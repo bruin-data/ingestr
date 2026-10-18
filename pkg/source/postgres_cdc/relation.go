@@ -260,6 +260,10 @@ func mapRelationToSchema(rel, prev *RelationInfo, tableSchema *schema.TableSchem
 				_, prevKnown := oidMatchesColumn(prevCol.DataType, tableSchema.Columns[idx])
 				if newKnown && !newMatches || !newKnown && prevKnown {
 					addMismatch(col.Name, fmt.Sprintf("changed type mid-stream (OID %d -> %d)", prevCol.DataType, col.DataType))
+				} else if typmodMatches, relevant := typmodMatchesColumn(col, tableSchema.Columns[idx]); relevant && !typmodMatches {
+					// varchar(n) -> text keeps the internal type but lifts the
+					// length bound the destination column was sized for.
+					addMismatch(col.Name, fmt.Sprintf("changed type mid-stream (OID %d -> %d)", prevCol.DataType, col.DataType))
 				}
 				if !newKnown && !prevKnown {
 					config.Debug("[CDC] Table %s: column %q custom/unknown type transition (OID %d -> %d) cannot be verified; keeping schema mapping", tableName, col.Name, prevCol.DataType, col.DataType)
@@ -366,6 +370,8 @@ func typmodMatchesColumn(rel RelationColumn, col schema.Column) (bool, bool) {
 			length = int(rel.TypeMod - 4)
 		}
 		return col.DataType == schema.TypeString && col.MaxLength == length, true
+	case 25: // text
+		return col.DataType == schema.TypeString && col.MaxLength == 0, true
 	default:
 		return true, false
 	}
@@ -441,7 +447,11 @@ func parseTupleData(data []byte, rel *RelationInfo, tableSchema *schema.TableSch
 
 			if schemaIdx >= 0 {
 				col := tableSchema.Columns[schemaIdx]
-				value, err := convertTextValueWithMap(textVal, col, typeMap)
+				delim := byte(',')
+				if int(i) < len(rel.Columns) {
+					delim = postgres.ArrayDelimiter(rel.Columns[i].DataType)
+				}
+				value, err := convertTextValueWithDelim(textVal, col, typeMap, delim)
 				if err != nil {
 					return nil, fmt.Errorf("failed to decode text value for column %q: %w", col.Name, err)
 				}

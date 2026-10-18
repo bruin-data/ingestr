@@ -2143,3 +2143,22 @@ func parseTableIdentifier(table string) pgx.Identifier {
 	}
 	return pgx.Identifier{table}
 }
+
+func (d *PostgresDestination) ListStagingTables(ctx context.Context, schema, prefix string) ([]string, error) {
+	rows, err := d.pool.Query(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND left(table_name, $2) = $3", schema, len(prefix), prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
+var _ destination.StagingTableLister = (*PostgresDestination)(nil)

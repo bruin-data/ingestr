@@ -194,10 +194,12 @@ The first run snapshots `public.users` and records the WAL position; each later 
 
 ## Hands-on tutorials
 
-Step-by-step walkthroughs that set up a source, take the initial snapshot, and capture live inserts, updates, and deletes into DuckDB:
+Walkthroughs that set up a source, take the initial snapshot, and capture live inserts, updates, and deletes:
 
 - [Replicate PostgreSQL to DuckDB with CDC](/tutorials/cdc-postgres-duckdb.md)
+- [Replicate PostgreSQL to StarRocks with CDC](/supported-sources/starrocks.md#postgresql-cdc)
 - [Replicate MySQL to DuckDB with CDC](/tutorials/cdc-mysql-duckdb.md)
+- [Replicate MySQL to StarRocks with CDC](/supported-sources/starrocks.md#mysql-cdc)
 - [Replicate SQL Server to DuckDB with CDC](/tutorials/cdc-sqlserver-duckdb.md)
 - [Replicate MongoDB to DuckDB with CDC](/tutorials/cdc-mongodb-duckdb.md)
 

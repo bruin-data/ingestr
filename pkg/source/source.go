@@ -152,6 +152,11 @@ type RecordBatchResult struct {
 	// CDCWALTruncate distinguishes a replicated source TRUNCATE from the
 	// destination reset emitted before a replacement snapshot.
 	CDCWALTruncate bool
+	// CDCSnapshotPosition, set on a snapshot replacement marker, is the source
+	// position stamped on every row up to the completion token whose
+	// SnapshotPositions names the table. It is greater than any position
+	// previously emitted for that table.
+	CDCSnapshotPosition string
 
 	// CommitToken is an opaque, cumulative position marker for streaming mode.
 	// Committing a token via StreamCommitter acknowledges everything emitted up

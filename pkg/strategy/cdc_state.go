@@ -1253,6 +1253,9 @@ func (m *CDCStateManager) prepareTable(ctx context.Context) error {
 		return err
 	}
 	prepare := func() error {
+		if preparer, ok := m.dest.(destination.CDCStateTablePreparer); ok {
+			return preparer.PrepareCDCStateTable(ctx, m.stateTable, cdcStateSchema)
+		}
 		return m.dest.PrepareTable(ctx, destination.PrepareOptions{
 			Table: m.stateTable, Schema: cdcStateSchema, DropFirst: false, PrimaryKeys: []string{"connector_id", "event_id"},
 		})

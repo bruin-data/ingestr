@@ -1,13 +1,17 @@
 package strategy
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
@@ -240,4 +244,49 @@ func GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID strin
 	// Re-qualify the transient table in the target's own catalog/schema.
 	catalog, schema, _ := splitCatalogSchemaTableRaw(targetTable)
 	return tablename.TableName{Catalog: catalog, Schema: schema, Table: bare}.String()
+}
+
+var stagingRunToken = regexp.MustCompile(`^([0-9a-f]{32}|[0-9]+)$`)
+
+// dropStaleStagingTables drops staging tables that earlier runs, killed before
+// cleanup, left for the same target and suffix. It runs only under a connector
+// lease, which excludes a concurrent run of the same connector, and only for
+// qualified targets: an unqualified staging name does not identify the
+// namespace it resolves to, so connectors writing the same table name
+// elsewhere would share the prefix.
+func dropStaleStagingTables(ctx context.Context, dest destination.Destination, targetTable, stagingTable string) {
+	lister, ok := dest.(destination.StagingTableLister)
+	if !ok || source.ConnectorLeaseGuardFromContext(ctx) == nil || len(tablename.SplitRaw(targetTable)) < 2 {
+		return
+	}
+	parts := tablename.SplitRaw(stagingTable)
+	if len(parts) < 2 {
+		return
+	}
+	name := parts[len(parts)-1]
+	cut := strings.LastIndex(name, "_")
+	if cut <= 0 {
+		return
+	}
+	prefix := name[:cut+1]
+	schema := strings.Join(parts[:len(parts)-1], ".")
+	tables, err := lister.ListStagingTables(ctx, schema, prefix)
+	if err != nil {
+		config.Debug("[STAGING] Could not list stale staging tables for %s: %v", stagingTable, err)
+		return
+	}
+	for _, table := range tables {
+		if table == name || !strings.HasPrefix(table, prefix) || !stagingRunToken.MatchString(table[len(prefix):]) {
+			continue
+		}
+		if source.ConnectorLeaseLoss(ctx) != nil {
+			return
+		}
+		stale := schema + "." + table
+		if err := dest.DropTable(ctx, stale); err != nil {
+			config.Debug("[STAGING] Could not drop stale staging table %s: %v", stale, err)
+			continue
+		}
+		config.Debug("[STAGING] Dropped stale staging table %s", stale)
+	}
 }

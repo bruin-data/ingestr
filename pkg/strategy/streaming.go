@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/transformer"
 	"github.com/google/uuid"
+	"github.com/jackc/pglogrepl"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -315,6 +317,9 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 	}
 	st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
 	output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
+	if e.opts.StateManager != nil {
+		dropStaleStagingTables(ctx, dest, st.destTable, st.stagingTable)
+	}
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        st.stagingTable,
 		Schema:       st.schema,
@@ -393,6 +398,9 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 		}
 		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
 		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
+		if e.opts.StateManager != nil {
+			dropStaleStagingTables(ctx, dest, st.destTable, st.stagingTable)
+		}
 		return prepareMergeTables(ctx, dest, mergeTableParams{
 			DestTable:    st.destTable,
 			StagingTable: st.stagingTable,
@@ -452,6 +460,15 @@ type streamTableState struct {
 	pending                     []arrow.RecordBatch
 	pendingRows                 int64
 	snapshotBoundaryInvalidated bool
+	softReplace                 *pendingSoftReplace
+}
+
+// pendingSoftReplace is a snapshot replacement applied without emptying the
+// target. Rows below boundary that the snapshot did not rewrite are retired
+// once the snapshot completion token for sourceTable is flushed.
+type pendingSoftReplace struct {
+	sourceTable string
+	boundary    string
 }
 
 type flushLoop struct {
@@ -666,6 +683,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 			}
 			if handled {
 				st.snapshotBoundaryInvalidated = false
+				st.softReplace = nil
 				l.buffer(res)
 				return nil
 			}
@@ -681,6 +699,17 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 	}
 	if err := connectorLeaseLoss(ctx); err != nil {
 		return err
+	}
+	softReplace, err := l.softSnapshotReplace(ctx, res, st, stateTable)
+	if err != nil {
+		return err
+	}
+	st.softReplace = softReplace
+	if softReplace != nil {
+		output.Statusf("[STREAM] %s | Replacing snapshot of %s in place at %s\n", time.Now().Format("15:04:05"), st.destTable, softReplace.boundary)
+		st.snapshotBoundaryInvalidated = false
+		l.buffer(res)
+		return nil
 	}
 	var truncateErr error
 	if expectedIncarnation != "" && destination.SupportsCDCConditionalTruncate(l.dest) {
@@ -701,6 +730,106 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 		l.pendingTruncates[stateTable] = st.incarnation
 	}
 	l.buffer(res)
+	return nil
+}
+
+// softSnapshotReplace decides whether a snapshot replacement marker can keep
+// the target readable instead of truncating it. It requires a keyed CDC merge
+// target whose stored positions all precede the snapshot boundary, so every
+// snapshot row supersedes the row it replaces and the retire sweep cannot
+// touch rows written after the boundary.
+func (l *flushLoop) softSnapshotReplace(ctx context.Context, res source.RecordBatchResult, st *streamTableState, stateTable string) (*pendingSoftReplace, error) {
+	if l.opts.StateManager == nil || stateTable == "" || res.CDCWALTruncate || res.CDCSnapshotPosition == "" ||
+		!st.isCDC || st.stagingTable == "" || len(st.primaryKeys) == 0 {
+		return nil, nil
+	}
+	replacer, ok := destination.SupportsCDCSnapshotSoftReplace(l.dest)
+	if !ok {
+		return nil, nil
+	}
+	boundary, ok := canonicalPostgresRowLSN(res.CDCSnapshotPosition)
+	if !ok {
+		return nil, nil
+	}
+	maxLSN, err := replacer.MaxCDCRowLSN(ctx, st.destTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CDC position of %s before replacing its snapshot: %w", st.destTable, err)
+	}
+	if maxLSN != "" {
+		current, ok := canonicalPostgresRowLSN(maxLSN)
+		if !ok || current >= boundary {
+			config.Debug("[STREAM] Truncating %s for its snapshot: stored position %q is not below boundary %q", st.destTable, maxLSN, res.CDCSnapshotPosition)
+			return nil, nil
+		}
+	}
+	return &pendingSoftReplace{sourceTable: stateTable, boundary: res.CDCSnapshotPosition}, nil
+}
+
+// canonicalPostgresRowLSN parses a fixed-width PostgreSQL row position,
+// ignoring its optional transaction-local sequence. Only the zero-padded form
+// is accepted because destinations compare stored positions as strings.
+func canonicalPostgresRowLSN(position string) (pglogrepl.LSN, bool) {
+	if parts := strings.Split(position, "/"); len(parts) == 3 {
+		if len(parts[2]) != 16 {
+			return 0, false
+		}
+		if _, err := strconv.ParseUint(parts[2], 16, 64); err != nil {
+			return 0, false
+		}
+		position = parts[0] + "/" + parts[1]
+	}
+	lsn, err := pglogrepl.ParseLSN(position)
+	if err != nil || fmt.Sprintf("%08X/%08X", uint32(lsn>>32), uint32(lsn)) != position {
+		return 0, false
+	}
+	return lsn, true
+}
+
+// retireSoftReplacedRows completes in-place snapshot replacements whose
+// completion token is about to be persisted. It must run after the snapshot
+// rows are merged and before the state certifies the snapshot, so a failure
+// leaves the table to be snapshotted again.
+func (l *flushLoop) retireSoftReplacedRows(ctx context.Context) error {
+	if l.opts.StateManager == nil || !l.tokenDirty {
+		return nil
+	}
+	for _, st := range l.tables {
+		pending := st.softReplace
+		if pending == nil {
+			continue
+		}
+		position, completed := l.pendingState.SnapshotPositions[pending.sourceTable]
+		if !completed {
+			continue
+		}
+		if position != pending.boundary {
+			return fmt.Errorf("streaming flush: snapshot of %s completed at %s, but its rows were stamped %s", pending.sourceTable, position, pending.boundary)
+		}
+		replacer, ok := destination.SupportsCDCSnapshotSoftReplace(l.dest)
+		if !ok {
+			return fmt.Errorf("streaming flush: destination scheme %q cannot complete the in-place snapshot of %s", l.dest.GetScheme(), pending.sourceTable)
+		}
+		expectedIncarnation, err := l.opts.StateManager.BoundDestinationIncarnation(pending.sourceTable)
+		if err != nil {
+			return err
+		}
+		if err := connectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := replacer.RetireCDCRowsBefore(ctx, destination.CDCRetireOptions{
+			Table:               st.destTable,
+			PrimaryKeys:         st.primaryKeys,
+			Boundary:            pending.boundary,
+			SyncedAt:            time.Now().UTC(),
+			ExpectedIncarnation: expectedIncarnation,
+		}); err != nil {
+			return fmt.Errorf("streaming flush: failed to retire rows missing from the %s snapshot: %w", pending.sourceTable, err)
+		}
+		if err := connectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		st.softReplace = nil
+	}
 	return nil
 }
 
@@ -1099,6 +1228,9 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		l.pendingState.SnapshotSchemas[sourceTable] = st.schemaFingerprint
 	}
 	if err := connectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if err := l.retireSoftReplacedRows(ctx); err != nil {
 		return err
 	}
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,8 +68,12 @@ func WriteWithResult(
 	router := NewRouter(tables, 8)
 	router.Route(writeCtx, records, opts.CancelSource != nil)
 
+	type tableError struct {
+		table string
+		err   error
+	}
 	var wg sync.WaitGroup
-	errChan := make(chan error, len(tables))
+	errChan := make(chan tableError, len(tables))
 	var resultMu sync.Mutex
 
 	parallelism := opts.Parallelism
@@ -107,7 +113,7 @@ func WriteWithResult(
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}
-				errChan <- fmt.Errorf("table %s: %w", table, err)
+				errChan <- tableError{table: table, err: err}
 			}
 		}(sourceTable, cfg)
 	}
@@ -116,12 +122,29 @@ func WriteWithResult(
 	router.Wait()
 	close(errChan)
 
+	// A source failure reaches every table's writer; report each distinct
+	// error once with the tables it affected.
 	var errs []error
-	for err := range errChan {
-		errs = append(errs, err)
+	tablesByError := map[string][]string{}
+	var order []string
+	for te := range errChan {
+		msg := te.err.Error()
+		if _, seen := tablesByError[msg]; !seen {
+			order = append(order, msg)
+		}
+		tablesByError[msg] = append(tablesByError[msg], te.table)
+	}
+	for _, msg := range order {
+		tables := tablesByError[msg]
+		sort.Strings(tables)
+		label := "table " + tables[0]
+		if len(tables) > 1 {
+			label = "tables " + strings.Join(tables, ", ")
+		}
+		errs = append(errs, fmt.Errorf("%s: %s", label, msg))
 	}
 
-	if routerErr := router.Err(); routerErr != nil && !errors.Is(routerErr, context.Canceled) && !errors.Is(routerErr, context.DeadlineExceeded) {
+	if routerErr := router.Err(); routerErr != nil && !errors.Is(routerErr, context.Canceled) && !errors.Is(routerErr, context.DeadlineExceeded) && tablesByError[routerErr.Error()] == nil {
 		errs = append(errs, fmt.Errorf("router error: %w", routerErr))
 	}
 

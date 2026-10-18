@@ -8,6 +8,10 @@ import "github.com/bruin-data/ingestr/pkg/tablename"
 var namespaceRequiringSchemes = map[string]tablename.Capability{
 	"bigquery":   tablename.BigQuery,
 	"databricks": tablename.Databricks,
+	"starrocks": {
+		Platform: "starrocks", MinComponents: 2, MaxComponents: 2,
+		Labels: [3]string{"", "database", "table"}, FormatDesc: "database.table",
+	},
 }
 
 // RequiresNamespace reports whether scheme rejects unqualified table names,

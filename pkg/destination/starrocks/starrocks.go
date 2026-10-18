@@ -2,14 +2,18 @@ package starrocks
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -33,6 +37,12 @@ type StarRocksDestination struct {
 	database       string
 	replicationNum string // empty => use the cluster default
 	labelCounter   int64
+
+	swapMu sync.Mutex
+	// preparedSwaps maps cross-database staging tables to the copies that
+	// CDCConditionalSwapIncarnations placed in the target database.
+	preparedSwaps map[string]string
+	keptSwaps     map[string]bool
 }
 
 func NewStarRocksDestination() *StarRocksDestination {
@@ -73,9 +83,11 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	query := u.Query()
 	httpPort := defaultHTTPPort
 	if v := query.Get("http_port"); v != "" {
-		if p, convErr := strconv.Atoi(v); convErr == nil {
-			httpPort = p
+		p, convErr := strconv.Atoi(v)
+		if convErr != nil || p <= 0 || p > 65535 {
+			return fmt.Errorf("invalid StarRocks http_port %q", v)
 		}
+		httpPort = p
 	}
 	d.replicationNum = query.Get("replication_num")
 
@@ -94,7 +106,7 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	}
 	// The database is omitted from the DSN: it may not exist yet (the destination
 	// creates it), and pinning it would make the driver USE it on connect.
-	dsn += fmt.Sprintf("tcp(%s:%s)/?parseTime=true", host, port)
+	dsn += fmt.Sprintf("tcp(%s:%s)/?parseTime=true&interpolateParams=true", host, port)
 	if tls != "" {
 		dsn += "&tls=" + tls
 	}
@@ -113,6 +125,7 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 
 	d.db = db
 	d.loader = newStreamLoader(host, httpPort, user, password)
+	d.loader.waitForPublish = d.waitForPublish
 	config.Debug("[STARROCKS] Connected (database: %s, http_port: %d)", d.database, httpPort)
 	return nil
 }
@@ -125,19 +138,33 @@ func (d *StarRocksDestination) Close(ctx context.Context) error {
 }
 
 func (d *StarRocksDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	return d.prepareTable(ctx, opts, false)
+}
+
+// prepareTable creates the table; exclusive fails if it already exists.
+func (d *StarRocksDestination) prepareTable(ctx context.Context, opts destination.PrepareOptions, exclusive bool) error {
 	if err := tablename.TwoLevel("starrocks").CheckName(opts.Table); err != nil {
 		return err
 	}
-	if db, _ := splitDatabaseTable(opts.Table); db != "" {
-		createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteColumn(db))
-		if _, err := d.db.ExecContext(ctx, createDB); err != nil {
-			config.LogFailedQuery(createDB, err)
-			return fmt.Errorf("failed to ensure database %s: %w", db, err)
+	if opts.Schema != nil {
+		for _, col := range opts.Schema.Columns {
+			if strings.Contains(col.Name, "`") {
+				return fmt.Errorf("StarRocks cannot store column %q: column names containing a backtick are not supported", col.Name)
+			}
 		}
+	}
+	db, err := d.requireDatabase(opts.Table)
+	if err != nil {
+		return err
+	}
+	createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteColumn(db))
+	if _, err := d.db.ExecContext(ctx, createDB); err != nil {
+		config.LogFailedQuery(createDB, err)
+		return fmt.Errorf("failed to ensure database %s: %w", db, err)
 	}
 
 	if opts.DropFirst {
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTable(opts.Table))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", d.tableRef(opts.Table))
 		if _, err := d.db.ExecContext(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -145,11 +172,21 @@ func (d *StarRocksDestination) PrepareTable(ctx context.Context, opts destinatio
 	}
 
 	if opts.Schema != nil {
-		createSQL := d.buildCreateTableSQL(opts.Table, opts.Schema.Columns, opts.PrimaryKeys)
+		tableSchema := opts.Schema
+		if len(opts.PrimaryKeys) > 0 {
+			tableSchema = destination.DestinationTableSchema(tableSchema)
+		}
+		createSQL := d.buildCreateTableSQL(opts.Table, tableSchema.Columns, opts.PrimaryKeys)
+		if exclusive {
+			createSQL = strings.Replace(createSQL, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+		}
 		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 			config.LogFailedQuery(createSQL, err)
 			return fmt.Errorf("failed to create table: %w", err)
 		}
+	}
+	if opts.RequirePrimaryKeyMatch {
+		return d.validateCDCPrimaryKey(ctx, opts.Table, opts.PrimaryKeys)
 	}
 	return nil
 }
@@ -237,7 +274,7 @@ func (d *StarRocksDestination) buildCreateTableSQL(table string, columns []schem
 		}
 	}
 
-	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", quoteTable(table), strings.Join(colDefs, ",\n  "))
+	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", d.tableRef(table), strings.Join(colDefs, ",\n  "))
 
 	switch {
 	case len(primaryKeys) > 0:
@@ -262,6 +299,9 @@ func (d *StarRocksDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
 	startTime := time.Now()
 	var totalRows int64
 	var batchNum int
@@ -277,74 +317,288 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 		}
 		batchNum++
 
-		body, rows, binaryCols, err := recordBatchToJSON(result.Batch)
-		if err != nil {
-			result.Batch.Release()
-			return fmt.Errorf("failed to encode batch %d: %w", batchNum, err)
-		}
-		if rows > 0 {
-			label := d.nextLabel(table)
-			columns := columnsHeader(result.Batch.Schema(), binaryCols)
-			if err := d.loader.load(ctx, db, table, label, body, columns); err != nil {
-				result.Batch.Release()
-				return fmt.Errorf("failed to stream load batch %d: %w", batchNum, err)
-			}
-			totalRows += rows
-		}
+		rows, err := d.loadRecord(ctx, db, table, result.Batch)
 		result.Batch.Release()
+		if err != nil {
+			return fmt.Errorf("failed to stream load batch %d: %w", batchNum, err)
+		}
+		totalRows += rows
 	}
 
 	config.Debug("[STARROCKS] Wrote %d rows in %d batches in %v", totalRows, batchNum, time.Since(startTime))
+	return d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation)
+}
+
+// maxStreamLoadJSONBytes stays below StarRocks' default 100 MB JSON Stream
+// Load limit (streaming_load_max_batch_size_mb).
+var maxStreamLoadJSONBytes = 90 << 20
+
+// loadRecord stream-loads a batch, splitting it until each JSON body fits.
+func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string, rec arrow.RecordBatch) (int64, error) {
+	body, rows, binaryCols, err := recordBatchToJSON(rec)
+	if err != nil {
+		return 0, fmt.Errorf("encode batch: %w", err)
+	}
+	if rows == 0 {
+		return 0, nil
+	}
+	if len(body) > maxStreamLoadJSONBytes {
+		if rows == 1 {
+			return 0, fmt.Errorf("a single row encodes to %d bytes, above the %d-byte Stream Load limit", len(body), maxStreamLoadJSONBytes)
+		}
+		mid := rec.NumRows() / 2
+		var loaded int64
+		for _, bounds := range [][2]int64{{0, mid}, {mid, rec.NumRows()}} {
+			part := rec.NewSlice(bounds[0], bounds[1])
+			n, err := d.loadRecord(ctx, db, table, part)
+			part.Release()
+			loaded += n
+			if err != nil {
+				return loaded, err
+			}
+		}
+		return loaded, nil
+	}
+	if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, columnsHeader(rec.Schema(), binaryCols)); err != nil {
+		return 0, err
+	}
+	return rows, nil
+}
+
+// nextLabel returns a unique load label. StarRocks labels must match
+// ^[-\w]{1,128}$, so the table part keeps only ASCII word characters, is
+// truncated, and is followed by a hash of the full name.
+func (d *StarRocksDestination) nextLabel(table string) string {
+	n := atomic.AddInt64(&d.labelCounter, 1)
+	safe := []byte(table)
+	for i, c := range safe {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
+			safe[i] = '_'
+		}
+	}
+	if len(safe) > 48 {
+		safe = safe[:48]
+	}
+	sum := sha1.Sum([]byte(table))
+	return fmt.Sprintf("ingestr_%s_%s_%d_%d", safe, hex.EncodeToString(sum[:4]), time.Now().UnixNano(), n)
+}
+
+// SwapTable publishes a complete replacement. When the target already has the
+// staging table's columns and keys, INSERT OVERWRITE replaces its data in
+// place and keeps the table's grants and properties. Otherwise, and for
+// CDC-fenced swaps, the staging table replaces the target via SWAP WITH or
+// RENAME, which carries the new schema and keys. StarRocks swaps only within
+// a database, so cross-database staging is first copied into the target
+// database. Expected incarnations are checked immediately before and after
+// the atomic statement.
+func (d *StarRocksDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	copied, prepared := d.takePreparedSwap(opts.StagingTable)
+	if prepared {
+		defer d.dropQuietly(ctx, copied)
+	}
+	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+	if _, err := d.requireDatabase(opts.TargetTable); err != nil {
+		return err
+	}
+	targetDB, targetName := d.tableParts(opts.TargetTable)
+	stageDB, stageName := d.tableParts(opts.StagingTable)
+	if _, err := d.db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+quoteColumn(targetDB)); err != nil {
+		return fmt.Errorf("ensure StarRocks swap database: %w", err)
+	}
+	oldID, exists, err := d.tableID(ctx, targetDB, targetName)
+	if err != nil {
+		return err
+	}
+	if exists && opts.CDCExpectedIncarnation == "" && !prepared {
+		same, err := d.sameTableLayout(ctx, opts.TargetTable, opts.StagingTable)
+		if err != nil {
+			return err
+		}
+		if same {
+			return d.overwriteTable(ctx, opts)
+		}
+	}
+	replacement := opts.StagingTable
+	if stageDB != targetDB {
+		if !prepared {
+			if err := d.checkCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
+				return err
+			}
+			if copied, err = d.copySwapStaging(ctx, opts.StagingTable, targetDB, targetName); err != nil {
+				return err
+			}
+			defer d.dropQuietly(ctx, copied)
+		}
+		replacement = copied
+		_, stageName = d.tableParts(copied)
+	}
+	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+	if replacement == opts.StagingTable || prepared {
+		if err := d.checkCDCIncarnation(ctx, replacement, opts.CDCExpectedStagingIncarnation); err != nil {
+			return err
+		}
+	}
+	query := fmt.Sprintf("ALTER TABLE %s RENAME %s", d.tableRef(replacement), quoteColumn(targetName))
+	if exists {
+		query = fmt.Sprintf("ALTER TABLE %s SWAP WITH %s", d.tableRef(opts.TargetTable), quoteColumn(stageName))
+	}
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("publish StarRocks replacement: %w", err)
+	}
+	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedResultIncarnation); err != nil {
+		return fmt.Errorf("StarRocks CDC target changed during publication: %w", err)
+	}
+	if exists {
+		// The old target now sits under the replacement's name. If it is not
+		// the table that was validated, someone replaced the target just
+		// before the swap: keep it for inspection instead of dropping it.
+		swappedID, _, err := d.tableID(ctx, targetDB, stageName)
+		if err != nil {
+			return err
+		}
+		if swappedID != oldID {
+			kept := targetDB + "." + stageName
+			if stageDB != targetDB {
+				d.forgetSwapCopy(copied)
+			} else {
+				// The caller drops its staging table on error; move the kept
+				// table out of that name first.
+				renamed := fmt.Sprintf("%s_replaced_%d", targetName, time.Now().UnixNano())
+				if _, err := d.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME %s", d.tableRef(kept), quoteColumn(renamed))); err == nil {
+					kept = targetDB + "." + renamed
+				}
+			}
+			return fmt.Errorf("StarRocks target %s was replaced concurrently; the previous table was kept as %s", opts.TargetTable, kept)
+		}
+	}
+	if exists || stageDB != targetDB {
+		return d.DropTable(ctx, opts.StagingTable)
+	}
 	return nil
 }
 
-func (d *StarRocksDestination) nextLabel(table string) string {
-	n := atomic.AddInt64(&d.labelCounter, 1)
-	safe := strings.NewReplacer(".", "_", "`", "", "-", "_").Replace(table)
-	return fmt.Sprintf("ingestr_%s_%d_%d", safe, time.Now().UnixNano(), n)
-}
-
-// SwapTable atomically replaces the target's data from staging. StarRocks
-// SWAP WITH / RENAME are single-database only (and ingestr stages into a
-// separate database), so instead it uses INSERT OVERWRITE: StarRocks loads into
-// temporary partitions and swaps them in only on success, leaving the target's
-// existing data intact if the load fails.
-func (d *StarRocksDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
-	if db, _ := splitDatabaseTable(opts.TargetTable); db != "" {
-		createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteColumn(db))
-		if _, err := d.db.ExecContext(ctx, createDB); err != nil {
-			config.LogFailedQuery(createDB, err)
-			return fmt.Errorf("failed to ensure target database: %w", err)
-		}
-	}
-	// Normalized staging already carries the primary key; the replace strategy
-	// clears opts.PrimaryKeys after deduplication rather than repeating it here.
-	createSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s LIKE %s",
-		quoteTable(opts.TargetTable), quoteTable(opts.StagingTable))
-	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-		config.LogFailedQuery(createSQL, err)
-		return fmt.Errorf("failed to create target table: %w", err)
-	}
-
-	overwriteSQL := fmt.Sprintf("INSERT OVERWRITE %s SELECT * FROM %s",
-		quoteTable(opts.TargetTable), quoteTable(opts.StagingTable))
+// overwriteTable replaces the target's rows from staging in one atomic
+// INSERT OVERWRITE, leaving the target table itself in place.
+func (d *StarRocksDestination) overwriteTable(ctx context.Context, opts destination.SwapOptions) error {
+	query := fmt.Sprintf("INSERT OVERWRITE %s SELECT * FROM %s", d.tableRef(opts.TargetTable), d.tableRef(opts.StagingTable))
 	if opts.Schema != nil && len(opts.Schema.Columns) > 0 {
-		cols := make([]string, len(opts.Schema.Columns))
-		for i, c := range opts.Schema.Columns {
-			cols[i] = quoteColumn(c.Name)
-		}
-		list := strings.Join(cols, ", ")
-		overwriteSQL = fmt.Sprintf("INSERT OVERWRITE %s (%s) SELECT %s FROM %s",
-			quoteTable(opts.TargetTable), list, list, quoteTable(opts.StagingTable))
+		list := strings.Join(quoteColumns(opts.Schema.ColumnNames()), ", ")
+		query = fmt.Sprintf("INSERT OVERWRITE %s (%s) SELECT %s FROM %s", d.tableRef(opts.TargetTable), list, list, d.tableRef(opts.StagingTable))
 	}
-	if _, err := d.db.ExecContext(ctx, overwriteSQL); err != nil {
-		config.LogFailedQuery(overwriteSQL, err)
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		config.LogFailedQuery(query, err)
 		return fmt.Errorf("failed to overwrite target table: %w", err)
 	}
 	return d.DropTable(ctx, opts.StagingTable)
 }
 
+// sameTableLayout reports whether two tables have identical columns (names,
+// types, nullability, key membership, order) and the same key model.
+func (d *StarRocksDestination) sameTableLayout(ctx context.Context, a, b string) (bool, error) {
+	layout := func(table string) (string, error) {
+		db, name := d.tableParts(table)
+		var model string
+		if err := d.db.QueryRowContext(ctx, "SELECT TABLE_MODEL FROM information_schema.tables_config WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", db, name).Scan(&model); err != nil {
+			return "", fmt.Errorf("read StarRocks table model: %w", err)
+		}
+		rows, err := d.db.QueryContext(ctx, "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY FROM information_schema.columns WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION", db, name)
+		if err != nil {
+			return "", fmt.Errorf("read StarRocks table columns: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var out strings.Builder
+		out.WriteString(model)
+		for rows.Next() {
+			var col, typ, nullable, key string
+			if err := rows.Scan(&col, &typ, &nullable, &key); err != nil {
+				return "", err
+			}
+			fmt.Fprintf(&out, "\x00%s\x01%s\x01%s\x01%s", strings.ToLower(col), strings.ToLower(typ), nullable, key)
+		}
+		return out.String(), rows.Err()
+	}
+	left, err := layout(a)
+	if err != nil {
+		return false, err
+	}
+	right, err := layout(b)
+	if err != nil {
+		return false, err
+	}
+	return left == right, nil
+}
+
+// copySwapStaging copies cross-database staging into a new table in the
+// target database and returns its qualified name.
+func (d *StarRocksDestination) copySwapStaging(ctx context.Context, stagingTable, targetDB, targetName string) (string, error) {
+	sum := sha1.Sum([]byte(targetName))
+	prefix := "__ingestr_swap_" + hex.EncodeToString(sum[:4]) + "_"
+	d.dropStaleSwapTables(ctx, targetDB, prefix)
+	copied := targetDB + "." + fmt.Sprintf("%s%d%04d", prefix, time.Now().UnixNano(), atomic.AddInt64(&d.labelCounter, 1)%10000)
+	query := fmt.Sprintf("CREATE TABLE %s LIKE %s", d.tableRef(copied), d.tableRef(stagingTable))
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		return "", fmt.Errorf("prepare StarRocks swap: %w", err)
+	}
+	if err := d.insertVisible(ctx, copied, "SELECT * FROM "+d.tableRef(stagingTable)); err != nil {
+		d.dropQuietly(ctx, copied)
+		return "", fmt.Errorf("copy StarRocks swap staging: %w", err)
+	}
+	return copied, nil
+}
+
+// dropStaleSwapTables drops swap tables left in the target database by runs
+// killed mid-publication. Without the connector lease a concurrent run may own
+// a swap table, so only ones older than ManagedStagingTTL are dropped.
+func (d *StarRocksDestination) dropStaleSwapTables(ctx context.Context, db, prefix string) {
+	leased := source.ConnectorLeaseGuardFromContext(ctx) != nil
+	tables, err := d.ListStagingTables(ctx, db, prefix)
+	if err != nil {
+		config.Debug("[STARROCKS] Could not list stale swap tables in %s: %v", db, err)
+		return
+	}
+	now := time.Now()
+	for _, table := range tables {
+		if !isStaleSwapSuffix(table[len(prefix):], leased, now) {
+			continue
+		}
+		if err := d.DropTable(ctx, db+"."+table); err != nil {
+			config.Debug("[STARROCKS] Could not drop stale swap table %s.%s: %v", db, table, err)
+		}
+	}
+}
+
+// isStaleSwapSuffix reports whether a swap table suffix (UnixNano followed by
+// a 4-digit counter) belongs to a table that can be dropped.
+func isStaleSwapSuffix(suffix string, leased bool, now time.Time) bool {
+	if len(suffix) <= 4 {
+		return false
+	}
+	for _, c := range suffix {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	if leased {
+		return true
+	}
+	nanos, err := strconv.ParseInt(suffix[:len(suffix)-4], 10, 64)
+	if err != nil {
+		return false
+	}
+	return now.Sub(time.Unix(0, nanos)) > destination.ManagedStagingTTL
+}
+
 func (d *StarRocksDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		return d.mergeCDC(ctx, opts)
+	}
+	if err := d.validatePrimaryKey(ctx, "merge target", opts.TargetTable, opts.PrimaryKeys); err != nil {
+		return err
+	}
 	cols := quoteColumns(opts.Columns)
 	colList := strings.Join(cols, ", ")
 	orderBy := ""
@@ -355,11 +609,11 @@ func (d *StarRocksDestination) MergeTable(ctx context.Context, opts destination.
 		// key is constant within each group and likewise leaves ties unordered.
 		orderBy = quoteColumn(opts.PrimaryKeys[0])
 	}
-	selectSQL := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteTable(opts.StagingTable), orderBy)
+	selectSQL := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), d.tableRef(opts.StagingTable), orderBy)
 	// Select the winner before the PRIMARY KEY engine upserts; its replacement
 	// order does not honor the incremental key.
 	mergeSQL := fmt.Sprintf("INSERT INTO %s (%s) %s",
-		quoteTable(opts.TargetTable), colList, selectSQL)
+		d.tableRef(opts.TargetTable), colList, selectSQL)
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
 		config.LogFailedQuery(mergeSQL, err)
 		return fmt.Errorf("failed to merge into table: %w", err)
@@ -376,7 +630,7 @@ func (d *StarRocksDestination) SCD2Table(ctx context.Context, opts destination.S
 }
 
 func (d *StarRocksDestination) DropTable(ctx context.Context, table string) error {
-	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTable(table))
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", d.tableRef(table))
 	if _, err := d.db.ExecContext(ctx, dropSQL); err != nil {
 		config.LogFailedQuery(dropSQL, err)
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
@@ -433,9 +687,12 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 		if err := rows.Scan(&colName, &dataType, &columnType, &isNullable, &numPrecision, &numScale, &charMaxLen); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
+		if colName == syntheticSortKeyColumn {
+			continue
+		}
 		col := schema.Column{
 			Name:     colName,
-			DataType: mapStarRocksTypeToSchema(dataType),
+			DataType: mapStarRocksColumnType(dataType, columnType),
 			Nullable: strings.EqualFold(isNullable, "YES"),
 		}
 		if numPrecision != nil {
@@ -459,7 +716,18 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 	if len(columns) == 0 {
 		return nil, nil
 	}
-	return &schema.TableSchema{Name: tableName, Schema: db, Columns: columns}, nil
+	keys, _, err := d.primaryKeys(ctx, table)
+	if err != nil {
+		return nil, err
+	}
+	for i := range columns {
+		for _, key := range keys {
+			if strings.EqualFold(columns[i].Name, key) {
+				columns[i].IsPrimaryKey = true
+			}
+		}
+	}
+	return &schema.TableSchema{Name: tableName, Schema: db, Columns: columns, PrimaryKeys: keys}, nil
 }
 
 func (d *StarRocksDestination) SupportsReplaceStrategy() bool      { return true }
@@ -470,3 +738,24 @@ func (d *StarRocksDestination) SupportsSCD2Strategy() bool         { return fals
 func (d *StarRocksDestination) SupportsAtomicSwap() bool           { return true }
 
 var _ destination.Destination = (*StarRocksDestination)(nil)
+
+// rejectBacktickName refuses database/table names with backticks: StarRocks
+// drops escaped backticks, so DDL would hit a different table than the
+// information_schema lookups.
+func rejectBacktickName(db, name string) error {
+	if strings.Contains(db, "`") || strings.Contains(name, "`") {
+		return fmt.Errorf("StarRocks cannot use table %q: database and table names containing a backtick are not supported", db+"."+name)
+	}
+	return nil
+}
+
+func (d *StarRocksDestination) requireDatabase(table string) (string, error) {
+	db, name := d.tableParts(table)
+	if err := rejectBacktickName(db, name); err != nil {
+		return "", err
+	}
+	if db == "" {
+		return "", fmt.Errorf("StarRocks table %q has no database: add one to the destination URI path (starrocks://host:9030/<database>) or qualify the table as <database>.<table>", table)
+	}
+	return db, nil
+}

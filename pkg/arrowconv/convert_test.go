@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -799,5 +800,49 @@ func TestValueBytes(t *testing.T) {
 	// RowBytes of a single-column row equals key length + ValueBytes(value)
 	if got, want := RowBytes(map[string]interface{}{"k": "value"}), int64(len("k"))+ValueBytes("value"); got != want {
 		t.Errorf("RowBytes/ValueBytes disagree: got %d, want %d", got, want)
+	}
+}
+
+func TestAppendDecimal128OverflowIsNull(t *testing.T) {
+	b := array.NewDecimal128Builder(memory.NewGoAllocator(), &arrow.Decimal128Type{Precision: 38, Scale: 9})
+	defer b.Release()
+	huge, _ := new(big.Int).SetString("1"+strings.Repeat("0", 45), 10)
+	AppendValue(b, "1e35")
+	AppendValue(b, huge)
+	AppendValue(b, "1.5")
+	arr := b.NewDecimal128Array()
+	defer arr.Release()
+	require.True(t, arr.IsNull(0))
+	require.True(t, arr.IsNull(1))
+	require.False(t, arr.IsNull(2))
+}
+
+func TestScaledDecimalRoundsHalfAwayFromZero(t *testing.T) {
+	for in, want := range map[string]string{"1.0000000005": "1000000001", "-1.0000000025": "-1000000003", "1.00000000049": "1000000000", "1e2": "100000000000"} {
+		got, ok := ScaledDecimal(in, 9)
+		require.True(t, ok, in)
+		require.Equal(t, want, got.String(), in)
+	}
+	for in, want := range map[string]string{"12300": "123", "12350": "124", "-12350": "-124", "12349": "123"} {
+		got, ok := ScaledDecimal(in, -2)
+		require.True(t, ok, in)
+		require.Equal(t, want, got.String(), in)
+	}
+	_, ok := ScaledDecimal("abc", 9)
+	require.False(t, ok)
+}
+
+func TestAppendDecimalRoundsExactHalvesAwayFromZero(t *testing.T) {
+	b := array.NewDecimal128Builder(memory.NewGoAllocator(), &arrow.Decimal128Type{Precision: 38, Scale: 9})
+	defer b.Release()
+	inputs := []string{"7.0000000005", "0.0000000015", "-123456.1234567895", "123456.1234567895"}
+	for _, in := range inputs {
+		AppendValue(b, in)
+	}
+	arr := b.NewDecimal128Array()
+	defer arr.Release()
+	want := []string{"7.000000001", "0.000000002", "-123456.123456790", "123456.123456790"}
+	for i := range inputs {
+		require.Equal(t, want[i], arr.Value(i).ToString(9), inputs[i])
 	}
 }

@@ -4361,3 +4361,10 @@ func TestApplyReverseETLNamingRejectsUnknownConvention(t *testing.T) {
 		t.Fatalf("error = %v, want the unknown convention rejected", err)
 	}
 }
+
+func TestCanonicalCDCStateURIIgnoresStarRocksConnectionSettings(t *testing.T) {
+	base := canonicalCDCStateURI("starrocks://root:pw@sr:9030/analytics")
+	require.Equal(t, base, canonicalCDCStateURI("starrocks://other@sr:9030/analytics?http_port=8040&replication_num=1&ssl=true"))
+	require.NotEqual(t, base, canonicalCDCStateURI("starrocks://root@sr:9030/other"))
+	require.Contains(t, canonicalCDCStateURI("clickhouse://u@ch:9000/db?http_port=8123"), "http_port=8123")
+}

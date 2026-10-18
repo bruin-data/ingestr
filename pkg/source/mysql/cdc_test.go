@@ -1636,3 +1636,24 @@ func TestMySQLCDCSelectTablesIgnoresUnselectedTableAppearing(t *testing.T) {
 	assert.Equal(t, []string{"good"}, names)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestMySQLCDCEndsTransaction(t *testing.T) {
+	query := func(q string) *replication.BinlogEvent {
+		return &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.QUERY_EVENT}, Event: &replication.QueryEvent{Query: []byte(q)}}
+	}
+	tableMap := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.TABLE_MAP_EVENT}, Event: &replication.TableMapEvent{}}
+	rows := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.UPDATE_ROWS_EVENTv2}, Event: &replication.RowsEvent{}}
+	xid := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.XID_EVENT}, Event: &replication.XIDEvent{}}
+	for _, events := range [][]*replication.BinlogEvent{{query("BEGIN")}, {tableMap}, {rows}, {query("XA START 'x'")}, {query("SAVEPOINT s1")}, nil} {
+		require.False(t, mysqlCDCEndsTransaction(events))
+	}
+	rotate := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.ROTATE_EVENT}, Event: &replication.RotateEvent{}}
+	for _, events := range [][]*replication.BinlogEvent{{xid}, {query("COMMIT")}, {query("ALTER TABLE t ADD COLUMN c INT")}, {query("XA COMMIT 'x'")}, {tableMap, rows, xid}, {rotate}} {
+		require.True(t, mysqlCDCEndsTransaction(events))
+	}
+	gtid := &replication.BinlogEvent{Header: &replication.EventHeader{EventType: replication.GTID_EVENT}, Event: &replication.GTIDEvent{}}
+	for _, events := range [][]*replication.BinlogEvent{{gtid}, {query("BEGIN")}, {tableMap}, {rows}} {
+		require.True(t, mysqlCDCInTransaction(events))
+	}
+	require.False(t, mysqlCDCInTransaction([]*replication.BinlogEvent{rotate}))
+}

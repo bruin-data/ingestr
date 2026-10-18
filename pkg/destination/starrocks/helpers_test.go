@@ -1,6 +1,7 @@
 package starrocks
 
 import (
+	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -9,8 +10,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-// Binary columns are base64-encoded in the body (so json.Marshal can't mangle
-// non-UTF-8 bytes) and reported so the loader can add a from_base64 transform.
+// Binary columns are hex-encoded in the body (so json.Marshal can't mangle
+// non-UTF-8 bytes) and reported so the loader can add a to_binary transform.
 func TestRecordBatchToJSONBinary(t *testing.T) {
 	pool := memory.NewGoAllocator()
 	bb := array.NewBinaryBuilder(pool, arrow.BinaryTypes.Binary)
@@ -26,13 +27,13 @@ func TestRecordBatchToJSONBinary(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
-	if want := `[{"data":"//4A"}]`; string(body) != want {
+	if want := `[{"data":"fffe00"}]`; string(body) != want {
 		t.Fatalf("body: got %s want %s", string(body), want)
 	}
 	if len(binaryCols) != 1 || binaryCols[0] != "data" {
 		t.Fatalf("binaryCols: got %v", binaryCols)
 	}
-	if got, want := columnsHeader(sc, binaryCols), "data, data=from_base64(data)"; got != want {
+	if got, want := columnsHeader(sc, binaryCols), "`data`, `data`=to_binary(`data`, 'hex')"; got != want {
 		t.Fatalf("columnsHeader: got %q want %q", got, want)
 	}
 	if columnsHeader(sc, nil) != "" {
@@ -90,5 +91,59 @@ func TestMapStarRocksArrayType(t *testing.T) {
 		if elem != tt.elem || precision != tt.precision || scale != tt.scale {
 			t.Errorf("%s: got (%s, %d, %d), want (%s, %d, %d)", tt.columnType, elem, precision, scale, tt.elem, tt.precision, tt.scale)
 		}
+	}
+}
+
+func TestRecordBatchToJSONNonFiniteFloats(t *testing.T) {
+	pool := memory.NewGoAllocator()
+	fb := array.NewFloat64Builder(pool)
+	fb.AppendValues([]float64{math.NaN(), math.Inf(1), 1.5}, nil)
+	arr := fb.NewFloat64Array()
+	defer arr.Release()
+	rec := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "f", Type: arrow.PrimitiveTypes.Float64}}, nil), []arrow.Array{arr}, 3)
+	defer rec.Release()
+	body, _, _, err := recordBatchToJSON(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `[{"f":null},{"f":null},{"f":1.5}]`; string(body) != want {
+		t.Fatalf("body: got %s want %s", body, want)
+	}
+}
+
+func TestRecordBatchToJSONFloat32KeepsShortestForm(t *testing.T) {
+	fb := array.NewFloat32Builder(memory.NewGoAllocator())
+	fb.AppendValues([]float32{0.1, float32(math.NaN())}, nil)
+	arr := fb.NewFloat32Array()
+	defer arr.Release()
+	rec := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "f", Type: arrow.PrimitiveTypes.Float32}}, nil), []arrow.Array{arr}, 2)
+	defer rec.Release()
+	body, _, _, err := recordBatchToJSON(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `[{"f":0.1},{"f":null}]`; string(body) != want {
+		t.Fatalf("body: got %s want %s", body, want)
+	}
+}
+
+func TestRecordBatchToJSONBinaryListUsesBase64(t *testing.T) {
+	pool := memory.NewGoAllocator()
+	lb := array.NewListBuilder(pool, arrow.BinaryTypes.Binary)
+	vb := lb.ValueBuilder().(*array.BinaryBuilder)
+	lb.Append(true)
+	vb.Append([]byte{0x00, 0xff})
+	vb.Append([]byte{})
+	vb.AppendNull()
+	arr := lb.NewListArray()
+	defer arr.Release()
+	rec := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "c", Type: arr.DataType()}}, nil), []arrow.Array{arr}, 1)
+	defer rec.Release()
+	body, _, _, err := recordBatchToJSON(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `[{"c":["AP8=","",null]}]`; string(body) != want {
+		t.Fatalf("body: got %s want %s", body, want)
 	}
 }

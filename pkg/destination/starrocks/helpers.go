@@ -2,8 +2,10 @@ package starrocks
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -58,7 +60,7 @@ func splitDatabaseTable(table string) (string, string) {
 
 // recordBatchToJSON encodes an Arrow record batch as a JSON array of row
 // objects (keyed by column name) for Stream Load. It returns the body, the row
-// count, and the names of binary columns (base64-encoded in the body, so the
+// count, and the names of binary columns (hex-encoded in the body, so the
 // loader must decode them server-side).
 func recordBatchToJSON(record arrow.RecordBatch) ([]byte, int64, []string, error) {
 	numRows := record.NumRows()
@@ -91,9 +93,9 @@ func recordBatchToJSON(record arrow.RecordBatch) ([]byte, int64, []string, error
 	return body, numRows, binaryCols, nil
 }
 
-// columnsHeader builds the Stream Load `columns` value that decodes base64
+// columnsHeader builds the Stream Load `columns` value that decodes hex
 // binary columns back to their raw bytes, or "" when there are none. It lists
-// every batch column in order, then a from_base64() transform for each binary
+// every batch column in order, then a to_binary() transform for each binary
 // column.
 func columnsHeader(sc *arrow.Schema, binaryCols []string) string {
 	if len(binaryCols) == 0 {
@@ -102,10 +104,11 @@ func columnsHeader(sc *arrow.Schema, binaryCols []string) string {
 	fields := sc.Fields()
 	parts := make([]string, 0, len(fields)+len(binaryCols))
 	for _, f := range fields {
-		parts = append(parts, f.Name)
+		parts = append(parts, quoteColumn(f.Name))
 	}
+	// Hex keeps empty values non-NULL; from_base64('') returns NULL.
 	for _, name := range binaryCols {
-		parts = append(parts, fmt.Sprintf("%s=from_base64(%s)", name, name))
+		parts = append(parts, fmt.Sprintf("%s=to_binary(%s, 'hex')", quoteColumn(name), quoteColumn(name)))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -130,19 +133,24 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 	case *array.Int64:
 		return a.Value(idx)
 	case *array.Float32:
-		return a.Value(idx)
+		// Keep float32 so JSON uses its shortest 32-bit form (0.1, not
+		// 0.10000000149011612).
+		if v := a.Value(idx); !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
+			return v
+		}
+		return nil
 	case *array.Float64:
-		return a.Value(idx)
+		return finiteOrNil(a.Value(idx))
 	case *array.String:
 		return a.Value(idx)
 	case *array.LargeString:
 		return a.Value(idx)
 	case *array.Binary:
-		// base64 keeps the bytes valid UTF-8 for JSON; the loader adds a
-		// from_base64() transform so StarRocks stores the original bytes.
-		return base64.StdEncoding.EncodeToString(a.Value(idx))
+		// Hex keeps the bytes valid UTF-8 for JSON; the loader adds a
+		// to_binary() transform so StarRocks stores the original bytes.
+		return hex.EncodeToString(a.Value(idx))
 	case *array.LargeBinary:
-		return base64.StdEncoding.EncodeToString(a.Value(idx))
+		return hex.EncodeToString(a.Value(idx))
 	case *array.Date32:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Date64:
@@ -189,6 +197,20 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 func listElements(values arrow.Array, start, end int) []interface{} {
 	out := make([]interface{}, 0, end-start)
 	for j := start; j < end; j++ {
+		// Binary inside JSON gets no to_binary transform; keep base64 as other
+		// destinations do.
+		switch b := values.(type) {
+		case *array.Binary:
+			if !b.IsNull(j) {
+				out = append(out, base64.StdEncoding.EncodeToString(b.Value(j)))
+				continue
+			}
+		case *array.LargeBinary:
+			if !b.IsNull(j) {
+				out = append(out, base64.StdEncoding.EncodeToString(b.Value(j)))
+				continue
+			}
+		}
 		out = append(out, extractValue(values, j))
 	}
 	return out
@@ -198,7 +220,9 @@ func mapStarRocksTypeToSchema(dataType string) schema.DataType {
 	switch strings.ToLower(dataType) {
 	case "boolean", "bool":
 		return schema.TypeBoolean
-	case "tinyint", "smallint":
+	case "tinyint":
+		return schema.TypeInt8
+	case "smallint":
 		return schema.TypeInt16
 	case "int", "integer":
 		return schema.TypeInt32
@@ -248,4 +272,19 @@ func mapStarRocksArrayType(columnType string) (elem schema.DataType, precision, 
 		scale, _ = strconv.Atoi(m[2])
 	}
 	return elem, precision, scale
+}
+
+func mapStarRocksColumnType(dataType, columnType string) schema.DataType {
+	if strings.EqualFold(columnType, "tinyint(1)") {
+		return schema.TypeBoolean
+	}
+	return mapStarRocksTypeToSchema(dataType)
+}
+
+// StarRocks cannot store NaN or infinities, and JSON cannot encode them.
+func finiteOrNil(v float64) any {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
+	return v
 }
