@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -37,9 +38,24 @@ func (p *Pipeline) streamingRefreshScope() string {
 		destTable = ""
 	}
 	parts := []string{
-		canonicalCDCStateURI(p.config.SourceURI), canonicalCDCStateURI(p.config.DestURI),
+		canonicalStreamingRefreshURI(p.config.SourceURI), canonicalStreamingRefreshURI(p.config.DestURI),
 		p.config.SourceTable, destTable, cdcSelectionIdentity(p.config),
 		cdcTableNamingIdentity(p.config), p.config.StagingDataset,
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
+}
+
+func canonicalStreamingRefreshURI(rawURI string) string {
+	canonical := canonicalCDCStateURI(rawURI)
+	parsed, err := url.Parse(canonical)
+	if err != nil || parsed.Scheme != "bigquery" {
+		return canonical
+	}
+	// Credentials may rotate or move between workload starts without changing
+	// the BigQuery project and dataset this refresh targets.
+	query := parsed.Query()
+	query.Del("credentials_path")
+	query.Del("credentials_base64")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }

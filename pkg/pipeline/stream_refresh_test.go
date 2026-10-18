@@ -30,3 +30,38 @@ func TestStreamingRefreshRequiresSnapshotReplacement(t *testing.T) {
 	p := &Pipeline{config: &config.IngestConfig{Stream: true, FullRefresh: true, RefreshID: "request"}}
 	require.ErrorContains(t, p.prepareStreamingRefresh(t.Context(), nil), "snapshot truncation")
 }
+
+func TestStreamingRefreshScopeSurvivesBigQueryCredentialChanges(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mysql+cdc://source/db"
+	cfg.SourceTables = []string{"orders", "users"}
+	cfg.DestURI = "bigquery://project/dataset?location=EU&credentials_base64=b3JpZ2luYWw="
+	p := &Pipeline{config: cfg}
+	scope := p.streamingRefreshScope()
+	connectorID := genericCDCConnectorID(cfg)
+	for _, uri := range []string{
+		"bigquery://project/dataset?location=EU&credentials_base64=cm90YXRlZA==",
+		"bigquery://project/dataset?location=EU&credentials_path=/tmp/credentials-1.json",
+		"bigquery://project/dataset?location=EU&credentials_path=/tmp/credentials-2.json",
+		"bigquery://project/dataset?location=EU",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			cfg.DestURI = uri
+			require.Equal(t, scope, p.streamingRefreshScope())
+			require.NotEqual(t, connectorID, genericCDCConnectorID(cfg), "refresh scope normalization must not alter ordinary connector identity")
+		})
+	}
+	for _, uri := range []string{
+		"bigquery://other-project/dataset?location=EU",
+		"bigquery://project/other-dataset?location=EU",
+		"bigquery://project/dataset?location=US",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			cfg.DestURI = uri
+			require.NotEqual(t, scope, p.streamingRefreshScope())
+		})
+	}
+	cfg.DestURI = "bigquery://project/dataset?location=EU"
+	cfg.SourceTables = []string{"orders"}
+	require.NotEqual(t, scope, p.streamingRefreshScope())
+}
