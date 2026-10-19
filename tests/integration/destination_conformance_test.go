@@ -202,11 +202,13 @@ func destinationCases() []destCase {
 			validateAppendNonSQL: validateMongoDBAppend,
 		},
 		{
-			name:                "starrocks",
-			setup:               setupStarRocksConformance,
-			sqlBackend:          starRocksConformanceBackend(),
-			mergeCapable:        true,
-			replaceDedupCapable: true,
+			name:                   "starrocks",
+			setup:                  setupStarRocksConformance,
+			sqlBackend:             starRocksConformanceBackend(),
+			mergeCapable:           true,
+			replaceDedupCapable:    true,
+			schemaEvolutionCapable: true,
+			addColumnCapable:       true,
 		},
 		{
 			name: "bigquery",

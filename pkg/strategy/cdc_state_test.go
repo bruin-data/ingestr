@@ -2538,3 +2538,28 @@ func TestCDCStateBeginRunRetainsCompletedGenerationForPrune(t *testing.T) {
 	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, "public.table_000"))
 	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, restarted, fmt.Sprintf("public.table_%03d", cdcStatePruneThreshold-1)))
 }
+
+type customCDCStatePreparer struct {
+	*cdcStateDestination
+	preparedTable  string
+	preparedSchema *schema.TableSchema
+	prepareErr     error
+}
+
+func (d *customCDCStatePreparer) PrepareCDCStateTable(_ context.Context, table string, tableSchema *schema.TableSchema) error {
+	d.preparedTable, d.preparedSchema = table, tableSchema
+	return d.prepareErr
+}
+
+func TestCDCStateUsesDestinationTableLayout(t *testing.T) {
+	dest := &customCDCStatePreparer{cdcStateDestination: newCDCStateDestination(), prepareErr: errors.New("layout failed")}
+	manager, err := NewCDCStateManager(dest, "connector", "raw.items", "")
+	require.NoError(t, err)
+	require.ErrorContains(t, manager.prepareTable(t.Context()), "layout failed")
+	require.False(t, manager.prepared)
+	dest.prepareErr = nil
+	require.NoError(t, manager.prepareTable(t.Context()))
+	require.True(t, manager.prepared)
+	require.Equal(t, manager.stateTable, dest.preparedTable)
+	require.Same(t, cdcStateSchema, dest.preparedSchema)
+}

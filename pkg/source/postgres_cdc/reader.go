@@ -253,7 +253,7 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 		accum.durable = r.source.pos.Committed
 	}
 
-	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming)
+	err = streamLoop(ctx, repl, batchSize, accum, results, opts.Streaming, streamingMaxAge(opts))
 	if err == nil && !opts.Streaming {
 		decodedBarrierLSN := repl.BarrierLSN()
 		if decodedBarrierLSN == 0 {
@@ -290,14 +290,16 @@ func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, 
 		return 0, err
 	}
 	tableSchema.PrimaryKeys = r.tableSchema.PrimaryKeys
+	replaced := replacedColumns(r.tableSchema, tableSchema)
 	r.tableSchema = tableSchema
 	if schemaErr != nil {
+		replaced = append(replaced, schemaErr.Columns()...)
+	}
+	for _, column := range replaced {
 		if r.allowedUnknown == nil {
 			r.allowedUnknown = make(map[string]struct{})
 		}
-		for _, column := range schemaErr.Columns() {
-			r.allowedUnknown[column] = struct{}{}
-		}
+		r.allowedUnknown[column] = struct{}{}
 	}
 
 	incarnation, err := r.source.TableIncarnation(ctx, r.tableName)
@@ -425,7 +427,7 @@ type singleTableChangeFilter interface {
 //
 // When streaming, each flushed batch carries a CommitToken (a safe LSN) so the
 // pipeline can confirm the replication slot only after the data is durable.
-func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool) error {
+func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum *batchAccumulator, results chan<- source.RecordBatchResult, streaming bool, maxAge time.Duration) error {
 	var token tokenFunc
 	if streaming {
 		token = func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
@@ -473,6 +475,12 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 
 		if err := accum.flushReadyContext(ctx, results, token); err != nil {
 			return err
+		}
+		// A steady trickle of changes never looks idle; bound how long rows wait.
+		if streaming && hadActivity && maxAge > 0 {
+			if err := accum.flushStaleContext(ctx, results, token, maxAge, time.Now()); err != nil {
+				return err
+			}
 		}
 
 		if !streaming && repl.BarrierReached() {

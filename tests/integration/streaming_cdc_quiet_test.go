@@ -18,6 +18,9 @@ import (
 func TestPostgresCDC_StreamingQuietTableAcknowledgesAfterWrite(t *testing.T) {
 	t.Parallel()
 	ctx, pool, cfg := setupQuietTableCDC(t)
+	// The source flushes partial batches after the flush interval; make it long
+	// enough to distinguish that expiry from an idle flush.
+	cfg.FlushInterval = 10 * time.Second
 	_, running := startQuietTableCDCStream(t, ctx, cfg)
 	waitForQuietTableCDCSnapshot(t, ctx, pool, running)
 	busyRunning := startQuietTableCDCBusyWriter(t, ctx, pool)
@@ -56,7 +59,7 @@ func TestPostgresCDC_StreamingQuietTableAcknowledgesAfterWrite(t *testing.T) {
 		return blocked
 	}, 30*time.Second, 100*time.Millisecond, "quiet-table write should reach the destination during continuous WAL traffic")
 	require.GreaterOrEqual(t, time.Since(insertedAt), 9*time.Second,
-		"an early write would exercise idle flushing instead of the ten-second expiry")
+		"an early write would exercise idle flushing instead of the flush-interval expiry")
 
 	// Observe more than one standby-status interval while the write is blocked.
 	for deadline := time.Now().Add(11 * time.Second); time.Now().Before(deadline); {

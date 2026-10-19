@@ -609,19 +609,12 @@ func AppendValue(builder array.Builder, val interface{}) {
 			} else if num, ok := parseDecimal128Fast(v, dt.Precision, dt.Scale); ok {
 				b.Append(num)
 			} else {
-				num, err := decimal128.FromString(v, dt.Precision, dt.Scale)
-				if err != nil {
-					bf := new(big.Float)
-					if _, ok := bf.SetString(v); ok {
-						scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil))
-						bf.Mul(bf, scale)
-						bi, _ := bf.Int(nil)
-						b.Append(decimal128.FromBigInt(bi))
-					} else {
-						b.AppendNull()
-					}
+				// decimal128.FromString rounds through a binary float and
+				// misrounds exact halves; scale exactly instead.
+				if bi, ok := ScaledDecimal(v, dt.Scale); ok {
+					appendBigIntDecimal128(b, bi)
 				} else {
-					b.Append(num)
+					b.AppendNull()
 				}
 			}
 		case float64:
@@ -696,27 +689,13 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.Append(num)
 			}
 		case []byte:
-			s := strings.TrimSpace(string(v))
-			if s == "" {
-				b.AppendNull()
+			if num, ok := ParseDecimal128BytesFast(v, dt.Precision, dt.Scale); ok {
+				b.Append(num)
 			} else {
-				num, err := decimal128.FromString(s, dt.Precision, dt.Scale)
-				if err != nil {
-					bf := new(big.Float)
-					if _, ok := bf.SetString(s); ok {
-						scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil))
-						bf.Mul(bf, scale)
-						bi, _ := bf.Int(nil)
-						b.Append(decimal128.FromBigInt(bi))
-					} else {
-						b.AppendNull()
-					}
-				} else {
-					b.Append(num)
-				}
+				AppendValue(b, string(v))
 			}
 		case *big.Int:
-			b.Append(decimal128.FromBigInt(v))
+			appendBigIntDecimal128(b, v)
 		case json.Number:
 			AppendValue(b, string(v))
 		default:
@@ -735,20 +714,11 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 				return
 			}
-			num, err := decimal256.FromString(s, dt.Precision, dt.Scale)
-			if err != nil {
-				bf := new(big.Float)
-				if _, ok := bf.SetString(s); ok {
-					scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil))
-					bf.Mul(bf, scale)
-					bi, _ := bf.Int(nil)
-					b.Append(decimal256.FromBigInt(bi))
-				} else {
-					b.AppendNull()
-				}
-				return
+			if bi, ok := ScaledDecimal(s, dt.Scale); ok && bi.BitLen() <= 255 {
+				b.Append(decimal256.FromBigInt(bi))
+			} else {
+				b.AppendNull()
 			}
-			b.Append(num)
 		}
 		switch v := val.(type) {
 		case decimal256.Num:
@@ -1113,4 +1083,43 @@ func valueLen(v interface{}) int64 {
 	default:
 		return 8
 	}
+}
+
+// appendBigIntDecimal128 appends NULL for values decimal128 cannot hold;
+// decimal128.FromBigInt panics on them.
+func appendBigIntDecimal128(b *array.Decimal128Builder, v *big.Int) {
+	if v == nil || v.BitLen() > 127 {
+		b.AppendNull()
+		return
+	}
+	b.Append(decimal128.FromBigInt(v))
+}
+
+// ScaledDecimal parses a decimal string exactly and returns it scaled by
+// 10^scale, rounded half away from zero like decimal128.FromString.
+func ScaledDecimal(value string, scale int32) (*big.Int, bool) {
+	value = strings.TrimSpace(value)
+	if strings.ContainsRune(value, '/') {
+		return nil, false
+	}
+	r, ok := new(big.Rat).SetString(value)
+	if !ok {
+		return nil, false
+	}
+	exp := int64(scale)
+	if exp < 0 {
+		exp = -exp
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(exp), nil)
+	if scale >= 0 {
+		r.Mul(r, new(big.Rat).SetInt(factor))
+	} else {
+		r.Quo(r, new(big.Rat).SetInt(factor))
+	}
+	num, den := r.Num(), r.Denom()
+	q, rem := new(big.Int).QuoRem(num, den, new(big.Int))
+	if rem.Sign() != 0 && new(big.Int).Mul(new(big.Int).Abs(rem), big.NewInt(2)).Cmp(den) >= 0 {
+		q.Add(q, big.NewInt(int64(num.Sign())))
+	}
+	return q, true
 }

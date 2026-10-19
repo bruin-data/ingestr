@@ -45,6 +45,15 @@ const streamHeartbeatInterval = 10 * time.Second
 // pin the streaming commit position while other tables keep producing WAL.
 const streamingAccumulatorMaxAge = 10 * time.Second
 
+// streamingMaxAge is the longest buffered rows wait before a streaming flush;
+// a shorter --flush-interval tightens the default.
+func streamingMaxAge(opts source.ReadOptions) time.Duration {
+	if opts.FlushInterval > 0 {
+		return min(opts.FlushInterval, streamingAccumulatorMaxAge)
+	}
+	return streamingAccumulatorMaxAge
+}
+
 // streamPosition holds the LSN the pipeline has confirmed durable (flushed and
 // merged into the destination). The pipeline goroutine advances it via
 // CommitStream; the replicator goroutine reads it when sending standby status

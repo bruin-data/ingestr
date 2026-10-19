@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math/big"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -301,7 +303,7 @@ func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []
 		query := buildSelectQuery(table, columns, opts)
 
 		startQuery := time.Now()
-		rows, err := conn.Query(ctx, query)
+		rows, err := queryWithTextStrings(ctx, conn, query, columns)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", err)}
 			return
@@ -423,30 +425,22 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 		defer conn.Release()
 
 		config.Debug("[SOURCE] Executing custom query: %s", query)
-		rows, err := conn.Query(ctx, query)
+		typeMap := conn.Conn().TypeMap()
+		var rows pgx.Rows
+		var columns []schema.Column
+		if description, descErr := conn.Conn().PgConn().Prepare(ctx, "", query, nil); descErr == nil {
+			columns = customQueryColumns(typeMap, description.Fields)
+			rows, err = conn.Query(ctx, query, TextResultFormats(typeMap, description.Fields, columns, postgresTextFormat))
+		} else {
+			rows, err = conn.Query(ctx, query)
+		}
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
 		}
 		defer rows.Close()
-
-		fields := rows.FieldDescriptions()
-		typeMap := conn.Conn().TypeMap()
-		columns := make([]schema.Column, len(fields))
-		for i, fd := range fields {
-			pgTypeName := "text"
-			if t, ok := typeMap.TypeForOID(fd.DataTypeOID); ok {
-				pgTypeName = t.Name
-			}
-			dt, precision, scale, arrayType := MapPostgresToDataType(pgTypeName)
-			columns[i] = schema.Column{
-				Name:      string(fd.Name),
-				DataType:  dt,
-				Nullable:  true,
-				Precision: precision,
-				Scale:     scale,
-				ArrayType: arrayType,
-			}
+		if columns == nil {
+			columns = customQueryColumns(typeMap, rows.FieldDescriptions())
 		}
 		arrowSchema := buildArrowSchema(columns)
 
@@ -505,6 +499,58 @@ func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
 		}
 	}
 	return filtered
+}
+
+// queryWithTextStrings reads string-typed columns in PostgreSQL text format.
+// pgx decodes types such as interval, bit, ranges, geometry, and "char" into
+// Go structs or integers, while their text form is the value users expect.
+func queryWithTextStrings(ctx context.Context, conn *pgxpool.Conn, query string, columns []schema.Column) (pgx.Rows, error) {
+	description, err := conn.Conn().PgConn().Prepare(ctx, "", query, nil)
+	if err != nil || len(description.Fields) != len(columns) {
+		return conn.Query(ctx, query)
+	}
+	return conn.Query(ctx, query, TextResultFormats(conn.Conn().TypeMap(), description.Fields, columns, postgresTextFormat))
+}
+
+// TextResultFormats requests text for the columns useText selects and each
+// type's preferred format otherwise.
+func TextResultFormats(typeMap *pgtype.Map, fields []pgconn.FieldDescription, columns []schema.Column, useText func(schema.Column) bool) pgx.QueryResultFormats {
+	formats := make(pgx.QueryResultFormats, len(fields))
+	for i, field := range fields {
+		formats[i] = typeMap.FormatCodeForOID(field.DataTypeOID)
+		if i < len(columns) && useText(columns[i]) {
+			formats[i] = pgx.TextFormatCode
+		}
+	}
+	return formats
+}
+
+func customQueryColumns(typeMap *pgtype.Map, fields []pgconn.FieldDescription) []schema.Column {
+	columns := make([]schema.Column, len(fields))
+	for i, fd := range fields {
+		pgTypeName := "text"
+		if t, ok := typeMap.TypeForOID(fd.DataTypeOID); ok {
+			pgTypeName = t.Name
+		}
+		dt, precision, scale, arrayType := MapPostgresToDataType(pgTypeName)
+		columns[i] = schema.Column{
+			Name:      fd.Name,
+			DataType:  dt,
+			Nullable:  true,
+			Precision: precision,
+			Scale:     scale,
+			ArrayType: arrayType,
+		}
+	}
+	return columns
+}
+
+func postgresTextColumn(col schema.Column) bool {
+	return col.DataType == schema.TypeString || col.DataType == schema.TypeInterval
+}
+
+func postgresTextFormat(col schema.Column) bool {
+	return postgresTextColumn(col) || (col.DataType == schema.TypeArray && postgresTextColumn(schema.Column{DataType: col.ArrayType}))
 }
 
 func buildArrowSchema(columns []schema.Column) *arrow.Schema {
@@ -633,6 +679,23 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 		return convertUUIDValue(val)
 	}
 	switch v := val.(type) {
+	case string:
+		// pgx returns arrays of types it does not know (e.g. enum[]) as text.
+		if col.DataType != schema.TypeArray {
+			return val
+		}
+		elems, ok := ParseArrayLiteral(v)
+		if !ok {
+			return val
+		}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		out := make([]any, len(elems))
+		for i, e := range elems {
+			if !e.IsNull {
+				out[i] = convertValue(e.Value, elemCol)
+			}
+		}
+		return out
 	case []any:
 		if col.DataType != schema.TypeArray {
 			return val
@@ -655,6 +718,22 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 			}
 		}
 		return numericToBigInt(v, col.Scale)
+	case pgtype.Time:
+		if !v.Valid {
+			return nil
+		}
+		return time.Date(0, time.January, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(v.Microseconds) * time.Microsecond)
+	case driver.Valuer:
+		// Array elements are decoded by pgx; render struct values (interval,
+		// bit, ...) as PostgreSQL text like the scalar text-format path.
+		if col.DataType == schema.TypeString || col.DataType == schema.TypeInterval {
+			if text, err := v.Value(); err == nil {
+				if str, ok := text.(string); ok {
+					return str
+				}
+			}
+		}
+		return val
 	default:
 		return val
 	}

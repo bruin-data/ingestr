@@ -93,6 +93,9 @@ func TestWriteSourceErrorCancelsProducer(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "source failed") {
 		t.Fatalf("Write() = %v, want source failure", err)
 	}
+	if strings.Count(err.Error(), "source failed") != 1 || !strings.Contains(err.Error(), "tables first, second: source failed") {
+		t.Fatalf("Write() = %v, want the shared source failure reported once for both tables", err)
+	}
 	if got := cancellations.Load(); got != 1 {
 		t.Fatalf("source cancellations = %d, want 1", got)
 	}

@@ -5,12 +5,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -479,6 +483,12 @@ func convertTextValue(text string, col schema.Column) (interface{}, error) {
 }
 
 func convertTextValueWithMap(text string, col schema.Column, typeMap *pgtype.Map) (interface{}, error) {
+	return convertTextValueWithDelim(text, col, typeMap, ',')
+}
+
+// convertTextValueWithDelim decodes a text value whose array elements, if any,
+// are separated by delim (see postgres.ArrayDelimiter).
+func convertTextValueWithDelim(text string, col schema.Column, typeMap *pgtype.Map, delim byte) (interface{}, error) {
 	if typeMap == nil {
 		typeMap = pgtype.NewMap()
 	}
@@ -523,23 +533,11 @@ func convertTextValueWithMap(text string, col schema.Column, typeMap *pgtype.Map
 		}
 		return v, nil
 	case schema.TypeTimestamp:
-		var value time.Time
-		if err := typeMap.Scan(pgtype.TimestampOID, pgtype.TextFormatCode, []byte(text), &value); err != nil {
-			return nil, err
-		}
-		return value, nil
+		return scanTextTime(typeMap, pgtype.TimestampOID, text)
 	case schema.TypeTimestampTZ:
-		var value time.Time
-		if err := typeMap.Scan(pgtype.TimestamptzOID, pgtype.TextFormatCode, []byte(text), &value); err != nil {
-			return nil, err
-		}
-		return value, nil
+		return scanTextTime(typeMap, pgtype.TimestamptzOID, text)
 	case schema.TypeDate:
-		var value time.Time
-		if err := typeMap.Scan(pgtype.DateOID, pgtype.TextFormatCode, []byte(text), &value); err != nil {
-			return nil, err
-		}
-		return value, nil
+		return scanTextTime(typeMap, pgtype.DateOID, text)
 	case schema.TypeTime:
 		formats := []string{
 			"15:04:05.999999",
@@ -550,8 +548,15 @@ func convertTextValueWithMap(text string, col schema.Column, typeMap *pgtype.Map
 				return t, nil
 			}
 		}
+		// PostgreSQL accepts 24:00:00; match the binary decoder's wrap.
+		if strings.HasPrefix(text, "24:00:00") && strings.TrimRight(text[len("24:00:00"):], ".0") == "" {
+			return time.Date(0, time.January, 2, 0, 0, 0, 0, time.UTC), nil
+		}
 		return nil, fmt.Errorf("invalid PostgreSQL time %q", text)
 	case schema.TypeDecimal:
+		if err := checkDecimalRange(text, col); err != nil {
+			return nil, err
+		}
 		return text, nil // Keep as string for decimal handling
 	case schema.TypeBinary:
 		// bytea arrives as a hex literal ("\x48...") in text mode; decode it so
@@ -571,18 +576,18 @@ func convertTextValueWithMap(text string, col schema.Column, typeMap *pgtype.Map
 		// element by the element type. Returning a []interface{} lets the list
 		// builder populate the array; the snapshot path produces the same shape
 		// via pgx, keeping streaming and snapshot consistent.
-		elems, ok := parsePostgresArrayLiteral(text)
+		elems, ok := postgres.ParseArrayLiteralDelim(text, delim)
 		if !ok {
 			return nil, fmt.Errorf("invalid PostgreSQL array literal %q", text)
 		}
 		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
 		out := make([]interface{}, len(elems))
 		for i, e := range elems {
-			if e.isNull {
+			if e.IsNull {
 				out[i] = nil
 				continue
 			}
-			value, err := convertTextValueWithMap(e.value, elemCol, typeMap)
+			value, err := convertTextValueWithMap(e.Value, elemCol, typeMap)
 			if err != nil {
 				return nil, fmt.Errorf("invalid array element %d: %w", i, err)
 			}
@@ -592,4 +597,56 @@ func convertTextValueWithMap(text string, col schema.Column, typeMap *pgtype.Map
 	default:
 		return text, nil
 	}
+}
+
+// decimalPrecision mirrors schema.DataTypeToArrowType's decimal sizing.
+func decimalPrecision(col schema.Column) int {
+	if col.Precision <= 0 {
+		return 38
+	}
+	return min(col.Precision, 76)
+}
+
+// checkDecimalRange rejects finite values that, rounded to the column's scale
+// as the Arrow layer does, do not fit its DECIMAL(p,s).
+func checkDecimalRange(text string, col schema.Column) error {
+	scaled, ok := arrowconv.ScaledDecimal(text, int32(col.Scale))
+	if !ok {
+		return nil
+	}
+	limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimalPrecision(col))), nil)
+	if scaled.Abs(scaled).Cmp(limit) >= 0 {
+		return fmt.Errorf("PostgreSQL numeric %s exceeds DECIMAL(%d,%d)", text, decimalPrecision(col), col.Scale)
+	}
+	return nil
+}
+
+var wideYear = regexp.MustCompile(`^(\d{5,})(-.*)$`)
+
+// scanTextTime parses PostgreSQL date/timestamp text. pgx's text parser only
+// accepts four-digit years, while PostgreSQL emits years past 9999 (which the
+// binary decoder and snapshot accept); those are parsed with a stand-in year
+// of the same leap-ness and shifted back.
+func scanTextTime(typeMap *pgtype.Map, oid uint32, text string) (any, error) {
+	var value time.Time
+	err := typeMap.Scan(oid, pgtype.TextFormatCode, []byte(text), &value)
+	if err == nil {
+		return value, nil
+	}
+	match := wideYear.FindStringSubmatch(text)
+	if match == nil {
+		return nil, err
+	}
+	year, convErr := strconv.Atoi(match[1])
+	if convErr != nil {
+		return nil, err
+	}
+	standIn := 2001
+	if year%4 == 0 && (year%100 != 0 || year%400 == 0) {
+		standIn = 2000
+	}
+	if scanErr := typeMap.Scan(oid, pgtype.TextFormatCode, []byte(strconv.Itoa(standIn)+match[2]), &value); scanErr != nil {
+		return nil, err
+	}
+	return value.UTC().AddDate(year-standIn, 0, 0), nil
 }

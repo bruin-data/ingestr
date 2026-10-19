@@ -1457,18 +1457,22 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		return safeMySQLCDCCheckpoint(position, pendingXA, buffers)
 	}
 	lastTokenPosition := ""
-	streamingToken := func(position gomysql.Position, preferredLSN string) (source.CDCStateCommitToken, error) {
-		safe := safeCheckpoint(position)
+	// Streaming checkpoints may only name a transaction boundary: resuming
+	// between a TABLE_MAP event and its rows event fails, and resuming inside
+	// a transaction would skip its earlier rows. Timer, heartbeat and drain
+	// flushes wait for a boundary, so only a buffer filled mid-transaction
+	// loads rows past the checkpoint: keyed merges ignore their replay, and
+	// keyless change logs are at-least-once.
+	txnBoundary := start
+	inTransaction := false
+	streamingToken := func() (source.CDCStateCommitToken, error) {
+		// Changes still buffered or in pending XA transactions pull the
+		// checkpoint back to their own transaction boundaries.
+		safe := safeCheckpoint(txnBoundary)
 		if safe.Name == "" {
 			return source.CDCStateCommitToken{}, nil
 		}
-		commitPosition := ""
-		if preferredLSN != "" {
-			if parsed, ok := parseStoredMySQLPosition(preferredLSN); ok && parsed.Compare(safe) == 0 {
-				commitPosition = preferredLSN
-			}
-		}
-		token, err := s.checkpointCommitToken(ctx, commitPosition, safe)
+		token, err := s.checkpointCommitToken(ctx, "", safe)
 		if err != nil {
 			return source.CDCStateCommitToken{}, err
 		}
@@ -1481,11 +1485,10 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	var tokenFn mysqlCDCCommitTokenFunc
 	if opts.Streaming {
 		tokenFn = func(lastLSN string) (any, error) {
-			position, ok := parseStoredMySQLPosition(lastLSN)
-			if !ok {
+			if _, ok := parseStoredMySQLPosition(lastLSN); !ok {
 				return nil, fmt.Errorf("invalid MySQL CDC change LSN %q", lastLSN)
 			}
-			token, err := streamingToken(position, lastLSN)
+			token, err := streamingToken()
 			if err != nil {
 				return nil, err
 			}
@@ -1495,11 +1498,11 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			return token, nil
 		}
 	}
-	emitStreamingProgress := func(sendCtx context.Context, position gomysql.Position) error {
+	emitStreamingProgress := func(sendCtx context.Context) error {
 		if !opts.Streaming {
 			return nil
 		}
-		token, err := streamingToken(position, "")
+		token, err := streamingToken()
 		if err != nil {
 			return err
 		}
@@ -1508,20 +1511,24 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	flushBuffers := func(sendCtx context.Context) error {
 		return flushMySQLCDCChangeBuffersWithTokenContext(sendCtx, buffers, results, tokenFn)
 	}
-	flushBuffersAndProgress := func(sendCtx context.Context, position gomysql.Position) error {
-		if err := flushBuffers(sendCtx); err != nil {
-			return err
+	// Mid-transaction the checkpoint stays at the transaction start, so
+	// rows flushed now would be replayed on resume; keep them buffered.
+	flushBuffersAndProgress := func(sendCtx context.Context) error {
+		if !inTransaction {
+			if err := flushBuffers(sendCtx); err != nil {
+				return err
+			}
 		}
-		return emitStreamingProgress(sendCtx, position)
+		return emitStreamingProgress(sendCtx)
 	}
 	streamingFlushInterval := mysqlCDCStreamingFlushInterval(opts)
 	lastStreamingFlush := time.Now()
-	maybeFlushStreaming := func(position gomysql.Position) error {
-		if !opts.Streaming || time.Since(lastStreamingFlush) < streamingFlushInterval {
+	maybeFlushStreaming := func() error {
+		if !opts.Streaming || time.Since(lastStreamingFlush) < streamingFlushInterval || inTransaction {
 			return nil
 		}
 		lastStreamingFlush = time.Now()
-		return flushBuffersAndProgress(ctx, position)
+		return flushBuffersAndProgress(ctx)
 	}
 	finish := func(position gomysql.Position) error {
 		if err := flushMySQLCDCChangeBuffersWithTokenContext(ctx, buffers, results, nil); err != nil {
@@ -1584,7 +1591,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		case <-ctx.Done():
 			if opts.Streaming {
 				drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-				err := flushBuffersAndProgress(drainCtx, current)
+				err := flushBuffersAndProgress(drainCtx)
 				cancel()
 				if err != nil {
 					return err
@@ -1603,7 +1610,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			if ctx.Err() != nil {
 				if opts.Streaming {
 					drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-					flushErr := flushBuffersAndProgress(drainCtx, current)
+					flushErr := flushBuffersAndProgress(drainCtx)
 					cancel()
 					if flushErr != nil {
 						return flushErr
@@ -1618,7 +1625,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 					}
 					return fmt.Errorf("MySQL binlog stream stalled at %s while catching up to %s: no events or heartbeats received for %s; check connectivity to the server", current, target, mysqlCDCStreamStallTimeout)
 				}
-				if err := maybeFlushStreaming(current); err != nil {
+				if err := maybeFlushStreaming(); err != nil {
 					return err
 				}
 				continue
@@ -1637,7 +1644,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
 				if opts.Streaming {
 					lastStreamingFlush = time.Now()
-					if err := flushBuffersAndProgress(ctx, current); err != nil {
+					if err := flushBuffersAndProgress(ctx); err != nil {
 						return err
 					}
 					continue
@@ -1691,7 +1698,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 						}
 						pendingXA[xaID] = &mysqlCDCXAChanges{
 							byTable: make(map[string]*mysqlCDCXATableChanges),
-							start:   previousPosition,
+							start:   txnBoundary,
 							bytes:   transactionBytes,
 						}
 						pendingXABytes += transactionBytes
@@ -1731,7 +1738,10 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 							return err
 						}
 					}
-					if err := emitStreamingProgress(ctx, eventPos); err != nil {
+					// TRUNCATE commits implicitly and the buffers were just
+					// flushed, so its end is a safe checkpoint.
+					txnBoundary = eventPos
+					if err := emitStreamingProgress(ctx); err != nil {
 						return err
 					}
 				}
@@ -1779,7 +1789,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			if err := validateMySQLCDCFullRowImage(rowsEvent, len(sourceColumnsWithoutMySQLCDC(meta.FullSchema))); err != nil {
 				return fmt.Errorf("failed to decode MySQL CDC rows for %s: %w", meta.Name, err)
 			}
-			changes, nextRowSeq, err := mysqlRowsEventToChangesFromSequence(rowsEvent.Type(), rowsEvent.Rows, meta.FullSchema, outputSchema, eventPos, rowSeq, previousPosition)
+			changes, nextRowSeq, err := mysqlRowsEventToChangesFromSequence(rowsEvent.Type(), rowsEvent.Rows, meta.FullSchema, outputSchema, eventPos, rowSeq, txnBoundary)
 			if err != nil {
 				return fmt.Errorf("failed to decode MySQL CDC rows for %s: %w", meta.Name, err)
 			}
@@ -1825,10 +1835,56 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 				return err
 			}
 		}
-		if err := maybeFlushStreaming(current); err != nil {
+		switch {
+		case mysqlCDCEndsTransaction(logicalEvents):
+			txnBoundary, inTransaction = eventPos, false
+		case mysqlCDCInTransaction(logicalEvents):
+			inTransaction = true
+		}
+		if err := maybeFlushStreaming(); err != nil {
 			return err
 		}
 	}
+}
+
+// mysqlCDCEndsTransaction reports whether the events end a binlog
+// transaction: a commit (XID or COMMIT), an implicitly committed statement
+// such as DDL, an XA outcome or prepare, or a whole compressed transaction.
+func mysqlCDCEndsTransaction(events []*replication.BinlogEvent) bool {
+	if len(events) == 0 {
+		return false
+	}
+	last := events[len(events)-1]
+	if last.Header != nil && last.Header.EventType == replication.XA_PREPARE_LOG_EVENT {
+		return true
+	}
+	switch e := last.Event.(type) {
+	case *replication.XIDEvent, *replication.RotateEvent:
+		// Transactions never span binlog files, so a rotation is a boundary.
+		return true
+	case *replication.QueryEvent:
+		query := strings.ToUpper(strings.TrimSpace(string(e.Query)))
+		for _, inside := range []string{"BEGIN", "XA START", "XA BEGIN", "XA END", "SAVEPOINT", "ROLLBACK TO", "RELEASE SAVEPOINT"} {
+			if strings.HasPrefix(query, inside) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// mysqlCDCInTransaction reports whether the events open or continue a binlog
+// transaction without ending it.
+func mysqlCDCInTransaction(events []*replication.BinlogEvent) bool {
+	if len(events) == 0 {
+		return false
+	}
+	switch events[len(events)-1].Event.(type) {
+	case *replication.GTIDEvent, *replication.MariadbGTIDEvent, *replication.TableMapEvent, *replication.RowsEvent, *replication.QueryEvent:
+		return true
+	}
+	return false
 }
 
 func safeMySQLCDCCheckpoint(position gomysql.Position, pendingXA map[string]*mysqlCDCXAChanges, buffers map[string]*mysqlCDCChangeBuffer) gomysql.Position {

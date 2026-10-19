@@ -10,6 +10,36 @@ import (
 
 const cdcResultDrainTimeout = time.Second
 
+// CDCSnapshotSoftReplacer replaces a keyed CDC target's snapshot without
+// emptying it first. Replacement rows upsert over the old ones; once the
+// snapshot is complete, RetireCDCRowsBefore tombstones every live row the
+// snapshot did not rewrite, so readers never observe a partially loaded table.
+type CDCSnapshotSoftReplacer interface {
+	SupportsCDCSnapshotSoftReplace() bool
+	// MaxCDCRowLSN returns the greatest _cdc_lsn stored in table, live or
+	// tombstoned, or an empty string when no row carries one.
+	MaxCDCRowLSN(ctx context.Context, table string) (string, error)
+	RetireCDCRowsBefore(ctx context.Context, opts CDCRetireOptions) error
+}
+
+// CDCRetireOptions marks every live row whose _cdc_lsn is NULL or below
+// Boundary as deleted at Boundary. Existing tombstones are left unchanged.
+type CDCRetireOptions struct {
+	Table               string
+	PrimaryKeys         []string
+	Boundary            string
+	SyncedAt            time.Time
+	ExpectedIncarnation string
+}
+
+func SupportsCDCSnapshotSoftReplace(dest Destination) (CDCSnapshotSoftReplacer, bool) {
+	replacer, ok := dest.(CDCSnapshotSoftReplacer)
+	if !ok || !replacer.SupportsCDCSnapshotSoftReplace() {
+		return nil, false
+	}
+	return replacer, true
+}
+
 type truncateBoundary struct {
 	truncate bool
 	err      error
