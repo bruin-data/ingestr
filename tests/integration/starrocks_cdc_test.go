@@ -27,12 +27,23 @@ func TestStarRocksCDC(t *testing.T) {
 	if testing.Short() || !containerWanted("starrocks") {
 		t.Skip("Docker CDC integration")
 	}
+	t.Parallel()
 	ctx := t.Context()
 	dsn, uri := os.Getenv("INGESTR_TEST_STARROCKS_DSN"), os.Getenv("INGESTR_TEST_STARROCKS_URI")
 	if dsn == "" || uri == "" {
-		dsn, uri = startStarRocksContainer(ctx, t)
+		dsn, uri = sharedStarRocks(t)
 	}
 	waitForStarRocksBackend(t, dsn)
+	parent, pgSourceURI := t, os.Getenv("INGESTR_TEST_POSTGRES_CDC_URI")
+	pgSource := func(t *testing.T) string {
+		t.Helper()
+		if pgSourceURI == "" {
+			container, u := setupPostgresCDCContainer(t, ctx)
+			pgSourceURI = u
+			parent.Cleanup(func() { _ = container.Terminate(context.Background()) })
+		}
+		return pgSourceURI
+	}
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -268,7 +279,7 @@ func TestStarRocksCDC(t *testing.T) {
 
 	t.Run("Postgres snapshot resume stream and refresh", func(t *testing.T) {
 		sourceSchema := database
-		pg, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, sourceSchema)
+		pg, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, pgSource(t), sourceSchema)
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.items(id BIGINT PRIMARY KEY, payload TEXT, n BIGINT, active BOOLEAN, amount NUMERIC(18,4), doc JSONB, ts TIMESTAMP);
    ALTER TABLE %[1]s.items ALTER COLUMN payload SET STORAGE EXTERNAL;
    ALTER TABLE %[1]s.items ALTER COLUMN doc SET STORAGE EXTERNAL;
@@ -413,7 +424,7 @@ func TestStarRocksCDC(t *testing.T) {
 	})
 	t.Run("Postgres mid-stream re-snapshot keeps rows readable", func(t *testing.T) {
 		name := database + "_soft"
-		pg, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, name)
+		pg, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, pgSource(t), name)
 		const rows = 20000
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.soft_items(id BIGINT PRIMARY KEY, payload TEXT, dropme TEXT, n BIGINT);
    INSERT INTO %[1]s.soft_items SELECT g, 'p' || g, 'd' || g, g FROM generate_series(1,%[2]d) g;
@@ -539,7 +550,7 @@ func TestStarRocksCDC(t *testing.T) {
 	})
 	t.Run("Postgres varchar widened to text mid-stream", func(t *testing.T) {
 		name := database + "_widen"
-		_, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, name)
+		_, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, pgSource(t), name)
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.t(id INT PRIMARY KEY, name VARCHAR(5));
    INSERT INTO %[1]s.t SELECT g, 'n' || g FROM generate_series(1,100) g;
    CREATE PUBLICATION %[1]s FOR TABLE %[1]s.t;`, name))
@@ -589,7 +600,7 @@ func TestStarRocksCDC(t *testing.T) {
 
 	t.Run("Postgres snapshot values match WAL values", func(t *testing.T) {
 		name := database + "_types"
-		_, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, name)
+		_, sourceURI, pgExec := setupStarRocksCDCPostgres(t, ctx, pgSource(t), name)
 		columns := "t, ttz, iv, inet_h, bits, vb, money_c, r, tr, mr, pt, bx, tsv, c, t24, tarr, inarr, barr, far"
 		pgExec(fmt.Sprintf(`CREATE TABLE %[1]s.t(id INT PRIMARY KEY, t TIME, ttz TIMETZ, iv INTERVAL, inet_h INET, bits BIT(4), vb VARBIT, money_c MONEY, r INT4RANGE, tr TSTZRANGE, mr INT4MULTIRANGE, pt POINT, bx BOX, tsv TSVECTOR, c CHAR(3), t24 TIME, tarr TIME[], inarr INET[], barr BIT(2)[], far TSTZRANGE);
    INSERT INTO %[1]s.t VALUES (1,'13:14:15.123456','10:00:00+02','1 day 02:03:04','10.0.0.1',B'1010',B'101','12.34','[1,5)','[2026-01-01,2026-02-01)','{[1,3),[5,7)}','(1,2)','((0,0),(1,1))','a fat cat','ab','24:00:00','{13:14:15.5,24:00:00}','{10.0.0.1}','{10,01}','[10000-01-01,10001-01-01)');
@@ -616,14 +627,8 @@ func TestStarRocksCDC(t *testing.T) {
 
 // setupStarRocksCDCPostgres creates schema name on the CDC source and drops it,
 // with the publication and inactive slot of the same name, on cleanup.
-func setupStarRocksCDCPostgres(t *testing.T, ctx context.Context, name string) (*pgxpool.Pool, string, func(string)) {
+func setupStarRocksCDCPostgres(t *testing.T, ctx context.Context, sourceURI, name string) (*pgxpool.Pool, string, func(string)) {
 	t.Helper()
-	sourceURI := os.Getenv("INGESTR_TEST_POSTGRES_CDC_URI")
-	if sourceURI == "" {
-		container, u := setupPostgresCDCContainer(t, ctx)
-		sourceURI = u
-		t.Cleanup(func() { _ = container.Terminate(context.Background()) })
-	}
 	pg, err := pgxpool.New(ctx, sourceURI)
 	require.NoError(t, err)
 	t.Cleanup(pg.Close)

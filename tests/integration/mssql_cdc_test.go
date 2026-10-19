@@ -61,8 +61,8 @@ func setupMSSQLCDCDatabase(t *testing.T, ctx context.Context) (string, *sql.DB) 
 
 	// Create the capture job with a 1s log-scan interval (default 5s) so tests
 	// don't idle a poll cycle per change; set at creation to avoid a restart.
-	_, err = db.ExecContext(ctx, "EXEC sys.sp_cdc_add_job @job_type = N'capture', @pollinginterval = 1")
-	require.NoError(t, err)
+	// Retried: it fails while SQL Server Agent is still starting.
+	execEventually(t, db, "EXEC sys.sp_cdc_add_job @job_type = N'capture', @pollinginterval = 1")
 
 	return dbName, db
 }
@@ -121,6 +121,7 @@ func TestMSSQLCDC_SnapshotAndIncremental_DuckDB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	dbName, db := setupMSSQLCDCDatabase(t, ctx)
@@ -243,6 +244,7 @@ func TestMSSQLCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	dbName, db := setupMSSQLCDCDatabase(t, ctx)
@@ -275,6 +277,7 @@ func TestMSSQLCDC_SnapshotAndIncremental_MySQL(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	if mysqlDest.uri == "" {
 		t.Skip("shared mysql container not available")
 	}
@@ -309,6 +312,7 @@ func TestMSSQLCDC_SnapshotAndIncremental_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	if pgDest.uri == "" {
 		t.Skip("shared postgres dest container not available")
 	}
@@ -393,6 +397,7 @@ func TestMSSQLCDC_FreshCaptureInstanceResume_DuckDB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	dbName, db := setupMSSQLCDCDatabase(t, ctx)
@@ -450,6 +455,7 @@ func TestMSSQLCDC_CaptureInstanceHandoff_DuckDB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	dbName, db := setupMSSQLCDCDatabase(t, ctx)
@@ -543,6 +549,7 @@ func TestMSSQLCDC_MultiTable_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	if pgDest.uri == "" {
 		t.Skip("shared postgres dest container not available")
 	}
@@ -642,6 +649,7 @@ func TestMSSQLCDC_SingleTableRenamedColumns_SQLite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	dbName, db := setupMSSQLCDCDatabase(t, ctx)

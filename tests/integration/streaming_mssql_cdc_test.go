@@ -26,6 +26,7 @@ func TestMSSQLCDC_Streaming(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	dbName, db := setupMSSQLCDCDatabase(t, ctx)
