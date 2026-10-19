@@ -310,9 +310,15 @@ func TestJiraVerifyCredentials(t *testing.T) {
 }
 
 func TestJiraConnectFallsBackToGateway(t *testing.T) {
+	creds := jiraCredentials{email: "bot@serviceaccount.atlassian.com", apiToken: "tok"}
+
 	var gatewayPaths []string
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gatewayPaths = append(gatewayPaths, r.URL.Path)
+		if user, pass, ok := r.BasicAuth(); !ok || user != creds.email || pass != creds.apiToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer gateway.Close()
@@ -333,8 +339,6 @@ func TestJiraConnectFallsBackToGateway(t *testing.T) {
 	orig := atlassianGatewayURL
 	atlassianGatewayURL = gateway.URL
 	defer func() { atlassianGatewayURL = orig }()
-
-	creds := jiraCredentials{email: "bot@serviceaccount.atlassian.com", apiToken: "tok"}
 
 	s := &JiraSource{}
 	if err := s.connect(context.Background(), site.URL, creds); err != nil {
