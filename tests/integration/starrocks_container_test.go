@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,14 +22,35 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string) {
-	t.Helper()
-	dsn, uri, cleanup := startStarRocksContainerWithCleanup(ctx, t)
-	t.Cleanup(cleanup)
-	return dsn, uri
+var starRocksShared struct {
+	sync.Once
+	dsn, uri string
+	cleanup  func()
 }
 
-// Callers own cleanup so conformance tests can share the slow-booting container.
+// sharedStarRocks boots one StarRocks for the whole package; TestMain terminates it.
+func sharedStarRocks(t *testing.T) (dsn, uri string) {
+	t.Helper()
+	if !containerWanted("starrocks") {
+		t.Skip("StarRocks excluded by INTEGRATION_BACKENDS")
+	}
+	requireDocker(t)
+	starRocksShared.Do(func() {
+		dsn, uri, cleanup := startStarRocksContainerWithCleanup(context.Background(), t)
+		starRocksShared.cleanup = cleanup
+		waitForStarRocksBackend(t, dsn)
+		db, err := sql.Open("mysql", dsn)
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		// Alive precedes tablet placement readiness; probe before handing it out.
+		execEventually(t, db, "CREATE DATABASE IF NOT EXISTS ready_probe")
+		execEventually(t, db, "CREATE TABLE IF NOT EXISTS ready_probe.ready (id BIGINT) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1')")
+		starRocksShared.dsn, starRocksShared.uri = dsn, uri
+	})
+	require.NotEmpty(t, starRocksShared.uri, "shared StarRocks setup failed")
+	return starRocksShared.dsn, starRocksShared.uri
+}
+
 func startStarRocksContainerWithCleanup(ctx context.Context, t *testing.T) (dsn, uri string, cleanup func()) {
 	requireDocker(t)
 	t.Helper()
@@ -41,6 +63,7 @@ func startStarRocksContainerWithCleanup(ctx context.Context, t *testing.T) (dsn,
 			// on disk-constrained CI runners, so CREATE TABLE finds no usable backend.
 			Cmd: []string{"/bin/sh", "-c", "echo 'storage_flood_stage_usage_percent=99' >> /data/deploy/starrocks/be/conf/be.conf && " +
 				"echo 'storage_flood_stage_left_capacity_bytes=104857600' >> /data/deploy/starrocks/be/conf/be.conf && " +
+				"echo 'alter_scheduler_interval_millisecond=1000' >> /data/deploy/starrocks/fe/conf/fe.conf && " +
 				"cd /data/deploy && ./entrypoint.sh"},
 			WaitingFor: wait.ForListeningPort("9030/tcp").WithStartupTimeout(300 * time.Second),
 		},
@@ -146,9 +169,9 @@ func TestStarRocksToSQLite(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	t.Parallel()
 	ctx := context.Background()
-	dsn, baseURI := startStarRocksContainer(ctx, t)
-	waitForStarRocksBackend(t, dsn)
+	dsn, baseURI := sharedStarRocks(t)
 
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
