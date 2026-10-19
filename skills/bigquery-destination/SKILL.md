@@ -126,7 +126,7 @@ The old data is kept until the new table is confirmed, so a failed swap is recov
 
 > **Caveat:** recreating the target drops any table-level metadata ingestr does not itself manage but a user may have set manually on the destination — table/partition expiration, `require_partition_filter`, description, labels, column policy tags, row-level access policies, and CMEK. (The CTAS path already reset these via `CREATE OR REPLACE` regardless; the copy-job path preserved them on an in-place `WRITE_TRUNCATE` but not through a rename-aside recreate.)
 
-**Scope:** this runs only in `SwapTable`, i.e. only for the replace strategy (and full-refresh, which forces replace). Merge and append upsert/insert in place and do not repartition. When an existing table's partitioning (or an explicitly configured `cluster_by`) differs from the requested spec, the non-DropFirst `PrepareTable` path logs a warning that the old spec is kept until a replace or `--full-refresh` run.
+**Scope:** this runs only in `SwapTable`, i.e. only for the replace strategy (and batch full-refresh, which forces replace). Merge and append upsert/insert in place and do not repartition. When an existing table's partitioning (or an explicitly configured `cluster_by`) differs from the requested spec, the non-DropFirst `PrepareTable` path logs a warning that the old spec is kept until a replace or `--full-refresh` run.
 
 ## 7. Partition / Cluster Mismatch Check (`partitionOrClusterMismatch`)
 
@@ -159,6 +159,7 @@ The function name only carries the granularity: `partitionByClause` (CTAS swap, 
 
 ## 10. Merge Strategy (`MergeTable`)
 
+- **Streaming full refresh:** `--full-refresh --stream` retains merge/append after rebuilding selected tables through the existing snapshot truncate boundaries. `--refresh-id` stores an independent operation record in destination CDC metadata and fences resume to the refresh generation or later; completed snapshots survive retries. It does not use the batch swap/repartition path.
 - **CDC snapshot safety:** batch merges durably invalidate the prior snapshot epoch before truncating any target for a replacement snapshot or source truncate. Interrupted replacements cannot resume from an older completion marker, even when their partial reload has an LSN at or below the prior checkpoint. The destination incarnation stays pinned through invalidation and final checkpoint persistence.
 - Runs a MERGE statement:
   ```sql
