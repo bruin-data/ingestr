@@ -77,23 +77,78 @@ func (s *JiraSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.domain = creds.domain
-	baseURL := fmt.Sprintf("https://%s/rest/api/3", creds.domain)
-
-	s.client = httpclient.New(
-		httpclient.WithBaseURL(baseURL),
-		httpclient.WithTimeout(60*time.Second),
-		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
-		httpclient.WithDebug(config.DebugMode),
-		httpclient.WithAuth(httpclient.NewBasicAuth(creds.email, creds.apiToken)),
-	)
-
-	if err := s.verifyCredentials(ctx); err != nil {
+	if err := s.connect(ctx, "https://"+creds.domain, creds); err != nil {
 		return err
 	}
 
 	config.Debug("[JIRA] Connected to domain: %s", creds.domain)
 	return nil
 }
+
+// Scoped tokens (e.g. service accounts) are rejected on the site URL and only work through the gateway.
+func (s *JiraSource) connect(ctx context.Context, siteURL string, creds jiraCredentials) error {
+	if creds.cloudID != "" {
+		s.client = newJiraClient(gatewayAPIURL(creds.cloudID), creds)
+		return s.verifyCredentials(ctx)
+	}
+
+	s.client = newJiraClient(siteURL+"/rest/api/3", creds)
+	err := s.verifyCredentials(ctx)
+	if !errors.Is(err, errJiraUnauthorized) {
+		return err
+	}
+
+	cloudID, lookupErr := lookupCloudID(ctx, siteURL)
+	if lookupErr != nil {
+		return fmt.Errorf("%w (cloud ID lookup failed: %v; for service accounts, set cloud_id in the URI)", err, lookupErr)
+	}
+
+	config.Debug("[JIRA] Site URL rejected the credentials, retrying through the API gateway with cloud ID %s", cloudID)
+	_ = s.client.Close()
+	s.client = newJiraClient(gatewayAPIURL(cloudID), creds)
+	return s.verifyCredentials(ctx)
+}
+
+var atlassianGatewayURL = "https://api.atlassian.com/ex/jira"
+
+func gatewayAPIURL(cloudID string) string {
+	return fmt.Sprintf("%s/%s/rest/api/3", atlassianGatewayURL, url.PathEscape(cloudID))
+}
+
+func newJiraClient(baseURL string, creds jiraCredentials) *httpclient.Client {
+	return httpclient.New(
+		httpclient.WithBaseURL(baseURL),
+		httpclient.WithTimeout(60*time.Second),
+		httpclient.WithRateLimiter(rateLimit, rateLimitBurst),
+		httpclient.WithDebug(config.DebugMode),
+		httpclient.WithAuth(httpclient.NewBasicAuth(creds.email, creds.apiToken)),
+	)
+}
+
+func lookupCloudID(ctx context.Context, siteURL string) (string, error) {
+	client := httpclient.New(httpclient.WithTimeout(30*time.Second), httpclient.WithDebug(config.DebugMode))
+	defer func() { _ = client.Close() }()
+
+	var info struct {
+		CloudID string `json:"cloudId"`
+	}
+	resp, err := client.R(ctx).Get(siteURL + "/_edge/tenant_info")
+	if err != nil {
+		return "", err
+	}
+	if !resp.IsSuccess() {
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode(), resp.String())
+	}
+	if err := resp.JSON(&info); err != nil {
+		return "", err
+	}
+	if info.CloudID == "" {
+		return "", errors.New("tenant_info returned no cloudId")
+	}
+	return info.CloudID, nil
+}
+
+var errJiraUnauthorized = errors.New("jira rejected the credentials: check that the api_token is valid, not expired, and belongs to the given email")
 
 // Jira runs requests with rejected credentials anonymously, so tables silently return 0 rows.
 func (s *JiraSource) verifyCredentials(ctx context.Context) error {
@@ -102,7 +157,7 @@ func (s *JiraSource) verifyCredentials(ctx context.Context) error {
 		return fmt.Errorf("failed to verify jira credentials: %w", err)
 	}
 	if resp.StatusCode() == http.StatusUnauthorized {
-		return errors.New("jira rejected the credentials: check that the api_token is valid, not expired, and belongs to the given email")
+		return errJiraUnauthorized
 	}
 	if !resp.IsSuccess() {
 		return fmt.Errorf("failed to verify jira credentials: status %d: %s", resp.StatusCode(), resp.String())
@@ -237,10 +292,11 @@ type jiraCredentials struct {
 	domain   string
 	email    string
 	apiToken string
+	cloudID  string
 }
 
-// parseURI parses a Jira URI: jira://<domain>?email=<email>&api_token=<api_token>
-// The domain can be just the subdomain (e.g. "mycompany") or the full domain (e.g. "mycompany.atlassian.net").
+// parseURI parses a Jira URI: jira://<domain>?email=<email>&api_token=<api_token>[&cloud_id=<cloud_id>]
+// cloud_id is optional: it is looked up automatically when the site URL rejects a scoped token.
 func parseURI(uri string) (jiraCredentials, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
@@ -274,6 +330,7 @@ func parseURI(uri string) (jiraCredentials, error) {
 		domain:   domain,
 		email:    email,
 		apiToken: apiToken,
+		cloudID:  parsed.Query().Get("cloud_id"),
 	}, nil
 }
 
