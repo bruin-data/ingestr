@@ -18,6 +18,8 @@ import (
 
 type db2Client struct {
 	conn     net.Conn
+	host     string
+	ssl      bool
 	database string
 	user     string
 	password string
@@ -31,6 +33,13 @@ type db2Client struct {
 	// needs the real name. Set directly from the URI's rdb_name override
 	// if given, otherwise auto-detected from ACCRDBRM during handshake.
 	rdbName string
+	// signonExchange performs the Sign-on Server attribute exchange needed
+	// to compute a SECMEC 8 credential (see signon.go). Left nil in normal
+	// operation, where handshake falls back to the real
+	// exchangeSignonAttributes; tests override it to avoid a real Sign-on
+	// Server connection when only the DRDA/DDM side of the handshake is
+	// under test.
+	signonExchange func(context.Context, string, bool, time.Duration) (signonAttributes, error)
 	// sawACCRDBRM records whether the handshake's parseResponse call
 	// actually observed an ACCRDBRM reply. parseResponse returns
 	// successfully once the chain ends with no error reply, even if
@@ -126,6 +135,8 @@ func dialDb2(ctx context.Context, cfg db2ConnConfig) (*db2Client, error) {
 
 	client := &db2Client{
 		conn:     conn,
+		host:     cfg.Host,
+		ssl:      cfg.SSL,
 		database: padDatabaseName(cfg.Database),
 		rdbName:  strings.TrimSpace(cfg.RDBName),
 		user:     cfg.User,
@@ -314,7 +325,41 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		c.platform = db2PlatformIBMi
 	}
 
-	secchk, err := c.packSECCHK(secmec, sectkn)
+	// SECMEC 8 (secmecEUSRIDPWD) is a password-substitute mechanism, not
+	// plain-text: the real IBM i host on issue #3 returned SECCHKRM
+	// SVRCOD=16/SECCHKCD=15 (authentication rejected) for every connection
+	// in this investigation because SECCHK was sending plain-text
+	// credentials for a mechanism that doesn't accept them. Neither SECMEC
+	// 8 nor its substitute-password algorithms are documented in the open
+	// DRDA/DDM spec; both are ported from IBM's own JTOpen (jt400) client
+	// (see signon.go and substitutePasswordSHA1/512 in drda_crypto.go).
+	// Computing one requires a server seed that only the separate Sign-on
+	// Server protocol (not DRDA/DDM) provides, so that exchange happens
+	// here, once, right before building SECCHK.
+	var substituteCredential []byte
+	if secmec == secmecEUSRIDPWD {
+		signonExchange := c.signonExchange
+		if signonExchange == nil {
+			signonExchange = exchangeSignonAttributes
+		}
+		attrs, err := signonExchange(ctx, c.host, c.ssl, c.timeout)
+		if err != nil {
+			return fmt.Errorf("exchanging Sign-on Server attributes for SECMEC 8: %w", err)
+		}
+		config.Debug("[DB2] handshake: Sign-on Server passwordLevel=%d", attrs.passwordLevel)
+		// IBM i user profile names are always uppercase internally; the
+		// substitute algorithms are specified against that canonical form
+		// (confirmed via JTOpen's own EBCDIC round-trip, which only
+		// recognizes uppercase A-Z in the byte<->char tables it uses here).
+		substituteUser := strings.ToUpper(c.user)
+		if attrs.passwordLevel >= 4 {
+			substituteCredential = substitutePasswordSHA512(substituteUser, c.password, attrs.serverSeed, attrs.clientSeed)
+		} else {
+			substituteCredential = substitutePasswordSHA1(substituteUser, c.password, attrs.serverSeed, attrs.clientSeed)
+		}
+	}
+
+	secchk, err := c.packSECCHK(secmec, sectkn, substituteCredential)
 	if err != nil {
 		return err
 	}
@@ -677,7 +722,14 @@ func resolveSecMec(secmec int, sectkn []byte) int {
 	return secmecUserPassword
 }
 
-func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
+// packSECCHK builds the SECCHK request. substituteCredential is only used
+// when secmec == secmecEUSRIDPWD (SECMEC 8): it's the password-substitute
+// bytes computed from a Sign-on Server seed exchange (see signon.go and
+// substitutePasswordSHA1/512 in drda_crypto.go) - SECMEC 8 reuses the same
+// USRID/PASSWORD codepoints as plain-text auth, just with those substitute
+// bytes in place of the cp500-encoded password. Callers not using SECMEC 8
+// can pass nil.
+func (c *db2Client) packSECCHK(secmec int, sectkn []byte, substituteCredential []byte) ([]byte, error) {
 	body := bytes.NewBuffer(nil)
 	body.Write(packUint(cpSECMEC, secmec, 2))
 	rdbName, err := packString(cpRDBNAM, c.database, "cp500")
@@ -685,7 +737,8 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to encode database name: %w", err)
 	}
 	body.Write(rdbName)
-	if secmec == secmecEncryptedUserPassword {
+	switch {
+	case secmec == secmecEncryptedUserPassword:
 		encodedUser, err := encodeString(c.user, "cp500")
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode user: %w", err)
@@ -705,7 +758,17 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte) ([]byte, error) {
 			return nil, fmt.Errorf("credential encryption failed for password: %w", err)
 		}
 		body.Write(packBinary(cpSECTKN, password))
-	} else {
+	case secmec == secmecEUSRIDPWD:
+		user, err := packString(cpUSRID, c.user, "cp500")
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode user: %w", err)
+		}
+		body.Write(user)
+		if len(substituteCredential) == 0 {
+			return nil, fmt.Errorf("SECMEC %d requires a password-substitute credential but none was computed", secmec)
+		}
+		body.Write(packBinary(cpPASSWORD, substituteCredential))
+	default:
 		user, err := packString(cpUSRID, c.user, "cp500")
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode user: %w", err)

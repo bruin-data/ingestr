@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"math/big"
 	"net"
 	"strings"
@@ -103,7 +104,7 @@ func TestPackSECCHKReturnsEncryptionError(t *testing.T) {
 		private:  big.NewInt(2),
 	}
 
-	_, err := client.packSECCHK(secmecEncryptedUserPassword, []byte("short-token"))
+	_, err := client.packSECCHK(secmecEncryptedUserPassword, []byte("short-token"), nil)
 
 	require.ErrorContains(t, err, "credential encryption failed for user")
 	require.ErrorContains(t, err, "expected 32-byte security token")
@@ -131,6 +132,79 @@ func TestParseSECCHKRMReturnsNilWhenSVRCODAbsent(t *testing.T) {
 	require.NoError(t, parseSECCHKRM(nil))
 }
 
+func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	private, err := newPrivateKey()
+	require.NoError(t, err)
+
+	serverSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
+	clientSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	client := &db2Client{
+		conn:           clientConn,
+		database:       padDatabaseName("SIGLPAR"),
+		user:           "user",
+		password:       "pass",
+		timeout:        time.Second,
+		private:        private,
+		signonExchange: stubSignonExchange(3, serverSeed),
+	}
+
+	var secchkObject []byte
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		if _, err := readDSS(serverConn); err != nil { // EXCSAT
+			return
+		}
+		if _, err := readDSS(serverConn); err != nil { // ACCSEC
+			return
+		}
+		if writeTestDSS(serverConn, cpEXCSATRD, nil, true) != nil {
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEncryptedUserPassword, 2), false) != nil {
+			return
+		}
+
+		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		packet, err := readDSS(serverConn) // SECCHK
+		if err != nil {
+			return
+		}
+		secchkObject = packet.object
+		// Closing without a reply is fine - this test only cares about
+		// what the client sent, not the rest of the handshake.
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handshake(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	_ = serverConn.Close()
+	<-done
+
+	fields := parseReplyObject(secchkObject)
+	wantCredential := substitutePasswordSHA1("USER", "pass", serverSeed, clientSeed)
+	require.Equal(t, wantCredential, fields[cpPASSWORD], "PASSWORD field must carry the SECMEC 8 substitute, not the plain-text password")
+	require.NotEqual(t, []byte("pass"), fields[cpPASSWORD])
+}
+
 func TestHandshakeFailsWhenSECCHKRMReportsAuthenticationFailure(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -140,13 +214,14 @@ func TestHandshakeFailsWhenSECCHKRMReportsAuthenticationFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &db2Client{
-		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
-		user:     "user",
-		password: "pass",
-		timeout:  time.Second,
-		private:  private,
-		platform: db2PlatformIBMi,
+		conn:           clientConn,
+		database:       padDatabaseName("SIGLPAR"),
+		user:           "user",
+		password:       "pass",
+		timeout:        time.Second,
+		private:        private,
+		platform:       db2PlatformIBMi,
+		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
 	}
 
 	serverDone := make(chan struct{})
@@ -201,6 +276,38 @@ func TestHandshakeFailsWhenSECCHKRMReportsAuthenticationFailure(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("handshake did not return in time")
 	}
+}
+
+func TestSubstitutePasswordSHA1MatchesIndependentVector(t *testing.T) {
+	// Computed independently in Python (hashlib.sha1), not derived from
+	// this Go implementation, so this catches transcription bugs in the
+	// port rather than just re-confirming whatever the Go code already
+	// does. See AS400ImplRemote.generateShaToken/generateShaSubstitute.
+	serverSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	clientSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
+
+	got := substitutePasswordSHA1("TESTUSER", "Secret123", serverSeed, clientSeed)
+
+	require.Equal(t, "2de5412589a9505bc92a57e38ec409dabf368cdf", hex.EncodeToString(got))
+}
+
+func TestSubstitutePasswordSHA1PadsAndUppercasesUserID(t *testing.T) {
+	serverSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	clientSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
+
+	short := substitutePasswordSHA1("ABC", "Secret123", serverSeed, clientSeed)
+	padded := substitutePasswordSHA1("ABC       ", "Secret123", serverSeed, clientSeed)
+
+	require.Equal(t, padded, short, "user ID must be blank-padded to 10 chars before hashing")
+}
+
+func TestSubstitutePasswordSHA512Is64Bytes(t *testing.T) {
+	serverSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	clientSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
+
+	got := substitutePasswordSHA512("TESTUSER", "Secret123", serverSeed, clientSeed)
+
+	require.Len(t, got, 64)
 }
 
 func TestCP500EncodingUsesCodePage500(t *testing.T) {
@@ -450,12 +557,13 @@ func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &db2Client{
-		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
-		user:     "user",
-		password: "pass",
-		timeout:  time.Second,
-		private:  private,
+		conn:           clientConn,
+		database:       padDatabaseName("SIGLPAR"),
+		user:           "user",
+		password:       "pass",
+		timeout:        time.Second,
+		private:        private,
+		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
 	}
 
 	serverDone := make(chan struct{})
@@ -531,13 +639,14 @@ func TestHandshakeFailsLoudlyWhenACCRDBRMNeverArrives(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &db2Client{
-		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
-		user:     "user",
-		password: "pass",
-		timeout:  time.Second,
-		private:  private,
-		platform: db2PlatformIBMi,
+		conn:           clientConn,
+		database:       padDatabaseName("SIGLPAR"),
+		user:           "user",
+		password:       "pass",
+		timeout:        time.Second,
+		private:        private,
+		platform:       db2PlatformIBMi,
+		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
 	}
 
 	serverDone := make(chan struct{})
@@ -628,14 +737,15 @@ func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &db2Client{
-		conn:     clientConn,
-		database: padDatabaseName("*LOCAL"),
-		rdbName:  "RDBNAME2",
-		platform: db2PlatformIBMi,
-		user:     "user",
-		password: "pass",
-		timeout:  time.Second,
-		private:  private,
+		conn:           clientConn,
+		database:       padDatabaseName("*LOCAL"),
+		rdbName:        "RDBNAME2",
+		platform:       db2PlatformIBMi,
+		user:           "user",
+		password:       "pass",
+		timeout:        time.Second,
+		private:        private,
+		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
 	}
 
 	var accrdbRDBNAM string
@@ -984,6 +1094,21 @@ func TestPackSQLSTTRejectsOversizedQuery(t *testing.T) {
 	_, err := packSQLSTT(strings.Repeat("x", maxDSSObjectBodyLength))
 
 	require.ErrorContains(t, err, "body too large")
+}
+
+// stubSignonExchange stands in for a real Sign-on Server connection in
+// handshake tests that aren't themselves testing the Sign-on Server
+// protocol (that's signon_test.go's job) but still exercise the SECMEC 8
+// downgrade path, which now needs *something* to answer the Sign-on Server
+// attribute exchange before SECCHK can be built.
+func stubSignonExchange(passwordLevel int, serverSeed []byte) func(context.Context, string, bool, time.Duration) (signonAttributes, error) {
+	return func(context.Context, string, bool, time.Duration) (signonAttributes, error) {
+		return signonAttributes{
+			passwordLevel: passwordLevel,
+			serverSeed:    serverSeed,
+			clientSeed:    []byte{1, 2, 3, 4, 5, 6, 7, 8},
+		}, nil
+	}
 }
 
 func writeTestDSS(conn net.Conn, codePoint uint16, object []byte, chained bool) error {
