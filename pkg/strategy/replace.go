@@ -366,6 +366,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
 		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
+		CDCManagedState:                 job.CDCStateManager != nil,
 	}
 
 	readCtx, cancelRead := context.WithCancel(ctx)
@@ -570,6 +571,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
 			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
 			FullRefresh:         job.Config.FullRefresh,
+			CDCManagedState:     job.CDCStateManager != nil,
 		},
 		CDCResumeLSNs: job.CDCResumeLSNs,
 	})

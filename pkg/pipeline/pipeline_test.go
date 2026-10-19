@@ -2775,7 +2775,9 @@ func TestResolveStrategyStreamingAndCDC(t *testing.T) {
 		{name: "batch ignores streaming preference", src: streaming, want: ""},
 		{name: "non-streaming source has no default", src: plain, cfg: config.IngestConfig{Stream: true}, want: ""},
 		{name: "explicit strategy beats stream default", src: streaming, cfg: config.IngestConfig{Stream: true, IncrementalStrategy: config.StrategyMerge}, want: config.StrategyMerge},
-		{name: "refresh beats stream default", src: streaming, cfg: config.IngestConfig{Stream: true, FullRefresh: true}, want: config.StrategyReplace},
+		{name: "stream refresh preserves ongoing strategy", src: streaming, cfg: config.IngestConfig{Stream: true, FullRefresh: true}, want: config.StrategyAppend},
+		{name: "CDC streaming refresh uses merge", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", Stream: true, FullRefresh: true}, pks: []string{"id"}, want: config.StrategyMerge},
+		{name: "keyless CDC streaming refresh uses append", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", Stream: true, FullRefresh: true}, want: config.StrategyAppend},
 		{name: "CDC empty defaults to merge", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db"}, pks: []string{"id"}, want: config.StrategyMerge},
 		{name: "CDC replace becomes merge", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db", IncrementalStrategy: config.StrategyReplace}, pks: []string{"id"}, want: config.StrategyMerge},
 		{name: "keyless CDC defaults to append", src: plain, cfg: config.IngestConfig{SourceURI: "postgres+cdc://db"}, want: config.StrategyAppend},
@@ -4367,4 +4369,27 @@ func TestCanonicalCDCStateURIIgnoresStarRocksConnectionSettings(t *testing.T) {
 	require.Equal(t, base, canonicalCDCStateURI("starrocks://other@sr:9030/analytics?http_port=8040&replication_num=1&ssl=true"))
 	require.NotEqual(t, base, canonicalCDCStateURI("starrocks://root@sr:9030/other"))
 	require.Contains(t, canonicalCDCStateURI("clickhouse://u@ch:9000/db?http_port=8123"), "http_port=8123")
+}
+
+func TestStreamingRefreshPreservesCDCStrategyRestrictions(t *testing.T) {
+	for _, sourceURI := range []string{"mysql+cdc://source/db", "mariadb+cdc://source/db", "mssql+cdc://source/db"} {
+		t.Run(sourceURI, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = sourceURI
+			cfg.Stream = true
+			cfg.FullRefresh = true
+			cfg.IncrementalStrategy = config.StrategyAppend
+			require.ErrorContains(t, validateManagedChangeConfig(cfg), "incremental-strategy")
+			cfg.IncrementalStrategy = config.StrategyMerge
+			require.NoError(t, validateManagedChangeConfig(cfg))
+			cfg.Stream = false
+			cfg.IncrementalStrategy = config.StrategyAppend
+			require.NoError(t, validateManagedChangeConfig(cfg), "batch refresh replaces rather than appends")
+		})
+	}
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "postgres+cdc://source/db"
+	cfg.Stream, cfg.FullRefresh = true, true
+	cfg.IncrementalStrategy = config.StrategyAppend
+	require.NoError(t, validateManagedChangeConfig(cfg), "PostgreSQL keyless streams retain append support")
 }

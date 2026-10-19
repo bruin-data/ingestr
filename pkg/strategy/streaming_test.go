@@ -710,6 +710,7 @@ func TestStreamingExecutor_PassesFlushOptionsToSource(t *testing.T) {
 	defer src.mu.Unlock()
 	require.True(t, src.readCalled)
 	assert.True(t, src.readOpts.Streaming)
+	assert.False(t, src.readOpts.CDCManagedState)
 	assert.Equal(t, 123*time.Millisecond, src.readOpts.FlushInterval)
 	assert.Equal(t, 7, src.readOpts.FlushRecords)
 }

@@ -242,9 +242,8 @@ func TestIngestConfigValidate_Stream(t *testing.T) {
 			mutate: func(c *IngestConfig) {},
 		},
 		{
-			name:    "full refresh rejected",
-			mutate:  func(c *IngestConfig) { c.FullRefresh = true },
-			wantErr: "full-refresh",
+			name:   "full refresh allowed",
+			mutate: func(c *IngestConfig) { c.FullRefresh = true },
 		},
 		{
 			name:    "interval end rejected",
@@ -680,5 +679,57 @@ func TestIngestConfigValidate_SubsetLeavesDestTableEmpty(t *testing.T) {
 	// DestTable must not be defaulted to a joined name.
 	if cfg.DestTable != "" {
 		t.Fatalf("DestTable = %q, want empty", cfg.DestTable)
+	}
+}
+
+func TestIngestConfigValidateRefreshID(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		stream, fullRefresh bool
+		wantError           bool
+	}{
+		{"durable streaming refresh", true, true, false},
+		{"missing refresh", true, false, true},
+		{"missing streaming", false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://localhost/db"
+			cfg.DestURI = "postgres://localhost/dest"
+			cfg.IncrementalStrategy = StrategyMerge
+			cfg.Stream = tc.stream
+			cfg.FullRefresh = tc.fullRefresh
+			cfg.RefreshID = "stream:opaque-request"
+			err := cfg.Validate()
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "refresh-id") {
+					t.Fatalf("expected refresh-id validation, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestChangeTrackingStreamingRefreshRequiresMerge(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "mssql+ct://source/db"
+	cfg.SourceTable = "dbo.users"
+	cfg.DestURI = "postgres://destination/db"
+	cfg.Stream, cfg.FullRefresh = true, true
+	cfg.IncrementalStrategy, cfg.IncrementalStrategyExplicit = StrategyAppend, true
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "incremental-strategy") {
+		t.Fatalf("expected CT streaming strategy rejection, got %v", err)
+	}
+	cfg.IncrementalStrategy = StrategyMerge
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Stream = false
+	cfg.IncrementalStrategy = StrategyReplace
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("batch refresh should still allow replace: %v", err)
 	}
 }
