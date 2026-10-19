@@ -691,16 +691,16 @@ func TestIngestConfigValidate_CDCNoSnapshot(t *testing.T) {
 	}{
 		{name: "bootstrap", change: func(c *IngestConfig) { c.CDCStartLSN = "1/ABCDEF" }},
 		{name: "resume", change: func(c *IngestConfig) {}},
-		{name: "alias initial", change: func(c *IngestConfig) {
+		{name: "alias auto", change: func(c *IngestConfig) {
 			c.SourceURI = "postgresql+cdc://localhost/db"
-			c.CDCSnapshotMode = "initial"
+			c.CDCSnapshotMode = "auto"
 		}},
 		{name: "alias bootstrap", change: func(c *IngestConfig) {
 			c.SourceURI = "postgresql+cdc://localhost/db?slot=external"
 			c.CDCStartLSN = "1/ABCDEF"
 		}},
 		{name: "subset", change: func(c *IngestConfig) { c.SourceTable = ""; c.SourceTables = []string{"a", "b"} }},
-		{name: "unknown mode", change: func(c *IngestConfig) { c.CDCSnapshotMode = "skip" }, wantErr: "must be initial or never"},
+		{name: "unknown mode", change: func(c *IngestConfig) { c.CDCSnapshotMode = "skip" }, wantErr: "must be auto or never"},
 		{name: "wrong source", change: func(c *IngestConfig) { c.SourceURI = "mysql+cdc://localhost/db" }, wantErr: "only supported for postgres+cdc"},
 		{name: "no selection", change: func(c *IngestConfig) { c.SourceTable = "" }, wantErr: "explicitly select tables"},
 		{name: "no slot", change: func(c *IngestConfig) { c.SourceURI = "postgres+cdc://localhost/db" }, wantErr: "existing explicit slot"},
@@ -709,7 +709,7 @@ func TestIngestConfigValidate_CDCNoSnapshot(t *testing.T) {
 		{name: "explicit replace", change: func(c *IngestConfig) { c.IncrementalStrategyExplicit = true }, wantErr: "requires merge"},
 		{name: "invalid LSN", change: func(c *IngestConfig) { c.CDCStartLSN = "now" }, wantErr: "nonzero PostgreSQL LSN"},
 		{name: "zero LSN", change: func(c *IngestConfig) { c.CDCStartLSN = "0/0" }, wantErr: "nonzero PostgreSQL LSN"},
-		{name: "LSN without never", change: func(c *IngestConfig) { c.CDCSnapshotMode = "initial"; c.CDCStartLSN = "0/1234" }, wantErr: "requires --cdc-snapshot-mode never"},
+		{name: "LSN without never", change: func(c *IngestConfig) { c.CDCSnapshotMode = "auto"; c.CDCStartLSN = "0/1234" }, wantErr: "requires --cdc-snapshot-mode never"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := DefaultConfig()

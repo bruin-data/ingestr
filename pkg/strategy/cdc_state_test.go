@@ -2565,7 +2565,7 @@ func TestCDCStateExternalBaselineSurvivesRestartAndPruning(t *testing.T) {
 		require.NoError(t, manager.Persist(t.Context(), source.CDCStateCommitToken{Position: baseline}))
 	}
 	manager = restartedCDCStateManager(t, dest, connector, tables)
-	_, err = manager.ResolveSnapshotMode(t.Context(), "initial")
+	_, err = manager.ResolveSnapshotMode(t.Context(), "auto")
 	require.ErrorContains(t, err, "durable never-snapshot policy")
 	require.ErrorContains(t, manager.BeginRun(t.Context(), true), "never-snapshot policy")
 

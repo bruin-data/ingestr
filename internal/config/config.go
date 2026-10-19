@@ -147,7 +147,7 @@ type IngestConfig struct {
 	StagingDataset string
 	KeepStaging    bool // testing only: skip final DropTable so tests can inspect staging
 
-	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to initial
+	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to auto
 	CDCStartLSN                string // Bootstrap boundary for externally loaded PostgreSQL CDC targets
 	CDCResumeLSN               string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCResumeIncarnation       string
@@ -300,8 +300,8 @@ func (c *IngestConfig) ValidateCDCSnapshotMode() error {
 	if err != nil || (u.Scheme != "postgres+cdc" && u.Scheme != "postgresql+cdc") {
 		return &ValidationError{Field: "cdc-snapshot-mode", Message: "is only supported for postgres+cdc sources"}
 	}
-	if c.CDCSnapshotMode != "" && c.CDCSnapshotMode != "initial" && c.CDCSnapshotMode != "never" {
-		return &ValidationError{Field: "cdc-snapshot-mode", Message: "must be initial or never"}
+	if c.CDCSnapshotMode != "" && c.CDCSnapshotMode != "auto" && c.CDCSnapshotMode != "never" {
+		return &ValidationError{Field: "cdc-snapshot-mode", Message: "must be auto or never"}
 	}
 	if c.CDCStartLSN != "" {
 		if c.CDCSnapshotMode != "never" {

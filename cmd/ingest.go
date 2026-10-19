@@ -121,7 +121,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "cdc-snapshot-mode",
-				Usage:   "PostgreSQL CDC snapshot policy: initial (default) or never; omitted inherits the saved policy",
+				Usage:   "PostgreSQL CDC snapshot policy: auto (default, allows snapshots and backfills as needed) or never; omitted inherits the saved policy",
 				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_MODE"),
 			},
 			&cli.StringFlag{

@@ -66,12 +66,12 @@ Requirements and behavior:
 - PostgreSQL CDC only, using keyed `merge`. Explicitly select one table or a comma-separated list; every selected destination table must already exist with compatible data columns and merge keys. A multi-table bootstrap uses the same consistent boundary for every selected table.
 - Supply an existing, inactive, persistent `pgoutput` slot in the source database. Ingestr refuses a boundary older than the slot's `confirmed_flush_lsn` or `restart_lsn`, unavailable WAL, or a future LSN. No slot is created or replaced in this mode.
 - `--cdc-start-lsn` is first-run-only: remove it after bootstrap. Supplying it when connector state already exists fails rather than resetting progress. Subsequent runs resume from managed checkpoints.
-- The `never` policy is saved with connector state and inherited when the flag is omitted. `--full-refresh` and switching that connector to `--cdc-snapshot-mode initial` are rejected. Keep the same connector identity, table selection, and staging namespace across runs.
+- The `never` policy is saved with connector state and inherited when the flag is omitted. `--full-refresh` and switching that connector to `--cdc-snapshot-mode auto` are rejected. Keep the same connector identity, table selection, and staging namespace across runs.
 - Initial snapshots, recovery snapshots, schema-change snapshots, and automatic backfills are prohibited. Missing or invalid checkpoints, replaced destinations, and source schema or identity changes stop the run. Recovery requires restoring valid state and retained WAL, or explicitly establishing a new external baseline and connector; do not delete state to bypass these checks.
 - Required CDC metadata columns are added without rewriting existing row data. Untouched baseline rows have NULL CDC metadata; use `COALESCE(_cdc_deleted, false) = false` when selecting active rows. Updates and deletes populate metadata as changes arrive. Keyed replay is at least once.
 - Source WAL `TRUNCATE` events still clear the corresponding destination table. “Never snapshot” does not mean “ignore destructive source changes.”
 
-Omit `--stream` for a one-shot run that catches up and exits. Without a saved policy or explicit flag, `initial` preserves the default snapshot-and-resume behavior.
+Omit `--stream` for a one-shot run that catches up and exits. Without a saved policy or explicit flag, `auto` preserves the default behavior: resume when possible, otherwise allow initial or recovery snapshots and backfills as needed.
 
 ### New tables
 

@@ -1031,14 +1031,14 @@ func (m *CDCStateManager) ResolveSnapshotMode(ctx context.Context, requested str
 	if err := m.load(ctx); err != nil {
 		return "", err
 	}
-	if m.neverSnapshot && requested == "initial" {
-		return "", fmt.Errorf("this CDC connector has a durable never-snapshot policy; initial snapshots cannot be enabled")
+	if m.neverSnapshot && requested == "auto" {
+		return "", fmt.Errorf("this CDC connector has a durable never-snapshot policy; automatic snapshots cannot be enabled")
 	}
 	m.neverSnapshot = m.neverSnapshot || requested == "never"
 	if m.neverSnapshot {
 		return "never", nil
 	}
-	return "initial", nil
+	return "auto", nil
 }
 
 // AdoptBaseline certifies an explicitly supplied external snapshot boundary.
