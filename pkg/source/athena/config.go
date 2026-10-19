@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-
-	"github.com/bruin-data/ingestr/internal/endpointguard"
 )
 
 func parseAthenaConfig(rawURI string) (athenaConfig, error) {
@@ -23,6 +21,7 @@ func parseAthenaConfig(rawURI string) (athenaConfig, error) {
 		AccessKeyID:     parsed.Query().Get("access_key_id"),
 		SecretAccessKey: parsed.Query().Get("secret_access_key"),
 		SessionToken:    parsed.Query().Get("session_token"),
+		EndpointURL:     strings.TrimSpace(parsed.Query().Get("endpoint_url")),
 		DefaultDatabase: strings.TrimPrefix(parsed.Path, "/"),
 	}
 
@@ -35,14 +34,6 @@ func parseAthenaConfig(rawURI string) (athenaConfig, error) {
 		return athenaConfig{}, err
 	}
 	cfg.OutputLocation = outputLocation
-
-	if raw := strings.TrimSpace(parsed.Query().Get("endpoint_url")); raw != "" {
-		endpoint, err := endpointguard.ParseURL(raw)
-		if err != nil {
-			return athenaConfig{}, fmt.Errorf("athena uri: %w", err)
-		}
-		cfg.EndpointURL = endpoint
-	}
 
 	if cfg.Profile == "" && cfg.AccessKeyID == "" && cfg.SecretAccessKey == "" && cfg.SessionToken == "" {
 		return athenaConfig{}, errors.New("athena uri: provide either access_key_id/secret_access_key (optional session_token) or profile")

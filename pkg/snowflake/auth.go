@@ -7,8 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"net"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -97,12 +97,14 @@ func ParseURI(uri string) (*Auth, error) {
 	return auth, nil
 }
 
+var validHost = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+
 // parseEndpoint reads the optional host and port overrides. Without them the driver
 // derives the host from the account. The driver always connects over HTTPS.
 func (a *Auth) parseEndpoint(query url.Values) error {
 	if host := query.Get("host"); host != "" {
-		if strings.ContainsAny(host, ":/?#@ ") && net.ParseIP(host) == nil {
-			return fmt.Errorf("snowflake URI: host must be a hostname or IP address without a scheme, port, or path")
+		if !validHost.MatchString(host) {
+			return fmt.Errorf("snowflake URI: host must be a hostname or IPv4 address without a scheme, port, or path")
 		}
 		a.Host = host
 	}

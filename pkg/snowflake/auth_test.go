@@ -568,6 +568,8 @@ func TestParseURI_InvalidEndpoint(t *testing.T) {
 		"host=snowflake.example.com:8443",
 		"host=snowflake.example.com/path",
 		"host=user@snowflake.example.com",
+		"host=a%3Badbc.snowflake.sql.role%3Dx",
+		"host=::1",
 		"port=0",
 		"port=65536",
 		"port=abc",

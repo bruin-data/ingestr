@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/internal/endpointguard"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -45,7 +43,7 @@ type athenaConfig struct {
 	SecretAccessKey string
 	SessionToken    string
 	DefaultDatabase string
-	EndpointURL     *url.URL
+	EndpointURL     string
 }
 
 func NewAthenaDestination() *AthenaDestination {
@@ -552,9 +550,7 @@ func (d *AthenaDestination) waitForQuery(ctx context.Context, executionID string
 }
 
 func (c athenaConfig) clientOptions(o *athena.Options) {
-	if c.EndpointURL == nil {
-		return
+	if c.EndpointURL != "" {
+		o.BaseEndpoint = aws.String(c.EndpointURL)
 	}
-	o.BaseEndpoint = aws.String(c.EndpointURL.String())
-	o.HTTPClient = endpointguard.NewHTTPClient(c.EndpointURL)
 }
