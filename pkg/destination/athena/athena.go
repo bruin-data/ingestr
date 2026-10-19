@@ -551,7 +551,6 @@ func (d *AthenaDestination) waitForQuery(ctx context.Context, executionID string
 	}
 }
 
-// clientOptions points the client at a custom endpoint, if one is configured.
 func (c athenaConfig) clientOptions(o *athena.Options) {
 	if c.EndpointURL == nil {
 		return

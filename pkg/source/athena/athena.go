@@ -348,7 +348,6 @@ func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
-// clientOptions points the client at a custom endpoint, if one is configured.
 func (c athenaConfig) clientOptions(o *athena.Options) {
 	if c.EndpointURL == nil {
 		return
