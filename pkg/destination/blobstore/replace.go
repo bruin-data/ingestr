@@ -1,0 +1,137 @@
+package blobstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"cloud.google.com/go/storage"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
+	"google.golang.org/api/iterator"
+)
+
+// s3DeleteBatchSize is the most keys a single S3 DeleteObjects request accepts.
+const s3DeleteBatchSize = 1000
+
+var errListUnsupported = errors.New("listing files is not supported for this provider")
+
+// removeStaleBlobs completes a replace by deleting the files under the table's path that
+// this load did not write. It runs only after every new file is written, so a failed load
+// never removes the previous data.
+func (d *BlobstoreDestination) removeStaleBlobs(ctx context.Context) error {
+	d.mu.Lock()
+	bucket, basePath, table := d.bucketName, strings.Trim(d.basePath, "/"), d.tableName
+	written := make(map[string]struct{}, len(d.writtenKeys))
+	for key := range d.writtenKeys {
+		written[key] = struct{}{}
+	}
+	d.mu.Unlock()
+
+	// Never clear a whole bucket: without a path, the table has no files of its own.
+	if basePath == "" {
+		output.Warnf("[BLOBSTORE] replace kept existing files for %s: the table has no path inside bucket %s, and the bucket root is never cleared", table, bucket)
+		return nil
+	}
+
+	// The trailing slash keeps "reports/t" from matching "reports/t2".
+	keys, err := d.listBlobs(ctx, bucket, basePath+"/")
+	if errors.Is(err, errListUnsupported) {
+		output.Warnf("[BLOBSTORE] replace kept existing files for %s: removing old files is not supported for %s yet", table, d.provider)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var stale []string
+	for _, key := range keys {
+		if _, ok := written[key]; !ok {
+			stale = append(stale, key)
+		}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+
+	config.Debug("[BLOBSTORE] Removing %d files from the previous load under %s/%s/", len(stale), bucket, basePath)
+	return d.deleteBlobs(ctx, bucket, stale)
+}
+
+func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix string) ([]string, error) {
+	var keys []string
+
+	switch d.provider {
+	case ProviderS3:
+		pager := s3.NewListObjectsV2Paginator(d.s3Client, &s3.ListObjectsV2Input{
+			Bucket: aws.String(bucket),
+			Prefix: aws.String(prefix),
+		})
+		for pager.HasMorePages() {
+			page, err := pager.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list s3://%s/%s: %w", bucket, prefix, err)
+			}
+			for _, obj := range page.Contents {
+				keys = append(keys, aws.ToString(obj.Key))
+			}
+		}
+		return keys, nil
+
+	case ProviderGCS:
+		it := d.gcsClient.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: prefix})
+		for {
+			attrs, err := it.Next()
+			if errors.Is(err, iterator.Done) {
+				return keys, nil
+			}
+			if err != nil {
+				return nil, fmt.Errorf("failed to list gs://%s/%s: %w", bucket, prefix, err)
+			}
+			keys = append(keys, attrs.Name)
+		}
+	}
+
+	return nil, errListUnsupported
+}
+
+func (d *BlobstoreDestination) deleteBlobs(ctx context.Context, bucket string, keys []string) error {
+	switch d.provider {
+	case ProviderS3:
+		for start := 0; start < len(keys); start += s3DeleteBatchSize {
+			batch := keys[start:min(start+s3DeleteBatchSize, len(keys))]
+			objects := make([]s3types.ObjectIdentifier, len(batch))
+			for i, key := range batch {
+				objects[i] = s3types.ObjectIdentifier{Key: aws.String(key)}
+			}
+			resp, err := d.s3Client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+				Bucket: aws.String(bucket),
+				Delete: &s3types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+			})
+			if err != nil {
+				return fmt.Errorf("failed to delete files in s3://%s: %w", bucket, err)
+			}
+			if len(resp.Errors) > 0 {
+				first := resp.Errors[0]
+				return fmt.Errorf("failed to delete %d files in s3://%s, first: %s: %s",
+					len(resp.Errors), bucket, aws.ToString(first.Key), aws.ToString(first.Message))
+			}
+		}
+		return nil
+
+	case ProviderGCS:
+		for _, key := range keys {
+			err := d.gcsClient.Bucket(bucket).Object(key).Delete(ctx)
+			if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
+				return fmt.Errorf("failed to delete gs://%s/%s: %w", bucket, key, err)
+			}
+		}
+		return nil
+	}
+
+	return errListUnsupported
+}

@@ -93,6 +93,12 @@ my-org-bucket/
     └── records.parquet
 ```
 
+### Bucket and prefix in the URI, replace and append
+
+You can also set the bucket and an optional prefix in the URI, such as `gs://my-org-bucket/exports`. `--dest-table` is then a path under them, so `public.users` is written to `my-org-bucket/exports/public.users/`. A `--dest-table` that starts with the URI's bucket keeps the `<bucket>/<path>` form.
+
+With the `replace` strategy, ingestr writes the new files first and then deletes the other files under the destination path. Files outside that path are not touched, a failed load keeps the previous files, and a bucket root is never cleared. With `append`, existing files are kept.
+
 ### Available Layout Placeholders
 
 The following placeholders can be used in the `layout` parameter:

@@ -52,6 +52,14 @@ type BlobstoreDestination struct {
 	bucketName  string
 	basePath    string
 	layout      string
+	// uriBucket and uriPrefix come from the URI (s3://bucket/prefix); when set, table
+	// names are resolved under them.
+	uriBucket string
+	uriPrefix string
+	// replacing is set when the table is prepared for a replace; writtenKeys tracks the
+	// files written since then so the remaining old files can be removed afterwards.
+	replacing   bool
+	writtenKeys map[string]struct{}
 	arrowSchema *arrow.Schema
 	schema      *schema.TableSchema
 	tableName   string
@@ -73,6 +81,8 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 	}
 
 	d.provider = parsed.provider
+	d.uriBucket = parsed.bucket
+	d.uriPrefix = parsed.prefix
 	d.layout = parsed.layout
 	if d.layout == "" {
 		d.layout = "{load_id}.{file_id}.{ext}"
@@ -248,10 +258,10 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 
 	d.schema = opts.Schema
 
-	bucketName, basePath := parseBucketAndPath(opts.Table)
-	d.bucketName = bucketName
-	d.basePath = basePath
+	d.bucketName, d.basePath = d.resolveLocation(opts.Table)
 	d.tableName = opts.Table
+	d.replacing = opts.DropFirst
+	d.writtenKeys = map[string]struct{}{}
 
 	if opts.Schema != nil {
 		d.arrowSchema = opts.Schema.ToArrowSchema()
@@ -259,6 +269,28 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 
 	config.Debug("[BLOBSTORE] Prepared table: bucket=%s, basePath=%s", d.bucketName, d.basePath)
 	return nil
+}
+
+// resolveLocation returns the bucket and base path for table. When the URI names a bucket,
+// table is a path under the URI's bucket and prefix. A table that starts with that same
+// bucket keeps the bucket/path form, so pipelines that already spell out the bucket in the
+// table name keep writing to the same place.
+func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string) {
+	tableBucket, tablePath := parseBucketAndPath(table)
+	if d.uriBucket == "" || tableBucket == d.uriBucket {
+		return tableBucket, tablePath
+	}
+	return d.uriBucket, joinPath(d.uriPrefix, table)
+}
+
+func joinPath(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p = strings.Trim(p, "/"); p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "/")
 }
 
 func parseBucketAndPath(table string) (bucket, path string) {
@@ -383,6 +415,15 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		return err
 	}
 
+	d.mu.Lock()
+	replacing := d.replacing
+	d.mu.Unlock()
+	if replacing {
+		if err := d.removeStaleBlobs(ctx); err != nil {
+			return fmt.Errorf("failed to remove files from the previous load: %w", err)
+		}
+	}
+
 	config.Debug("[BLOBSTORE] Total: %d rows written to %d files in %v", totalRows, fileID, time.Since(startTime))
 	return nil
 }
@@ -392,6 +433,13 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 	if d.basePath != "" {
 		fullPath = strings.TrimSuffix(d.basePath, "/") + "/" + path
 	}
+
+	d.mu.Lock()
+	if d.writtenKeys == nil {
+		d.writtenKeys = map[string]struct{}{}
+	}
+	d.writtenKeys[fullPath] = struct{}{}
+	d.mu.Unlock()
 
 	switch d.provider {
 	case ProviderS3:
@@ -607,6 +655,8 @@ func (d *BlobstoreDestination) GetTableSchema(ctx context.Context, table string)
 
 type parsedBlobstoreURI struct {
 	provider          Provider
+	bucket            string
+	prefix            string
 	accessKeyID       string
 	secretAccessKey   string
 	region            string
@@ -630,12 +680,16 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	switch u.Scheme {
 	case "s3":
 		parsed.provider = ProviderS3
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.accessKeyID = u.Query().Get("access_key_id")
 		parsed.secretAccessKey = u.Query().Get("secret_access_key")
 		parsed.region = u.Query().Get("region")
 		parsed.endpointURL = u.Query().Get("endpoint_url")
 	case "gs", "gcs":
 		parsed.provider = ProviderGCS
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.credentialsFile = u.Query().Get("credentials_file")
 	case "az", "azure":
 		parsed.provider = ProviderAzure
