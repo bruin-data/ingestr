@@ -56,10 +56,18 @@ type signonAttributes struct {
 // SECMEC 8 credential for the DRDA/DDM connection on a different port
 // (446) entirely. The connection here is closed before returning in either
 // case; nothing further is needed from the Sign-on Server itself.
-func exchangeSignonAttributes(ctx context.Context, host string, useSSL bool, timeout time.Duration) (signonAttributes, error) {
-	port := signonPort
-	if useSSL {
-		port = signonPortSSL
+//
+// host/port override the normal target (the DRDA host, on the well-known
+// Sign-on Server port) - port 0 means "use the well-known default for
+// useSSL". Needed for setups where only the DRDA port is reachable at the
+// main host and the Sign-on Server has to be reached some other way
+// (reported on issue #3: a port-forwarding proxy that only forwards 446).
+func exchangeSignonAttributes(ctx context.Context, host string, port int, useSSL bool, timeout time.Duration) (signonAttributes, error) {
+	if port == 0 {
+		port = signonPort
+		if useSSL {
+			port = signonPortSSL
+		}
 	}
 	return exchangeSignonAttributesAt(ctx, fmt.Sprintf("%s:%d", host, port), timeout, func(conn net.Conn) (net.Conn, error) {
 		if !useSSL {

@@ -18,16 +18,23 @@ import (
 )
 
 type db2Client struct {
-	conn     net.Conn
-	host     string
-	ssl      bool
-	database string
-	user     string
-	password string
-	timeout  time.Duration
-	private  *big.Int
-	mu       sync.Mutex
-	platform db2Platform
+	conn net.Conn
+	host string
+	ssl  bool
+	// signonHost/signonPort override where the Sign-on Server attribute
+	// exchange connects (see signon.go) - empty/0 means "use host and the
+	// well-known default port", the normal case. Set from the URI's
+	// signon_host/signon_port overrides for setups where only the DRDA
+	// port is reachable at the main host (reported on issue #3).
+	signonHost string
+	signonPort int
+	database   string
+	user       string
+	password   string
+	timeout    time.Duration
+	private    *big.Int
+	mu         sync.Mutex
+	platform   db2Platform
 	// rdbName is the real RDB directory name (e.g. "RDBNAME2"), distinct
 	// from database which is commonly a symbolic alias like *LOCAL on
 	// IBM i. ACCSEC/ACCRDB resolve the alias themselves, but PKGNAMCSN
@@ -40,7 +47,7 @@ type db2Client struct {
 	// exchangeSignonAttributes; tests override it to avoid a real Sign-on
 	// Server connection when only the DRDA/DDM side of the handshake is
 	// under test.
-	signonExchange func(context.Context, string, bool, time.Duration) (signonAttributes, error)
+	signonExchange func(context.Context, string, int, bool, time.Duration) (signonAttributes, error)
 	// sawACCRDBRM records whether the handshake's parseResponse call
 	// actually observed an ACCRDBRM reply. parseResponse returns
 	// successfully once the chain ends with no error reply, even if
@@ -135,16 +142,18 @@ func dialDb2(ctx context.Context, cfg db2ConnConfig) (*db2Client, error) {
 	}
 
 	client := &db2Client{
-		conn:     conn,
-		host:     cfg.Host,
-		ssl:      cfg.SSL,
-		database: padDatabaseName(cfg.Database),
-		rdbName:  strings.TrimSpace(cfg.RDBName),
-		user:     cfg.User,
-		password: cfg.Password,
-		timeout:  cfg.Timeout,
-		private:  private,
-		platform: cfg.Platform,
+		conn:       conn,
+		host:       cfg.Host,
+		ssl:        cfg.SSL,
+		signonHost: cfg.SignonHost,
+		signonPort: cfg.SignonPort,
+		database:   padDatabaseName(cfg.Database),
+		rdbName:    strings.TrimSpace(cfg.RDBName),
+		user:       cfg.User,
+		password:   cfg.Password,
+		timeout:    cfg.Timeout,
+		private:    private,
+		platform:   cfg.Platform,
 	}
 	if err := client.handshake(ctx); err != nil {
 		_ = conn.Close()
@@ -380,7 +389,11 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		if signonExchange == nil {
 			signonExchange = exchangeSignonAttributes
 		}
-		attrs, err := signonExchange(ctx, c.host, c.ssl, c.timeout)
+		signonHost := c.host
+		if c.signonHost != "" {
+			signonHost = c.signonHost
+		}
+		attrs, err := signonExchange(ctx, signonHost, c.signonPort, c.ssl, c.timeout)
 		if err != nil {
 			return fmt.Errorf("exchanging Sign-on Server attributes for password level: %w", err)
 		}
@@ -570,15 +583,21 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 
 			switch packet.codePoint {
 			case cpSQLERRRM:
+				// SRVDGN is a bare DDM diagnostic code with no further
+				// structure (e.g. "23765") - label it so it's not a
+				// mystifying lone number, and let a later SQLCARD in the
+				// same chain (below) replace it with the real SQLCODE/
+				// SQLSTATE/message if one arrives, since that's strictly
+				// more informative than this generic diagnostic.
 				if msg := parseDiagnostic(packet.object); msg != "" && errResult == nil {
-					errResult = fmt.Errorf("%s", strings.TrimSpace(msg))
+					errResult = fmt.Errorf("server diagnostic code: %s", strings.TrimSpace(msg))
 				}
 			case cpSQLCARD:
-				if _, err := parseSQLCard(packet.object); err != nil && errResult == nil {
+				if _, err := parseSQLCard(packet.object); err != nil {
 					errResult = err
 				}
 			case cpSQLDARD:
-				if columns, err := parseSQLDARD(packet.object); err != nil {
+				if columns, err := parseSQLDARD(packet.object, c.platform); err != nil {
 					if errResult == nil {
 						errResult = err
 					}
@@ -604,7 +623,7 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 				}
 				fields = parsed
 			case cpQRYDTA:
-				rows, err := parseQRYDTA(packet.object, fields)
+				rows, err := parseQRYDTA(packet.object, fields, c.platform)
 				if err != nil {
 					return err
 				}

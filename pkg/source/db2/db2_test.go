@@ -40,6 +40,18 @@ func TestParseDb2URIRejectsInvalidPlatform(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported platform")
 }
 
+func TestParseDb2URISignonOverride(t *testing.T) {
+	cfg, err := parseDb2URI("db2://db2inst1:password@example.com/siglpar?platform=ibmi&signon_host=signon.internal&signon_port=9999")
+	require.NoError(t, err)
+	require.Equal(t, "signon.internal", cfg.SignonHost)
+	require.Equal(t, 9999, cfg.SignonPort)
+}
+
+func TestParseDb2URIRejectsInvalidSignonPort(t *testing.T) {
+	_, err := parseDb2URI("db2://db2inst1:password@example.com/sample?signon_port=notanumber")
+	require.ErrorContains(t, err, "invalid signon_port")
+}
+
 func TestBuildSelectQueryForSchemaWithFilters(t *testing.T) {
 	start := time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC)
 	end := time.Date(2024, 1, 3, 3, 4, 5, 1000, time.UTC)

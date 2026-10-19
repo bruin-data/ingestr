@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"net"
 	"strings"
@@ -18,7 +19,7 @@ func TestReadDRDAFieldNonNullableDecimal(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte{0x12, 0x34, 0x5c}), drdaField{
 		typeCode: drdaTypeDecimal,
 		params:   []byte{5, 2},
-	})
+	}, db2PlatformAuto)
 
 	require.NoError(t, err)
 	require.Equal(t, "123.45", value.(interface{ String() string }).String())
@@ -28,7 +29,7 @@ func TestReadDRDAFieldTimestampTruncatesToMicroseconds(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte("2024-01-02-03.04.05.123456789012")), drdaField{
 		typeCode: drdaTypeTimestamp,
 		params:   lengthParams(len("2024-01-02-03.04.05.123456789012")),
-	})
+	}, db2PlatformAuto)
 
 	require.NoError(t, err)
 	require.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC), value)
@@ -38,7 +39,7 @@ func TestReadDRDAFieldTimestampPadsToMicroseconds(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte("2024-01-02-03.04.05.1")), drdaField{
 		typeCode: drdaTypeTimestamp,
 		params:   lengthParams(len("2024-01-02-03.04.05.1")),
-	})
+	}, db2PlatformAuto)
 
 	require.NoError(t, err)
 	require.Equal(t, time.Date(2024, 1, 2, 3, 4, 5, 100000000, time.UTC), value)
@@ -49,7 +50,7 @@ func TestReadDRDAFieldTimestampReturnsErrorForMalformedValue(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte(raw)), drdaField{
 		typeCode: drdaTypeTimestamp,
 		params:   lengthParams(len(raw)),
-	})
+	}, db2PlatformAuto)
 
 	require.ErrorContains(t, err, "invalid Db2 timestamp")
 	require.Nil(t, value)
@@ -59,7 +60,7 @@ func TestReadDRDAFieldTimeNormalizesSeparators(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte("03.04.05")), drdaField{
 		typeCode: drdaTypeTime,
 		params:   lengthParams(len("03.04.05")),
-	})
+	}, db2PlatformAuto)
 
 	require.NoError(t, err)
 	require.Equal(t, "03:04:05", value)
@@ -69,7 +70,7 @@ func TestReadDRDAFieldTimePreservesFraction(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte("03.04.05.1")), drdaField{
 		typeCode: drdaTypeTime,
 		params:   lengthParams(len("03.04.05.1")),
-	})
+	}, db2PlatformAuto)
 
 	require.NoError(t, err)
 	require.Equal(t, "03:04:05.100000", value)
@@ -471,6 +472,63 @@ func TestCP500EncodingUsesCodePage500(t *testing.T) {
 	require.Equal(t, "[]{}@#$", decodeString(encoded, "cp500"))
 }
 
+func TestCP37EncodingDiffersFromCP500AtTheSevenKnownPositions(t *testing.T) {
+	// Values from IBM's own CCSID 37 vs 500 comparison, not derived from
+	// this package's own tables, so this catches a transcription bug in
+	// the port rather than just re-confirming whatever the code already
+	// does. Letters and digits are identical on both pages; these 7 byte
+	// positions are the only ones that differ.
+	cases := []struct {
+		b        byte
+		cp37Char string
+		cp500Str string
+	}{
+		{0x4A, "¢", "["},
+		{0x4F, "|", "!"},
+		{0x5A, "!", "]"},
+		{0x5F, "¬", "^"},
+		{0xB0, "^", "¢"},
+		{0xBA, "[", "¬"},
+		{0xBB, "]", "|"},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.cp37Char, decodeCP37([]byte{tc.b}), "cp37 byte 0x%x", tc.b)
+		require.Equal(t, tc.cp500Str, decodeCP500([]byte{tc.b}), "cp500 byte 0x%x", tc.b)
+	}
+}
+
+func TestCP37EncodingRoundTripsBracketsAndPipe(t *testing.T) {
+	encoded, err := encodeString("COL[1]|TEST!X^Y", "cp37")
+	require.NoError(t, err)
+
+	require.Equal(t, "COL[1]|TEST!X^Y", decodeString(encoded, "cp37"))
+}
+
+func TestReadDRDAFieldDecodesVarcharAsCP37OnIBMi(t *testing.T) {
+	raw, err := encodeCP37("COL[1]")
+	require.NoError(t, err)
+	lnBytes := []byte{byte(len(raw) >> 8), byte(len(raw))}
+
+	value, err := readDRDAField(bytes.NewReader(append(lnBytes, raw...)), drdaField{
+		typeCode: drdaTypeVarchar,
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, "COL[1]", value)
+}
+
+func TestReadDRDAFieldDecodesVarcharAsUTF8OnOtherPlatforms(t *testing.T) {
+	raw := []byte("COL[1]")
+	lnBytes := []byte{byte(len(raw) >> 8), byte(len(raw))}
+
+	value, err := readDRDAField(bytes.NewReader(append(lnBytes, raw...)), drdaField{
+		typeCode: drdaTypeVarchar,
+	}, db2PlatformLUW)
+
+	require.NoError(t, err)
+	require.Equal(t, "COL[1]", value, "non-IBM-i platforms keep the existing UTF-8 passthrough")
+}
+
 func TestPackPKGNAMCSNUsesCatalogBytes(t *testing.T) {
 	client := &db2Client{database: padDatabaseName("[")}
 
@@ -576,6 +634,58 @@ func TestPackPKGNAMCSNKeepsNonQuerySectionsUnchangedOnIBMi(t *testing.T) {
 	section := packet[len(packet)-2:]
 	require.Equal(t, []byte{0x00, byte(db2PackageSectionSet)}, section,
 		"only the query section (64) is remapped on IBM i - other section numbers should pass through untouched")
+}
+
+// buildSQLCard builds a minimal valid SQLCARD object: group flag 0,
+// little-endian SQLCODE, blank-padded SQLSTATE, 44 bytes of filler up to
+// the fixed 54-byte header parseSQLCard requires, then an empty varchar,
+// the message (cp500-encoded), and an empty secondary message varchar.
+func buildSQLCard(t *testing.T, sqlCode int32, state, message string) []byte {
+	t.Helper()
+	buf := make([]byte, 54)
+	buf[0] = 0x00
+	binary.LittleEndian.PutUint32(buf[1:5], uint32(sqlCode))
+	copy(buf[5:10], []byte(fmt.Sprintf("%-5s", state)))
+
+	msgBytes, err := encodeString(message, "cp500")
+	require.NoError(t, err)
+
+	buf = append(buf, 0x00, 0x00) // empty leading varchar
+	buf = append(buf, byte(len(msgBytes)>>8), byte(len(msgBytes)))
+	buf = append(buf, msgBytes...)
+	buf = append(buf, 0x00, 0x00) // empty secondary message varchar
+	return buf
+}
+
+func TestParseResponseSQLCARDReplacesBareSQLERRRMDiagnostic(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{})
+	}()
+
+	// SRVDGN carries a bare diagnostic code with no further structure -
+	// confirmed on issue #3 ("preparing statement: 23765", no SQLCODE/
+	// SQLSTATE/message at all). A SQLCARD arriving in the same chain has
+	// real structure and should win.
+	srvdgn, err := encodeString("23765", "cp500")
+	require.NoError(t, err)
+	require.NoError(t, writeTestDSS(serverConn, cpSQLERRRM, packBinary(cpSRVDGN, srvdgn), true))
+	require.NoError(t, writeTestDSS(serverConn, cpSQLCARD, buildSQLCard(t, -204, "42704", "real diagnostic"), false))
+
+	select {
+	case err := <-done:
+		require.ErrorContains(t, err, "real diagnostic")
+		require.ErrorContains(t, err, "SQLCODE=-204")
+		require.NotContains(t, err.Error(), "23765")
+	case <-time.After(time.Second):
+		t.Fatal("parseResponse did not return in time")
+	}
 }
 
 func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
@@ -1283,8 +1393,8 @@ func TestPackSQLSTTRejectsOversizedQuery(t *testing.T) {
 // (deciding SHA-1 vs SHA-512) - the seed pair the substitute actually uses
 // comes from a dedicated ACCSEC/ACCSECRD round on the DRDA connection
 // itself (see handshake), so the seeds returned here are unused filler.
-func stubSignonExchange(passwordLevel int) func(context.Context, string, bool, time.Duration) (signonAttributes, error) {
-	return func(context.Context, string, bool, time.Duration) (signonAttributes, error) {
+func stubSignonExchange(passwordLevel int) func(context.Context, string, int, bool, time.Duration) (signonAttributes, error) {
+	return func(context.Context, string, int, bool, time.Duration) (signonAttributes, error) {
 		return signonAttributes{
 			passwordLevel: passwordLevel,
 			serverSeed:    []byte{0, 0, 0, 0, 0, 0, 0, 0},

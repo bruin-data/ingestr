@@ -299,16 +299,18 @@ func (s *Db2Source) parseTableName(table string) (string, string) {
 }
 
 type db2ConnConfig struct {
-	Address  string
-	Host     string
-	Database string
-	RDBName  string
-	User     string
-	Password string
-	Schema   string
-	SSL      bool
-	Timeout  time.Duration
-	Platform db2Platform
+	Address    string
+	Host       string
+	Database   string
+	RDBName    string
+	User       string
+	Password   string
+	Schema     string
+	SSL        bool
+	Timeout    time.Duration
+	Platform   db2Platform
+	SignonHost string
+	SignonPort int
 }
 
 func parseDb2URI(raw string) (db2ConnConfig, error) {
@@ -366,6 +368,20 @@ func parseDb2URI(raw string) (db2ConnConfig, error) {
 		return db2ConnConfig{}, err
 	}
 
+	// signon_host/signon_port let IBM i users override where the Sign-on
+	// Server attribute exchange connects (see signon.go) - needed for
+	// SECMEC 8 password-substitute auth. Normally that's just this URI's
+	// own host on the well-known port, but a setup that only forwards
+	// port 446 through a proxy (reported on issue #3) has no way to reach
+	// the real Sign-on Server at the default host/port otherwise.
+	signonPort := 0
+	if v := query.Get("signon_port"); v != "" {
+		signonPort, err = strconv.Atoi(v)
+		if err != nil {
+			return db2ConnConfig{}, fmt.Errorf("invalid signon_port: %w", err)
+		}
+	}
+
 	return db2ConnConfig{
 		Address:  net.JoinHostPort(host, port),
 		Host:     host,
@@ -375,13 +391,15 @@ func parseDb2URI(raw string) (db2ConnConfig, error) {
 		// needs the real name (e.g. "RDBNAME2") - the database value is
 		// commonly a symbolic alias like *LOCAL, which only ACCRDB/ACCSEC
 		// resolve, not package lookups.
-		RDBName:  query.Get("rdb_name"),
-		User:     user,
-		Password: password,
-		Schema:   query.Get("schema"),
-		SSL:      sslEnabled,
-		Timeout:  timeout,
-		Platform: platform,
+		RDBName:    query.Get("rdb_name"),
+		User:       user,
+		Password:   password,
+		Schema:     query.Get("schema"),
+		SSL:        sslEnabled,
+		Timeout:    timeout,
+		Platform:   platform,
+		SignonHost: query.Get("signon_host"),
+		SignonPort: signonPort,
 	}, nil
 }
 

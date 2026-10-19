@@ -122,7 +122,21 @@ func parseSQLCard(obj []byte) ([]byte, error) {
 	return rest, nil
 }
 
-func parseSQLDARD(obj []byte) ([]db2Column, error) {
+// characterEncodingFor returns the encoding character data actually comes
+// back in for a given platform. IBM i returns job CCSID (37) for
+// CHAR/VARCHAR data and SQLDARD column names regardless of what ACCRDB's
+// TYPDEFOVR requests (confirmed on issue #3: SYSCOLUMNS/SYSTABLES text
+// arrived as EBCDIC despite TYPDEFOVR asking for CCSID 1208/UTF-8). Other
+// platforms keep this client's existing UTF-8 assumption, which nothing
+// in this investigation has contradicted.
+func characterEncodingFor(platform db2Platform) string {
+	if platform == db2PlatformIBMi {
+		return "cp37"
+	}
+	return "utf-8"
+}
+
+func parseSQLDARD(obj []byte, platform db2Platform) ([]db2Column, error) {
 	if len(obj) == 0 {
 		return nil, nil
 	}
@@ -155,7 +169,7 @@ func parseSQLDARD(obj []byte) ([]db2Column, error) {
 		if len(rest) == 0 {
 			break
 		}
-		col, next, err := parseDB2Column(rest, hasName)
+		col, next, err := parseDB2Column(rest, hasName, platform)
 		if err != nil {
 			if len(columns) > 0 {
 				break
@@ -168,7 +182,7 @@ func parseSQLDARD(obj []byte) ([]db2Column, error) {
 	return columns, nil
 }
 
-func parseDB2Column(b []byte, hasName bool) (db2Column, []byte, error) {
+func parseDB2Column(b []byte, hasName bool, platform db2Platform) (db2Column, []byte, error) {
 	if len(b) < 16 {
 		return db2Column{}, nil, fmt.Errorf("short SQLDARD column: %d bytes", len(b))
 	}
@@ -200,6 +214,12 @@ func parseDB2Column(b []byte, hasName bool) (db2Column, []byte, error) {
 		} else {
 			name = sqlName
 		}
+		// parseName/parseVarchar return the raw bytes as a Go string with
+		// no decoding (see their own docs) - decode here, once, with the
+		// real encoding the server actually used, instead of leaving it
+		// as a raw passthrough that happens to be legible only for
+		// platforms that return UTF-8-ish ASCII.
+		name = decodeString([]byte(name), characterEncodingFor(platform))
 		if len(b) >= 7 {
 			b = b[7:]
 		} else {
@@ -245,7 +265,7 @@ func parseQRYDSC(obj []byte) ([]drdaField, error) {
 	return fields, nil
 }
 
-func parseQRYDTA(obj []byte, fields []drdaField) ([][]any, error) {
+func parseQRYDTA(obj []byte, fields []drdaField, platform db2Platform) ([][]any, error) {
 	if len(fields) == 0 {
 		return nil, nil
 	}
@@ -266,7 +286,7 @@ func parseQRYDTA(obj []byte, fields []drdaField) ([][]any, error) {
 
 		row := make([]any, len(fields))
 		for i, field := range fields {
-			v, err := readDRDAField(stream, field)
+			v, err := readDRDAField(stream, field, platform)
 			if err != nil {
 				return nil, err
 			}
@@ -277,7 +297,7 @@ func parseQRYDTA(obj []byte, fields []drdaField) ([][]any, error) {
 	return rows, nil
 }
 
-func readDRDAField(stream *bytes.Reader, field drdaField) (any, error) {
+func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) (any, error) {
 	if nullableDRDAType(field.typeCode) {
 		b, err := stream.ReadByte()
 		if err != nil {
@@ -296,7 +316,7 @@ func readDRDAField(stream *bytes.Reader, field drdaField) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return strings.TrimRight(string(data), " "), nil
+		return strings.TrimRight(decodeString(data, characterEncodingFor(platform)), " "), nil
 	case drdaTypeVarchar, drdaTypeNVarchar, drdaTypeLong, drdaTypeNLong,
 		drdaTypeVarGraph, drdaTypeNVarGraph, drdaTypeVarMix, drdaTypeNVarMix,
 		drdaTypeLongMix, drdaTypeNLongMix:
@@ -309,7 +329,7 @@ func readDRDAField(stream *bytes.Reader, field drdaField) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return string(data), nil
+		return decodeString(data, characterEncodingFor(platform)), nil
 	case drdaTypeVarByte, drdaTypeNVarByte:
 		lnBytes, err := readBytes(stream, 4)
 		if err != nil {
@@ -522,6 +542,11 @@ func normalizeDb2Time(value string) string {
 	return base + "." + fraction
 }
 
+// parseVarchar returns the raw bytes of a length-prefixed field wrapped in
+// a Go string with no character decoding applied - callers that care what
+// encoding those bytes are actually in (e.g. SQLDARD column names) decode
+// them separately via decodeString, since that depends on the platform,
+// not on anything this generic framing helper knows.
 func parseVarchar(b []byte) (string, []byte) {
 	if len(b) < 2 {
 		return "", nil

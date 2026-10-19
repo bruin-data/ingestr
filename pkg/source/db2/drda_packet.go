@@ -91,6 +91,8 @@ func encodeString(value string, encoding string) ([]byte, error) {
 	switch strings.ToLower(encoding) {
 	case "cp500":
 		return encodeCP500(value)
+	case "cp37":
+		return encodeCP37(value)
 	case "utf-8", "utf8":
 		return []byte(value), nil
 	default:
@@ -102,6 +104,8 @@ func decodeString(value []byte, encoding string) string {
 	switch strings.ToLower(encoding) {
 	case "cp500":
 		return decodeCP500(value)
+	case "cp37":
+		return decodeCP37(value)
 	}
 	return string(value)
 }

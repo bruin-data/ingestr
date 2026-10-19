@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -76,6 +77,44 @@ func TestExchangeSignonAttributesParsesServerSeedAndPasswordLevel(t *testing.T) 
 	require.Equal(t, 3, attrs.passwordLevel)
 	require.Equal(t, serverSeed, attrs.serverSeed)
 	require.Len(t, attrs.clientSeed, 8)
+}
+
+func TestExchangeSignonAttributesHonorsPortOverride(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+
+	_, portStr, err := net.SplitHostPort(ln.Addr().String())
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	serverSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		req := make([]byte, 52)
+		if _, err := readFull(conn, req); err != nil {
+			return
+		}
+		_, _ = conn.Write(fakeSignonReply(2, serverSeed))
+	}()
+
+	// port=0 (the default) would try the well-known 8476/9476 at this
+	// host and fail instantly (nothing listens there in a test) - using
+	// the override and getting a clean reply back proves it's actually
+	// honored, not silently ignored in favor of the default.
+	attrs, err := exchangeSignonAttributes(context.Background(), "127.0.0.1", port, false, time.Second)
+	require.NoError(t, err)
+
+	<-serverDone
+	require.Equal(t, 2, attrs.passwordLevel)
+	require.Equal(t, serverSeed, attrs.serverSeed)
 }
 
 func TestExchangeSignonAttributesFailsOnNonZeroRC(t *testing.T) {
