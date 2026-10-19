@@ -953,6 +953,16 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 						tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 					}
 					tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
+					// A truncated table keeps its column types; recreate it when they no longer fit.
+					if validateBigQuerySchemaCompatibility(existingMeta, tableSchema, false) != nil {
+						config.Debug("[DEST] Recreating table with incompatible schema: %s", opts.Table)
+						if err := tableRef.Delete(ctx); err != nil && !isNotFoundError(err) {
+							errCh <- fmt.Errorf("failed to drop table: %w", err)
+							return
+						}
+						errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
+						return
+					}
 					if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
 						errCh <- fmt.Errorf("failed to update schema: %w", err)
 						return
