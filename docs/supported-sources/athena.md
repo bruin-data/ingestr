@@ -21,6 +21,7 @@ URI parameters:
 - `region_name` (required if there's no local profile found): The AWS region of the Athena service and S3 buckets, e.g. `eu-central-1`
 - `workgroup` (optional): The name of the Athena workgroup, e.g. `my_group`
 - `profile` (optional): The name of the AWS profile to use, e.g. `my_profile`
+- `endpoint_url` (optional): An Athena-compatible endpoint to use instead of AWS, e.g. `https://athena.example.com`. It must be a bare `https://host[:port]` URL. `http://` is only accepted when the host resolves to a loopback address, such as `http://localhost:4566`. Endpoints that resolve to link-local or cloud metadata addresses are rejected, redirects are not followed, and proxy settings are ignored for these requests.
 
 You have two ways of providing credentials:
 1. Provide `access_key_id` and `secret_access_key` directly in the URI.

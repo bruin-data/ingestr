@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/endpointguard"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
@@ -31,6 +33,7 @@ type athenaConfig struct {
 	SecretAccessKey string
 	SessionToken    string
 	DefaultDatabase string
+	EndpointURL     *url.URL
 }
 
 func NewAthenaSource() *AthenaSource {
@@ -67,7 +70,7 @@ func (s *AthenaSource) Connect(ctx context.Context, rawURI string) error {
 		return errors.New("athena uri: region_name is required (or configure a default AWS region via profile/environment)")
 	}
 
-	s.client = athena.NewFromConfig(awsCfg)
+	s.client = athena.NewFromConfig(awsCfg, cfg.clientOptions)
 	s.cfg = cfg
 	return nil
 }
@@ -343,4 +346,13 @@ func (s *AthenaSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 
 func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+// clientOptions points the client at a custom endpoint, if one is configured.
+func (c athenaConfig) clientOptions(o *athena.Options) {
+	if c.EndpointURL == nil {
+		return
+	}
+	o.BaseEndpoint = aws.String(c.EndpointURL.String())
+	o.HTTPClient = endpointguard.NewHTTPClient(c.EndpointURL)
 }

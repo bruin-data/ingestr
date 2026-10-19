@@ -17,6 +17,8 @@ URI parameters:
 - `dbname`: the name of the database to connect to
 - `warehouse`: optional, the name of the warehouse to use
 - `role`: optional, the name of the role to use
+- `host`: optional, a hostname or IP address to connect to instead of the one derived from `account`, e.g. `snowflake.example.com`. Do not include a scheme or port.
+- `port`: optional, the port to connect to, defaults to `443`. Connections always use HTTPS.
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Snowflake dialect [here](https://docs.snowflake.com/en/developer-guide/python-connector/sqlalchemy#connection-parameters).
 
