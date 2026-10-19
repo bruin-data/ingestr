@@ -21,8 +21,8 @@ const s3DeleteBatchSize = 1000
 var errListUnsupported = errors.New("listing files is not supported for this provider")
 
 // listPreviousBlobs returns the files under the table path before a replace writes
-// anything. Only these files are removed afterwards, so a replace running at the same time
-// on the same path cannot delete this load's files.
+// anything. Only these files are removed afterwards, so this load never deletes files
+// written after it started. Concurrent replaces on one path still need external coordination.
 func (d *BlobstoreDestination) listPreviousBlobs(ctx context.Context) ([]string, error) {
 	// Never clear a whole bucket: without a path, the table has no files of its own.
 	if strings.Trim(d.basePath, "/") == "" {

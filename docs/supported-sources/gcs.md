@@ -97,7 +97,7 @@ my-org-bucket/
 
 You can also set the bucket and an optional prefix in the URI, such as `gs://my-org-bucket/exports`. `--dest-table` is then a path under them, so `public.users` is written to `my-org-bucket/exports/public.users/`. A `--dest-table` that starts with the URI's bucket keeps the `<bucket>/<path>` form.
 
-With the `replace` strategy, ingestr writes the new files first and then deletes the files that were under the destination path before the load started. Files outside that path are not touched and a bucket root is never cleared. A load that fails before all new files are written keeps the previous files; if deleting the previous files fails partway, some may already be removed, and running the load again finishes the cleanup. With `append`, existing files are kept.
+With the `replace` strategy, ingestr writes the new files first and then deletes the files that were under the destination path before the load started. Files outside that path are not touched and a bucket root is never cleared. A load that fails before all new files are written keeps the previous files; if deleting the previous files fails partway, some may already be removed, and running the load again finishes the cleanup. Running two `replace` loads on the same path at the same time is not supported and can leave files from both loads. With `append`, existing files are kept.
 
 ### Available Layout Placeholders
 
