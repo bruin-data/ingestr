@@ -207,9 +207,28 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 	if _, err = writeRequestDSS(c.conn, sqlSTT, curID, false, true); err != nil {
 		return fmt.Errorf("sending SQLSTT: %w", err)
 	}
-	if err := c.parseResponse(ctx, handler); err != nil {
+	// PRPSQLSTT requests RTNSQLDA (an inline SQLDARD describing the
+	// statement's columns), which custom (query:) sources depend on for
+	// column metadata - unlike the catalog-driven table path, which never
+	// needs this. Reported on issue #3: custom queries on IBM i get rows
+	// with no column metadata ever having arrived, meaning either
+	// PRPSQLSTT's reply has no SQLDARD on this platform despite RTNSQLDA,
+	// or it arrives in a shape parseResponse doesn't recognize as
+	// cpSQLDARD. This flag + log turns that into a direct yes/no from the
+	// next real trace instead of inferring it from a downstream symptom.
+	sawSQLDARDDuringPrepare := false
+	prepareHandler := handler
+	prepareHandler.Columns = func(columns []db2Column) error {
+		sawSQLDARDDuringPrepare = true
+		if handler.Columns != nil {
+			return handler.Columns(columns)
+		}
+		return nil
+	}
+	if err := c.parseResponse(ctx, prepareHandler); err != nil {
 		return fmt.Errorf("preparing statement: %w", err)
 	}
+	config.Debug("[DB2] Stream: SQLDARD received during PRPSQLSTT=%v", sawSQLDARDDuringPrepare)
 
 	opnQRY, err := c.packOPNQRY()
 	if err != nil {

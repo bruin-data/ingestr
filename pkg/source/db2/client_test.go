@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/stretchr/testify/require"
 )
@@ -54,6 +55,27 @@ func TestReadDRDAFieldTimestampReturnsErrorForMalformedValue(t *testing.T) {
 
 	require.ErrorContains(t, err, "invalid Db2 timestamp")
 	require.Nil(t, value)
+}
+
+func TestReadDRDAFieldDecodesTimestampAsCP37OnIBMi(t *testing.T) {
+	// The exact bytes from a real IBM i host's QRYDTA reply on issue #3 -
+	// cp37-encoded "2026-09-11-11.39.16.546000", sent raw with no
+	// conversion to CCSID 1208/UTF-8 despite TYPDEFOVR asking for it (the
+	// same server behavior v30 fixed for CHAR/VARCHAR, but the datetime
+	// path still read it as if it were already UTF-8).
+	raw := []byte{
+		0xf2, 0xf0, 0xf2, 0xf6, 0x60, 0xf0, 0xf9, 0x60, 0xf1, 0xf1, 0x60,
+		0xf1, 0xf1, 0x4b, 0xf3, 0xf9, 0x4b, 0xf1, 0xf6, 0x4b, 0xf5, 0xf4,
+		0xf6, 0xf0, 0xf0, 0xf0,
+	}
+
+	value, err := readDRDAField(bytes.NewReader(raw), drdaField{
+		typeCode: drdaTypeTimestamp,
+		params:   lengthParams(len(raw)),
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, 9, 11, 11, 39, 16, 546000000, time.UTC), value)
 }
 
 func TestReadDRDAFieldTimeNormalizesSeparators(t *testing.T) {
@@ -527,6 +549,48 @@ func TestReadDRDAFieldDecodesVarcharAsUTF8OnOtherPlatforms(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "COL[1]", value, "non-IBM-i platforms keep the existing UTF-8 passthrough")
+}
+
+func TestReadDRDAFieldDecodesFixedGraphicAsUTF16BE(t *testing.T) {
+	raw := encodeUTF16BEForTest("Hi")
+
+	value, err := readDRDAField(bytes.NewReader(raw), drdaField{
+		typeCode: drdaTypeGraphic,
+		params:   lengthParams(len(raw)),
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, "Hi", value)
+}
+
+func TestReadDRDAFieldDecodesVarGraphicAsUTF16BE(t *testing.T) {
+	raw := encodeUTF16BEForTest("TABLE_TEXT")
+	lnBytes := []byte{byte(len(raw) >> 8), byte(len(raw))}
+
+	value, err := readDRDAField(bytes.NewReader(append(lnBytes, raw...)), drdaField{
+		typeCode: drdaTypeVarGraph,
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, "TABLE_TEXT", value)
+}
+
+func TestReadDRDAFieldRejectsOddLengthGraphicData(t *testing.T) {
+	_, err := readDRDAField(bytes.NewReader([]byte{0x00, 0x48, 0x00}), drdaField{
+		typeCode: drdaTypeGraphic,
+		params:   lengthParams(3),
+	}, db2PlatformIBMi)
+
+	require.ErrorContains(t, err, "odd-length UTF-16BE")
+}
+
+func encodeUTF16BEForTest(s string) []byte {
+	units := utf16.Encode([]rune(s))
+	out := make([]byte, 0, len(units)*2)
+	for _, u := range units {
+		out = append(out, byte(u>>8), byte(u))
+	}
+	return out
 }
 
 func TestPackPKGNAMCSNUsesCatalogBytes(t *testing.T) {
@@ -1371,7 +1435,41 @@ func TestRefreshDeadlineZeroTimeoutClearsDeadline(t *testing.T) {
 func TestParseQRYDSCRejectsZeroLength(t *testing.T) {
 	_, err := parseQRYDSC([]byte{0})
 
-	require.ErrorContains(t, err, "invalid QRYDSC length: 0")
+	require.ErrorContains(t, err, "invalid QRYDSC triplet length: 0")
+}
+
+func TestParseQRYDTAIncludesColumnContextOnUnsupportedType(t *testing.T) {
+	fields := []drdaField{
+		{typeCode: drdaTypeInteger, params: []byte{0, 4}},
+		{typeCode: 0x99}, // not a recognized DRDA field type
+	}
+	row := []byte{0xff, 0x00, 0x2a, 0x00, 0x00, 0x00}
+
+	_, err := parseQRYDTA(row, fields, db2PlatformAuto)
+
+	require.ErrorContains(t, err, "column 1")
+	require.ErrorContains(t, err, "0x99")
+}
+
+func TestParseQRYDSCSkipsLeadingMDDTriplet(t *testing.T) {
+	// The exact MDD triplet bytes from a real IBM i host's QRYDSC reply on
+	// issue #3 (07 78 00 05 01 01 38 - 7 bytes, matching FD:OCA's
+	// documented MDD_TRIPLET_SIZE), which earlier code misread as the
+	// entire descriptor and rejected outright as "unsupported QRYDSC
+	// descriptor: 780005010138" - that hex is this MDD triplet's body,
+	// not a malformed N-GDA triplet. Followed by a minimal, otherwise
+	// normal N-GDA triplet (one INTEGER column) to confirm parsing
+	// continues correctly past it.
+	mdd := []byte{0x07, 0x78, 0x00, 0x05, 0x01, 0x01, 0x38}
+	ngda := []byte{0x06, 0x76, 0xd0, drdaTypeInteger, 0x00, 0x04}
+	obj := append(append([]byte{}, mdd...), ngda...)
+
+	fields, err := parseQRYDSC(obj)
+
+	require.NoError(t, err)
+	require.Len(t, fields, 1)
+	require.Equal(t, drdaTypeInteger, fields[0].typeCode)
+	require.Equal(t, []byte{0x00, 0x04}, fields[0].params)
 }
 
 func TestPackDSSObjectRejectsOversizedBody(t *testing.T) {

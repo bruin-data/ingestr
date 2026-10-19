@@ -166,3 +166,19 @@ const (
 	drdaTypeNLobBytes  byte = 0xC9
 	drdaTypeNLobCSBCS  byte = 0xCF
 )
+
+// FD:OCA triplet types that can appear in a QRYDSC reply. Confirmed via
+// Apache Derby's client-side FdocaConstants.java (DRDA's own FD:OCA
+// architecture isn't in the public DRDA/DDM spec documents): a QRYDSC is a
+// sequence of one or more length-prefixed triplets, not always a single
+// one. The per-column type list this client needs always lives in the
+// N-GDA triplet; an MDD (metadata descriptor) triplet precedes it when the
+// result set has columns needing extra metadata (observed on issue #3:
+// IBM i sends one ahead of the N-GDA for GRAPHIC/LOB-bearing queries,
+// which a parser assuming a single N-GDA-only triplet misreads as a
+// malformed descriptor).
+const (
+	fdocaTripletTypeNGDA byte = 0x76
+	fdocaTripletTypeMDD  byte = 0x78
+	fdocaSQLDTAGRPLID    byte = 0xD0
+)

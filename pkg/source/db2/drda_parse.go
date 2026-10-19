@@ -9,6 +9,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/shopspring/decimal"
 )
@@ -246,23 +247,44 @@ func parseQRYDSC(obj []byte) ([]drdaField, error) {
 	if len(obj) == 0 {
 		return nil, fmt.Errorf("empty QRYDSC")
 	}
-	ln := int(obj[0])
-	if ln < 1 || ln > len(obj) {
-		return nil, fmt.Errorf("invalid QRYDSC length: %d", ln)
+	for len(obj) > 0 {
+		ln := int(obj[0])
+		if ln < 1 || ln > len(obj) {
+			return nil, fmt.Errorf("invalid QRYDSC triplet length: %d", ln)
+		}
+		triplet := obj[1:ln]
+		obj = obj[ln:]
+		if len(triplet) == 0 {
+			continue
+		}
+		switch triplet[0] {
+		case fdocaTripletTypeNGDA:
+			if len(triplet) < 2 || triplet[1] != fdocaSQLDTAGRPLID {
+				return nil, fmt.Errorf("unsupported QRYDSC N-GDA triplet: %s", hex.EncodeToString(triplet))
+			}
+			body := triplet[2:]
+			fields := make([]drdaField, 0, len(body)/3)
+			for i := 0; i+3 <= len(body); i += 3 {
+				fields = append(fields, drdaField{
+					typeCode: body[i],
+					params:   append([]byte(nil), body[i+1:i+3]...),
+				})
+			}
+			return fields, nil
+		case fdocaTripletTypeMDD:
+			// Metadata descriptor - precedes the N-GDA triplet for result
+			// sets with GRAPHIC/LOB columns, carries nothing this client
+			// needs. Skip and keep looking for the N-GDA triplet.
+			continue
+		default:
+			// Any other FD:OCA triplet type (RLO, SDA, CPT, ...): skip
+			// rather than fail outright, since none of the per-column
+			// type information this client needs lives outside the N-GDA
+			// triplet.
+			continue
+		}
 	}
-	body := obj[1:ln]
-	if len(body) < 2 || body[0] != 0x76 || body[1] != 0xd0 {
-		return nil, fmt.Errorf("unsupported QRYDSC descriptor: %s", hex.EncodeToString(body))
-	}
-	body = body[2:]
-	fields := make([]drdaField, 0, len(body)/3)
-	for i := 0; i+3 <= len(body); i += 3 {
-		fields = append(fields, drdaField{
-			typeCode: body[i],
-			params:   append([]byte(nil), body[i+1:i+3]...),
-		})
-	}
-	return fields, nil
+	return nil, fmt.Errorf("QRYDSC has no N-GDA triplet")
 }
 
 func parseQRYDTA(obj []byte, fields []drdaField, platform db2Platform) ([][]any, error) {
@@ -288,13 +310,29 @@ func parseQRYDTA(obj []byte, fields []drdaField, platform db2Platform) ([][]any,
 		for i, field := range fields {
 			v, err := readDRDAField(stream, field, platform)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("column %d (DRDA type 0x%x): %w", i, field.typeCode, err)
 			}
 			row[i] = v
 		}
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// decodeUTF16BE decodes GRAPHIC/VARGRAPHIC column data (CCSID 1200/13488),
+// which IBM i sends as big-endian UTF-16 - a different, double-byte-per-
+// character encoding from every other character type this client decodes
+// (CHAR/VARCHAR's single-byte cp37/cp500). An odd byte count is malformed
+// input for this encoding, not something to silently truncate.
+func decodeUTF16BE(data []byte) (string, error) {
+	if len(data)%2 != 0 {
+		return "", fmt.Errorf("odd-length UTF-16BE graphic data: %d bytes", len(data))
+	}
+	units := make([]uint16, len(data)/2)
+	for i := range units {
+		units[i] = binary.BigEndian.Uint16(data[i*2 : i*2+2])
+	}
+	return string(utf16.Decode(units)), nil
 }
 
 func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) (any, error) {
@@ -309,17 +347,33 @@ func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) 
 	}
 
 	switch field.typeCode {
-	case drdaTypeChar, drdaTypeNChar, drdaTypeGraphic, drdaTypeNGraphic,
-		drdaTypeMix, drdaTypeNMix:
+	case drdaTypeChar, drdaTypeNChar, drdaTypeMix, drdaTypeNMix:
 		ln := int(binary.BigEndian.Uint16(field.params))
 		data, err := readBytes(stream, ln)
 		if err != nil {
 			return nil, err
 		}
 		return strings.TrimRight(decodeString(data, characterEncodingFor(platform)), " "), nil
+	case drdaTypeGraphic, drdaTypeNGraphic:
+		// GRAPHIC is DBCS data - CCSID 1200/13488, i.e. big-endian UTF-16 -
+		// a fundamentally different (double-byte) encoding from CHAR's
+		// single-byte cp37/cp500, not just a different code page. Reported
+		// on issue #3 as the cause of an "unsupported QRYDSC descriptor"
+		// failure (actually an unrelated FD:OCA framing issue, fixed
+		// separately in parseQRYDSC) on tables with GRAPHIC/VARGRAPHIC
+		// columns.
+		ln := int(binary.BigEndian.Uint16(field.params))
+		data, err := readBytes(stream, ln)
+		if err != nil {
+			return nil, err
+		}
+		decoded, err := decodeUTF16BE(data)
+		if err != nil {
+			return nil, err
+		}
+		return strings.TrimRight(decoded, " "), nil
 	case drdaTypeVarchar, drdaTypeNVarchar, drdaTypeLong, drdaTypeNLong,
-		drdaTypeVarGraph, drdaTypeNVarGraph, drdaTypeVarMix, drdaTypeNVarMix,
-		drdaTypeLongMix, drdaTypeNLongMix:
+		drdaTypeVarMix, drdaTypeNVarMix, drdaTypeLongMix, drdaTypeNLongMix:
 		lnBytes, err := readBytes(stream, 2)
 		if err != nil {
 			return nil, err
@@ -330,6 +384,25 @@ func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) 
 			return nil, err
 		}
 		return decodeString(data, characterEncodingFor(platform)), nil
+	case drdaTypeVarGraph, drdaTypeNVarGraph:
+		// See drdaTypeGraphic above - same UTF-16BE encoding, variable-
+		// length framing (2-byte inline length prefix) instead of fixed.
+		// The inline length is assumed to be a byte count, matching every
+		// other variable-length type here and IBM's own JTOpen client
+		// (SQLVargraphic.java: "maxLength is in bytes not counting 2 for
+		// LL") - not yet confirmed against a real wire capture with an
+		// actual GRAPHIC value, unlike the rest of this client's CCSID
+		// handling.
+		lnBytes, err := readBytes(stream, 2)
+		if err != nil {
+			return nil, err
+		}
+		ln := int(binary.BigEndian.Uint16(lnBytes))
+		data, err := readBytes(stream, ln)
+		if err != nil {
+			return nil, err
+		}
+		return decodeUTF16BE(data)
 	case drdaTypeVarByte, drdaTypeNVarByte:
 		lnBytes, err := readBytes(stream, 4)
 		if err != nil {
@@ -375,9 +448,10 @@ func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) 
 		if err != nil {
 			return nil, err
 		}
-		t, err := time.Parse("2006-01-02", string(data))
+		decoded := decodeString(data, characterEncodingFor(platform))
+		t, err := time.Parse("2006-01-02", decoded)
 		if err != nil {
-			return string(data), nil
+			return decoded, nil
 		}
 		return t, nil
 	case drdaTypeTime, drdaTypeNTime:
@@ -386,17 +460,18 @@ func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) 
 		if err != nil {
 			return nil, err
 		}
-		return normalizeDb2Time(string(data)), nil
+		return normalizeDb2Time(decodeString(data, characterEncodingFor(platform))), nil
 	case drdaTypeTimestamp, drdaTypeNTimestamp:
 		ln := int(binary.BigEndian.Uint16(field.params))
 		data, err := readBytes(stream, ln)
 		if err != nil {
 			return nil, err
 		}
-		value := normalizeDb2Timestamp(string(data))
+		decoded := decodeString(data, characterEncodingFor(platform))
+		value := normalizeDb2Timestamp(decoded)
 		t, err := time.Parse("2006-01-02-15.04.05.000000", value)
 		if err != nil {
-			return nil, fmt.Errorf("invalid Db2 timestamp %q: %w", strings.TrimSpace(string(data)), err)
+			return nil, fmt.Errorf("invalid Db2 timestamp %q: %w", strings.TrimSpace(decoded), err)
 		}
 		return t, nil
 	case drdaTypeBoolean, drdaTypeNBoolean:
