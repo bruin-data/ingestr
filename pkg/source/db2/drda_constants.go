@@ -180,5 +180,10 @@ const (
 const (
 	fdocaTripletTypeNGDA byte = 0x76
 	fdocaTripletTypeMDD  byte = 0x78
-	fdocaSQLDTAGRPLID    byte = 0xD0
+	// fdocaTripletTypeSDA (Self-Defining type) defines a Local IDentifier
+	// (LID) a column's N-GDA type byte can reference instead of a literal
+	// FD:OCA primitive type - confirmed on issue #3 for VARGRAPHIC columns
+	// (CCSID 1200, 2 bytes/char). See sdaDescriptor in drda_parse.go.
+	fdocaTripletTypeSDA byte = 0x70
+	fdocaSQLDTAGRPLID   byte = 0xD0
 )

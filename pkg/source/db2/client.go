@@ -230,7 +230,13 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 	}
 	config.Debug("[DB2] Stream: SQLDARD received during PRPSQLSTT=%v", sawSQLDARDDuringPrepare)
 
-	if !sawSQLDARDDuringPrepare {
+	// Only callers that actually need column metadata (custom query:
+	// sources) set handler.Columns - the catalog-driven table path gets
+	// its schema from SYSCOLUMNS and passes a handler with Columns unset,
+	// so it has no use for a SQLDARD and shouldn't pay for a DSCSQLSTT
+	// round trip it'll never consume. Reported on issue #3 as a wasted
+	// extra round trip on every query, including internal catalog ones.
+	if !sawSQLDARDDuringPrepare && handler.Columns != nil {
 		// Confirmed on issue #3: this server never returns a SQLDARD
 		// inline with PRPSQLSTT's reply despite RTNSQLDA, on every
 		// PRPSQLSTT including internal catalog queries - not a parsing
@@ -238,9 +244,7 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 		// Statement") is DRDA's standard, documented mechanism for
 		// explicitly requesting a SQLDARD for an already-prepared
 		// statement; this client defined the codepoint but never sent
-		// it. Only custom (query:) sources actually need this - the
-		// catalog-driven table path gets column metadata from SYSCOLUMNS
-		// instead and never reaches this branch's absence.
+		// it.
 		config.Debug("[DB2] Stream: sending DSCSQLSTT (SQLDARD not returned inline with PRPSQLSTT)")
 		dscSQLSTT, err := c.packDSCSQLSTT()
 		if err != nil {
@@ -249,9 +253,16 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 		if _, err = writeRequestDSS(c.conn, dscSQLSTT, 1, false, true); err != nil {
 			return fmt.Errorf("sending DSCSQLSTT: %w", err)
 		}
-		if err := c.parseResponse(ctx, handler); err != nil {
+		sawSQLDARDDuringDescribe := false
+		describeHandler := handler
+		describeHandler.Columns = func(columns []db2Column) error {
+			sawSQLDARDDuringDescribe = true
+			return handler.Columns(columns)
+		}
+		if err := c.parseResponse(ctx, describeHandler); err != nil {
 			return fmt.Errorf("describing statement: %w", err)
 		}
+		config.Debug("[DB2] Stream: SQLDARD received during DSCSQLSTT=%v", sawSQLDARDDuringDescribe)
 	}
 
 	opnQRY, err := c.packOPNQRY()
@@ -624,6 +635,7 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 				chained = extra.chained
 			}
 
+			config.Debug("[DB2] parseResponse: codepoint=0x%x object_len=%d chained=%v", packet.codePoint, len(packet.object), chained)
 			switch packet.codePoint {
 			case cpSQLERRRM:
 				// SRVDGN is a bare DDM diagnostic code with no further
@@ -637,6 +649,11 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 				}
 			case cpSQLCARD:
 				if _, err := parseSQLCard(packet.object); err != nil {
+					if sqlErr, ok := err.(db2SQLError); ok {
+						config.Debug("[DB2] parseResponse: SQLCARD SQLCODE=%d SQLSTATE=%s message=%q", sqlErr.Code, sqlErr.State, sqlErr.Message)
+					} else {
+						config.Debug("[DB2] parseResponse: SQLCARD parse error: %v", err)
+					}
 					errResult = err
 				}
 			case cpSQLDARD:

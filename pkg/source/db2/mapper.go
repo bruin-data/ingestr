@@ -48,7 +48,8 @@ func MapDb2ToDataType(db2Type string) (schema.DataType, int, int, schema.DataTyp
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	case "CHAR", "CHARACTER", "VARCHAR", "CHARACTER VARYING", "LONG VARCHAR":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
-	case "GRAPHIC", "VARGRAPHIC", "LONG VARGRAPHIC", "CLOB", "DBCLOB", "XML":
+	case "GRAPHIC", "VARGRAPHIC", "LONG VARGRAPHIC", "CLOB", "DBCLOB", "XML",
+		"VARG": // IBM i's truncated system name for VARGRAPHIC, flagged on issue #3 - unlike TIMESTMP, not yet independently re-confirmed by a fresh catalog query, just added on the same evidenced pattern
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	case "BINARY", "VARBINARY", "CHAR FOR BIT DATA", "VARCHAR FOR BIT DATA", "BLOB", "ROWID":
 		return schema.TypeBinary, 0, 0, schema.TypeUnknown

@@ -1296,11 +1296,12 @@ func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
 		// PRPSQLSTT + SQLSTT must be fully drained and replied to before
 		// OPNQRY is ever sent - if Stream still chained them together,
 		// this second drain would see OPNQRY mixed into the first one.
-		// drainOneRequest's generic RDBCMM reply carries no SQLDARD, so
-		// Stream is expected to follow up with a DSCSQLSTT round trip
-		// (see TestStreamSendsDSCSQLSTTWhenPrepareOmitsSQLDARD for the
-		// case where that happens for a real reason).
-		drainOneRequest(t, serverConn, &codePoints)
+		// This handler has no Columns callback (the catalog-driven table
+		// path's own shape), so DSCSQLSTT must not fire even though
+		// drainOneRequest's generic RDBCMM reply carries no SQLDARD - see
+		// TestStreamSendsDSCSQLSTTForCustomQueriesWhenPrepareOmitsSQLDARD
+		// for the case where a caller that actually wants column metadata
+		// triggers it.
 		drainOneRequest(t, serverConn, &codePoints)
 		drainOneRequest(t, serverConn, &codePoints)
 	}()
@@ -1323,7 +1324,61 @@ func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
 		t.Fatal("Stream did not return in time")
 	}
 
-	require.Equal(t, []uint16{cpPRPSQLSTT, cpSQLSTT, cpDSCSQLSTT, cpOPNQRY}, codePoints)
+	require.Equal(t, []uint16{cpPRPSQLSTT, cpSQLSTT, cpOPNQRY}, codePoints,
+		"DSCSQLSTT must not be sent when the caller has no Columns callback to use it")
+}
+
+func TestStreamSendsDSCSQLSTTForCustomQueriesWhenPrepareOmitsSQLDARD(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("SIGLPAR"),
+		timeout:  time.Second,
+	}
+
+	var codePoints []uint16
+	var sawColumns bool
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		drainOneRequest(t, serverConn, &codePoints) // PRPSQLSTT+SQLSTT, generic reply (no SQLDARD)
+
+		dscSQLSTT, err := readDSS(serverConn)
+		require.NoError(t, err)
+		codePoints = append(codePoints, dscSQLSTT.codePoint)
+		require.NoError(t, writeTestDSS(serverConn, cpSQLDARD, minimalSQLDARD(), false))
+
+		drainOneRequest(t, serverConn, &codePoints) // OPNQRY
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Stream(context.Background(), "SELECT TABLE_NAME FROM QSYS2.SYSTABLES", db2StreamHandler{
+			Columns: func([]db2Column) error {
+				sawColumns = true
+				return nil
+			},
+		})
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Stream did not return in time")
+	}
+
+	require.True(t, sawColumns, "DSCSQLSTT's own SQLDARD must still reach the caller's Columns handler")
+	require.Equal(t, []uint16{cpPRPSQLSTT, cpSQLSTT, cpDSCSQLSTT, cpOPNQRY}, codePoints,
+		"DSCSQLSTT must be sent when the caller needs column metadata and PRPSQLSTT didn't provide it")
 }
 
 // drainOneRequest reads DSS packets from conn until a non-chained one is
@@ -1568,6 +1623,33 @@ func TestParseQRYDTAIncludesColumnContextOnUnsupportedType(t *testing.T) {
 
 	require.ErrorContains(t, err, "column 1")
 	require.ErrorContains(t, err, "0x99")
+}
+
+func TestParseQRYDSCResolvesVARGRAPHICThroughSDALIDs(t *testing.T) {
+	// The exact QRYDSC triplet bytes from a real IBM i host's reply on
+	// issue #3, for a query with two VARGRAPHIC CCSID 1200 columns
+	// (TABLE_TEXT NOT NULL, LONG_COMMENT nullable). The N-GDA triplet's
+	// own column entries use LIDs 0x80/0x81 defined by the two preceding
+	// SDA triplets, not a literal FD:OCA primitive type - which the
+	// parser previously had no way to resolve, surfacing as "unsupported
+	// DRDA field type: 0x80".
+	obj := []byte{
+		0x07, 0x78, 0x00, 0x05, 0x01, 0x01, 0x38, // MDD
+		0x0c, 0x70, 0x80, 0x11, 0x00, 0x00, 0x04, 0xb0, 0x02, 0x01, 0x3f, 0xff, // SDA: LID 0x80, CCSID 1200, 2 bytes/char
+		0x07, 0x78, 0x00, 0x05, 0x01, 0x01, 0x3b, // MDD
+		0x0c, 0x70, 0x81, 0x91, 0x00, 0x00, 0x04, 0xb0, 0x02, 0x01, 0x3f, 0xff, // SDA: LID 0x81, CCSID 1200, 2 bytes/char
+		0x07, 0x78, 0x00, 0x05, 0x02, 0x01, 0xd0, // MDD (row layout)
+		0x09, 0x76, 0xd0, 0x80, 0x00, 0x32, 0x81, 0x07, 0xd0, // N-GDA: column(LID=0x80, len=50), column(LID=0x81, len=2000)
+	}
+
+	fields, err := parseQRYDSC(obj)
+
+	require.NoError(t, err)
+	require.Len(t, fields, 2)
+	require.Equal(t, drdaTypeVarGraph, fields[0].typeCode, "LID 0x80 is even (NOT NULL column) - resolves to the non-null VARGRAPH type")
+	require.Equal(t, []byte{0x00, 0x32}, fields[0].params)
+	require.Equal(t, drdaTypeNVarGraph, fields[1].typeCode, "LID 0x81 is odd (nullable column) - resolves to the nullable VARGRAPH type")
+	require.Equal(t, []byte{0x07, 0xd0}, fields[1].params)
 }
 
 func TestParseQRYDSCSkipsLeadingMDDTriplet(t *testing.T) {

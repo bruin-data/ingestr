@@ -244,10 +244,63 @@ func parseDB2Column(b []byte, hasName bool, platform db2Platform) (db2Column, []
 	}, b, nil
 }
 
+// sdaDescriptor is a parsed SDA (Self-Defining type) triplet: it defines a
+// Local IDentifier (LID) a column's own type byte in the N-GDA triplet can
+// reference instead of a literal FD:OCA primitive type. Confirmed on issue
+// #3 via a real IBM i host's QRYDSC for a query with VARGRAPHIC columns -
+// SDA triplets there defined LIDs 0x80/0x81 (base type 0x11/0x91, CCSID
+// 1200, 2 bytes/char), which the N-GDA triplet's column entries then used
+// directly as their type byte. The LID's own parity (even/odd) follows
+// this client's existing non-null/nullable convention for every other
+// FD:OCA type pair (0x38/0x39 etc.) - confirmed against the same capture
+// (0x80, even, NOT NULL column; 0x81, odd, nullable column).
+type sdaDescriptor struct {
+	lid          byte
+	baseType     byte
+	ccsid        int
+	bytesPerChar int
+}
+
+// parseSDATriplet decodes an SDA triplet's body: LID(1) baseType(1)
+// reserved(2) CCSID(2) bytesPerChar(1) flag(1) maxLength(2) - 10 bytes
+// after the triplet-type byte, confirmed byte-for-byte against the real
+// capture on issue #3.
+func parseSDATriplet(triplet []byte) (sdaDescriptor, bool) {
+	body := triplet[1:]
+	if len(body) < 10 {
+		return sdaDescriptor{}, false
+	}
+	return sdaDescriptor{
+		lid:          body[0],
+		baseType:     body[1],
+		ccsid:        int(binary.BigEndian.Uint16(body[4:6])),
+		bytesPerChar: int(body[6]),
+	}, true
+}
+
+// resolveSDALID maps an SDA-defined LID to a type this client already
+// knows how to decode, using only what's actually been confirmed: CCSID
+// 1200/13488 with 2 bytes/char is GRAPHIC/VARGRAPHIC data, decoded via the
+// existing drdaTypeVarGraph/NVarGraph path (variable-length framing, UTF-
+// 16BE content) with nullability from the LID's own parity. Anything else
+// is left as the bare LID value, which readDRDAField's "unsupported DRDA
+// field type" error (with column index) will surface clearly rather than
+// silently mis-decode - there's no confirmed mapping for it yet.
+func resolveSDALID(desc sdaDescriptor) byte {
+	if (desc.ccsid == 1200 || desc.ccsid == 13488) && desc.bytesPerChar == 2 {
+		if desc.lid%2 == 1 {
+			return drdaTypeNVarGraph
+		}
+		return drdaTypeVarGraph
+	}
+	return desc.lid
+}
+
 func parseQRYDSC(obj []byte) ([]drdaField, error) {
 	if len(obj) == 0 {
 		return nil, fmt.Errorf("empty QRYDSC")
 	}
+	sdaLIDs := make(map[byte]sdaDescriptor)
 	for len(obj) > 0 {
 		ln := int(obj[0])
 		if ln < 1 || ln > len(obj) {
@@ -266,8 +319,14 @@ func parseQRYDSC(obj []byte) ([]drdaField, error) {
 			body := triplet[2:]
 			fields := make([]drdaField, 0, len(body)/3)
 			for i := 0; i+3 <= len(body); i += 3 {
+				typeCode := body[i]
+				if desc, ok := sdaLIDs[typeCode]; ok {
+					resolved := resolveSDALID(desc)
+					config.Debug("[DB2] QRYDSC: column type 0x%x resolved via SDA LID to 0x%x (ccsid=%d, bytes_per_char=%d)", typeCode, resolved, desc.ccsid, desc.bytesPerChar)
+					typeCode = resolved
+				}
 				fields = append(fields, drdaField{
-					typeCode: body[i],
+					typeCode: typeCode,
 					params:   append([]byte(nil), body[i+1:i+3]...),
 				})
 			}
@@ -279,16 +338,18 @@ func parseQRYDSC(obj []byte) ([]drdaField, error) {
 			// needs. Skip and keep looking for the N-GDA triplet.
 			config.Debug("[DB2] QRYDSC: skipping MDD triplet, raw bytes=%x", triplet)
 			continue
+		case fdocaTripletTypeSDA:
+			if desc, ok := parseSDATriplet(triplet); ok {
+				sdaLIDs[desc.lid] = desc
+				config.Debug("[DB2] QRYDSC: SDA LID=0x%x base_type=0x%x ccsid=%d bytes_per_char=%d", desc.lid, desc.baseType, desc.ccsid, desc.bytesPerChar)
+			} else {
+				config.Debug("[DB2] QRYDSC: SDA triplet too short to parse, raw bytes=%x", triplet)
+			}
+			continue
 		default:
-			// Any other FD:OCA triplet type (RLO, SDA, CPT, ...): skip
-			// rather than fail outright, since none of the per-column
-			// type information this client needs lives outside the N-GDA
-			// triplet. Logged explicitly (not just via the whole-object
-			// dump in parseResponse) since issue #3's "DRDA type 0x80"
-			// mystery may turn out to need one of these - an SDA triplet
-			// in particular can carry a per-column type override the
-			// N-GDA triplet's own type byte just points at (unconfirmed;
-			// this log is what would show it).
+			// Any other FD:OCA triplet type (RLO, CPT, ...): skip rather
+			// than fail outright, since no per-column type information
+			// this client needs lives outside the N-GDA/SDA triplets.
 			config.Debug("[DB2] QRYDSC: skipping triplet type 0x%x, raw bytes=%x", triplet[0], triplet)
 			continue
 		}

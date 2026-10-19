@@ -22,6 +22,7 @@ func TestMapDb2ToDataType(t *testing.T) {
 		{name: "double", input: "DOUBLE PRECISION", wantType: schema.TypeFloat64},
 		{name: "decimal", input: "DECIMAL(12, 4)", wantType: schema.TypeDecimal, precision: 12, scale: 4},
 		{name: "varchar", input: "VARCHAR", wantType: schema.TypeString},
+		{name: "varg (IBM i truncated system name for VARGRAPHIC)", input: "VARG", wantType: schema.TypeString},
 		{name: "bit data", input: "VARCHAR FOR BIT DATA", wantType: schema.TypeBinary},
 		{name: "blob", input: "BLOB", wantType: schema.TypeBinary},
 		{name: "date", input: "DATE", wantType: schema.TypeDate},
