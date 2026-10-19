@@ -67,7 +67,7 @@ func TestStreamingRefreshReplacesSnapshotAndContinuesInSameExecutor(t *testing.T
 			if multi {
 				require.NoError(t, manager.RegisterTable(ctx, "b", "raw.b"))
 			}
-			_, err = manager.PrepareRefresh(ctx, "one-operation", "scope")
+			_, err = manager.PrepareRefresh(ctx, "one-operation", "scope", "", "")
 			require.NoError(t, err)
 			require.NoError(t, manager.BeginRun(ctx, true))
 			cfg := config.DefaultConfig()
@@ -116,7 +116,7 @@ func TestStreamingRefreshReplacesSnapshotAndContinuesInSameExecutor(t *testing.T
 			restarted, err := NewCDCStateManager(dest, "stream-refresh", "raw.a", "")
 			require.NoError(t, err)
 			require.NoError(t, restarted.RegisterTable(ctx, "a", "raw.a"))
-			fresh, err := restarted.PrepareRefresh(ctx, "one-operation", "scope")
+			fresh, err := restarted.PrepareRefresh(ctx, "one-operation", "scope", "", "")
 			require.NoError(t, err)
 			require.False(t, fresh)
 			position, err := restarted.ResumePosition(ctx, "a")

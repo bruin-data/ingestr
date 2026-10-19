@@ -7,9 +7,38 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/strategy"
 )
+
+func (p *Pipeline) prepareStreamingRefreshIdentity(ctx context.Context) error {
+	var saved *strategy.RefreshIdentity
+	if p.config.Stream && p.config.FullRefresh && p.config.RefreshID != "" {
+		var err error
+		saved, err = strategy.LookupRefresh(ctx, p.dest, p.config.RefreshID, p.streamingRefreshScope(), p.config.StagingDataset)
+		if err != nil {
+			return err
+		}
+		if saved != nil {
+			if isPostgresCDCSource(p.config.SourceURI) && (saved.SlotSuffix == "" || saved.LegacySlotSuffix == "") {
+				return fmt.Errorf("refresh ID %q is missing its replication slot identity; use a new refresh ID to request a new snapshot", p.config.RefreshID)
+			}
+			p.cdcConnectorID = saved.ConnectorID
+		}
+	}
+	if isCDCSource(p.config.SourceURI) {
+		p.config.CDCSlotSuffix = cdcSlotSuffix(canonicalCDCStateURI(p.config.DestURI) + "\x00" + p.cdcConnectorID)
+		p.config.CDCLegacySlotSuffix = legacyCDCSlotSuffix(p.config.DestURI)
+		if saved != nil {
+			// The destination credentials may change independently of this operation.
+			p.config.CDCSlotSuffix = saved.SlotSuffix
+			p.config.CDCLegacySlotSuffix = saved.LegacySlotSuffix
+		}
+		config.Debug("[PIPELINE] CDC slot suffix: %s", p.config.CDCSlotSuffix)
+	}
+	return nil
+}
 
 func (p *Pipeline) prepareStreamingRefresh(ctx context.Context, manager *strategy.CDCStateManager) error {
 	if !p.config.Stream || !p.config.FullRefresh {
@@ -24,7 +53,7 @@ func (p *Pipeline) prepareStreamingRefresh(ctx context.Context, manager *strateg
 	if p.config.RefreshID == "" {
 		return nil
 	}
-	fresh, err := manager.PrepareRefresh(ctx, p.config.RefreshID, p.streamingRefreshScope())
+	fresh, err := manager.PrepareRefresh(ctx, p.config.RefreshID, p.streamingRefreshScope(), p.config.CDCSlotSuffix, p.config.CDCLegacySlotSuffix)
 	if err != nil {
 		return err
 	}

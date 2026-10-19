@@ -13,20 +13,22 @@ import (
 const cdcRefreshStateKind = "refresh"
 
 type cdcRefresh struct {
-	ID          string   `json:"id"`
-	Scope       string   `json:"scope"`
-	ConnectorID string   `json:"connector_id"`
-	Generation  int64    `json:"generation"`
-	Tables      []string `json:"tables"`
-	complete    bool
-	writer      *CDCStateManager
+	ID               string   `json:"id"`
+	Scope            string   `json:"scope"`
+	ConnectorID      string   `json:"connector_id"`
+	SlotSuffix       string   `json:"slot_suffix,omitempty"`
+	LegacySlotSuffix string   `json:"legacy_slot_suffix,omitempty"`
+	Generation       int64    `json:"generation"`
+	Tables           []string `json:"tables"`
+	complete         bool
+	writer           *CDCStateManager
 }
 
 // PrepareRefresh records the refresh before any checkpoint is invalidated or
 // destination data is removed. The operation is looked up by refresh ID alone;
 // its generation links it to the separately identified CDC checkpoint history.
 // A retry can only resume snapshots from this generation or a later one.
-func (m *CDCStateManager) PrepareRefresh(ctx context.Context, id, scope string) (bool, error) {
+func (m *CDCStateManager) PrepareRefresh(ctx context.Context, id, scope, slotSuffix, legacySlotSuffix string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -57,6 +59,9 @@ func (m *CDCStateManager) PrepareRefresh(ctx context.Context, id, scope string) 
 		return false, fmt.Errorf("refresh ID %q belongs to CDC checkpoint identity %q; the current identity is %q", id, refresh.ConnectorID, m.connectorID)
 	}
 	if refresh != nil {
+		if refresh.SlotSuffix != slotSuffix || refresh.LegacySlotSuffix != legacySlotSuffix {
+			return false, fmt.Errorf("refresh ID %q belongs to a different replication slot identity", id)
+		}
 		if m.generation+1 < refresh.Generation || (refresh.complete && m.generation < refresh.Generation) {
 			return false, fmt.Errorf("refresh ID %q is missing its associated CDC checkpoint history", id)
 		}
@@ -83,7 +88,11 @@ func (m *CDCStateManager) PrepareRefresh(ctx context.Context, id, scope string) 
 		tables = append(tables, table)
 	}
 	sort.Strings(tables)
-	refresh = &cdcRefresh{ID: id, Scope: scope, ConnectorID: m.connectorID, Generation: m.generation + 1, Tables: tables, writer: writer}
+	refresh = &cdcRefresh{
+		ID: id, Scope: scope, ConnectorID: m.connectorID,
+		SlotSuffix: slotSuffix, LegacySlotSuffix: legacySlotSuffix,
+		Generation: m.generation + 1, Tables: tables, writer: writer,
+	}
 	if err := refresh.write(ctx, cdcStateStatusInProgress); err != nil {
 		return false, err
 	}
@@ -121,22 +130,29 @@ func (m *CDCStateManager) completeRefresh(ctx context.Context) error {
 	return nil
 }
 
-// RefreshConnectorID restores the operation's checkpoint association before
-// leases and source slots are acquired. Recomputed connector identities are
-// not part of the refresh lookup key.
-func RefreshConnectorID(ctx context.Context, dest destination.Destination, id, scope, stagingDataset string) (string, error) {
+// RefreshIdentity associates a refresh with its checkpoint history and source slot.
+type RefreshIdentity struct {
+	ConnectorID      string
+	SlotSuffix       string
+	LegacySlotSuffix string
+}
+
+// LookupRefresh restores the operation's checkpoint and slot associations before
+// leases and source slots are acquired. Recomputed identities are not part of
+// the refresh lookup key. A nil identity means the refresh has not been recorded.
+func LookupRefresh(ctx context.Context, dest destination.Destination, id, scope, stagingDataset string) (*RefreshIdentity, error) {
 	reader, ok := dest.(destination.CDCStateReader)
 	if !ok {
-		return "", fmt.Errorf("destination does not support durable refresh metadata")
+		return nil, fmt.Errorf("destination does not support durable refresh metadata")
 	}
 	sum := sha256.Sum256([]byte("ingestr:refresh:" + id))
 	key := fmt.Sprintf("%x", sum[:])
 	table := managedCDCStateTableName(dest, cdcStateTableName, stagingDataset)
 	record, err := loadRefresh(ctx, reader, table, key, id, scope)
 	if err != nil || record == nil {
-		return "", err
+		return nil, err
 	}
-	return record.ConnectorID, nil
+	return &RefreshIdentity{ConnectorID: record.ConnectorID, SlotSuffix: record.SlotSuffix, LegacySlotSuffix: record.LegacySlotSuffix}, nil
 }
 
 func loadRefresh(ctx context.Context, reader destination.CDCStateReader, table, key, id, scope string) (*cdcRefresh, error) {
@@ -158,6 +174,9 @@ func loadRefresh(ctx context.Context, reader destination.CDCStateReader, table, 
 		}
 		if record.Generation <= 0 || record.ConnectorID == "" || (refresh != nil && (record.Generation != refresh.Generation || record.ConnectorID != refresh.ConnectorID)) {
 			return nil, fmt.Errorf("refresh ID %q has conflicting CDC generations or checkpoint identities", id)
+		}
+		if refresh != nil && (record.SlotSuffix != refresh.SlotSuffix || record.LegacySlotSuffix != refresh.LegacySlotSuffix) {
+			return nil, fmt.Errorf("refresh ID %q has conflicting replication slot identities", id)
 		}
 		completed := entry.Status == destination.CDCStateStatusComplete
 		if refresh != nil {

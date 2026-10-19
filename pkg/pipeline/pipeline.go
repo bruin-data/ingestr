@@ -232,24 +232,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		p.cdcConnectorID = genericCDCConnectorID(p.config)
 	}
 
-	if p.config.Stream && p.config.FullRefresh && p.config.RefreshID != "" {
-		savedConnectorID, err := strategy.RefreshConnectorID(ctx, dest, p.config.RefreshID, p.streamingRefreshScope(), p.config.StagingDataset)
-		if err != nil {
-			return err
-		}
-		if savedConnectorID != "" {
-			p.cdcConnectorID = savedConnectorID
-		}
+	if err := p.prepareStreamingRefreshIdentity(ctx); err != nil {
+		return err
 	}
 
 	var cdcStateManager *strategy.CDCStateManager
-
-	// For CDC sources, compute a destination-aware slot suffix
-	if isCDCSource(p.config.SourceURI) {
-		p.config.CDCSlotSuffix = cdcSlotSuffix(canonicalCDCStateURI(p.config.DestURI) + "\x00" + p.cdcConnectorID)
-		p.config.CDCLegacySlotSuffix = legacyCDCSlotSuffix(p.config.DestURI)
-		config.Debug("[PIPELINE] CDC slot suffix: %s", p.config.CDCSlotSuffix)
-	}
 
 	if managedDestinationCDC {
 		if err := validateDestinationManagedCDCState(dest); err != nil {
