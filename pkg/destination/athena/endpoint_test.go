@@ -23,6 +23,11 @@ func TestParseAthenaConfig_EndpointURL(t *testing.T) {
 	cfg, err = parseAthenaConfig(base + "&endpoint_url=http://localhost:4566")
 	require.NoError(t, err)
 	require.Equal(t, "http://localhost:4566", cfg.EndpointURL)
+
+	for _, endpoint := range []string{"http://athena.example.com", "ftp://localhost", "localhost:4566"} {
+		_, err := parseAthenaConfig(base + "&endpoint_url=" + endpoint)
+		require.Error(t, err, endpoint)
+	}
 }
 
 func TestConnect_UsesEndpointURL(t *testing.T) {

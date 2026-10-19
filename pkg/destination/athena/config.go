@@ -3,6 +3,7 @@ package athena
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 )
@@ -42,6 +43,17 @@ func parseAthenaConfig(rawURI string) (athenaConfig, error) {
 	}
 	if (cfg.AccessKeyID == "") != (cfg.SecretAccessKey == "") {
 		return athenaConfig{}, errors.New("athena uri: both access_key_id and secret_access_key are required when using static credentials")
+	}
+
+	if cfg.EndpointURL != "" {
+		u, err := url.Parse(cfg.EndpointURL)
+		if err != nil || u.Host == "" {
+			return athenaConfig{}, errors.New("athena uri: endpoint_url must be a URL like https://host[:port]")
+		}
+		loopback := u.Hostname() == "localhost" || net.ParseIP(u.Hostname()).IsLoopback()
+		if u.Scheme != "https" && (u.Scheme != "http" || !loopback) {
+			return athenaConfig{}, errors.New("athena uri: endpoint_url must use https:// (http:// is only allowed for localhost)")
+		}
 	}
 
 	return cfg, nil
