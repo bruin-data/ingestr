@@ -31,6 +31,7 @@ func TestRabbitMQToSQLite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	rmqURI := sharedRabbitMQURI(t)
@@ -75,6 +76,7 @@ func TestRabbitMQToPostgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	rmqURI := sharedRabbitMQURI(t)
@@ -107,6 +109,7 @@ func TestRabbitMQEmptyQueue(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	rmqURI := sharedRabbitMQURI(t)
