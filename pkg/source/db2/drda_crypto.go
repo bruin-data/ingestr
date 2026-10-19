@@ -14,6 +14,8 @@ import (
 	"unicode/utf16"
 
 	"golang.org/x/crypto/pbkdf2"
+
+	"github.com/bruin-data/ingestr/internal/config"
 )
 
 var (
@@ -89,6 +91,13 @@ var substitutePasswordSequence = []byte{0, 0, 0, 0, 0, 0, 0, 1}
 // reply (see signon.go) - SECCHK cannot carry a SECMEC 8 credential without
 // that exchange happening first.
 func substitutePasswordSHA1(userID, password string, serverSeed, clientSeed []byte) []byte {
+	// Despite how it's commonly described (including in IBM's own doc
+	// comments elsewhere), this is NOT EBCDIC: AS400ImplRemote feeds
+	// generateShaToken/generateShaSubstitute UTF-16BE ("Unicode") bytes -
+	// confirmed directly from source (BinaryConverter.charArrayToByteArray
+	// after decoding the EBCDIC user ID back to Unicode chars). Logged as
+	// what it actually is, not the commonly assumed EBCDIC form, since that
+	// mismatch is exactly the kind of thing worth being able to see.
 	userIDBytes := utf16BEBlankPadded(userID, 10)
 	passwordBytes := utf16BE(strings.TrimRight(password, "\x00 　"))
 
@@ -103,7 +112,13 @@ func substitutePasswordSHA1(userID, password string, serverSeed, clientSeed []by
 	substituteHash.Write(clientSeed)
 	substituteHash.Write(userIDBytes)
 	substituteHash.Write(substitutePasswordSequence)
-	return substituteHash.Sum(nil)
+	substitute := substituteHash.Sum(nil)
+
+	config.Debug("[DB2] substitutePasswordSHA1: user_utf16be=%x password_utf16be=%x server_seed=%x client_seed=%x sequence=%x",
+		userIDBytes, passwordBytes, serverSeed, clientSeed, substitutePasswordSequence)
+	config.Debug("[DB2] substitutePasswordSHA1: token(sha1 of user_utf16be+password_utf16be)=%x", token)
+	config.Debug("[DB2] substitutePasswordSHA1: substitute(sha1 of token+server_seed+client_seed+user_utf16be+sequence)=%x", substitute)
+	return substitute
 }
 
 // passwordLevel4Salt builds the 32-byte salt IBM i's PBKDF2 password-level-4

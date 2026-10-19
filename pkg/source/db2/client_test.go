@@ -110,6 +110,33 @@ func TestPackSECCHKReturnsEncryptionError(t *testing.T) {
 	require.ErrorContains(t, err, "expected 32-byte security token")
 }
 
+func TestPackSECCHKPadsUSRIDToTenBytesForSubstitutePasswordAuth(t *testing.T) {
+	client := &db2Client{database: padDatabaseName("SIGLPAR"), user: "user", password: "pass"}
+
+	packet, err := client.packSECCHK(secmecEUSRIDPWD, nil, []byte("01234567890123456789"))
+	require.NoError(t, err)
+
+	fields := parseReplyObject(packet[4:])
+	require.Equal(t, []byte("USER      "), cp500ToASCIIForTest(t, fields[cpUSRID]),
+		"jt400's DDMSECCHKRequestDataStream always sends exactly 10 bytes for USRID, uppercase and blank-padded")
+}
+
+func TestPackSECCHKPadsUSRIDForPlainTextAuthToo(t *testing.T) {
+	client := &db2Client{database: padDatabaseName("SIGLPAR"), user: "ab", password: "pass"}
+
+	packet, err := client.packSECCHK(secmecUserPassword, nil, nil)
+	require.NoError(t, err)
+
+	fields := parseReplyObject(packet[4:])
+	require.Equal(t, []byte("AB        "), cp500ToASCIIForTest(t, fields[cpUSRID]))
+}
+
+func cp500ToASCIIForTest(t *testing.T, cp500Bytes []byte) []byte {
+	t.Helper()
+	decoded := decodeString(cp500Bytes, "cp500")
+	return []byte(decoded)
+}
+
 func TestParseSECCHKRMReturnsErrorForNonZeroSVRCOD(t *testing.T) {
 	// SVRCOD=16 (SEVERE ERROR), SECCHKCD=15 - the exact bytes a real IBM i
 	// host returns on issue #3 for every connection attempted so far, which

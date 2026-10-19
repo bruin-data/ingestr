@@ -346,7 +346,8 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("exchanging Sign-on Server attributes for SECMEC 8: %w", err)
 		}
-		config.Debug("[DB2] handshake: Sign-on Server passwordLevel=%d", attrs.passwordLevel)
+		config.Debug("[DB2] handshake: Sign-on Server passwordLevel=%d client_seed=%x server_seed=%x",
+			attrs.passwordLevel, attrs.clientSeed, attrs.serverSeed)
 		// IBM i user profile names are always uppercase internally; the
 		// substitute algorithms are specified against that canonical form
 		// (confirmed via JTOpen's own EBCDIC round-trip, which only
@@ -357,6 +358,7 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		} else {
 			substituteCredential = substitutePasswordSHA1(substituteUser, c.password, attrs.serverSeed, attrs.clientSeed)
 		}
+		config.Debug("[DB2] handshake: SECCHK PASSWORD field (substitute credential) hex=%x", substituteCredential)
 	}
 
 	secchk, err := c.packSECCHK(secmec, sectkn, substituteCredential)
@@ -759,17 +761,18 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte, substituteCredential [
 		}
 		body.Write(packBinary(cpSECTKN, password))
 	case secmec == secmecEUSRIDPWD:
-		user, err := packString(cpUSRID, c.user, "cp500")
+		user, err := packString(cpUSRID, padUserID(c.user), "cp500")
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode user: %w", err)
 		}
+		config.Debug("[DB2] SECCHK: USRID field (cp500, 10 bytes, uppercase-padded) hex=%x", user)
 		body.Write(user)
 		if len(substituteCredential) == 0 {
 			return nil, fmt.Errorf("SECMEC %d requires a password-substitute credential but none was computed", secmec)
 		}
 		body.Write(packBinary(cpPASSWORD, substituteCredential))
 	default:
-		user, err := packString(cpUSRID, c.user, "cp500")
+		user, err := packString(cpUSRID, padUserID(c.user), "cp500")
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode user: %w", err)
 		}
@@ -956,6 +959,22 @@ func padDatabaseName(database string) string {
 		return db[:18]
 	}
 	return db + strings.Repeat(" ", 18-len(db))
+}
+
+// padUserID uppercases and blank-pads (or truncates) a user ID to exactly
+// 10 characters - the fixed width IBM's own JTOpen client always sends on
+// the wire for SECCHK's USRID field (DDMSECCHKRequestDataStream always
+// copies exactly 10 bytes there, regardless of which security mechanism is
+// in play), confirmed directly from that source while investigating why
+// SECMEC 8 substitute-password auth (added in v27) was still rejected.
+// packString encodes whatever length it's given with no padding, so a
+// user ID shorter than 10 characters was going out undersized.
+func padUserID(user string) string {
+	u := strings.ToUpper(user)
+	if len(u) >= 10 {
+		return u[:10]
+	}
+	return u + strings.Repeat(" ", 10-len(u))
 }
 
 func mustPackString(codePoint uint16, value string, encoding string) []byte {
