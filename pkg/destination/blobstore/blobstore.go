@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -49,22 +50,28 @@ type BlobstoreDestination struct {
 	gcsClient   *storage.Client
 	azureClient *azblob.Client
 	adlsClient  *azureDatalakeClient
-	bucketName  string
-	basePath    string
 	layout      string
-	// uriBucket and uriPrefix come from the URI (s3://bucket/prefix); when set, table
-	// names are resolved under them.
-	uriBucket string
-	uriPrefix string
-	// For a replace, previousKeys are the files under the table path before this load and
-	// writtenKeys the files it wrote; previous files that were not rewritten are removed.
-	replacing    bool
+	uriBucket   string
+	uriPrefix   string
+	// customEndpoint is set for S3-compatible stores, which may not support batch deletes.
+	customEndpoint bool
+
+	mu sync.Mutex
+	// Multi-table loads prepare and write several tables on one destination concurrently.
+	tables map[string]*blobTable
+}
+
+type blobTable struct {
+	name     string
+	bucket   string
+	basePath string
+
+	mu          sync.Mutex
+	arrowSchema *arrow.Schema
+	// For a replace, previousKeys are the files this load replaces, and writtenKeys the
+	// files it wrote. Both are cleared once the previous files are removed.
 	previousKeys []string
 	writtenKeys  map[string]struct{}
-	arrowSchema  *arrow.Schema
-	schema       *schema.TableSchema
-	tableName    string
-	mu           sync.Mutex
 }
 
 func NewBlobstoreDestination() *BlobstoreDestination {
@@ -84,6 +91,7 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 	d.provider = parsed.provider
 	d.uriBucket = parsed.bucket
 	d.uriPrefix = parsed.prefix
+	d.customEndpoint = parsed.endpointURL != ""
 	d.layout = parsed.layout
 	if d.layout == "" {
 		d.layout = "{load_id}.{file_id}.{ext}"
@@ -254,51 +262,72 @@ func (d *BlobstoreDestination) Close(ctx context.Context) error {
 }
 
 func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	bucket, basePath, ambiguous := d.resolveLocation(opts.Table)
+	t := &blobTable{name: opts.Table, bucket: bucket, basePath: basePath}
+	if opts.Schema != nil {
+		t.arrowSchema = opts.Schema.ToArrowSchema()
+	}
+	if ambiguous {
+		output.Warnf("[BLOBSTORE] table %s starts with the URI's bucket, so it is written to %s/%s and the URI path %s is ignored\n", opts.Table, bucket, basePath, d.uriPrefix)
+	}
+
+	if opts.DropFirst {
+		if ambiguous {
+			output.Warnf("[BLOBSTORE] replace keeps existing files for %s: remove the bucket from the table name to replace files under %s/%s\n", opts.Table, d.uriBucket, d.uriPrefix)
+		} else {
+			keys, err := d.listPreviousBlobs(ctx, t)
+			if err != nil {
+				return err
+			}
+			t.previousKeys = keys
+			t.writtenKeys = map[string]struct{}{}
+		}
+	}
+
+	d.mu.Lock()
+	if d.tables == nil {
+		d.tables = map[string]*blobTable{}
+	}
+	d.tables[opts.Table] = t
+	d.mu.Unlock()
+
+	config.Debug("[BLOBSTORE] Prepared table: bucket=%s, basePath=%s", t.bucket, t.basePath)
+	return nil
+}
+
+// table returns the state PrepareTable created, or an append-only target for a table
+// written without being prepared.
+func (d *BlobstoreDestination) table(name string) *blobTable {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	d.schema = opts.Schema
-
-	d.bucketName, d.basePath = d.resolveLocation(opts.Table)
-	d.tableName = opts.Table
-	d.replacing = opts.DropFirst
-	d.previousKeys = nil
-	d.writtenKeys = map[string]struct{}{}
-	if d.replacing {
-		keys, err := d.listPreviousBlobs(ctx)
-		if err != nil {
-			return err
-		}
-		d.previousKeys = keys
+	if t, ok := d.tables[name]; ok {
+		return t
 	}
-
-	if opts.Schema != nil {
-		d.arrowSchema = opts.Schema.ToArrowSchema()
-	}
-
-	config.Debug("[BLOBSTORE] Prepared table: bucket=%s, basePath=%s", d.bucketName, d.basePath)
-	return nil
+	bucket, basePath, _ := d.resolveLocation(name)
+	return &blobTable{name: name, bucket: bucket, basePath: basePath}
 }
 
 // resolveLocation returns the bucket and base path for table. When the URI names a bucket,
 // table is a path under the URI's bucket and prefix. A table that starts with that same
 // bucket keeps the bucket/path form, so pipelines that already spell out the bucket in the
-// table name keep writing to the same place.
-func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string) {
+// table name keep writing to the same place. With a URI prefix that form is ambiguous.
+func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string, ambiguous bool) {
 	tableBucket, tablePath := parseBucketAndPath(table)
-	if d.uriBucket == "" || tableBucket == d.uriBucket {
-		return tableBucket, tablePath
+	if d.uriBucket == "" {
+		return tableBucket, tablePath, false
 	}
-	return d.uriBucket, joinPath(d.uriPrefix, table)
+	if tableBucket == d.uriBucket {
+		return tableBucket, tablePath, d.uriPrefix != ""
+	}
+	return d.uriBucket, joinPath(d.uriPrefix, table), false
 }
 
-// tablePrefix is the key prefix of the table's files. Uploads and replace cleanup both use
-// it, so cleanup always targets exactly the keys that uploads produce.
-func (d *BlobstoreDestination) tablePrefix() string {
-	if d.basePath == "" {
+// prefix is the key prefix of the table's files, shared by uploads and replace cleanup.
+func (t *blobTable) prefix() string {
+	if t.basePath == "" {
 		return ""
 	}
-	return strings.TrimSuffix(d.basePath, "/") + "/"
+	return strings.TrimSuffix(t.basePath, "/") + "/"
 }
 
 func joinPath(parts ...string) string {
@@ -329,12 +358,14 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 	var batchNum int
 	loadID := uuid.New().String()[:8]
 	fileID := 0
+	t := d.table(opts.Table)
 
-	config.Debug("[BLOBSTORE] Starting write to bucket=%s, basePath=%s with layout=%s", d.bucketName, d.basePath, d.layout)
+	config.Debug("[BLOBSTORE] Starting write to bucket=%s, basePath=%s with layout=%s", t.bucket, t.basePath, d.layout)
 
 	var buffer bytes.Buffer
 	var writer *pqarrow.FileWriter
 	var rowsInCurrentFile int64
+	var arrowSchema *arrow.Schema
 
 	flushToBlob := func() error {
 		if writer == nil || rowsInCurrentFile == 0 {
@@ -346,8 +377,8 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		}
 		writer = nil
 
-		path := d.renderLayout(loadID, fileID)
-		if err := d.writeBlob(ctx, path, buffer.Bytes()); err != nil {
+		path := d.renderLayout(t.name, loadID, fileID)
+		if err := d.writeBlob(ctx, t, path, buffer.Bytes()); err != nil {
 			return fmt.Errorf("failed to write to blob %s: %w", path, err)
 		}
 
@@ -375,11 +406,12 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		startBatch := time.Now()
 
 		if writer == nil {
-			d.mu.Lock()
-			if d.arrowSchema == nil {
-				d.arrowSchema = stripSchemaMetadata(record.Schema())
+			t.mu.Lock()
+			if t.arrowSchema == nil {
+				t.arrowSchema = stripSchemaMetadata(record.Schema())
 			}
-			d.mu.Unlock()
+			arrowSchema = t.arrowSchema
+			t.mu.Unlock()
 
 			writerProps := parquet.NewWriterProperties(
 				parquet.WithCompression(compress.Codecs.Snappy),
@@ -391,7 +423,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 			)
 
 			var err error
-			writer, err = pqarrow.NewFileWriter(d.arrowSchema, &buffer, writerProps, arrowProps)
+			writer, err = pqarrow.NewFileWriter(arrowSchema, &buffer, writerProps, arrowProps)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to create parquet writer: %w", err)
@@ -400,8 +432,8 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 
 		recordToWrite := record
 		shouldRelease := false
-		if !record.Schema().Equal(d.arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), d.arrowSchema) {
-			normalized, err := normalizeRecordToSchema(record, d.arrowSchema)
+		if !record.Schema().Equal(arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), arrowSchema) {
+			normalized, err := normalizeRecordToSchema(record, arrowSchema)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to normalize record schema: %w", err)
@@ -433,33 +465,27 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		return err
 	}
 
-	d.mu.Lock()
-	replacing := d.replacing
-	d.mu.Unlock()
-	if replacing {
-		if err := d.removeStaleBlobs(ctx); err != nil {
-			return fmt.Errorf("failed to remove files from the previous load: %w", err)
-		}
+	if err := d.removeStaleBlobs(ctx, t); err != nil {
+		return fmt.Errorf("failed to remove files from the previous load: %w", err)
 	}
 
 	config.Debug("[BLOBSTORE] Total: %d rows written to %d files in %v", totalRows, fileID, time.Since(startTime))
 	return nil
 }
 
-func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data []byte) error {
-	fullPath := d.tablePrefix() + path
+func (d *BlobstoreDestination) writeBlob(ctx context.Context, t *blobTable, path string, data []byte) error {
+	fullPath := t.prefix() + path
 
-	d.mu.Lock()
-	if d.writtenKeys == nil {
-		d.writtenKeys = map[string]struct{}{}
+	t.mu.Lock()
+	if t.writtenKeys != nil {
+		t.writtenKeys[fullPath] = struct{}{}
 	}
-	d.writtenKeys[fullPath] = struct{}{}
-	d.mu.Unlock()
+	t.mu.Unlock()
 
 	switch d.provider {
 	case ProviderS3:
 		_, err := d.s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(d.bucketName),
+			Bucket:      aws.String(t.bucket),
 			Key:         aws.String(fullPath),
 			Body:        bytes.NewReader(data),
 			ContentType: aws.String("application/octet-stream"),
@@ -467,7 +493,7 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 		return err
 
 	case ProviderGCS:
-		obj := d.gcsClient.Bucket(d.bucketName).Object(fullPath)
+		obj := d.gcsClient.Bucket(t.bucket).Object(fullPath)
 		w := obj.NewWriter(ctx)
 		w.ContentType = "application/octet-stream"
 		if _, err := io.Copy(w, bytes.NewReader(data)); err != nil {
@@ -477,14 +503,14 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 		return w.Close()
 
 	case ProviderAzure:
-		_, err := d.azureClient.UploadBuffer(ctx, d.bucketName, fullPath, data, nil)
+		_, err := d.azureClient.UploadBuffer(ctx, t.bucket, fullPath, data, nil)
 		return err
 
 	case ProviderAzureDatalake:
 		if d.adlsClient == nil {
 			return fmt.Errorf("azure Data Lake Storage Gen2 client is not initialized")
 		}
-		return d.adlsClient.uploadBuffer(ctx, d.bucketName, fullPath, data)
+		return d.adlsClient.uploadBuffer(ctx, t.bucket, fullPath, data)
 	}
 
 	return fmt.Errorf("unsupported provider: %s", d.provider)
@@ -586,8 +612,18 @@ func isAzureDatalakeAlreadyExists(err error) bool {
 	)
 }
 
-func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
-	tableName := d.tableName
+func (d *BlobstoreDestination) renderLayout(table, loadID string, fileID int) string {
+	tableName := layoutTableName(table)
+	result := d.layout
+	result = strings.ReplaceAll(result, "{table_name}", tableName)
+	result = strings.ReplaceAll(result, "{load_id}", loadID)
+	result = strings.ReplaceAll(result, "{file_id}", fmt.Sprintf("%d", fileID))
+	result = strings.ReplaceAll(result, "{ext}", "parquet")
+
+	return result
+}
+
+func layoutTableName(tableName string) string {
 	if idx := strings.LastIndex(tableName, "/"); idx != -1 {
 		tableName = tableName[idx+1:]
 	}
@@ -597,14 +633,7 @@ func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
 	if tableName == "" {
 		tableName = "data"
 	}
-
-	result := d.layout
-	result = strings.ReplaceAll(result, "{table_name}", tableName)
-	result = strings.ReplaceAll(result, "{load_id}", loadID)
-	result = strings.ReplaceAll(result, "{file_id}", fmt.Sprintf("%d", fileID))
-	result = strings.ReplaceAll(result, "{ext}", "parquet")
-
-	return result
+	return tableName
 }
 
 func (d *BlobstoreDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {

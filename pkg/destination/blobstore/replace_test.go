@@ -12,17 +12,25 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// fakeS3 is an in-memory, path-style S3 server covering list and batch delete.
+// fakeS3 is an in-memory, path-style S3 server.
 type fakeS3 struct {
-	mu      sync.Mutex
-	objects map[string]bool // "bucket/key"
-	lists   int
+	mu            sync.Mutex
+	objects       map[string]bool // "bucket/key"
+	lists         int
+	batchDeletes  int
+	singleDeletes int
+	denyList      bool
+	denyDelete    bool
 }
 
 func newFakeS3(t *testing.T, keys ...string) (*fakeS3, string) {
@@ -53,14 +61,24 @@ func (f *fakeS3) remaining() []string {
 	return keys
 }
 
+func accessDenied(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(w, `<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`)
+}
+
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	bucket := strings.Trim(r.URL.Path, "/")
+	bucket, key, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	switch {
 	case r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2":
 		f.lists++
+		if f.denyList {
+			accessDenied(w)
+			return
+		}
 		prefix := r.URL.Query().Get("prefix")
 		var b strings.Builder
 		b.WriteString(`<ListBucketResult><IsTruncated>false</IsTruncated>`)
@@ -72,27 +90,78 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		b.WriteString(`</ListBucketResult>`)
 		_, _ = io.WriteString(w, b.String())
 	case r.Method == http.MethodPost && r.URL.Query().Has("delete"):
+		f.batchDeletes++
 		var req struct {
 			Objects []struct{ Key string } `xml:"Object"`
 		}
-		if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := xml.Unmarshal(body, &req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		var b strings.Builder
+		b.WriteString(`<DeleteResult>`)
 		for _, o := range req.Objects {
+			if f.denyDelete {
+				fmt.Fprintf(&b, `<Error><Key>%s</Key><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`, o.Key)
+				continue
+			}
 			delete(f.objects, bucket+"/"+o.Key)
 		}
-		_, _ = io.WriteString(w, `<DeleteResult></DeleteResult>`)
+		b.WriteString(`</DeleteResult>`)
+		_, _ = io.WriteString(w, b.String())
+	case r.Method == http.MethodDelete:
+		f.singleDeletes++
+		if f.denyDelete {
+			accessDenied(w)
+			return
+		}
+		delete(f.objects, bucket+"/"+key)
+		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodPut:
+		f.objects[bucket+"/"+key] = true
 	default:
 		http.Error(w, "unsupported", http.StatusNotImplemented)
 	}
 }
 
-func connectFakeS3(t *testing.T, endpoint string) *BlobstoreDestination {
+func connectFakeS3(t *testing.T, endpoint, location string) *BlobstoreDestination {
 	t.Helper()
 	d := NewBlobstoreDestination()
-	require.NoError(t, d.Connect(t.Context(), "s3://?access_key_id=a&secret_access_key=b&endpoint_url="+endpoint))
+	require.NoError(t, d.Connect(t.Context(), "s3://"+location+"?access_key_id=a&secret_access_key=b&endpoint_url="+endpoint))
 	return d
+}
+
+func oneRow(column string) <-chan source.RecordBatchResult {
+	b := array.NewRecordBuilder(memory.DefaultAllocator, arrow.NewSchema([]arrow.Field{{Name: column, Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil))
+	defer b.Release()
+	b.Field(0).(*array.Int64Builder).Append(1)
+	ch := make(chan source.RecordBatchResult, 1)
+	ch <- source.RecordBatchResult{Batch: b.NewRecordBatch()}
+	close(ch)
+	return ch
+}
+
+func noRows() <-chan source.RecordBatchResult {
+	ch := make(chan source.RecordBatchResult)
+	close(ch)
+	return ch
+}
+
+func replace(t *testing.T, d *BlobstoreDestination, table string, records <-chan source.RecordBatchResult) {
+	t.Helper()
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: table, DropFirst: true}))
+	require.NoError(t, d.WriteParallel(t.Context(), records, destination.WriteOptions{Table: table}))
+}
+
+// newFiles returns the keys under prefix that are not in before.
+func newFiles(f *fakeS3, prefix string, before ...string) []string {
+	var keys []string
+	for _, k := range f.remaining() {
+		if strings.HasPrefix(k, prefix) && !slices.Contains(before, k) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
 }
 
 func TestParseBlobstoreURI_BucketAndPrefix(t *testing.T) {
@@ -115,101 +184,209 @@ func TestParseBlobstoreURI_BucketAndPrefix(t *testing.T) {
 func TestResolveLocation(t *testing.T) {
 	for _, tt := range []struct {
 		uriBucket, uriPrefix, table, wantBucket, wantPath string
+		wantAmbiguous                                     bool
 	}{
-		// No bucket in the URI: the table is bucket/path, as before.
-		{"", "", "my-bucket/reports/t", "my-bucket", "reports/t"},
-		// Bucket in the URI: the table is a path under the bucket and prefix.
-		{"my-bucket", "exports", "public.users", "my-bucket", "exports/public.users"},
-		{"my-bucket", "", "reports/t", "my-bucket", "reports/t"},
-		// A table that repeats the URI's bucket keeps the bucket/path form.
-		{"my-bucket", "exports", "my-bucket/reports/t", "my-bucket", "reports/t"},
+		{"", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
+		{"my-bucket", "exports", "public.users", "my-bucket", "exports/public.users", false},
+		{"my-bucket", "", "reports/t", "my-bucket", "reports/t", false},
+		{"my-bucket", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
+		// It could also mean my-bucket/exports/my-bucket/reports/t.
+		{"my-bucket", "exports", "my-bucket/reports/t", "my-bucket", "reports/t", true},
 	} {
 		d := &BlobstoreDestination{uriBucket: tt.uriBucket, uriPrefix: tt.uriPrefix}
-		bucket, path := d.resolveLocation(tt.table)
+		bucket, path, ambiguous := d.resolveLocation(tt.table)
 		assert.Equal(t, tt.wantBucket, bucket, tt.table)
 		assert.Equal(t, tt.wantPath, path, tt.table)
+		assert.Equal(t, tt.wantAmbiguous, ambiguous, tt.table)
 	}
 }
 
-func TestRemoveStaleBlobs_DeletesOnlyOldFilesUnderTablePath(t *testing.T) {
-	fake, endpoint := newFakeS3(t,
-		"b/reports/t/old.0.parquet",
-		"b/reports/t/nested/old.1.parquet",
-		"b/reports/t/new.0.parquet",
-		"b/reports/t2/keep.parquet",
-		"b/reports/notes.txt",
-		"other/reports/t/keep.parquet",
-	)
-	d := connectFakeS3(t, endpoint)
-	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: true}))
-	d.writtenKeys["reports/t/new.0.parquet"] = struct{}{}
-
-	require.NoError(t, d.removeStaleBlobs(t.Context()))
-	assert.Equal(t, []string{
-		"b/reports/notes.txt",
-		"b/reports/t/new.0.parquet",
-		"b/reports/t2/keep.parquet",
-		"other/reports/t/keep.parquet",
-	}, fake.remaining())
+func TestLayoutPattern(t *testing.T) {
+	for _, tt := range []struct {
+		layout, table  string
+		match, noMatch []string
+	}{
+		{
+			layout:  "{load_id}.{file_id}.{ext}",
+			table:   "b/reports/users",
+			match:   []string{"0a1b2c3d.0.parquet", "0a1b2c3d.12.parquet"},
+			noMatch: []string{"notes.txt", "nested/0a1b2c3d.0.parquet", "0a1b2c3d.0.parquet.bak", "0A1B2C3D.0.parquet", "0a1b2c3.0.parquet"},
+		},
+		{
+			layout:  "{table_name}/{load_id}.{file_id}.{ext}",
+			table:   "b/reports/users",
+			match:   []string{"users/0a1b2c3d.0.parquet"},
+			noMatch: []string{"orders/0a1b2c3d.0.parquet", "0a1b2c3d.0.parquet"},
+		},
+		{
+			layout:  "{table_name}.{ext}",
+			table:   "public.users",
+			match:   []string{"users.parquet"},
+			noMatch: []string{"usersXparquet", "orders.parquet"},
+		},
+	} {
+		pattern := (&BlobstoreDestination{layout: tt.layout}).layoutPattern(tt.table)
+		for _, key := range tt.match {
+			assert.True(t, pattern.MatchString(key), "%s should match %s", tt.layout, key)
+		}
+		for _, key := range tt.noMatch {
+			assert.False(t, pattern.MatchString(key), "%s should not match %s", tt.layout, key)
+		}
+	}
 }
 
-func TestRemoveStaleBlobs_KeepsFilesFromOverlappingLoad(t *testing.T) {
-	fake, endpoint := newFakeS3(t, "b/reports/t/old.0.parquet")
-	d := connectFakeS3(t, endpoint)
+func TestReplace_RemovesOnlyPreviousFilesOfTheTable(t *testing.T) {
+	keep := []string{
+		"b/reports/0a1b2c3d.0.parquet",
+		"b/reports/t/nested/0a1b2c3d.0.parquet",
+		"b/reports/t/notes.txt",
+		"b/reports/t2/0a1b2c3d.0.parquet",
+		"other/reports/t/0a1b2c3d.0.parquet",
+	}
+	fake, endpoint := newFakeS3(t, append([]string{"b/reports/t/0a1b2c3d.0.parquet", "b/reports/t/0a1b2c3d.1.parquet"}, keep...)...)
+	d := connectFakeS3(t, endpoint, "")
+
+	replace(t, d, "b/reports/t", oneRow("id"))
+
+	written := newFiles(fake, "b/reports/t/", keep...)
+	require.Len(t, written, 1)
+	assert.ElementsMatch(t, append(keep, written[0]), fake.remaining())
+}
+
+func TestReplace_KeepsFilesFromOverlappingLoad(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "")
 	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: true}))
 
 	// Another replace on the same path writes its file while this load is running.
-	fake.put("b/reports/t/other-run.0.parquet")
-	fake.put("b/reports/t/this-run.0.parquet")
-	d.writtenKeys["reports/t/this-run.0.parquet"] = struct{}{}
+	fake.put("b/reports/t/ffffffff.0.parquet")
+	require.NoError(t, d.WriteParallel(t.Context(), noRows(), destination.WriteOptions{Table: "b/reports/t"}))
 
-	require.NoError(t, d.removeStaleBlobs(t.Context()))
-	assert.Equal(t, []string{"b/reports/t/other-run.0.parquet", "b/reports/t/this-run.0.parquet"}, fake.remaining())
+	assert.Equal(t, []string{"b/reports/t/ffffffff.0.parquet"}, fake.remaining())
 }
 
-func TestRemoveStaleBlobs_UsesSameKeysAsUploads(t *testing.T) {
+func TestReplace_UsesSameKeysAsUploads(t *testing.T) {
 	// "b//reports/t" uploads keys starting with "/reports/t/"; cleanup must not touch "reports/t/".
-	fake, endpoint := newFakeS3(t, "b//reports/t/old.0.parquet", "b/reports/t/keep.parquet")
-	d := connectFakeS3(t, endpoint)
-	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b//reports/t", DropFirst: true}))
-	assert.Equal(t, "/reports/t/", d.tablePrefix())
+	fake, endpoint := newFakeS3(t, "b//reports/t/0a1b2c3d.0.parquet", "b/reports/t/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "")
 
-	require.NoError(t, d.removeStaleBlobs(t.Context()))
-	assert.Equal(t, []string{"b/reports/t/keep.parquet"}, fake.remaining())
+	replace(t, d, "b//reports/t", noRows())
+
+	assert.Equal(t, []string{"b/reports/t/0a1b2c3d.0.parquet"}, fake.remaining())
 }
 
-func TestRemoveStaleBlobs_NeverClearsBucketRoot(t *testing.T) {
-	fake, endpoint := newFakeS3(t, "b/data.parquet")
-	d := connectFakeS3(t, endpoint)
-	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b", DropFirst: true}))
+func TestReplace_NeverClearsBucketRoot(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "")
 
-	require.NoError(t, d.removeStaleBlobs(t.Context()))
-	assert.Equal(t, []string{"b/data.parquet"}, fake.remaining())
+	replace(t, d, "b", noRows())
+
+	assert.Equal(t, []string{"b/0a1b2c3d.0.parquet"}, fake.remaining())
 	assert.Zero(t, fake.lists, "the bucket root must not even be listed")
 }
 
-func TestWriteParallel_FailedReplaceKeepsPreviousFiles(t *testing.T) {
-	fake, endpoint := newFakeS3(t, "b/reports/t/old.0.parquet")
-	d := connectFakeS3(t, endpoint)
+func TestReplace_AmbiguousTableKeepsFiles(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d.0.parquet", "b/exports/b/reports/t/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "b/exports")
+
+	replace(t, d, "b/reports/t", noRows())
+
+	assert.Equal(t, []string{"b/exports/b/reports/t/0a1b2c3d.0.parquet", "b/reports/t/0a1b2c3d.0.parquet"}, fake.remaining())
+	assert.Zero(t, fake.lists)
+}
+
+func TestReplace_MultipleTablesAtOnce(t *testing.T) {
+	previous := []string{"b/exports/t1/0a1b2c3d.0.parquet", "b/exports/t2/0a1b2c3d.0.parquet"}
+	fake, endpoint := newFakeS3(t, previous...)
+	d := connectFakeS3(t, endpoint, "b/exports")
+
+	// Each table has its own schema; a shared one would make the parquet writer reject rows.
+	tables := map[string]string{"t1": "a", "t2": "b"}
+	var wg sync.WaitGroup
+	for table, column := range tables {
+		wg.Go(func() {
+			assert.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:     table,
+				Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: column, DataType: schema.TypeInt64, Nullable: true}}},
+				DropFirst: true,
+			}))
+		})
+	}
+	wg.Wait()
+	for table, column := range tables {
+		wg.Go(func() {
+			assert.NoError(t, d.WriteParallel(t.Context(), oneRow(column), destination.WriteOptions{Table: table}))
+		})
+	}
+	wg.Wait()
+
+	assert.Len(t, newFiles(fake, "b/exports/t1/", previous...), 1)
+	assert.Len(t, newFiles(fake, "b/exports/t2/", previous...), 1)
+	assert.Len(t, fake.remaining(), 2)
+}
+
+func TestReplace_FailedLoadKeepsPreviousFiles(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "")
 	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: true}))
 
 	records := make(chan source.RecordBatchResult, 1)
 	records <- source.RecordBatchResult{Err: errors.New("source failed")}
 	close(records)
 
-	require.EqualError(t, d.WriteParallel(t.Context(), records, destination.WriteOptions{}), "source failed")
-	assert.Equal(t, []string{"b/reports/t/old.0.parquet"}, fake.remaining())
+	require.EqualError(t, d.WriteParallel(t.Context(), records, destination.WriteOptions{Table: "b/reports/t"}), "source failed")
+	assert.Equal(t, []string{"b/reports/t/0a1b2c3d.0.parquet"}, fake.remaining())
 }
 
-func TestWriteParallel_AppendKeepsPreviousFiles(t *testing.T) {
-	fake, endpoint := newFakeS3(t, "b/reports/t/old.0.parquet")
-	d := connectFakeS3(t, endpoint)
-	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: false}))
+func TestAppend_KeepsPreviousFiles(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "")
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t"}))
 
-	records := make(chan source.RecordBatchResult)
-	close(records)
+	require.NoError(t, d.WriteParallel(t.Context(), oneRow("id"), destination.WriteOptions{Table: "b/reports/t"}))
 
-	require.NoError(t, d.WriteParallel(t.Context(), records, destination.WriteOptions{}))
-	assert.Equal(t, []string{"b/reports/t/old.0.parquet"}, fake.remaining())
+	assert.Len(t, fake.remaining(), 2)
 	assert.Zero(t, fake.lists)
+	assert.Nil(t, d.table("b/reports/t").writtenKeys)
+}
+
+func TestReplace_WithoutPermissionKeepsPreviousFiles(t *testing.T) {
+	for _, tt := range []struct {
+		name                 string
+		denyList, denyDelete bool
+		customEndpoint       bool
+	}{
+		{name: "list", denyList: true, customEndpoint: true},
+		{name: "delete object", denyDelete: true, customEndpoint: true},
+		{name: "batch delete", denyDelete: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d.0.parquet")
+			fake.denyList, fake.denyDelete = tt.denyList, tt.denyDelete
+			d := connectFakeS3(t, endpoint, "")
+			d.customEndpoint = tt.customEndpoint
+
+			replace(t, d, "b/reports/t", noRows())
+
+			assert.Equal(t, []string{"b/reports/t/0a1b2c3d.0.parquet"}, fake.remaining())
+		})
+	}
+}
+
+func TestReplace_DeletesPerObjectOnlyOnCustomEndpoints(t *testing.T) {
+	keys := []string{"b/reports/t/0a1b2c3d.0.parquet", "b/reports/t/0a1b2c3d.1.parquet"}
+
+	fake, endpoint := newFakeS3(t, keys...)
+	replace(t, connectFakeS3(t, endpoint, ""), "b/reports/t", noRows())
+	assert.Empty(t, fake.remaining())
+	assert.Equal(t, 2, fake.singleDeletes)
+	assert.Zero(t, fake.batchDeletes)
+
+	fake, endpoint = newFakeS3(t, keys...)
+	d := connectFakeS3(t, endpoint, "")
+	d.customEndpoint = false
+	replace(t, d, "b/reports/t", noRows())
+	assert.Empty(t, fake.remaining())
+	assert.Zero(t, fake.singleDeletes)
+	assert.Equal(t, 1, fake.batchDeletes)
 }
