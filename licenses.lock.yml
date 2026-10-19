@@ -100,6 +100,11 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
+    - module: code.dny.dev/ssrf
+      version: v0.3.0
+      licenses:
+        - MIT
+      status: allowed
     - module: dario.cat/mergo
       version: v1.0.2
       licenses:
