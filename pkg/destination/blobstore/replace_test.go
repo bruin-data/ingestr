@@ -36,6 +36,12 @@ func newFakeS3(t *testing.T, keys ...string) (*fakeS3, string) {
 	return f, server.URL
 }
 
+func (f *fakeS3) put(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[key] = true
+}
+
 func (f *fakeS3) remaining() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -145,6 +151,31 @@ func TestRemoveStaleBlobs_DeletesOnlyOldFilesUnderTablePath(t *testing.T) {
 		"b/reports/t2/keep.parquet",
 		"other/reports/t/keep.parquet",
 	}, fake.remaining())
+}
+
+func TestRemoveStaleBlobs_KeepsFilesFromOverlappingLoad(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/old.0.parquet")
+	d := connectFakeS3(t, endpoint)
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: true}))
+
+	// Another replace on the same path writes its file while this load is running.
+	fake.put("b/reports/t/other-run.0.parquet")
+	fake.put("b/reports/t/this-run.0.parquet")
+	d.writtenKeys["reports/t/this-run.0.parquet"] = struct{}{}
+
+	require.NoError(t, d.removeStaleBlobs(t.Context()))
+	assert.Equal(t, []string{"b/reports/t/other-run.0.parquet", "b/reports/t/this-run.0.parquet"}, fake.remaining())
+}
+
+func TestRemoveStaleBlobs_UsesSameKeysAsUploads(t *testing.T) {
+	// "b//reports/t" uploads keys starting with "/reports/t/"; cleanup must not touch "reports/t/".
+	fake, endpoint := newFakeS3(t, "b//reports/t/old.0.parquet", "b/reports/t/keep.parquet")
+	d := connectFakeS3(t, endpoint)
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b//reports/t", DropFirst: true}))
+	assert.Equal(t, "/reports/t/", d.tablePrefix())
+
+	require.NoError(t, d.removeStaleBlobs(t.Context()))
+	assert.Equal(t, []string{"b/reports/t/keep.parquet"}, fake.remaining())
 }
 
 func TestRemoveStaleBlobs_NeverClearsBucketRoot(t *testing.T) {

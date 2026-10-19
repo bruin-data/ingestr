@@ -56,14 +56,15 @@ type BlobstoreDestination struct {
 	// names are resolved under them.
 	uriBucket string
 	uriPrefix string
-	// replacing is set when the table is prepared for a replace; writtenKeys tracks the
-	// files written since then so the remaining old files can be removed afterwards.
-	replacing   bool
-	writtenKeys map[string]struct{}
-	arrowSchema *arrow.Schema
-	schema      *schema.TableSchema
-	tableName   string
-	mu          sync.Mutex
+	// For a replace, previousKeys are the files under the table path before this load and
+	// writtenKeys the files it wrote; previous files that were not rewritten are removed.
+	replacing    bool
+	previousKeys []string
+	writtenKeys  map[string]struct{}
+	arrowSchema  *arrow.Schema
+	schema       *schema.TableSchema
+	tableName    string
+	mu           sync.Mutex
 }
 
 func NewBlobstoreDestination() *BlobstoreDestination {
@@ -261,7 +262,15 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	d.bucketName, d.basePath = d.resolveLocation(opts.Table)
 	d.tableName = opts.Table
 	d.replacing = opts.DropFirst
+	d.previousKeys = nil
 	d.writtenKeys = map[string]struct{}{}
+	if d.replacing {
+		keys, err := d.listPreviousBlobs(ctx)
+		if err != nil {
+			return err
+		}
+		d.previousKeys = keys
+	}
 
 	if opts.Schema != nil {
 		d.arrowSchema = opts.Schema.ToArrowSchema()
@@ -281,6 +290,15 @@ func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath s
 		return tableBucket, tablePath
 	}
 	return d.uriBucket, joinPath(d.uriPrefix, table)
+}
+
+// tablePrefix is the key prefix of the table's files. Uploads and replace cleanup both use
+// it, so cleanup always targets exactly the keys that uploads produce.
+func (d *BlobstoreDestination) tablePrefix() string {
+	if d.basePath == "" {
+		return ""
+	}
+	return strings.TrimSuffix(d.basePath, "/") + "/"
 }
 
 func joinPath(parts ...string) string {
@@ -429,10 +447,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 }
 
 func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data []byte) error {
-	fullPath := path
-	if d.basePath != "" {
-		fullPath = strings.TrimSuffix(d.basePath, "/") + "/" + path
-	}
+	fullPath := d.tablePrefix() + path
 
 	d.mu.Lock()
 	if d.writtenKeys == nil {

@@ -20,45 +20,43 @@ const s3DeleteBatchSize = 1000
 
 var errListUnsupported = errors.New("listing files is not supported for this provider")
 
-// removeStaleBlobs completes a replace by deleting the files under the table's path that
-// this load did not write. It runs only after every new file is written, so a failed load
-// never removes the previous data.
+// listPreviousBlobs returns the files under the table path before a replace writes
+// anything. Only these files are removed afterwards, so a replace running at the same time
+// on the same path cannot delete this load's files.
+func (d *BlobstoreDestination) listPreviousBlobs(ctx context.Context) ([]string, error) {
+	// Never clear a whole bucket: without a path, the table has no files of its own.
+	if strings.Trim(d.basePath, "/") == "" {
+		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: the table has no path inside bucket %s, and the bucket root is never cleared", d.tableName, d.bucketName)
+		return nil, nil
+	}
+
+	// The trailing slash in the prefix keeps "reports/t" from matching "reports/t2".
+	keys, err := d.listBlobs(ctx, d.bucketName, d.tablePrefix())
+	if errors.Is(err, errListUnsupported) {
+		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: removing old files is not supported for %s yet", d.tableName, d.provider)
+		return nil, nil
+	}
+	return keys, err
+}
+
+// removeStaleBlobs completes a replace by deleting the previous files that this load did
+// not rewrite. It runs only after every new file is written.
 func (d *BlobstoreDestination) removeStaleBlobs(ctx context.Context) error {
 	d.mu.Lock()
-	bucket, basePath, table := d.bucketName, strings.Trim(d.basePath, "/"), d.tableName
-	written := make(map[string]struct{}, len(d.writtenKeys))
-	for key := range d.writtenKeys {
-		written[key] = struct{}{}
-	}
-	d.mu.Unlock()
-
-	// Never clear a whole bucket: without a path, the table has no files of its own.
-	if basePath == "" {
-		output.Warnf("[BLOBSTORE] replace kept existing files for %s: the table has no path inside bucket %s, and the bucket root is never cleared", table, bucket)
-		return nil
-	}
-
-	// The trailing slash keeps "reports/t" from matching "reports/t2".
-	keys, err := d.listBlobs(ctx, bucket, basePath+"/")
-	if errors.Is(err, errListUnsupported) {
-		output.Warnf("[BLOBSTORE] replace kept existing files for %s: removing old files is not supported for %s yet", table, d.provider)
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
+	bucket := d.bucketName
 	var stale []string
-	for _, key := range keys {
-		if _, ok := written[key]; !ok {
+	for _, key := range d.previousKeys {
+		if _, ok := d.writtenKeys[key]; !ok {
 			stale = append(stale, key)
 		}
 	}
+	d.mu.Unlock()
+
 	if len(stale) == 0 {
 		return nil
 	}
 
-	config.Debug("[BLOBSTORE] Removing %d files from the previous load under %s/%s/", len(stale), bucket, basePath)
+	config.Debug("[BLOBSTORE] Removing %d files from the previous load under %s/%s", len(stale), bucket, d.tablePrefix())
 	return d.deleteBlobs(ctx, bucket, stale)
 }
 
