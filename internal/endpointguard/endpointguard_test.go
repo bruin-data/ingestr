@@ -1,12 +1,14 @@
 package endpointguard
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -95,6 +97,24 @@ func TestNewHTTPClient_RejectsBlockedAddressAtDial(t *testing.T) {
 	metadata := &url.URL{Scheme: "https", Host: "169.254.169.254"}
 	_, err = get(t, NewHTTPClient(metadata), "http://169.254.169.254/latest/meta-data/")
 	require.ErrorContains(t, err, "not allowed")
+}
+
+func TestNewHTTPClient_RejectsPlainHTTPOutsideLoopbackAtDial(t *testing.T) {
+	t.Parallel()
+
+	// 203.0.113.0/24 is reserved for documentation; the dial check fails before any packet is sent.
+	// The deadline makes a regression fail fast instead of waiting for a real connect timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://203.0.113.10/", nil)
+	require.NoError(t, err)
+
+	endpoint := &url.URL{Scheme: "http", Host: "203.0.113.10"}
+	resp, err := NewHTTPClient(endpoint).Do(req)
+	if resp != nil {
+		require.NoError(t, resp.Body.Close())
+	}
+	require.ErrorContains(t, err, "http:// is only allowed for loopback addresses")
 }
 
 func TestNewHTTPClient_DoesNotFollowRedirects(t *testing.T) {
