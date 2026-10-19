@@ -46,7 +46,7 @@ For tables with a merge key, deletes are captured as soft deletes: the destinati
 
 ### Resuming and full refresh
 
-On every run after the first, a CDC connector resumes from the last durable position rather than re-snapshotting. If that saved position is no longer available in the source's log (for example, the log was truncated or retention expired), the run **fails instead of silently taking a partial snapshot**. To rebuild the destination from a fresh snapshot, run with `--full-refresh`.
+On every run after the first, a CDC connector resumes from the last durable position rather than re-snapshotting. If that saved position is no longer available in the source's log (for example, the log was truncated or retention expired), the run **fails instead of silently taking a partial snapshot**. To rebuild the destination from a fresh snapshot, run with `--full-refresh`. For a continuous PostgreSQL CDC, MySQL CDC, or SQL Server CDC/Change Tracking stream, use `--full-refresh --stream --refresh-id <unique-request-id>` to reset and continue streaming in one process. Persist the ID and reuse it on retries so completed snapshots are resumed instead of reset again. This requires destination-managed CDC state; see [Refreshing a stream](/commands/ingest.md#refreshing-a-stream).
 
 For externally loaded destinations, PostgreSQL supports [CDC without snapshots](/supported-sources/postgres#cdc-without-snapshots) using `--cdc-snapshot-mode never` and `--cdc-start-lsn`. This requires a consistent external baseline and a replication slot retaining changes from that boundary. The saved `never` policy prohibits full refresh and all automatic snapshot fallbacks, including the schema-change rebuilds described below.
 
@@ -162,7 +162,7 @@ PostgreSQL CDC is immune, because its replication slot is exclusive: a second ru
 
 MySQL and MariaDB CDC are a separate case: they require a destination-side run lease that neither BigQuery nor Snowflake implements, so `mysql+cdc`, `mysql+pymysql+cdc` and `mariadb+cdc` are still rejected against those two destinations and a serial schedule does not change that. Use a destination that enforces primary keys.
 
-The mitigation is operational: keep one run of a connector in flight at a time, with a non-overlapping schedule, a scheduler-level lock, or a single long-lived `--stream` process. A strictly serial schedule is safe, and `--full-refresh` runs are unaffected since they do not merge into existing data. [Issue #1190](https://github.com/bruin-data/ingestr/issues/1190) tracks removing the hazard.
+The mitigation is operational: keep one run of a connector in flight at a time, with a non-overlapping schedule, a scheduler-level lock, or a single long-lived `--stream` process. A strictly serial schedule is safe, and batch `--full-refresh` runs are unaffected since they do not merge into existing data. Streaming full refresh continues merging after the snapshot and requires the same serialization. [Issue #1190](https://github.com/bruin-data/ingestr/issues/1190) tracks removing the hazard.
 
 ## CDC vs. regular incremental loading
 
@@ -196,10 +196,12 @@ The first run snapshots `public.users` and records the WAL position; each later 
 
 ## Hands-on tutorials
 
-Step-by-step walkthroughs that set up a source, take the initial snapshot, and capture live inserts, updates, and deletes into DuckDB:
+Walkthroughs that set up a source, take the initial snapshot, and capture live inserts, updates, and deletes:
 
 - [Replicate PostgreSQL to DuckDB with CDC](/tutorials/cdc-postgres-duckdb.md)
+- [Replicate PostgreSQL to StarRocks with CDC](/supported-sources/starrocks.md#postgresql-cdc)
 - [Replicate MySQL to DuckDB with CDC](/tutorials/cdc-mysql-duckdb.md)
+- [Replicate MySQL to StarRocks with CDC](/supported-sources/starrocks.md#mysql-cdc)
 - [Replicate SQL Server to DuckDB with CDC](/tutorials/cdc-sqlserver-duckdb.md)
 - [Replicate MongoDB to DuckDB with CDC](/tutorials/cdc-mongodb-duckdb.md)
 

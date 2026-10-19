@@ -31,6 +31,7 @@ type athenaConfig struct {
 	SecretAccessKey string
 	SessionToken    string
 	DefaultDatabase string
+	EndpointURL     string
 }
 
 func NewAthenaSource() *AthenaSource {
@@ -67,7 +68,7 @@ func (s *AthenaSource) Connect(ctx context.Context, rawURI string) error {
 		return errors.New("athena uri: region_name is required (or configure a default AWS region via profile/environment)")
 	}
 
-	s.client = athena.NewFromConfig(awsCfg)
+	s.client = athena.NewFromConfig(awsCfg, cfg.clientOptions)
 	s.cfg = cfg
 	return nil
 }
@@ -343,4 +344,10 @@ func (s *AthenaSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 
 func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+func (c athenaConfig) clientOptions(o *athena.Options) {
+	if c.EndpointURL != "" {
+		o.BaseEndpoint = aws.String(c.EndpointURL)
+	}
 }

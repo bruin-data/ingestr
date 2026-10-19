@@ -816,3 +816,51 @@ func TestMergeTableRejectsNullPrimaryKeys(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "contains NULL")
 }
+
+func TestReplaceTableWithArrayColumns(t *testing.T) {
+	dest := newHadoopDestination(t)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "nums", DataType: schema.TypeArray, ArrayType: schema.TypeInt64, Nullable: true},
+			{Name: "tags", DataType: schema.TypeArray, ArrayType: schema.TypeString, Nullable: true},
+		},
+	}
+	for run := 0; run < 2; run++ {
+		writeTableRows(t, dest, "lake.replace.arrays", tableSchema, true, [][]any{
+			{int64(1), []any{int64(1), int64(2)}, []any{"a", "b"}},
+		})
+	}
+	require.Len(t, readTableRows(t, dest, "lake.replace.arrays").Rows, 1)
+}
+
+func TestSameIcebergTypeIgnoresListElementIDs(t *testing.T) {
+	a := &iceberggo.ListType{ElementID: 2, Element: iceberggo.PrimitiveTypes.Int64, ElementRequired: false}
+	b := &iceberggo.ListType{ElementID: 5, Element: iceberggo.PrimitiveTypes.Int64, ElementRequired: false}
+	require.True(t, sameIcebergType(a, b))
+	require.False(t, a.Equals(b))
+	require.False(t, sameIcebergType(a, &iceberggo.ListType{ElementID: 2, Element: iceberggo.PrimitiveTypes.String}))
+}
+
+func TestReplaceTableWidensArrayElement(t *testing.T) {
+	dest := newHadoopDestination(t)
+	table := "lake.replace.widen_array"
+	arraySchema := func(elem schema.DataType) *schema.TableSchema {
+		return &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+			{Name: "nums", DataType: schema.TypeArray, ArrayType: elem, Nullable: true},
+		}}
+	}
+	writeTableRows(t, dest, table, arraySchema(schema.TypeInt32), true, [][]any{{int64(1), []any{int64(1)}}})
+	writeTableRows(t, dest, table, arraySchema(schema.TypeInt64), true, [][]any{{int64(2), []any{int64(20000000000)}}})
+
+	tbl, err := dest.loadIcebergTable(context.Background(), table)
+	require.NoError(t, err)
+	field, ok := tbl.Schema().FindFieldByName("nums")
+	require.True(t, ok)
+	require.Equal(t, iceberggo.PrimitiveTypes.Int64, field.Type.(*iceberggo.ListType).Element)
+
+	rows := readTableRows(t, dest, table)
+	require.Len(t, rows.Rows, 1)
+	require.Equal(t, []any{int64(20000000000)}, rows.Rows[0][rows.ColIdx["nums"]])
+}

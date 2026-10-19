@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -381,6 +382,42 @@ func TestWriteNullsClearsField(t *testing.T) {
 		}))
 		assert.Equal(t, map[string]interface{}{"name": map[string]interface{}{"$delete": true}}, (*bodies)[0].D[0]["profileData"])
 	})
+}
+
+func TestNonFiniteFloatsFollowWriteNulls(t *testing.T) {
+	profiles := func() arrow.RecordBatch {
+		s := arrow.NewSchema([]arrow.Field{
+			{Name: "email", Type: arrow.BinaryTypes.String},
+			{Name: "score", Type: arrow.PrimitiveTypes.Float64},
+		}, nil)
+		b := array.NewRecordBuilder(memory.DefaultAllocator, s)
+		defer b.Release()
+		b.Field(0).(*array.StringBuilder).AppendValues([]string{"a@x.com", "b@x.com", "c@x.com"}, nil)
+		b.Field(1).(*array.Float64Builder).AppendValues([]float64{math.NaN(), math.Inf(-1), 1.5}, nil)
+		return b.NewRecordBatch()
+	}
+
+	for _, writeNulls := range []bool{false, true} {
+		server, bodies := newUploadServer(t)
+		d := connectTestDestination(t, server.URL)
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: profiles()}
+		close(records)
+		require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+			Table:       "profiles",
+			PrimaryKeys: []string{"email"},
+			WriteNulls:  writeNulls,
+		}))
+		items := (*bodies)[0].D
+		require.Len(t, items, 3)
+		cleared := map[string]interface{}{}
+		if writeNulls {
+			cleared = map[string]interface{}{"score": map[string]interface{}{"$delete": true}}
+		}
+		assert.Equal(t, cleared, items[0]["profileData"])
+		assert.Equal(t, cleared, items[1]["profileData"])
+		assert.Equal(t, map[string]interface{}{"score": 1.5}, items[2]["profileData"])
+	}
 }
 
 func TestFailFastParallelAborts(t *testing.T) {

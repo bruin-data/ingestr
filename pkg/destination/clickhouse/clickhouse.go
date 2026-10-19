@@ -31,6 +31,7 @@ type ClickHouseDestination struct {
 	conn           driver.Conn
 	uri            string
 	database       string
+	cluster        string
 	engineType     string
 	engineSettings map[string]string
 }
@@ -44,7 +45,7 @@ func (d *ClickHouseDestination) Schemes() []string {
 }
 
 func (d *ClickHouseDestination) Connect(ctx context.Context, uri string) error {
-	opts, database, engineType, engineSettings, err := parseClickHouseURI(uri)
+	opts, database, cluster, engineType, engineSettings, err := parseClickHouseURI(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse ClickHouse URI: %w", err)
 	}
@@ -62,9 +63,10 @@ func (d *ClickHouseDestination) Connect(ctx context.Context, uri string) error {
 	d.conn = conn
 	d.uri = uri
 	d.database = database
+	d.cluster = cluster
 	d.engineType = engineType
 	d.engineSettings = engineSettings
-	config.Debug("[CLICKHOUSE] Connected to database: %s (engine=%q, settings=%v)", database, engineType, engineSettings)
+	config.Debug("[CLICKHOUSE] Connected to database: %s (cluster=%q, engine=%q, settings=%v)", database, cluster, engineType, engineSettings)
 	return nil
 }
 
@@ -90,7 +92,7 @@ func (d *ClickHouseDestination) PrepareTable(ctx context.Context, opts destinati
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s%s", quoteIdentifier(database), quoteIdentifier(tableName), onClusterClause(d.cluster))
 		if err := d.conn.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -99,7 +101,7 @@ func (d *ClickHouseDestination) PrepareTable(ctx context.Context, opts destinati
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(database, tableName, opts.Schema.Columns, opts.PrimaryKeys, d.engineType, d.engineSettings)
+	createSQL := buildCreateTableSQL(database, tableName, opts.Schema.Columns, opts.PrimaryKeys, d.engineType, d.engineSettings, d.cluster)
 	config.Debug("[CLICKHOUSE] CREATE SQL: %s", createSQL)
 	if err := d.conn.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
@@ -115,7 +117,7 @@ func (d *ClickHouseDestination) ensureDatabaseExists(ctx context.Context, databa
 		return nil
 	}
 
-	createDBSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteIdentifier(database))
+	createDBSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s%s", quoteIdentifier(database), onClusterClause(d.cluster))
 	if err := d.conn.Exec(ctx, createDBSQL); err != nil {
 		config.LogFailedQuery(createDBSQL, err)
 		return fmt.Errorf("failed to create database %s: %w", database, err)
@@ -219,25 +221,25 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 		return fmt.Errorf("failed to ensure target database exists: %w", err)
 	}
 
-	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES %s.%s AND %s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName))
+	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES %s.%s AND %s.%s%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
 	if err := d.conn.Exec(ctx, exchangeSQL); err != nil {
 		config.Debug("[CLICKHOUSE] EXCHANGE TABLES failed, falling back to RENAME: %v", err)
 
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("clickhouse"))
 
-		renameOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(targetDB), quoteIdentifier(oldName))
+		renameOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
 		if err := d.conn.Exec(ctx, renameOldSQL); err != nil {
 			config.Debug("[CLICKHOUSE] No existing table to rename (this is OK for first run)")
 		}
 
-		renameNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName))
+		renameNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
 		if err := d.conn.Exec(ctx, renameNewSQL); err != nil {
 			config.LogFailedQuery(renameNewSQL, err)
 			return fmt.Errorf("failed to rename staging to target: %w", err)
 		}
 
-		dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteIdentifier(targetDB), quoteIdentifier(oldName))
+		dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
 		_ = d.conn.Exec(ctx, dropOldSQL)
 	}
 
@@ -392,6 +394,30 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	// Format timestamp as ClickHouse DateTime64 literal
 	tsLiteral := fmt.Sprintf("toDateTime64('%s', 6)", opts.Timestamp.Format("2006-01-02 15:04:05.999999"))
 
+	// Replicas re-run mutations against their own copies, so the subqueries need identical data everywhere.
+	mutationSettings := ""
+	replicated := false
+	if d.cluster != "" && strings.EqualFold(d.engineType, "replicated_merge_tree") {
+		var engine string
+		if err := d.conn.QueryRow(ctx, "SELECT engine FROM system.tables WHERE database = ? AND name = ?", targetDB, targetName).Scan(&engine); err != nil {
+			return fmt.Errorf("failed to read engine of %s.%s: %w", targetDB, targetName, err)
+		}
+		replicated = strings.HasPrefix(engine, "Replicated")
+	}
+	if replicated {
+		for _, table := range []string{
+			fmt.Sprintf("%s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName)),
+			fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName)),
+		} {
+			syncSQL := fmt.Sprintf("SYSTEM SYNC REPLICA%s %s", onClusterClause(d.cluster), table)
+			if err := d.conn.Exec(ctx, syncSQL); err != nil {
+				config.LogFailedQuery(syncSQL, err)
+				return fmt.Errorf("failed to sync replicas of %s: %w", table, err)
+			}
+		}
+		mutationSettings = " SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2"
+	}
+
 	// Step 1: Close changed records (update _scd_valid_to and _scd_is_current)
 	// ClickHouse doesn't support UPDATE...FROM, so we use ALTER TABLE UPDATE with a subquery
 	// that finds PKs of records that exist in staging AND have changed
@@ -401,7 +427,7 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	}
 	updateSQL := fmt.Sprintf(
 		`
-		ALTER TABLE %s.%s
+		ALTER TABLE %s.%s%s
 		UPDATE
 			_scd_valid_to = %s,
 			_scd_is_current = 0
@@ -410,13 +436,13 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 			SELECT %s FROM %s.%s AS target
 			INNER JOIN %s.%s AS source ON %s
 			WHERE target._scd_is_current = 1 AND (%s)
-		  )`,
-		quoteIdentifier(targetDB), quoteIdentifier(targetName),
+		  )%s`,
+		quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster),
 		tsLiteral,
 		strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 		strings.Join(pkSelectTarget, ", "), quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		quoteIdentifier(stagingDB), quoteIdentifier(stagingName), onCondition,
-		changeConditions,
+		changeConditions, mutationSettings,
 	)
 	config.Debug("[CLICKHOUSE SCD2] Step 1 - Close changed records: %s", updateSQL)
 
@@ -434,16 +460,17 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	if opts.IncrementalKey == "" {
 		softDeleteSQL := fmt.Sprintf(
 			`
-			ALTER TABLE %s.%s
+			ALTER TABLE %s.%s%s
 			UPDATE
 				_scd_valid_to = %s,
 				_scd_is_current = 0
 			WHERE _scd_is_current = 1
-			  AND (%s) NOT IN (SELECT %s FROM %s.%s)`,
-			quoteIdentifier(targetDB), quoteIdentifier(targetName),
+			  AND (%s) NOT IN (SELECT %s FROM %s.%s)%s`,
+			quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster),
 			tsLiteral,
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "),
 			strings.Join(quoteColumns(opts.PrimaryKeys), ", "), quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
+			mutationSettings,
 		)
 		config.Debug("[CLICKHOUSE SCD2] Step 2 - Soft-delete missing: %s", softDeleteSQL)
 
@@ -568,7 +595,7 @@ func waitForMutationCompletion(ctx context.Context, attempts int, interval time.
 
 func (d *ClickHouseDestination) DropTable(ctx context.Context, table string) error {
 	database, tableName := d.parseTableName(table)
-	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s%s", quoteIdentifier(database), quoteIdentifier(tableName), onClusterClause(d.cluster))
 	if err := d.conn.Exec(ctx, dropSQL); err != nil {
 		config.LogFailedQuery(dropSQL, err)
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
@@ -579,7 +606,7 @@ func (d *ClickHouseDestination) DropTable(ctx context.Context, table string) err
 
 func (d *ClickHouseDestination) TruncateTable(ctx context.Context, table string) error {
 	database, tableName := d.parseTableName(table)
-	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
+	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s.%s%s", quoteIdentifier(database), quoteIdentifier(tableName), onClusterClause(d.cluster))
 	if err := d.conn.Exec(ctx, truncateSQL); err != nil {
 		config.LogFailedQuery(truncateSQL, err)
 		return fmt.Errorf("failed to truncate table %s: %w", table, err)
@@ -673,10 +700,10 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 	}, nil
 }
 
-func parseClickHouseURI(uri string) (*clickhouse.Options, string, string, map[string]string, error) {
+func parseClickHouseURI(uri string) (*clickhouse.Options, string, string, string, map[string]string, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
-		return nil, "", "", nil, fmt.Errorf("invalid URI: %w", err)
+		return nil, "", "", "", nil, fmt.Errorf("invalid URI: %w", err)
 	}
 
 	host := parsed.Hostname()
@@ -725,6 +752,7 @@ func parseClickHouseURI(uri string) (*clickhouse.Options, string, string, map[st
 	}
 
 	engineType := query.Get("engine")
+	cluster := query.Get("cluster")
 	engineSettings := map[string]string{}
 	for key, values := range query {
 		if !strings.HasPrefix(key, "engine.") || len(values) == 0 {
@@ -733,7 +761,7 @@ func parseClickHouseURI(uri string) (*clickhouse.Options, string, string, map[st
 		engineSettings[strings.TrimPrefix(key, "engine.")] = values[0]
 	}
 
-	return opts, database, engineType, engineSettings, nil
+	return opts, database, cluster, engineType, engineSettings, nil
 }
 
 func (d *ClickHouseDestination) parseTableName(table string) (string, string) {
@@ -744,7 +772,7 @@ func (d *ClickHouseDestination) parseTableName(table string) (string, string) {
 	return d.database, table
 }
 
-func buildCreateTableSQL(database, table string, columns []schema.Column, primaryKeys []string, engineType string, engineSettings map[string]string) string {
+func buildCreateTableSQL(database, table string, columns []schema.Column, primaryKeys []string, engineType string, engineSettings map[string]string, cluster string) string {
 	pkSet := make(map[string]bool)
 	for _, pk := range primaryKeys {
 		pkSet[strings.ToLower(pk)] = true
@@ -760,8 +788,8 @@ func buildCreateTableSQL(database, table string, columns []schema.Column, primar
 	engine, isMergeTree := validateEngineType(engineType, len(primaryKeys) > 0)
 
 	parts := []string{
-		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%s (\n  %s\n) ENGINE = %s",
-			quoteIdentifier(database), quoteIdentifier(table), strings.Join(colDefs, ",\n  "), engine),
+		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%s%s (\n  %s\n) ENGINE = %s",
+			quoteIdentifier(database), quoteIdentifier(table), onClusterClause(cluster), strings.Join(colDefs, ",\n  "), engine),
 	}
 
 	if isMergeTree {
@@ -785,6 +813,13 @@ func buildCreateTableSQL(database, table string, columns []schema.Column, primar
 	return strings.Join(parts, "\n")
 }
 
+func onClusterClause(cluster string) string {
+	if cluster == "" {
+		return ""
+	}
+	return " ON CLUSTER " + quoteIdentifier(cluster)
+}
+
 var engineTypeMap = map[string]struct {
 	name      string
 	mergeTree bool
@@ -798,6 +833,10 @@ var engineTypeMap = map[string]struct {
 func validateEngineType(engineType string, hasPrimaryKeys bool) (string, bool) {
 	if engineType != "" {
 		if e, ok := engineTypeMap[strings.ToLower(engineType)]; ok {
+			// Without a sorting key ReplacingMergeTree collapses every row into one.
+			if !hasPrimaryKeys && e.name == "ReplacingMergeTree()" {
+				return "MergeTree()", true
+			}
 			return e.name, e.mergeTree
 		}
 		valid := make([]string, 0, len(engineTypeMap))
@@ -877,8 +916,9 @@ func (d *ClickHouseDestination) buildDeleteInsertStatements(opts destination.Del
 	incrementalKey := quoteIdentifier(opts.IncrementalKey)
 
 	deleteSQL := fmt.Sprintf(
-		"ALTER TABLE %s DELETE WHERE %s >= %s AND %s <= %s",
+		"ALTER TABLE %s%s DELETE WHERE %s >= %s AND %s <= %s",
 		targetFQN,
+		onClusterClause(d.cluster),
 		incrementalKey,
 		formatClickHouseLiteral(opts.IntervalStart, opts.IncrementalKeyType),
 		incrementalKey,
@@ -992,6 +1032,10 @@ func buildChangeConditionsClickHouse(columns []string, targetAlias, sourceAlias 
 
 func extractValue(arr arrow.Array, idx int) interface{} {
 	if arr.IsNull(idx) {
+		// ClickHouse arrays can't be NULL, so a NULL list is written as empty.
+		if _, ok := arr.(*array.List); ok {
+			return []interface{}{}
+		}
 		return nil
 	}
 

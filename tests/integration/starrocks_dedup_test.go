@@ -18,9 +18,9 @@ func TestStarRocksDeduplication(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	ctx := context.Background()
-	dsn, uri := startStarRocksContainer(ctx, t)
-	waitForStarRocksBackend(t, dsn)
+	dsn, uri := sharedStarRocks(t)
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

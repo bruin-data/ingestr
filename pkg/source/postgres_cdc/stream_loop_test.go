@@ -164,7 +164,7 @@ func drainStreamLoop(t *testing.T, steps []replStep) (batchCount int, totalRows 
 	results := make(chan source.RecordBatchResult, len(steps)+1)
 	accum := testAccumulator(10000)
 
-	err := streamLoop(context.Background(), repl, 10000, accum, results, false)
+	err := streamLoop(context.Background(), repl, 10000, accum, results, false, 0)
 	require.NoError(t, err)
 	close(results)
 
@@ -292,7 +292,7 @@ func TestStreamLoopLeaseLossDiscardsAccumulatorWithoutMaterializing(t *testing.T
 	accum := testAccumulator(10000)
 	results := make(chan source.RecordBatchResult, 1)
 
-	err := streamLoop(ctx, &leaseLossReplicator{lease: lease}, 10000, accum, results, true)
+	err := streamLoop(ctx, &leaseLossReplicator{lease: lease}, 10000, accum, results, true, 0)
 	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
 	assert.Empty(t, accum.changes)
 	assert.Empty(t, accum.minLSN)
@@ -341,7 +341,7 @@ func TestStreamLoopEmitsIdleCommitToken(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// Streaming ignores the scripted barrier and runs until cancellation.
-		done <- streamLoop(ctx, repl, 10000, accum, results, true)
+		done <- streamLoop(ctx, repl, 10000, accum, results, true, 0)
 	}()
 
 	var idleToken pglogrepl.LSN
@@ -403,7 +403,7 @@ func TestStreamModeKeepaliveHeadNeverBecomesCommitToken(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		_ = streamLoop(ctx, repl, 10000, accum, results, true)
+		_ = streamLoop(ctx, repl, 10000, accum, results, true, 0)
 		close(results)
 	}()
 
@@ -444,7 +444,7 @@ func TestBatchWaitsForBarrierAfterKeepaliveAndDelayedChanges(t *testing.T) {
 		{hadActivity: true, lsn: 30, barrier: true},
 	}}
 	results := make(chan source.RecordBatchResult, 1)
-	err := streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false)
+	err := streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
 	res := <-results

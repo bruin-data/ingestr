@@ -51,7 +51,7 @@ func MapDataTypeToDatabricks(col schema.Column) string {
 	case schema.TypeUUID:
 		return "STRING"
 	case schema.TypeArray:
-		elemType := MapDataTypeToDatabricks(schema.Column{DataType: col.ArrayType})
+		elemType := MapDataTypeToDatabricks(schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale})
 		return fmt.Sprintf("ARRAY<%s>", elemType)
 	default:
 		return "STRING"

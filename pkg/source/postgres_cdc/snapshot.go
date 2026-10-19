@@ -16,8 +16,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -28,6 +30,7 @@ type Snapshot struct {
 	tableSchema *schema.TableSchema
 	cdcConfig   CDCConfig
 	slotName    string
+	typeMap     *pgtype.Map
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -253,7 +256,12 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	// A replacement snapshot can run the same SELECT text after DDL changed a
 	// column OID. Describe it afresh so pgx cannot decode rows with the cached
 	// pre-DDL statement description.
-	rows, err := tx.Query(ctx, query, pgx.QueryExecModeDescribeExec)
+	description, err := tx.Conn().PgConn().Prepare(ctx, "", query, nil)
+	if err != nil {
+		return fmt.Errorf("failed to describe snapshot query: %w", err)
+	}
+	s.typeMap = tx.Conn().TypeMap()
+	rows, err := tx.Query(ctx, query, pgx.QueryExecModeDescribeExec, postgres.TextResultFormats(s.typeMap, description.Fields, sourceColumns, snapshotTextColumn))
 	if err != nil {
 		return fmt.Errorf("failed to query: %w", err)
 	}
@@ -262,7 +270,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	if opts.CDCSnapshotReplace {
 		// A snapshot is a complete replacement boundary. Consumers that opt in
 		// discard target rows left by an interrupted snapshot or a lost slot.
-		if err := sendResult(ctx, results, source.RecordBatchResult{Truncate: true}); err != nil {
+		if err := sendResult(ctx, results, source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)}); err != nil {
 			return err
 		}
 	}
@@ -315,18 +323,26 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 
 	var rowCount int64
 	var accBytes int64
+	typeMap := s.typeMap
+	if typeMap == nil {
+		typeMap = pgtype.NewMap()
+	}
 	for rows.Next() {
-		values, err := rows.Values()
-		if err != nil {
+		raw, fields := rows.RawValues(), rows.FieldDescriptions()
+		if len(raw) != len(columns) || len(fields) != len(columns) {
 			for _, b := range builders {
 				b.Release()
 			}
-			return nil, 0, fmt.Errorf("failed to get values: %w", err)
+			return nil, 0, fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), len(columns))
 		}
 
 		// Append source column values
-		for i, val := range values {
-			converted, err := convertValue(val, columns[i])
+		for i, buf := range raw {
+			val, err := snapshotValue(typeMap, fields[i], buf, columns[i])
+			var converted any
+			if err == nil {
+				converted, err = convertValue(val, columns[i])
+			}
 			if err != nil {
 				for _, b := range builders {
 					b.Release()
@@ -385,11 +401,53 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 	return record, rowCount, nil
 }
 
+// String-like columns and all arrays are read as PostgreSQL text and decoded
+// like pgoutput WAL values: pgx decodes types such as time, interval, bit,
+// ranges, and geometry into Go structs, leaves array elements (numeric, uuid)
+// in forms the Arrow builders reject, and its text parsers reject values
+// PostgreSQL emits (non-default IntervalStyle, years past 9999). Date and
+// timestamp arrays stay binary, where pgx handles years past 9999.
+func snapshotTextColumn(col schema.Column) bool {
+	switch col.DataType {
+	case schema.TypeString, schema.TypeInterval, schema.TypeTime:
+		return true
+	case schema.TypeArray:
+		return col.ArrayType != schema.TypeDate && col.ArrayType != schema.TypeTimestamp && col.ArrayType != schema.TypeTimestampTZ
+	}
+	return false
+}
+
+// snapshotValue decodes one column like pgx's Rows.Values, except that
+// text-format string-like columns keep PostgreSQL's text representation.
+func snapshotValue(typeMap *pgtype.Map, field pgconn.FieldDescription, buf []byte, col schema.Column) (any, error) {
+	if buf == nil {
+		return nil, nil
+	}
+	if field.Format == pgtype.TextFormatCode && snapshotTextColumn(col) {
+		return convertTextValueWithDelim(string(buf), col, typeMap, postgres.ArrayDelimiter(field.DataTypeOID))
+	}
+	return postgres.DecodePostgresValue(typeMap, field, buf)
+}
+
 func convertValue(val interface{}, col schema.Column) (interface{}, error) {
 	if val == nil {
 		return nil, nil
 	}
 	switch v := val.(type) {
+	case []any:
+		if col.DataType != schema.TypeArray {
+			return val, nil
+		}
+		elemCol := schema.Column{Name: col.Name, DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		out := make([]any, len(v))
+		for i, e := range v {
+			converted, err := convertValue(e, elemCol)
+			if err != nil {
+				return nil, fmt.Errorf("array element %d: %w", i, err)
+			}
+			out[i] = converted
+		}
+		return out, nil
 	case pgtype.Numeric:
 		if !v.Valid {
 			return nil, nil
@@ -403,7 +461,12 @@ func convertValue(val interface{}, col schema.Column) (interface{}, error) {
 		if v.Int == nil {
 			return nil, fmt.Errorf("PostgreSQL numeric has no finite coefficient")
 		}
-		return numericToBigInt(v, col.Scale), nil
+		scaled := numericToBigInt(v, col.Scale)
+		limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimalPrecision(col))), nil)
+		if new(big.Int).Abs(scaled).Cmp(limit) >= 0 {
+			return nil, fmt.Errorf("PostgreSQL numeric exceeds DECIMAL(%d,%d)", decimalPrecision(col), col.Scale)
+		}
+		return scaled, nil
 	case pgtype.InfinityModifier:
 		return nil, fmt.Errorf("PostgreSQL %s is not representable as %s", v, col.DataType)
 	case [16]byte:
@@ -429,8 +492,13 @@ func numericToBigInt(num pgtype.Numeric, targetScale int) *big.Int {
 		multiplier := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(diff)), nil)
 		result.Mul(result, multiplier)
 	} else if diff < 0 {
+		// Round half away from zero, like decimal128.FromString on the WAL path.
 		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-diff)), nil)
-		result.Div(result, divisor)
+		remainder := new(big.Int)
+		result.QuoRem(result, divisor, remainder)
+		if new(big.Int).Mul(remainder.Abs(remainder), big.NewInt(2)).Cmp(divisor) >= 0 {
+			result.Add(result, big.NewInt(int64(num.Int.Sign())))
+		}
 	}
 
 	return result

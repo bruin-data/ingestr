@@ -953,6 +953,16 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 						tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 					}
 					tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
+					// A truncated table keeps its column types; recreate it when they no longer fit.
+					if validateBigQuerySchemaCompatibility(existingMeta, tableSchema, false) != nil {
+						config.Debug("[DEST] Recreating table with incompatible schema: %s", opts.Table)
+						if err := tableRef.Delete(ctx); err != nil && !isNotFoundError(err) {
+							errCh <- fmt.Errorf("failed to drop table: %w", err)
+							return
+						}
+						errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
+						return
+					}
 					if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
 						errCh <- fmt.Errorf("failed to update schema: %w", err)
 						return
@@ -979,6 +989,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	// Non-DropFirst: check if table exists, add missing columns or create
 	existingMeta, err := tableRef.Metadata(ctx)
 	if err == nil {
+		if d.partitionOrClusterMismatch(existingMeta, opts.ClusterBy) {
+			output.Warnf("[WARNING] %s keeps its existing partitioning/clustering: BigQuery can't change it in place, so a new partition_by/cluster_by is applied only by a replace or --full-refresh run\n", opts.Table)
+		}
 		// The table existed at evolution-planning time, so a planned ALTER
 		// backs any type-kind difference.
 		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts, true)
@@ -2954,6 +2967,11 @@ func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) 
 			Name:     field.Name,
 			DataType: mapBigQueryTypeToSchema(field),
 			Nullable: !field.Required,
+		}
+		if field.Repeated {
+			elem := *field
+			elem.Repeated = false
+			col.ArrayType = mapBigQueryTypeToSchema(&elem)
 		}
 
 		if field.Type == bigquery.NumericFieldType || field.Type == bigquery.BigNumericFieldType {

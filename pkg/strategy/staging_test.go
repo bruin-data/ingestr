@@ -1,11 +1,15 @@
 package strategy
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStagingUniqueToken(t *testing.T) {
@@ -368,4 +372,47 @@ func TestManagedCDCStateTableName_UsesConfiguredCatalog(t *testing.T) {
 	if got := managedCDCStateTableName(dest, "cdc_state", ""); got != "projectA._bruin_staging.cdc_state" {
 		t.Fatalf("managedCDCStateTableName() = %q, want projectA._bruin_staging.cdc_state", got)
 	}
+}
+
+type staleStagingDestination struct {
+	destination.Destination
+	tables  []string
+	dropped []string
+}
+
+func (d *staleStagingDestination) ListStagingTables(_ context.Context, schema, prefix string) ([]string, error) {
+	if schema != "_bruin_staging" || prefix != "public_orders_stream_" {
+		return nil, fmt.Errorf("unexpected listing %s %s", schema, prefix)
+	}
+	return d.tables, nil
+}
+
+func (d *staleStagingDestination) DropTable(_ context.Context, table string) error {
+	d.dropped = append(d.dropped, table)
+	return nil
+}
+
+func TestDropStaleStagingTablesOnlyDropsEarlierRunsOfTheSameTarget(t *testing.T) {
+	current := "public_orders_stream_0123456789abcdef0123456789abcdef"
+	dest := &staleStagingDestination{tables: []string{
+		current,
+		"public_orders_stream_fedcba9876543210fedcba9876543210",
+		"public_orders_stream_1700000000000000000",
+		"public_orders_stream_stream_fedcba9876543210fedcba9876543210",
+		"public_orders_stream_notatoken",
+	}}
+	unleased := &staleStagingDestination{tables: dest.tables}
+	dropStaleStagingTables(context.Background(), unleased, "public.orders", "_bruin_staging."+current)
+	require.Empty(t, unleased.dropped)
+
+	ctx := source.WithConnectorLeaseGuard(context.Background(), source.NewConnectorLeaseGuard(nil))
+	dropStaleStagingTables(ctx, dest, "public.orders", "_bruin_staging."+current)
+	require.Equal(t, []string{
+		"_bruin_staging.public_orders_stream_fedcba9876543210fedcba9876543210",
+		"_bruin_staging.public_orders_stream_1700000000000000000",
+	}, dest.dropped)
+
+	unqualified := &staleStagingDestination{tables: dest.tables}
+	dropStaleStagingTables(ctx, unqualified, "orders", "_bruin_staging."+current)
+	require.Empty(t, unqualified.dropped)
 }

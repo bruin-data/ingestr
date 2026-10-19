@@ -38,6 +38,8 @@ ingestr ingest \
 - `--cdc-snapshot-mode auto|never`: PostgreSQL CDC only. `auto` resumes when possible and permits initial and recovery snapshots and backfills as needed. `never` prohibits all snapshots and backfills; it requires explicit table selection, an existing `slot=`, and keyed merge. The policy is saved with connector state and inherited when omitted; new connectors default to `auto`. Cannot combine `never` with full refresh. Environment variable: `INGESTR_CDC_SNAPSHOT_MODE`.
 - `--cdc-start-lsn TEXT`: First-run-only bootstrap boundary for preloaded PostgreSQL CDC destinations. Requires `--cdc-snapshot-mode never`, a transaction-consistent external baseline at this LSN, and retained WAL. Remove on subsequent runs; it cannot reset existing state. See [CDC without snapshots](/supported-sources/postgres#cdc-without-snapshots). Environment variable: `INGESTR_CDC_START_LSN`.
 - `--stream`: Runs continuous (streaming) ingestion instead of a one-shot load. Supported by CDC sources (`postgres+cdc`, `mysql+cdc`, `mariadb+cdc`, `vitess+cdc`, `ps_mysql+cdc`, `mssql+cdc`, `mongodb+cdc`) and message brokers. The process runs until interrupted (SIGINT/SIGTERM), flushing buffered records to the destination on an interval or record-count trigger. See [Streaming ingestion](#streaming-ingestion) below.
+- `--full-refresh`: Rebuild destination tables from fresh source snapshots. With `--stream`, continue streaming in the same process after the snapshots. Streaming refresh requires a PostgreSQL CDC, MySQL CDC, or SQL Server CDC/Change Tracking source and a destination supporting managed CDC state.
+- `--refresh-id TEXT`: An opaque, globally unique operation ID for `--full-refresh --stream`. Reuse this ID across process restarts; use a new ID for each requested refresh. Can also be set with `INGESTR_REFRESH_ID`.
 - `--flush-interval`: In streaming mode, flush buffered records to the destination at least this often. Defaults to `30s`. Only valid with `--stream`.
 - `--flush-records`: In streaming mode, flush when this many records have been buffered. Defaults to `50000`. Only valid with `--stream`.
 - `--metrics-addr`: In streaming mode, serve replication lag and throughput metrics over HTTP on this address (e.g. `127.0.0.1:6060`). Disabled unless set. Only valid with `--stream`. See [Monitoring a stream](#monitoring-a-stream) below.
@@ -98,6 +100,24 @@ ingestr ingest \
 
 > [!INFO]
 > Column-level schema changes are picked up at startup. If a table's columns change while a stream is running, restart the stream to apply the new schema. Run streaming ingestion under a supervisor (systemd, Kubernetes, etc.) so it restarts after transient source/destination outages.
+
+### Refreshing a stream
+
+Stop the existing process before starting its replacement:
+
+```bash
+ingestr ingest \
+   --source-uri "$SOURCE_URI" \
+   --dest-uri "$DEST_URI" \
+   --source-table public.orders \
+   --stream --full-refresh --refresh-id "orders:550e8400-e29b-41d4-a716-446655440000"
+```
+
+The stream truncates each selected destination table at its snapshot boundary, loads fresh source data, and continues applying changes with merge or append. Multi-table refresh covers the currently selected or discovered source tables; destinations for tables that are no longer selected or present in the source are left in place. Snapshots are not an atomic replacement across tables.
+
+The refresh ID is the sole lookup key in destination metadata. Its record links the operation to its CDC generation and per-table snapshot certificates. Restarting with the same ID resumes completed snapshots and retries interrupted ones. A completed refresh resumes ordinary streaming; a new ID requests another refresh. Reusing an ID for different connection or selection settings is rejected. The ID restores its recorded checkpoint and replication slot associations before source slots and leases are acquired, even if a recomputed connector identity changes. BigQuery credential rotation preserves these associations. Keep the destination metadata alongside the destination data.
+
+Without `--refresh-id`, every process invocation with `--full-refresh` requests a new reset. Supervisors should persist one ID per refresh request and reuse it on retries. Unsupported sources and destinations fail before resetting destination data.
 
 ### Monitoring a stream
 

@@ -15,6 +15,7 @@ jira://your-domain.atlassian.net?email=<email>&api_token=<api_token>
 URI parameters:
 - `email`: the email address used for authentication with the Jira API
 - `api_token`: the API token for authentication (required for Jira Cloud)
+- `cloud_id` (optional): your Atlassian site's cloud ID. Only needed for service accounts, and ingestr detects it automatically when it's not set
 
 ## Example usage
 
@@ -34,6 +35,16 @@ To connect to Jira, you need:
 
 1. **Email**: Your Atlassian account email
 2. **API Token**: Create one from your [Atlassian Account Settings](https://id.atlassian.com/manage-profile/security/api-tokens)
+
+### Service accounts
+
+Service accounts are the recommended way to connect for data fetching. Create one in [Atlassian Administration](https://admin.atlassian.com) under **Directory → Service accounts**, give it the **User** role on Jira, and create an API token for it with the `read:jira-work` and `read:jira-user` scopes. The `events`, `issue_custom_field_contexts` and `issue_custom_field_options` tables also need the `manage:jira-configuration` scope and the Jira Administration role. Then use the service account's email and token in the URI as usual:
+
+```plaintext
+jira://company.atlassian.net?email=<service-account-email>&api_token=<api_token>
+```
+
+ingestr detects your site's cloud ID automatically. If that fails, set it explicitly with `cloud_id`. You can find it by opening `https://company.atlassian.net/_edge/tenant_info` in your browser.
 
 ## Tables
 

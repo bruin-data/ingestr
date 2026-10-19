@@ -432,6 +432,17 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 		}
 	}
 	r.tables = tables
+	for _, table := range tables {
+		if _, changed := changedSet[table.Name]; !changed {
+			continue
+		}
+		for _, column := range replacedColumns(prevSchemas[table.Name], table.Schema) {
+			if r.allowedUnknown[table.Name] == nil {
+				r.allowedUnknown[table.Name] = make(map[string]struct{})
+			}
+			r.allowedUnknown[table.Name][column] = struct{}{}
+		}
+	}
 	for _, schemaErr := range signal.schemaErrors {
 		for _, table := range tables {
 			if table.Name != schemaErr.Table {
@@ -510,6 +521,27 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 	}
 	waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 	return r.getSlotLSN(ctx, slotName)
+}
+
+// replacedColumns lists columns of prev that next dropped or retyped. WAL
+// replayed from before a rebuild still carries relation messages describing
+// them, which must decode as historical instead of triggering another rebuild.
+func replacedColumns(prev, next *schema.TableSchema) []string {
+	if prev == nil || next == nil {
+		return nil
+	}
+	current := make(map[string]schema.Column, len(next.Columns))
+	for _, col := range next.Columns {
+		current[col.Name] = col
+	}
+	var out []string
+	for _, col := range prev.Columns {
+		now, ok := current[col.Name]
+		if !ok || now.DataType != col.DataType || now.ArrayType != col.ArrayType || now.MaxLength != col.MaxLength || now.Precision != col.Precision || now.Scale != col.Scale {
+			out = append(out, col.Name)
+		}
+	}
+	return out
 }
 
 // shapeChangedTables returns the indices of refreshed tables whose column
@@ -969,7 +1001,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 			return nil, err
 		}
 		if opts.Streaming && hadActivity {
-			if err := accum.flushStaleContext(ctx, results, token, streamingAccumulatorMaxAge, time.Now()); err != nil {
+			if err := accum.flushStaleContext(ctx, results, token, streamingMaxAge(opts.ReadOptions), time.Now()); err != nil {
 				return nil, err
 			}
 		}

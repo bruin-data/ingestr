@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/databricks/databricks-sdk-go"
@@ -57,7 +59,7 @@ func TestProcessResultsByteCap(t *testing.T) {
 			results := make(chan source.RecordBatchResult)
 			go func() {
 				defer close(results)
-				(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), tc.maxBatchBytes, results)
+				(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), tc.maxBatchBytes, 0, results)
 			}()
 
 			batches := 0
@@ -97,7 +99,7 @@ func TestProcessResultsExternalLinks(t *testing.T) {
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), 0, results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), 0, 0, results)
 	}()
 
 	totalRows := int64(0)
@@ -132,7 +134,7 @@ func TestProcessResultsExternalLinksError(t *testing.T) {
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), 0, results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, buildArrowSchema(columns), 0, 0, results)
 	}()
 
 	var foundErr error
@@ -184,7 +186,7 @@ func collect(t *testing.T, resp *dbsql.StatementResponse, target *arrow.Schema, 
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{}).processResults(context.Background(), resp, target, maxBatchBytes, results)
+		(&DatabricksSource{}).processResults(context.Background(), resp, target, maxBatchBytes, 0, results)
 	}()
 	var batches []arrow.RecordBatch
 	for res := range results {
@@ -469,6 +471,28 @@ func TestConformArrayListElements(t *testing.T) {
 	assert.True(t, tss.IsNull(1))
 }
 
+func TestMapDatabricksArrayOfDecimal(t *testing.T) {
+	dt, p, sc, at := MapDatabricksToDataType("ARRAY<DECIMAL(5,2)>")
+	assert.Equal(t, schema.TypeArray, dt)
+	assert.Equal(t, schema.TypeDecimal, at)
+	assert.Equal(t, 5, p)
+	assert.Equal(t, 2, sc)
+
+	src := arrow.NewSchema([]arrow.Field{
+		{Name: "arr_dec", Type: arrow.ListOf(&arrow.Decimal128Type{Precision: 5, Scale: 2}), Nullable: true},
+	}, nil)
+	rec := recordFromJSON(t, src, `[{"arr_dec": ["1.25"]}]`)
+	defer rec.Release()
+
+	target := buildArrowSchema([]schema.Column{{Name: "arr_dec", DataType: dt, Precision: p, Scale: sc, ArrayType: at, Nullable: true}})
+	out, err := conformRecord(memory.NewGoAllocator(), rec, target, nil)
+	require.NoError(t, err)
+	defer out.Release()
+
+	values := out.Column(0).(*array.List).ListValues().(*array.Decimal128)
+	assert.Equal(t, "1.25", values.ValueStr(0))
+}
+
 func TestProcessResultsFollowsNextChunkLinkWithoutManifest(t *testing.T) {
 	sc := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
 	rec0 := recordFromJSON(t, sc, `[{"id": 1}]`)
@@ -506,7 +530,7 @@ func TestProcessResultsFollowsNextChunkLinkWithoutManifest(t *testing.T) {
 	results := make(chan source.RecordBatchResult)
 	go func() {
 		defer close(results)
-		(&DatabricksSource{client: client}).processResults(context.Background(), resp, sc, 0, results)
+		(&DatabricksSource{client: client}).processResults(context.Background(), resp, sc, 0, 0, results)
 	}()
 	var ids []int64
 	for res := range results {
@@ -578,6 +602,13 @@ func TestFormatIntervals(t *testing.T) {
 	assert.True(t, out.Column(0).IsNull(1))
 	assert.True(t, out.Column(1).IsNull(1))
 	assert.Equal(t, int64(2), out.Column(2).(*array.Int64).Value(1))
+}
+
+func TestBuildIncrementalWhereSkipsMissingBounds(t *testing.T) {
+	start := time.Date(1998, 1, 1, 0, 0, 0, 0, time.UTC)
+	assert.Equal(t, "`d` >= TIMESTAMP '1998-01-01 00:00:00.000000'", buildIncrementalWhere("d", &start, nil))
+	assert.Equal(t, "`d` <= TIMESTAMP '1998-01-01 00:00:00.000000'", buildIncrementalWhere("d", nil, &start))
+	assert.Empty(t, buildIncrementalWhere("d", nil, nil))
 }
 
 func TestConformRecordMatchesColumnsByPosition(t *testing.T) {
@@ -681,4 +712,230 @@ func recordStringBytes(rec arrow.RecordBatch) int64 {
 		n += s
 	}
 	return n
+}
+
+// chunkServer serves a statement with one single-row chunk per index; download
+// controls how each chunk's data request is answered.
+func chunkServer(t *testing.T, total int, download func(w http.ResponseWriter, r *http.Request, idx int, data []byte)) (*httptest.Server, *dbsql.StatementResponse, *arrow.Schema) {
+	t.Helper()
+	sc := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	chunks := make([][]byte, total)
+	for i := range chunks {
+		rec := recordFromJSON(t, sc, fmt.Sprintf(`[{"id": %d}]`, i))
+		chunks[i] = arrowIPC(t, rec)
+		rec.Release()
+	}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var idx int
+		if _, err := fmt.Sscanf(r.URL.Path, "/api/2.0/sql/statements/s1/result/chunks/%d", &idx); err == nil {
+			_, _ = fmt.Fprintf(w, `{"external_links":[{"chunk_index":%d,"external_link":"%s/chunk/%d"}]}`, idx, server.URL, idx)
+			return
+		}
+		if _, err := fmt.Sscanf(r.URL.Path, "/chunk/%d", &idx); err == nil {
+			download(w, r, idx, chunks[idx])
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	resp := &dbsql.StatementResponse{
+		StatementId: "s1",
+		Manifest:    &dbsql.ResultManifest{TotalChunkCount: total},
+		Result: &dbsql.ResultData{ExternalLinks: []dbsql.ExternalLink{
+			{ChunkIndex: 0, ExternalLink: server.URL + "/chunk/0"},
+		}},
+	}
+	return server, resp, sc
+}
+
+func readIDs(t *testing.T, s *DatabricksSource, resp *dbsql.StatementResponse, sc *arrow.Schema, parallelism int) ([]int64, error) {
+	t.Helper()
+	results := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(results)
+		s.processResults(context.Background(), resp, sc, 0, parallelism, results)
+	}()
+	var ids []int64
+	var firstErr error
+	for res := range results {
+		if res.Err != nil {
+			if firstErr == nil {
+				firstErr = res.Err
+			}
+			continue
+		}
+		col := res.Batch.Column(0).(*array.Int64)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+		res.Batch.Release()
+	}
+	return ids, firstErr
+}
+
+func TestProcessResultsDownloadsChunksInParallel(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		parallelism int
+		want        int
+	}{
+		{"default", 0, config.DefaultExtractParallelism},
+		{"extract parallelism", 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const total = 10
+			var active, peak atomic.Int32
+			allBusy := make(chan struct{})
+			var once atomic.Bool
+			server, resp, sc := chunkServer(t, total, func(w http.ResponseWriter, r *http.Request, idx int, data []byte) {
+				n := active.Add(1)
+				defer active.Add(-1)
+				for {
+					p := peak.Load()
+					if n <= p || peak.CompareAndSwap(p, n) {
+						break
+					}
+				}
+				if int(n) == tc.want && once.CompareAndSwap(false, true) {
+					close(allBusy)
+				}
+				select {
+				case <-allBusy:
+				case <-time.After(5 * time.Second):
+				}
+				// Later chunks finish first, so ordering is up to the reader.
+				time.Sleep(time.Duration(total-idx) * 2 * time.Millisecond)
+				_, _ = w.Write(data)
+			})
+			client, err := databricks.NewWorkspaceClient(&databricks.Config{Host: server.URL, Token: "test"})
+			require.NoError(t, err)
+
+			ids, err := readIDs(t, &DatabricksSource{client: client}, resp, sc, tc.parallelism)
+			require.NoError(t, err)
+			assert.Equal(t, []int64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, ids)
+			assert.Equal(t, int32(tc.want), peak.Load())
+		})
+	}
+}
+
+func TestProcessResultsChunkFailureCancelsOthers(t *testing.T) {
+	var cancelled, started atomic.Int32
+	othersStarted := make(chan struct{})
+	server, resp, sc := chunkServer(t, 4, func(w http.ResponseWriter, r *http.Request, idx int, data []byte) {
+		switch idx {
+		case 0:
+			_, _ = w.Write(data)
+		case 1:
+			// Fail only once chunks 2 and 3 are in flight, so their cancellation is observable.
+			select {
+			case <-othersStarted:
+			case <-time.After(5 * time.Second):
+			}
+			http.NotFound(w, r)
+		default:
+			if started.Add(1) == 2 {
+				close(othersStarted)
+			}
+			select {
+			case <-r.Context().Done():
+				cancelled.Add(1)
+			case <-time.After(10 * time.Second):
+				_, _ = w.Write(data)
+			}
+		}
+	})
+	client, err := databricks.NewWorkspaceClient(&databricks.Config{Host: server.URL, Token: "test"})
+	require.NoError(t, err)
+
+	start := time.Now()
+	ids, err := readIDs(t, &DatabricksSource{client: client}, resp, sc, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 404")
+	// Chunk 0 may or may not be emitted before the failure cancels the read,
+	// but nothing after the failed chunk is.
+	assert.Subset(t, []int64{0}, ids)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Eventually(t, func() bool { return cancelled.Load() == 2 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestProcessResultsLaterChunkFailureStopsEarlierDownloads(t *testing.T) {
+	server, resp, sc := chunkServer(t, 2, func(w http.ResponseWriter, r *http.Request, idx int, data []byte) {
+		if idx == 1 {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+			_, _ = w.Write(data)
+		}
+	})
+	client, err := databricks.NewWorkspaceClient(&databricks.Config{Host: server.URL, Token: "test"})
+	require.NoError(t, err)
+
+	start := time.Now()
+	ids, err := readIDs(t, &DatabricksSource{client: client}, resp, sc, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status 404")
+	assert.Empty(t, ids)
+	assert.Less(t, time.Since(start), 5*time.Second, "must not wait for the slow earlier chunk")
+}
+
+func TestProcessResultsChunkRequestFailureStopsDownloads(t *testing.T) {
+	sc := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	rec := recordFromJSON(t, sc, `[{"id": 0}]`)
+	defer rec.Release()
+	chunk0 := arrowIPC(t, rec)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/chunk0":
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+				_, _ = w.Write(chunk0)
+			}
+		case "/api/2.0/sql/statements/s1/result/chunks/1":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error_code":"BAD_REQUEST","message":"chunk unavailable"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := databricks.NewWorkspaceClient(&databricks.Config{Host: server.URL, Token: "test"})
+	require.NoError(t, err)
+	resp := &dbsql.StatementResponse{
+		StatementId: "s1",
+		Manifest:    &dbsql.ResultManifest{TotalChunkCount: 2},
+		Result:      &dbsql.ResultData{ExternalLinks: []dbsql.ExternalLink{{ChunkIndex: 0, ExternalLink: server.URL + "/chunk0"}}},
+	}
+
+	start := time.Now()
+	ids, err := readIDs(t, &DatabricksSource{client: client}, resp, sc, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get result chunk")
+	assert.Empty(t, ids)
+	assert.Less(t, time.Since(start), 5*time.Second, "must not wait for the slow earlier chunk")
+}
+
+func TestProcessResultsRefreshesExpiredLink(t *testing.T) {
+	server, resp, sc := chunkServer(t, 2, func(w http.ResponseWriter, r *http.Request, idx int, data []byte) {
+		_, _ = w.Write(data)
+	})
+	var expiredHits atomic.Int32
+	expired := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expiredHits.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer expired.Close()
+	resp.Result.ExternalLinks[0].ExternalLink = expired.URL
+	client, err := databricks.NewWorkspaceClient(&databricks.Config{Host: server.URL, Token: "test"})
+	require.NoError(t, err)
+
+	ids, err := readIDs(t, &DatabricksSource{client: client}, resp, sc, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{0, 1}, ids)
+	assert.Equal(t, int32(1), expiredHits.Load(), "a 403 is not retried against the same link")
 }

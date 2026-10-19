@@ -427,6 +427,16 @@ func (d *Destination) cleanupOldOrphans(ctx context.Context, tbl *icebergtable.T
 	}
 }
 
+// sameIcebergType compares types ignoring list element IDs, which each table assigns itself.
+func sameIcebergType(a, b iceberggo.Type) bool {
+	al, aIsList := a.(*iceberggo.ListType)
+	bl, bIsList := b.(*iceberggo.ListType)
+	if aIsList && bIsList {
+		return al.ElementRequired == bl.ElementRequired && sameIcebergType(al.Element, bl.Element)
+	}
+	return a.Equals(b)
+}
+
 func (d *Destination) stageTableSchemaUpdate(txn *icebergtable.Transaction, tbl *icebergtable.Table, desired *schema.TableSchema, reset bool) (bool, error) {
 	if err := validateIdentifierFieldsForEvolution(tbl.Schema(), desired, reset); err != nil {
 		return false, err
@@ -460,14 +470,20 @@ func (d *Destination) stageTableSchemaUpdate(txn *icebergtable.Transaction, tbl 
 			continue
 		}
 
-		if !field.Type.Equals(targetType) {
+		if !sameIcebergType(field.Type, targetType) {
+			path, from, to := []string{col.Name}, field.Type, targetType
+			oldList, oldIsList := field.Type.(*iceberggo.ListType)
+			newList, newIsList := targetType.(*iceberggo.ListType)
+			if oldIsList && newIsList {
+				path, from, to = []string{col.Name, "element"}, oldList.Element, newList.Element
+			}
 			if !reset {
-				if _, err := iceberggo.PromoteType(field.Type, targetType); err != nil {
+				if _, err := iceberggo.PromoteType(from, to); err != nil {
 					return false, fmt.Errorf("iceberg: column %q type change from %s to %s is not supported: %w", col.Name, field.Type, targetType, err)
 				}
 			}
-			update.UpdateColumn([]string{col.Name}, icebergtable.ColumnUpdate{
-				FieldType: iceberggo.Optional[iceberggo.Type]{Valid: true, Val: targetType},
+			update.UpdateColumn(path, icebergtable.ColumnUpdate{
+				FieldType: iceberggo.Optional[iceberggo.Type]{Valid: true, Val: to},
 			})
 			changed = true
 		}

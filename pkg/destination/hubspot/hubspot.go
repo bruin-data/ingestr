@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"slices"
 	"strconv"
@@ -665,7 +666,7 @@ func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row
 		col := record.Column(i)
 		if v, ok := propertyValue(col, row); ok {
 			props[name] = v
-		} else if s.writeNulls && col.IsNull(row) {
+		} else if s.writeNulls && (col.IsNull(row) || nonFinite(col, row)) {
 			// Explicitly clear the field rather than leaving it untouched.
 			props[name] = ""
 		}
@@ -2694,8 +2695,22 @@ func timestampUnit(a *array.Timestamp) arrow.TimeUnit {
 
 // propertyValue converts a source cell to the string HubSpot property values
 // require, returning ok=false for nulls (which are omitted from the record).
+// nonFinite reports a NaN or ±Inf float; it is written like a null.
+func nonFinite(arr arrow.Array, idx int) bool {
+	var f float64
+	switch a := arr.(type) {
+	case *array.Float32:
+		f = float64(a.Value(idx))
+	case *array.Float64:
+		f = a.Value(idx)
+	default:
+		return false
+	}
+	return !arr.IsNull(idx) && (math.IsNaN(f) || math.IsInf(f, 0))
+}
+
 func propertyValue(arr arrow.Array, idx int) (string, bool) {
-	if arr.IsNull(idx) {
+	if arr.IsNull(idx) || nonFinite(arr, idx) {
 		return "", false
 	}
 
@@ -2781,7 +2796,7 @@ func jsonString(v interface{}) string {
 // arrowToValue decodes nested struct/list values so they can be JSON-encoded
 // into a single HubSpot property string.
 func arrowToValue(arr arrow.Array, idx int) interface{} {
-	if arr.IsNull(idx) {
+	if arr.IsNull(idx) || nonFinite(arr, idx) {
 		return nil
 	}
 	switch a := arr.(type) {

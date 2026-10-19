@@ -62,6 +62,34 @@ func TestCompareMergesDecimalArrayElementPrecision(t *testing.T) {
 	require.ErrorContains(t, err, "maximum supported precision is 76")
 }
 
+func TestCompareKeepsUnboundedDecimalArray(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amounts", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 38, Scale: 9,
+	}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amounts", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal,
+	}}}
+
+	comparison, err := Compare(source, dest, nil)
+	require.NoError(t, err)
+	require.False(t, comparison.HasChanges)
+}
+
+func TestCompareWidensNegativeScaleDecimalArray(t *testing.T) {
+	source := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amounts", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 5,
+	}}}
+	dest := &schema.TableSchema{Columns: []schema.Column{{
+		Name: "amounts", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 2, Scale: -3,
+	}}}
+
+	comparison, err := Compare(source, dest, nil)
+	require.NoError(t, err)
+	require.Len(t, comparison.Changes, 1)
+	require.Equal(t, 5, comparison.Changes[0].NewColumn.Precision)
+	require.Equal(t, 0, comparison.Changes[0].NewColumn.Scale)
+}
+
 func TestCompareWidensStringArrayElementLength(t *testing.T) {
 	source := &schema.TableSchema{Columns: []schema.Column{{
 		Name: "labels", DataType: schema.TypeArray, ArrayType: schema.TypeString, MaxLength: 120,

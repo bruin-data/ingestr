@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,6 +45,16 @@ func TestParseURI(t *testing.T) {
 				domain:   "test.atlassian.net",
 				email:    "a@b.com",
 				apiToken: "tok=en=",
+			},
+		},
+		{
+			name: "valid URI with cloud_id for service accounts",
+			uri:  "jira://mycompany?email=bot@serviceaccount.atlassian.com&api_token=abc123&cloud_id=1234-abcd",
+			want: jiraCredentials{
+				domain:   "mycompany.atlassian.net",
+				email:    "bot@serviceaccount.atlassian.com",
+				apiToken: "abc123",
+				cloudID:  "1234-abcd",
 			},
 		},
 		{
@@ -89,6 +100,9 @@ func TestParseURI(t *testing.T) {
 				}
 				if got.apiToken != tt.want.apiToken {
 					t.Errorf("parseURI() apiToken = %v, want %v", got.apiToken, tt.want.apiToken)
+				}
+				if got.cloudID != tt.want.cloudID {
+					t.Errorf("parseURI() cloudID = %v, want %v", got.cloudID, tt.want.cloudID)
 				}
 			}
 		})
@@ -292,5 +306,79 @@ func TestJiraVerifyCredentials(t *testing.T) {
 	err := s.verifyCredentials(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "jira rejected the credentials") {
 		t.Fatalf("expected credentials error, got %v", err)
+	}
+}
+
+func TestJiraConnectFallsBackToGateway(t *testing.T) {
+	creds := jiraCredentials{email: "bot@serviceaccount.atlassian.com", apiToken: "tok"}
+
+	var gatewayPaths []string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gatewayPaths = append(gatewayPaths, r.URL.Path)
+		if user, pass, ok := r.BasicAuth(); !ok || user != creds.email || pass != creds.apiToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gateway.Close()
+
+	siteStatus := http.StatusUnauthorized
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/_edge/tenant_info":
+			_, _ = w.Write([]byte(`{"cloudId":"abc-123"}`))
+		case "/rest/api/3/myself":
+			w.WriteHeader(siteStatus)
+		default:
+			t.Errorf("unexpected site path %s", r.URL.Path)
+		}
+	}))
+	defer site.Close()
+
+	orig := atlassianGatewayURL
+	atlassianGatewayURL = gateway.URL
+	defer func() { atlassianGatewayURL = orig }()
+
+	s := &JiraSource{}
+	if err := s.connect(context.Background(), site.URL, creds); err != nil {
+		t.Fatalf("expected gateway fallback to succeed, got %v", err)
+	}
+	if len(gatewayPaths) != 1 || gatewayPaths[0] != "/abc-123/rest/api/3/myself" {
+		t.Fatalf("unexpected gateway calls %v", gatewayPaths)
+	}
+
+	gatewayPaths = nil
+	siteStatus = http.StatusOK
+	if err := s.connect(context.Background(), site.URL, creds); err != nil {
+		t.Fatalf("expected site URL to succeed, got %v", err)
+	}
+	if len(gatewayPaths) != 0 {
+		t.Fatalf("gateway should not be called when the site URL works, got %v", gatewayPaths)
+	}
+
+	creds.cloudID = "explicit-id"
+	if err := s.connect(context.Background(), site.URL, creds); err != nil {
+		t.Fatalf("expected explicit cloud_id to succeed, got %v", err)
+	}
+	if len(gatewayPaths) != 1 || gatewayPaths[0] != "/explicit-id/rest/api/3/myself" {
+		t.Fatalf("unexpected gateway calls %v", gatewayPaths)
+	}
+}
+
+func TestJiraConnectReportsCloudIDLookupFailure(t *testing.T) {
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/_edge/tenant_info" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer site.Close()
+
+	s := &JiraSource{}
+	err := s.connect(context.Background(), site.URL, jiraCredentials{email: "a@b.com", apiToken: "tok"})
+	if !errors.Is(err, errJiraUnauthorized) || !strings.Contains(err.Error(), "set cloud_id") {
+		t.Fatalf("expected unauthorized error with cloud_id hint, got %v", err)
 	}
 }

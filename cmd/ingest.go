@@ -102,6 +102,11 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("FULL_REFRESH", "INGESTR_FULL_REFRESH"),
 			},
 			&cli.StringFlag{
+				Name:    "refresh-id",
+				Usage:   "Durable operation ID for --full-refresh --stream; reuse across restarts",
+				Sources: cli.EnvVars("INGESTR_REFRESH_ID"),
+			},
+			&cli.StringFlag{
 				Name:    "schema-contract",
 				Usage:   "Schema contract mode: evolve (auto-apply changes), freeze (reject changes), discard_row (drop non-conforming rows), discard_value (NULL non-conforming values)",
 				Value:   "evolve",
@@ -366,6 +371,7 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.PartitionBy = c.String("partition-by")
 	cfg.Yes = c.Bool("yes")
 	cfg.FullRefresh = c.Bool("full-refresh")
+	cfg.RefreshID = c.String("refresh-id")
 	cfg.SchemaContract = c.String("schema-contract")
 	cfg.SchemaNaming = c.String("schema-naming")
 	cfg.CDCTableNaming = config.TableNaming(c.String("cdc-table-naming"))

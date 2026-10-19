@@ -197,6 +197,9 @@ func evolveDestinationTableIfIncarnation(
 	if normalizer, ok := dest.(destination.SchemaEvolutionSourceColumnNormalizer); ok {
 		compareOptions.NormalizeSourceColumn = normalizer.NormalizeSchemaEvolutionSourceColumn
 	}
+	if limiter, ok := dest.(destination.DecimalPrecisionLimiter); ok {
+		compareOptions.MaxDecimalPrecision = limiter.MaxDecimalPrecision()
+	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
 	if err != nil {
 		return "", fmt.Errorf("failed to compare schemas: %w", err)

@@ -8,6 +8,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 
 	sf "github.com/snowflakedb/gosnowflake"
@@ -16,6 +18,8 @@ import (
 
 type Auth struct {
 	Account              string
+	Host                 string
+	Port                 int
 	User                 string
 	Password             string
 	Database             string
@@ -64,6 +68,10 @@ func ParseURI(uri string) (*Auth, error) {
 	auth.PrivateKeyPassphrase = query.Get("private_key_passphrase")
 	auth.ExtraParams = StripAuthParams(query)
 
+	if err := auth.parseEndpoint(query); err != nil {
+		return nil, err
+	}
+
 	authenticator := strings.ToLower(query.Get("authenticator"))
 	switch authenticator {
 	case "", "snowflake":
@@ -87,6 +95,29 @@ func ParseURI(uri string) (*Auth, error) {
 	}
 
 	return auth, nil
+}
+
+var validHost = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+
+// parseEndpoint reads the optional host and port overrides. Without them the driver
+// derives the host from the account. The driver always connects over HTTPS.
+func (a *Auth) parseEndpoint(query url.Values) error {
+	if host := query.Get("host"); host != "" {
+		if !validHost.MatchString(host) {
+			return fmt.Errorf("snowflake URI: host must be a hostname or IPv4 address without a scheme, port, or path")
+		}
+		a.Host = host
+	}
+
+	if raw := query.Get("port"); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("snowflake URI: port must be a number between 1 and 65535")
+		}
+		a.Port = port
+	}
+
+	return nil
 }
 
 func (a *Auth) resolvePrivateKey() error {
@@ -128,6 +159,8 @@ func (a *Auth) validate() error {
 func (a *Auth) ToConfig() *sf.Config {
 	cfg := &sf.Config{
 		Account:   a.Account,
+		Host:      a.Host,
+		Port:      a.Port,
 		User:      a.User,
 		Password:  a.Password,
 		Database:  a.Database,

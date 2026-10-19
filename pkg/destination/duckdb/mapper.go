@@ -49,7 +49,7 @@ func MapDataTypeToDuckDB(col schema.Column) string {
 	case schema.TypeUUID:
 		return "UUID"
 	case schema.TypeArray:
-		elemCol := schema.Column{DataType: col.ArrayType}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
 		return MapDataTypeToDuckDB(elemCol) + "[]"
 	default:
 		return "VARCHAR"

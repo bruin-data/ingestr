@@ -119,6 +119,7 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix,
 		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		FullRefresh:                     job.Config.FullRefresh,
+		CDCManagedState:                 job.CDCStateManager != nil,
 	}
 
 	records, err := job.GetRecords(ctx, readOpts)

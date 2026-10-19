@@ -267,8 +267,8 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	if starRocksConformance.cleanup != nil {
-		starRocksConformance.cleanup()
+	if starRocksShared.cleanup != nil {
+		starRocksShared.cleanup()
 	}
 
 	containers := []testcontainers.Container{

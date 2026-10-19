@@ -95,7 +95,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeUUID:
 		return "STRING"
 	case schema.TypeArray:
-		elemCol := schema.Column{DataType: col.ArrayType}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
 		return fmt.Sprintf("ARRAY<%s>", d.TypeName(elemCol))
 	default:
 		return "STRING"

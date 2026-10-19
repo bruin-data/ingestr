@@ -197,7 +197,17 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	if isMSSQLCDCSource(p.config.SourceURI) && !managedMSSQLCDC {
 		config.Debug("[PIPELINE] Destination %q does not support managed CDC state; SQL Server CDC uses destination-data resume", dest.GetScheme())
 	}
-	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC
+	managedChangeTracking := isChangeTrackingSource(p.config.SourceURI) && p.config.Stream && p.config.FullRefresh
+	if isChangeTrackingSource(p.config.SourceURI) && !managedChangeTracking {
+		managedChangeTracking, err = strategy.HasCDCState(ctx, dest, genericCDCConnectorID(p.config), p.config.StagingDataset)
+		if err != nil {
+			return err
+		}
+	}
+	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC || managedChangeTracking
+	if p.config.Stream && p.config.FullRefresh && !managedDestinationCDC {
+		return fmt.Errorf("--full-refresh --stream requires a PostgreSQL, MySQL, or SQL Server change source and destination-managed CDC state")
+	}
 	if managedMySQLCDC {
 		if err := validateMySQLCDCSourceDestination(p.config, src, dest); err != nil {
 			return err
@@ -215,21 +225,18 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			return fmt.Errorf("failed to resolve PostgreSQL CDC destination identity: %w", err)
 		}
 		p.cdcConnectorID = resolvedCDCStateConnectorID(p.config, postgresCDCIdentity, destinationIdentity)
-	} else if isCDCSource(p.config.SourceURI) {
-		if managedMySQLCDC || managedMSSQLCDC {
+	} else if isManagedChangeSource(p.config.SourceURI) {
+		if managedMySQLCDC || managedMSSQLCDC || managedChangeTracking {
 			destinationTarget = managedCDCDestinationTarget(p.config, dest)
 		}
 		p.cdcConnectorID = genericCDCConnectorID(p.config)
 	}
 
-	var cdcStateManager *strategy.CDCStateManager
-
-	// For CDC sources, compute a destination-aware slot suffix
-	if isCDCSource(p.config.SourceURI) {
-		p.config.CDCSlotSuffix = cdcSlotSuffix(canonicalCDCStateURI(p.config.DestURI) + "\x00" + p.cdcConnectorID)
-		p.config.CDCLegacySlotSuffix = legacyCDCSlotSuffix(p.config.DestURI)
-		config.Debug("[PIPELINE] CDC slot suffix: %s", p.config.CDCSlotSuffix)
+	if err := p.prepareStreamingRefreshIdentity(ctx); err != nil {
+		return err
 	}
+
+	var cdcStateManager *strategy.CDCStateManager
 
 	if managedDestinationCDC {
 		if err := validateDestinationManagedCDCState(dest); err != nil {
@@ -354,6 +361,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err := validateChangeTrackingDestination(dest); err != nil {
 			return err
 		}
+	}
+	if err := p.prepareStreamingRefresh(ctx, cdcStateManager); err != nil {
+		return err
 	}
 	// For managed change sources, check if we can resume from existing data
 	if cdcStateManager != nil && !p.config.FullRefresh {
@@ -1592,10 +1602,10 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			resolvedStrategy = ss.DefaultStreamingStrategy()
 		}
 	}
-	if isCDCSource(p.config.SourceURI) && !p.config.FullRefresh && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
+	if isCDCSource(p.config.SourceURI) && (!p.config.FullRefresh || p.config.Stream) && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
 		resolvedStrategy = config.StrategyMerge
 	}
-	if p.config.FullRefresh {
+	if p.config.FullRefresh && !p.config.Stream {
 		resolvedStrategy = config.StrategyReplace
 	}
 
@@ -1662,6 +1672,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			}
 		}
 	}
+
+	if err := p.prepareStreamingRefresh(ctx, cdcStateManager); err != nil {
+		return err
+	}
+	resolvedConfig.FullRefresh = p.config.FullRefresh
 
 	// For CDC sources, query per-table max LSNs for resume
 	var cdcResumeLSNs map[string]string
@@ -1948,6 +1963,9 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	}
 	if normalizer, ok := p.dest.(destination.SchemaEvolutionSourceColumnNormalizer); ok {
 		opts.NormalizeSourceColumn = normalizer.NormalizeSchemaEvolutionSourceColumn
+	}
+	if limiter, ok := p.dest.(destination.DecimalPrecisionLimiter); ok {
+		opts.MaxDecimalPrecision = limiter.MaxDecimalPrecision()
 	}
 	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
 	if err != nil {
@@ -2784,7 +2802,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 			s = ss.DefaultStreamingStrategy()
 		}
 	}
-	if isManagedChangeSource(cfg.SourceURI) && !cfg.FullRefresh && (s == "" || s == config.StrategyReplace) {
+	if isManagedChangeSource(cfg.SourceURI) && (!cfg.FullRefresh || cfg.Stream) && (s == "" || s == config.StrategyReplace) {
 		s = config.StrategyMerge
 		if len(resolvePrimaryKeys(cfg, table)) == 0 {
 			// Keyless CDC table (no primary key, no replica identity index):
@@ -2792,7 +2810,7 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 			s = config.StrategyAppend
 		}
 	}
-	if cfg.FullRefresh {
+	if cfg.FullRefresh && !cfg.Stream {
 		s = config.StrategyReplace
 	}
 	return s
@@ -3073,9 +3091,14 @@ func managedCDCDestinationTarget(cfg *config.IngestConfig, dest destination.Dest
 }
 
 func genericCDCConnectorID(cfg *config.IngestConfig) string {
+	sourceURI, destinationURI := canonicalCDCStateURI(cfg.SourceURI), canonicalCDCStateURI(cfg.DestURI)
+	if isChangeTrackingSource(cfg.SourceURI) {
+		sourceURI = canonicalStreamingRefreshURI(cfg.SourceURI)
+		destinationURI = canonicalStreamingRefreshURI(cfg.DestURI)
+	}
 	parts := []string{
-		canonicalCDCStateURI(cfg.SourceURI),
-		canonicalCDCStateURI(cfg.DestURI),
+		sourceURI,
+		destinationURI,
 		cfg.SourceTable,
 		cfg.DestTable,
 	}
@@ -3136,6 +3159,13 @@ func canonicalCDCStateURI(rawURI string) string {
 	}
 	for key := range query {
 		if strings.HasPrefix(key, "pool_") {
+			query.Del(key)
+		}
+	}
+	// StarRocks connection settings do not identify the destination; fixing a
+	// wrong load port must not orphan the connector's existing claims.
+	if strings.EqualFold(parsed.Scheme, "starrocks") {
+		for _, key := range []string{"http_port", "replication_num", "ssl"} {
 			query.Del(key)
 		}
 	}
@@ -3364,7 +3394,7 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 			return err
 		}
 	}
-	if isPostgresCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+	if isPostgresCDCSource(cfg.SourceURI) && (!cfg.FullRefresh || cfg.Stream) {
 		switch cfg.IncrementalStrategy {
 		case config.StrategyDeleteInsert, config.StrategySCD2:
 			return &config.ValidationError{
@@ -3373,7 +3403,7 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 			}
 		}
 	}
-	if isMSSQLCDCSource(cfg.SourceURI) && !cfg.FullRefresh {
+	if isMSSQLCDCSource(cfg.SourceURI) && (!cfg.FullRefresh || cfg.Stream) {
 		switch cfg.IncrementalStrategy {
 		case "", config.StrategyMerge, config.StrategyReplace:
 		default:
@@ -3384,7 +3414,7 @@ func validateManagedChangeConfig(cfg *config.IngestConfig) error {
 		}
 	}
 	if isMySQLCDCSource(cfg.SourceURI) {
-		if !cfg.FullRefresh {
+		if !cfg.FullRefresh || cfg.Stream {
 			switch cfg.IncrementalStrategy {
 			case "", config.StrategyMerge, config.StrategyReplace:
 			default:

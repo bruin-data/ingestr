@@ -2,23 +2,30 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/require"
 )
 
 type strategySQLConn struct {
 	driver.Conn
-	t          *testing.T
-	statements []string
+	t            *testing.T
+	statements   []string
+	failExchange bool
+	targetEngine string
 }
 
 func (c *strategySQLConn) Exec(_ context.Context, query string, _ ...any) error {
 	c.statements = append(c.statements, strings.Join(strings.Fields(query), " "))
+	if c.failExchange && strings.HasPrefix(query, "EXCHANGE TABLES") {
+		return errors.New("exchange unavailable")
+	}
 	return nil
 }
 
@@ -27,6 +34,22 @@ func (c *strategySQLConn) Query(_ context.Context, query string, args ...any) (d
 	require.Equal(c.t, []any{"warehouse", "order"}, args)
 	c.statements = append(c.statements, "WAIT FOR MUTATIONS")
 	return &completedMutationRows{}, nil
+}
+
+func (c *strategySQLConn) QueryRow(_ context.Context, query string, args ...any) driver.Row {
+	require.Equal(c.t, "SELECT engine FROM system.tables WHERE database = ? AND name = ?", query)
+	require.Equal(c.t, []any{"warehouse", "order"}, args)
+	return &engineRow{engine: c.targetEngine}
+}
+
+type engineRow struct {
+	driver.Row
+	engine string
+}
+
+func (r *engineRow) Scan(dest ...any) error {
+	*dest[0].(*string) = r.engine
+	return nil
 }
 
 type completedMutationRows struct{ driver.Rows }
@@ -109,5 +132,89 @@ func TestDeleteInsertExpectedSQL(t *testing.T) {
 			require.NoError(t, d.DeleteInsertTable(t.Context(), opts))
 			require.Equal(t, []string{"ALTER TABLE `warehouse`.`order` DELETE WHERE `version` >= 11 AND `version` <= 29", "WAIT FOR MUTATIONS", "INSERT INTO `warehouse`.`order` (`tenant`, `id`, `version`) " + selectSQL}, c.statements)
 		})
+	}
+}
+
+func TestClusterDDLExpectedSQL(t *testing.T) {
+	t.Parallel()
+
+	c := &strategySQLConn{t: t, failExchange: true}
+	d := &ClickHouseDestination{conn: c, database: "default", cluster: "analytics_cluster"}
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:     "analytics.events",
+		Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+		DropFirst: true,
+	}))
+	require.NoError(t, d.DropTable(t.Context(), "analytics.events"))
+	require.NoError(t, d.TruncateTable(t.Context(), "analytics.events"))
+	require.NoError(t, d.SwapTable(t.Context(), destination.SwapOptions{
+		StagingTable: "analytics.events_staging",
+		TargetTable:  "analytics.events",
+	}))
+
+	require.Contains(t, c.statements, "CREATE DATABASE IF NOT EXISTS `analytics` ON CLUSTER `analytics_cluster`")
+	require.Contains(t, c.statements, "DROP TABLE IF EXISTS `analytics`.`events` ON CLUSTER `analytics_cluster`")
+	require.Contains(t, c.statements, "CREATE TABLE IF NOT EXISTS `analytics`.`events` ON CLUSTER `analytics_cluster` ( `id` Int64 ) ENGINE = MergeTree() ORDER BY (tuple())")
+	require.Contains(t, c.statements, "TRUNCATE TABLE `analytics`.`events` ON CLUSTER `analytics_cluster`")
+	require.Contains(t, c.statements, "EXCHANGE TABLES `analytics`.`events_staging` AND `analytics`.`events` ON CLUSTER `analytics_cluster`")
+
+	renameCount := 0
+	for _, statement := range c.statements {
+		if strings.HasPrefix(statement, "RENAME TABLE ") {
+			renameCount++
+			require.Contains(t, statement, " ON CLUSTER `analytics_cluster`")
+		}
+	}
+	require.Equal(t, 2, renameCount)
+}
+
+func TestSCD2ClusterExpectedSQL(t *testing.T) {
+	t.Parallel()
+
+	c := &strategySQLConn{t: t}
+	d := &ClickHouseDestination{conn: c, database: "warehouse", cluster: "analytics_cluster"}
+	require.NoError(t, d.SCD2Table(t.Context(), destination.SCD2Options{
+		TargetTable: "order", StagingTable: "landing.stage",
+		Columns:     []string{"id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+		PrimaryKeys: []string{"id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+	}))
+
+	require.Contains(t, c.statements[0], "ALTER TABLE `warehouse`.`order` ON CLUSTER `analytics_cluster` UPDATE")
+	require.Contains(t, c.statements[2], "ALTER TABLE `warehouse`.`order` ON CLUSTER `analytics_cluster` UPDATE")
+}
+
+func TestSCD2ReplicatedClusterExpectedSQL(t *testing.T) {
+	t.Parallel()
+
+	c := &strategySQLConn{t: t, targetEngine: "ReplicatedMergeTree"}
+	d := &ClickHouseDestination{conn: c, database: "warehouse", cluster: "analytics_cluster", engineType: "replicated_merge_tree"}
+	require.NoError(t, d.SCD2Table(t.Context(), destination.SCD2Options{
+		TargetTable: "order", StagingTable: "landing.stage",
+		Columns:     []string{"id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+		PrimaryKeys: []string{"id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+	}))
+
+	require.Equal(t, "SYSTEM SYNC REPLICA ON CLUSTER `analytics_cluster` `landing`.`stage`", c.statements[0])
+	require.Equal(t, "SYSTEM SYNC REPLICA ON CLUSTER `analytics_cluster` `warehouse`.`order`", c.statements[1])
+	for _, i := range []int{2, 4} {
+		require.True(t, strings.HasSuffix(c.statements[i], " SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2"), c.statements[i])
+	}
+	require.NotContains(t, c.statements[6], "SETTINGS")
+}
+
+func TestSCD2ReplicatedEngineOnExistingMergeTreeTarget(t *testing.T) {
+	t.Parallel()
+
+	c := &strategySQLConn{t: t, targetEngine: "MergeTree"}
+	d := &ClickHouseDestination{conn: c, database: "warehouse", cluster: "analytics_cluster", engineType: "replicated_merge_tree"}
+	require.NoError(t, d.SCD2Table(t.Context(), destination.SCD2Options{
+		TargetTable: "order", StagingTable: "landing.stage",
+		Columns:     []string{"id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},
+		PrimaryKeys: []string{"id"}, Timestamp: time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC),
+	}))
+
+	for _, statement := range c.statements {
+		require.NotContains(t, statement, "SYNC REPLICA")
+		require.NotContains(t, statement, "SETTINGS")
 	}
 }

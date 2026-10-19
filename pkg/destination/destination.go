@@ -31,8 +31,8 @@ type PrepareOptions struct {
 	PreserveExistingLayout bool // Leave an existing table's properties, partition spec, and sort order unchanged.
 	TableProperties        map[string]string
 	OwnershipToken         string
-	// Strategy names the write behavior for reverse-ETL destinations so they can
-	// validate the dest-table up front. Ignored by SQL destinations.
+	// Strategy names the write behavior so reverse-ETL destinations can validate the
+	// dest-table up front and SQL destinations can skip key constraints on append.
 	Strategy string
 }
 
@@ -283,6 +283,12 @@ type SchemaEvolutionSourceColumnNormalizer interface {
 	NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column
 }
 
+// DecimalPrecisionLimiter reports the widest decimal precision a destination can store,
+// so schema evolution trims extra scale instead of widening past it.
+type DecimalPrecisionLimiter interface {
+	MaxDecimalPrecision() int
+}
+
 // TableWriteConfig contains per-table write configuration for multi-table writes.
 type TableWriteConfig struct {
 	DestTable              string
@@ -332,6 +338,12 @@ type CDCStateEntry struct {
 	Status           string
 	Position         string
 	RecordedAt       time.Time
+}
+
+// CDCStateTablePreparer allows an append-only state log to use a native layout
+// without requiring the logical event identity to fit a physical primary key.
+type CDCStateTablePreparer interface {
+	PrepareCDCStateTable(ctx context.Context, table string, tableSchema *schema.TableSchema) error
 }
 
 // CDCStateReader loads all state events for one logical connector from the
@@ -617,6 +629,13 @@ func DefaultMultiTableName(destSchema, sourceTable string) string {
 // verify when a table has become query-consistent at an exact row count.
 type ExactRowCountWaiter interface {
 	WaitForExactRowCount(ctx context.Context, table string, expectedRows int64) error
+}
+
+// StagingTableLister lists the tables in a staging schema whose names start
+// with prefix, so the strategy can drop staging tables a crashed run left
+// behind.
+type StagingTableLister interface {
+	ListStagingTables(ctx context.Context, schema, prefix string) ([]string, error)
 }
 
 // TruncateCapable is an optional interface for destinations that can empty a

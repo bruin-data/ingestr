@@ -220,8 +220,8 @@ func mapSpannerTypeString(spannerType string) (schema.DataType, int, int, schema
 
 	if strings.HasPrefix(upper, "ARRAY<") {
 		inner := upper[6 : len(upper)-1]
-		elemType, _, _, _ := mapSpannerTypeString(inner)
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := mapSpannerTypeString(inner)
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	base := upper

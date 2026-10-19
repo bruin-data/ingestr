@@ -14,6 +14,7 @@ type CompareOptions struct {
 	PrimaryKeys           []string
 	NormalizeColumn       func(schema.Column) schema.Column
 	NormalizeSourceColumn func(source, dest schema.Column) schema.Column
+	MaxDecimalPrecision   int
 }
 
 // Compare compares source and destination schemas and returns the differences.
@@ -27,10 +28,12 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}
 
 	var overrides ColumnOverrides
+	var maxDecimalPrecision int
 	normalizeColumn := func(col schema.Column) schema.Column { return col }
 	primaryKeys := make(map[string]struct{})
 	if opts != nil {
 		overrides = opts.Overrides
+		maxDecimalPrecision = opts.MaxDecimalPrecision
 		if opts.NormalizeColumn != nil {
 			normalizeColumn = opts.NormalizeColumn
 		}
@@ -102,6 +105,10 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 					if err != nil {
 						return nil, fmt.Errorf("column %s: %w", destColumn.Name, err)
 					}
+					precision, scale, err = fitDecimalPrecision(precision, scale, destCol.Scale, maxDecimalPrecision)
+					if err != nil {
+						return nil, fmt.Errorf("column %s: %w", destColumn.Name, err)
+					}
 					if precision == normalizedDecimal(destCol).Precision && scale == destCol.Scale {
 						continue
 					}
@@ -160,7 +167,7 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 		}
 
 		if needsWidening(srcCol, destCol) {
-			newCol, err := widenedColumn(srcCol, destCol)
+			newCol, err := widenedColumn(srcCol, destCol, maxDecimalPrecision)
 			if err != nil {
 				return nil, fmt.Errorf("column %s: %w", destColumn.Name, err)
 			}
@@ -202,7 +209,7 @@ func Compare(source, dest *schema.TableSchema, opts *CompareOptions) (*SchemaCom
 	}, nil
 }
 
-func widenedColumn(src, dest schema.Column) (schema.Column, error) {
+func widenedColumn(src, dest schema.Column, maxDecimalPrecision int) (schema.Column, error) {
 	result := src
 	result.Name = dest.Name
 	result.DataType, _ = GetWidenedType(src.DataType, dest.DataType)
@@ -229,6 +236,10 @@ func widenedColumn(src, dest schema.Column) (schema.Column, error) {
 			if err != nil {
 				return schema.Column{}, err
 			}
+			result.Precision, result.Scale, err = fitDecimalPrecision(result.Precision, result.Scale, dest.Scale, maxDecimalPrecision)
+			if err != nil {
+				return schema.Column{}, err
+			}
 		}
 		if result.ArrayType == schema.TypeString {
 			if src.ArrayType == schema.TypeString && dest.ArrayType == schema.TypeString {
@@ -249,6 +260,10 @@ func widenedColumn(src, dest schema.Column) (schema.Column, error) {
 	if result.DataType == schema.TypeDecimal {
 		var err error
 		result.Precision, result.Scale, err = mergeDecimalTypesChecked(src, dest)
+		if err != nil {
+			return schema.Column{}, err
+		}
+		result.Precision, result.Scale, err = fitDecimalPrecision(result.Precision, result.Scale, dest.Scale, maxDecimalPrecision)
 		if err != nil {
 			return schema.Column{}, err
 		}
@@ -285,7 +300,8 @@ func needsWidening(src, dest schema.Column) bool {
 			}
 			switch src.ArrayType {
 			case schema.TypeDecimal:
-				return decimalNeedsWidening(src, dest)
+				// Precision 0 is an unbounded element (e.g. Postgres numeric[]); never narrow it.
+				return dest.Precision > 0 && decimalNeedsWidening(src, dest)
 			case schema.TypeString:
 				return stringNeedsWidening(src.MaxLength, dest.MaxLength)
 			default:
@@ -302,6 +318,20 @@ func decimalNeedsWidening(src, dest schema.Column) bool {
 	src = normalizedDecimal(src)
 	dest = normalizedDecimal(dest)
 	return src.Precision-src.Scale > dest.Precision-dest.Scale || src.Scale > dest.Scale
+}
+
+// fitDecimalPrecision keeps the integer digits and gives up extra scale (never below the
+// existing column's) when the merged precision exceeds the destination's maximum.
+func fitDecimalPrecision(precision, scale, destScale, maxPrecision int) (int, int, error) {
+	if maxPrecision <= 0 || precision <= maxPrecision {
+		return precision, scale, nil
+	}
+	intDigits := precision - scale
+	if intDigits+destScale > maxPrecision {
+		return 0, 0, fmt.Errorf("decimal widening requires precision %d (integer digits %d + scale %d), destination maximum is %d", intDigits+destScale, intDigits, destScale, maxPrecision)
+	}
+	scale = max(destScale, min(scale, maxPrecision-intDigits))
+	return intDigits + scale, scale, nil
 }
 
 func arrayElementColumn(col schema.Column) schema.Column {

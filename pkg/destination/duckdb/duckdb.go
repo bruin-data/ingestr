@@ -265,8 +265,13 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 		config.Debug("[DUCKDB] DROP TABLE took %v", time.Since(startDrop))
 	}
 
+	// DuckDB can't declare an unenforced key, so append tables get none and keep every row.
+	primaryKeys := opts.PrimaryKeys
+	if opts.Strategy == string(config.StrategyAppend) {
+		primaryKeys = nil
+	}
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, primaryKeys)
 	config.Debug("[DUCKDB] CREATE SQL: %s", createSQL)
 	if err := d.exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
@@ -2203,14 +2208,18 @@ func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table stri
 				primaryKeys = append(primaryKeys, strings.Clone(colName))
 			}
 
-			dataType := mapDuckDBTypeToSchema(colType)
+			dataType, arrayType, valueType := mapDuckDBTypeToSchema(colType), schema.TypeUnknown, colType
+			if elem, ok := strings.CutSuffix(colType, "[]"); ok {
+				dataType, arrayType, valueType = schema.TypeArray, mapDuckDBTypeToSchema(elem), elem
+			}
 			precision, scale := 0, 0
-			if dataType == schema.TypeDecimal {
-				precision, scale = duckDBDecimalPrecisionScale(colType)
+			if dataType == schema.TypeDecimal || arrayType == schema.TypeDecimal {
+				precision, scale = duckDBDecimalPrecisionScale(valueType)
 			}
 			columns = append(columns, schema.Column{
 				Name:         strings.Clone(colName),
 				DataType:     dataType,
+				ArrayType:    arrayType,
 				Nullable:     nullable,
 				IsPrimaryKey: isPrimaryKey,
 				Precision:    precision,

@@ -61,26 +61,17 @@ func starRocksConformanceBackend() *sqlBackend {
 
 var starRocksConformance struct {
 	sync.Once
-	uri     string
-	cleanup func()
+	uri string
 }
 
 func setupStarRocksConformance(t *testing.T, ctx context.Context) (string, string, func()) {
 	t.Helper()
-	if !containerWanted("starrocks") {
-		t.Skip("StarRocks excluded by INTEGRATION_BACKENDS")
-	}
-	requireDocker(t)
+	dsn, destURI := sharedStarRocks(t)
 	starRocksConformance.Do(func() {
-		dsn, destURI, cleanup := startStarRocksContainerWithCleanup(ctx, t)
-		starRocksConformance.cleanup = cleanup
-		waitForStarRocksBackend(t, dsn)
 		db, err := sql.Open("mysql", dsn)
 		require.NoError(t, err)
 		defer func() { _ = db.Close() }()
 		execEventually(t, db, "CREATE DATABASE IF NOT EXISTS conformance")
-		// Alive precedes tablet placement readiness; probe independently of ingestion.
-		execEventually(t, db, `CREATE TABLE IF NOT EXISTS conformance.ready (id BIGINT) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1')`)
 		u, err := url.Parse(destURI)
 		require.NoError(t, err)
 		u.Path = "/conformance"

@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"math/big"
 	"testing"
 	"time"
 
@@ -34,6 +35,29 @@ func TestConvertValueNormalizesUUID(t *testing.T) {
 	}
 }
 
+func TestConvertValueConvertsNumericArrayElements(t *testing.T) {
+	col := schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 5, Scale: 2}
+	val := []any{
+		pgtype.Numeric{Int: big.NewInt(125), Exp: -2, Valid: true},
+		nil,
+		pgtype.Numeric{InfinityModifier: pgtype.Infinity, Valid: true},
+		pgtype.Numeric{InfinityModifier: pgtype.NegativeInfinity, Valid: true},
+	}
+
+	got, ok := convertValue(val, col).([]any)
+	if !ok || len(got) != 4 {
+		t.Fatalf("convertValue() = %#v, want four elements", got)
+	}
+	if n, ok := got[0].(*big.Int); !ok || n.Int64() != 125 {
+		t.Fatalf("element 0 = %#v, want 125 (1.25 at scale 2)", got[0])
+	}
+	for i := 1; i < 4; i++ {
+		if got[i] != nil {
+			t.Fatalf("element %d = %#v, want nil", i, got[i])
+		}
+	}
+}
+
 func TestBuildSelectQueryAddsExtractPartitionPredicate(t *testing.T) {
 	intervalStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	intervalEnd := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
@@ -55,5 +79,30 @@ func TestBuildSelectQueryAddsExtractPartitionPredicate(t *testing.T) {
 	want := `SELECT "id", "created_at" FROM "public"."orders" WHERE "updated_at" >= '2026-01-01 00:00:00.000000+00:00' AND "updated_at" <= '2026-01-31 00:00:00.000000+00:00' AND "created_at" >= '2026-01-08 00:00:00.000000+00:00' AND "created_at" < '2026-01-15 00:00:00.000000+00:00'`
 	if query != want {
 		t.Fatalf("query = %q, want %q", query, want)
+	}
+}
+
+func TestNumericTypmodPrecisionScale(t *testing.T) {
+	cases := []struct {
+		typmod        int32
+		precision, sc int
+	}{
+		{-1, 0, 0},
+		{(5<<16 | 2) + 4, 5, 2},
+		{38<<16 + 4, 38, 0},
+		{(10<<16 | 0x7fe) + 4, 10, -2},
+	}
+	for _, c := range cases {
+		p, s := NumericTypmodPrecisionScale(c.typmod)
+		if p != c.precision || s != c.sc {
+			t.Errorf("typmod %d: got (%d,%d), want (%d,%d)", c.typmod, p, s, c.precision, c.sc)
+		}
+	}
+}
+
+func TestMapPostgresArrayOfNumeric(t *testing.T) {
+	dt, p, s, at := MapPostgresToDataType("numeric(5,2)[]")
+	if dt != schema.TypeArray || at != schema.TypeDecimal || p != 5 || s != 2 {
+		t.Errorf("numeric(5,2)[]: got (%s, %d, %d, %s), want (array, 5, 2, decimal)", dt, p, s, at)
 	}
 }

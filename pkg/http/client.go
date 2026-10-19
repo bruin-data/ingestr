@@ -143,6 +143,12 @@ func (r *Request) SetFormData(data map[string]string) *Request {
 	return r
 }
 
+// SetAllowNonIdempotentRetry lets a read-only POST (e.g. a batch read) use the client's retry conditions.
+func (r *Request) SetAllowNonIdempotentRetry() *Request {
+	r.resty.SetAllowNonIdempotentRetry(true)
+	return r
+}
+
 // SetRetryOnRateLimitOnly restricts this request to retry only on HTTP 429 (the
 // request was throttled and never processed), never on 5xx or transport errors.
 // Use it for non-idempotent writes (e.g. record create) where a retry after a

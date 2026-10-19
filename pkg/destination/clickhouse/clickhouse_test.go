@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
@@ -77,7 +80,8 @@ func TestValidateEngineType(t *testing.T) {
 		{"empty without PK defaults to MergeTree", "", false, "MergeTree()", true},
 		{"empty with PK defaults to ReplacingMergeTree", "", true, "ReplacingMergeTree()", true},
 		{"merge_tree", "merge_tree", false, "MergeTree()", true},
-		{"replacing_merge_tree", "replacing_merge_tree", false, "ReplacingMergeTree()", true},
+		{"replacing_merge_tree with PK", "replacing_merge_tree", true, "ReplacingMergeTree()", true},
+		{"replacing_merge_tree without PK falls back to MergeTree", "replacing_merge_tree", false, "MergeTree()", true},
 		{"shared_merge_tree", "shared_merge_tree", false, "SharedMergeTree()", true},
 		{"replicated_merge_tree", "replicated_merge_tree", false, "ReplicatedMergeTree()", true},
 		{"case insensitive", "MERGE_TREE", false, "MergeTree()", true},
@@ -190,6 +194,7 @@ func TestParseClickHouseURI_Engine(t *testing.T) {
 	tests := []struct {
 		name         string
 		uri          string
+		wantCluster  string
 		wantEngine   string
 		wantSettings map[string]string
 	}{
@@ -197,6 +202,12 @@ func TestParseClickHouseURI_Engine(t *testing.T) {
 			name:         "no engine params",
 			uri:          "clickhouse://user:pw@localhost:9000/db",
 			wantEngine:   "",
+			wantSettings: map[string]string{},
+		},
+		{
+			name:         "cluster",
+			uri:          "clickhouse://user:pw@localhost:9000/db?cluster=analytics_cluster",
+			wantCluster:  "analytics_cluster",
 			wantSettings: map[string]string{},
 		},
 		{
@@ -225,9 +236,12 @@ func TestParseClickHouseURI_Engine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, engineType, engineSettings, err := parseClickHouseURI(tt.uri)
+			_, _, cluster, engineType, engineSettings, err := parseClickHouseURI(tt.uri)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			if cluster != tt.wantCluster {
+				t.Errorf("cluster: got %q, want %q", cluster, tt.wantCluster)
 			}
 			if engineType != tt.wantEngine {
 				t.Errorf("engine: got %q, want %q", engineType, tt.wantEngine)
@@ -255,6 +269,7 @@ func TestBuildCreateTableSQL_Engine(t *testing.T) {
 		primaryKeys []string
 		engineType  string
 		settings    map[string]string
+		cluster     string
 		wantHas     []string
 		wantMissing []string
 	}{
@@ -298,6 +313,11 @@ func TestBuildCreateTableSQL_Engine(t *testing.T) {
 			},
 		},
 		{
+			name:    "cluster",
+			cluster: "analytics_cluster",
+			wantHas: []string{"CREATE TABLE IF NOT EXISTS `db`.`t` ON CLUSTER `analytics_cluster`"},
+		},
+		{
 			name:        "unknown engine falls back to ReplacingMergeTree with PK",
 			primaryKeys: []string{"id"},
 			engineType:  "FakeEngine",
@@ -314,7 +334,7 @@ func TestBuildCreateTableSQL_Engine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildCreateTableSQL("db", "t", cols, tt.primaryKeys, tt.engineType, tt.settings)
+			got := buildCreateTableSQL("db", "t", cols, tt.primaryKeys, tt.engineType, tt.settings, tt.cluster)
 			for _, s := range tt.wantHas {
 				if !strings.Contains(got, s) {
 					t.Errorf("missing %q in:\n%s", s, got)
@@ -329,10 +349,30 @@ func TestBuildCreateTableSQL_Engine(t *testing.T) {
 	}
 }
 
+func TestOnClusterClauseQuotesIdentifier(t *testing.T) {
+	t.Parallel()
+
+	if got, want := onClusterClause("cluster`name"), " ON CLUSTER `cluster``name`"; got != want {
+		t.Fatalf("clause = %q, want %q", got, want)
+	}
+}
+
+func TestDialectClusterSQL(t *testing.T) {
+	t.Parallel()
+
+	dialect := &Dialect{cluster: "analytics_cluster"}
+	if got, want := dialect.AddColumnSQL("`db`.`events`", schema.Column{Name: "payload", DataType: schema.TypeString}), "ALTER TABLE `db`.`events` ON CLUSTER `analytics_cluster` ADD COLUMN `payload` String"; got != want {
+		t.Fatalf("add column SQL = %q, want %q", got, want)
+	}
+	if got, want := dialect.AlterColumnTypeSQL("`db`.`events`", "payload", schema.Column{DataType: schema.TypeInt64}), "ALTER TABLE `db`.`events` ON CLUSTER `analytics_cluster` MODIFY COLUMN `payload` Int64"; got != want {
+		t.Fatalf("alter column SQL = %q, want %q", got, want)
+	}
+}
+
 func TestBuildDeleteInsertStatements(t *testing.T) {
 	t.Parallel()
 
-	dest := &ClickHouseDestination{database: "default"}
+	dest := &ClickHouseDestination{database: "default", cluster: "analytics_cluster"}
 	start := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)
 	end := time.Date(2026, 1, 3, 4, 5, 6, 7000, time.UTC)
 
@@ -351,7 +391,7 @@ func TestBuildDeleteInsertStatements(t *testing.T) {
 		t.Fatalf("target = %s.%s, want analytics.events", targetDB, targetName)
 	}
 
-	wantDelete := "ALTER TABLE `analytics`.`events` DELETE WHERE `event_time` >= toDateTime64('2026-01-02 03:04:05.000006', 6) AND `event_time` <= toDateTime64('2026-01-03 04:05:06.000007', 6)"
+	wantDelete := "ALTER TABLE `analytics`.`events` ON CLUSTER `analytics_cluster` DELETE WHERE `event_time` >= toDateTime64('2026-01-02 03:04:05.000006', 6) AND `event_time` <= toDateTime64('2026-01-03 04:05:06.000007', 6)"
 	if deleteSQL != wantDelete {
 		t.Fatalf("delete SQL = %q, want %q", deleteSQL, wantDelete)
 	}
@@ -404,5 +444,47 @@ func TestBeginTransactionUnsupported(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not support transactions") {
 		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
+	}
+}
+
+func TestArrayColumnsUseNullableElements(t *testing.T) {
+	col := schema.Column{Name: "nums", DataType: schema.TypeArray, ArrayType: schema.TypeInt32, Nullable: true}
+	if got := MapDataTypeToClickHouse(col); got != "Array(Nullable(Int32))" {
+		t.Errorf("MapDataTypeToClickHouse = %q", got)
+	}
+	d := &Dialect{}
+	if got := d.AddColumnSQL("t", col); !strings.HasSuffix(got, "`nums` Array(Nullable(Int32))") {
+		t.Errorf("AddColumnSQL = %q", got)
+	}
+	if got := d.AlterColumnTypeSQL("t", "nums", col); !strings.HasSuffix(got, "`nums` Array(Nullable(Int32))") {
+		t.Errorf("AlterColumnTypeSQL = %q", got)
+	}
+	if got := MapDataTypeToClickHouse(schema.Column{DataType: schema.TypeInt32, Nullable: true}); got != "Nullable(Int32)" {
+		t.Errorf("scalar column = %q", got)
+	}
+	notNull := schema.Column{Name: "nums", DataType: schema.TypeArray, ArrayType: schema.TypeInt32}
+	if got := MapDataTypeToClickHouse(notNull); got != "Array(Int32)" {
+		t.Errorf("NOT NULL array = %q", got)
+	}
+	if got := d.AddColumnSQL("t", notNull); !strings.HasSuffix(got, "`nums` Array(Int32)") {
+		t.Errorf("NOT NULL AddColumnSQL = %q", got)
+	}
+}
+
+func TestExtractValueArrays(t *testing.T) {
+	b := array.NewListBuilder(memory.DefaultAllocator, arrow.PrimitiveTypes.Int32)
+	defer b.Release()
+	vb := b.ValueBuilder().(*array.Int32Builder)
+	b.Append(true)
+	vb.AppendValues([]int32{1, 0, 3}, []bool{true, false, true})
+	b.AppendNull()
+	arr := b.NewArray()
+	defer arr.Release()
+
+	if got := extractValue(arr, 0).([]interface{}); len(got) != 3 || got[1] != nil {
+		t.Errorf("NULL element = %v, want [1 <nil> 3]", got)
+	}
+	if got, ok := extractValue(arr, 1).([]interface{}); !ok || len(got) != 0 {
+		t.Errorf("NULL array = %#v, want empty array", extractValue(arr, 1))
 	}
 }

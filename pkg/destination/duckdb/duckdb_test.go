@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -948,6 +949,32 @@ func TestPrepareTable_CreateTable(t *testing.T) {
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'test_table'").Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count, "table should exist")
+}
+
+func TestPrepareTable_AppendSkipsPrimaryKeyConstraint(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+	}
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "appended", Schema: tableSchema, PrimaryKeys: []string{"id"}, Strategy: string(config.StrategyAppend),
+	}))
+	appended, err := dest.GetTableSchema(ctx, "appended")
+	require.NoError(t, err)
+	assert.Empty(t, appended.PrimaryKeys)
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO appended VALUES (1, 'a'), (1, 'b')`))
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "merged", Schema: tableSchema, PrimaryKeys: []string{"id"},
+	}))
+	merged, err := dest.GetTableSchema(ctx, "merged")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id"}, merged.PrimaryKeys)
 }
 
 func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
@@ -2320,6 +2347,26 @@ func TestGetTableSchema_Basic(t *testing.T) {
 	assert.Equal(t, schema.TypeInt32, colMap["age"].DataType)
 	assert.Equal(t, schema.TypeFloat64, colMap["score"].DataType)
 	assert.Equal(t, schema.TypeBoolean, colMap["active"].DataType)
+}
+
+func TestGetTableSchema_Arrays(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE array_test (amounts DECIMAL(5,2)[], labels VARCHAR[], ids INTEGER[])`))
+
+	tableSchema, err := dest.GetTableSchema(ctx, "array_test")
+	require.NoError(t, err)
+	require.Len(t, tableSchema.Columns, 3)
+
+	amounts, labels, ids := tableSchema.Columns[0], tableSchema.Columns[1], tableSchema.Columns[2]
+	assert.Equal(t, schema.TypeArray, amounts.DataType)
+	assert.Equal(t, schema.TypeDecimal, amounts.ArrayType)
+	assert.Equal(t, 5, amounts.Precision)
+	assert.Equal(t, 2, amounts.Scale)
+	assert.Equal(t, schema.TypeArray, labels.DataType)
+	assert.Equal(t, schema.TypeString, labels.ArrayType)
+	assert.Equal(t, schema.TypeArray, ids.DataType)
+	assert.Equal(t, schema.TypeInt32, ids.ArrayType)
 }
 
 func TestGetTableSchema_NonExistentTable(t *testing.T) {

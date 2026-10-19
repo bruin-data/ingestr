@@ -350,7 +350,7 @@ func (s *shaper) shape(record arrow.RecordBatch, colIndex map[string]int, row in
 		col := record.Column(i)
 		if v := arrowToValue(col, row); v != nil {
 			data[name] = v
-		} else if s.writeNulls && s.recordType == "profile" && col.IsNull(row) {
+		} else if s.writeNulls && s.recordType == "profile" && (col.IsNull(row) || nonFinite(col, row)) {
 			// CleverTap ignores a null value; $delete is what unsets a profile
 			// attribute. Events are append-only, so null cells are omitted there.
 			data[name] = map[string]interface{}{"$delete": true}
@@ -752,7 +752,7 @@ func epochSeconds(arr arrow.Array, idx int) (int64, bool) {
 }
 
 func arrowToValue(arr arrow.Array, idx int) interface{} {
-	if arr.IsNull(idx) {
+	if arr.IsNull(idx) || nonFinite(arr, idx) {
 		return nil
 	}
 
@@ -837,6 +837,20 @@ func arrowToValue(arr arrow.Array, idx int) interface{} {
 	default:
 		return arrowutil.Value(arr, idx)
 	}
+}
+
+// nonFinite reports a NaN or ±Inf float; it is written like a null.
+func nonFinite(arr arrow.Array, idx int) bool {
+	var f float64
+	switch a := arr.(type) {
+	case *array.Float32:
+		f = float64(a.Value(idx))
+	case *array.Float64:
+		f = a.Value(idx)
+	default:
+		return false
+	}
+	return !arr.IsNull(idx) && (math.IsNaN(f) || math.IsInf(f, 0))
 }
 
 func convertUint(v uint64) interface{} {

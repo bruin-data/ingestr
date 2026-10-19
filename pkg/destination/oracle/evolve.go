@@ -18,6 +18,10 @@ func (d *OracleDestination) NormalizeSchemaEvolutionSourceColumn(source, dest sc
 	return source
 }
 
+func (d *OracleDestination) MaxDecimalPrecision() int {
+	return 38
+}
+
 // ApplySchemaEvolution renders the abstract schema-change plan into this
 // destination's DDL using the local dialect and applies each statement.
 func (d *OracleDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {

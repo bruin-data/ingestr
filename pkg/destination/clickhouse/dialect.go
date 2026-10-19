@@ -8,7 +8,9 @@ import (
 )
 
 // Dialect implements the destination.Dialect interface for ClickHouse.
-type Dialect struct{}
+type Dialect struct {
+	cluster string
+}
 
 func (d *Dialect) Name() string {
 	return "ClickHouse"
@@ -16,22 +18,24 @@ func (d *Dialect) Name() string {
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {
 	typeName := d.TypeName(col)
-	if col.Nullable {
+	if col.Nullable && col.DataType != schema.TypeArray {
 		typeName = fmt.Sprintf("Nullable(%s)", typeName)
 	}
-	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+	return fmt.Sprintf("ALTER TABLE %s%s ADD COLUMN %s %s",
 		table,
+		onClusterClause(d.cluster),
 		d.QuoteIdentifier(col.Name),
 		typeName)
 }
 
 func (d *Dialect) AlterColumnTypeSQL(table, colName string, newType schema.Column) string {
 	typeName := d.TypeName(newType)
-	if newType.Nullable {
+	if newType.Nullable && newType.DataType != schema.TypeArray {
 		typeName = fmt.Sprintf("Nullable(%s)", typeName)
 	}
-	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s",
+	return fmt.Sprintf("ALTER TABLE %s%s MODIFY COLUMN %s %s",
 		table,
+		onClusterClause(d.cluster),
 		d.QuoteIdentifier(colName),
 		typeName)
 }
@@ -80,7 +84,10 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeUUID:
 		return "UUID"
 	case schema.TypeArray:
-		elemCol := schema.Column{DataType: col.ArrayType}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		if col.Nullable {
+			return fmt.Sprintf("Array(Nullable(%s))", d.TypeName(elemCol))
+		}
 		return fmt.Sprintf("Array(%s)", d.TypeName(elemCol))
 	default:
 		return "String"
