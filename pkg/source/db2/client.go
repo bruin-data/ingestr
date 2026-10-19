@@ -230,6 +230,30 @@ func (c *db2Client) Stream(ctx context.Context, query string, handler db2StreamH
 	}
 	config.Debug("[DB2] Stream: SQLDARD received during PRPSQLSTT=%v", sawSQLDARDDuringPrepare)
 
+	if !sawSQLDARDDuringPrepare {
+		// Confirmed on issue #3: this server never returns a SQLDARD
+		// inline with PRPSQLSTT's reply despite RTNSQLDA, on every
+		// PRPSQLSTT including internal catalog queries - not a parsing
+		// bug, a real behavior difference. DSCSQLSTT ("Describe SQL
+		// Statement") is DRDA's standard, documented mechanism for
+		// explicitly requesting a SQLDARD for an already-prepared
+		// statement; this client defined the codepoint but never sent
+		// it. Only custom (query:) sources actually need this - the
+		// catalog-driven table path gets column metadata from SYSCOLUMNS
+		// instead and never reaches this branch's absence.
+		config.Debug("[DB2] Stream: sending DSCSQLSTT (SQLDARD not returned inline with PRPSQLSTT)")
+		dscSQLSTT, err := c.packDSCSQLSTT()
+		if err != nil {
+			return err
+		}
+		if _, err = writeRequestDSS(c.conn, dscSQLSTT, 1, false, true); err != nil {
+			return fmt.Errorf("sending DSCSQLSTT: %w", err)
+		}
+		if err := c.parseResponse(ctx, handler); err != nil {
+			return fmt.Errorf("describing statement: %w", err)
+		}
+	}
+
 	opnQRY, err := c.packOPNQRY()
 	if err != nil {
 		return err
@@ -636,6 +660,7 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 			case cpENDQRYRM:
 				needCNTQRY = false
 			case cpQRYDSC:
+				config.Debug("[DB2] QRYDSC wire bytes: %x", packet.object)
 				parsed, err := parseQRYDSC(packet.object)
 				if err != nil {
 					return err
@@ -947,6 +972,22 @@ func (c *db2Client) packPRPSQLSTT() ([]byte, error) {
 	body.Write(pkg)
 	body.Write(packBinary(cpRTNSQLDA, []byte{0xf1}))
 	return packDSSObject(cpPRPSQLSTT, body.Bytes())
+}
+
+// packDSCSQLSTT builds a DSCSQLSTT ("Describe SQL Statement") request,
+// referencing the same already-prepared statement as packPRPSQLSTT via the
+// identical PKGNAMCSN (same package/section number) - DRDA's standard
+// mechanism for explicitly requesting a SQLDARD when a server doesn't
+// return one inline with PRPSQLSTT's own reply.
+func (c *db2Client) packDSCSQLSTT() ([]byte, error) {
+	body := bytes.NewBuffer(nil)
+	pkg, err := c.packPKGNAMCSN(db2PackageSectionQuery)
+	if err != nil {
+		return nil, err
+	}
+	body.Write(pkg)
+	body.Write(packBinary(cpRTNSQLDA, []byte{0xf1}))
+	return packDSSObject(cpDSCSQLSTT, body.Bytes())
 }
 
 func (c *db2Client) packEXCSQLIMM() ([]byte, error) {

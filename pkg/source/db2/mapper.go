@@ -56,7 +56,14 @@ func MapDb2ToDataType(db2Type string) (schema.DataType, int, int, schema.DataTyp
 		return schema.TypeDate, 0, 0, schema.TypeUnknown
 	case "TIME":
 		return schema.TypeTime, 0, 0, schema.TypeUnknown
-	case "TIMESTAMP":
+	case "TIMESTAMP", "TIMESTMP":
+		// IBM i's own catalog (QSYS2.SYSCOLUMNS.DATA_TYPE) reports this as
+		// "TIMESTMP" - the 8-character-truncated system name OS/400's
+		// legacy object-naming convention uses, not the full SQL word.
+		// Confirmed on issue #3: this fell through to the TypeString
+		// default, so the column landed as the raw Go time.Time string
+		// representation in a TEXT destination column instead of a real
+		// timestamp.
 		return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
 	case "TIMESTAMP WITH TIME ZONE":
 		return schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown

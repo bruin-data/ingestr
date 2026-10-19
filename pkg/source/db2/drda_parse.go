@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/shopspring/decimal"
 )
 
@@ -270,17 +271,25 @@ func parseQRYDSC(obj []byte) ([]drdaField, error) {
 					params:   append([]byte(nil), body[i+1:i+3]...),
 				})
 			}
+			config.Debug("[DB2] QRYDSC N-GDA triplet: %d column(s), raw bytes=%x", len(fields), triplet)
 			return fields, nil
 		case fdocaTripletTypeMDD:
 			// Metadata descriptor - precedes the N-GDA triplet for result
 			// sets with GRAPHIC/LOB columns, carries nothing this client
 			// needs. Skip and keep looking for the N-GDA triplet.
+			config.Debug("[DB2] QRYDSC: skipping MDD triplet, raw bytes=%x", triplet)
 			continue
 		default:
 			// Any other FD:OCA triplet type (RLO, SDA, CPT, ...): skip
 			// rather than fail outright, since none of the per-column
 			// type information this client needs lives outside the N-GDA
-			// triplet.
+			// triplet. Logged explicitly (not just via the whole-object
+			// dump in parseResponse) since issue #3's "DRDA type 0x80"
+			// mystery may turn out to need one of these - an SDA triplet
+			// in particular can carry a per-column type override the
+			// N-GDA triplet's own type byte just points at (unconfirmed;
+			// this log is what would show it).
+			config.Debug("[DB2] QRYDSC: skipping triplet type 0x%x, raw bytes=%x", triplet[0], triplet)
 			continue
 		}
 	}
@@ -420,19 +429,19 @@ func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) 
 		if err != nil {
 			return nil, err
 		}
-		return signedLittleEndian(data), nil
+		return signedInt(data, numericByteOrderFor(platform)), nil
 	case drdaTypeFloat4, drdaTypeNFloat4:
 		data, err := readBytes(stream, 4)
 		if err != nil {
 			return nil, err
 		}
-		return math.Float32frombits(binary.LittleEndian.Uint32(data)), nil
+		return math.Float32frombits(numericByteOrderFor(platform).Uint32(data)), nil
 	case drdaTypeFloat8, drdaTypeNFloat8:
 		data, err := readBytes(stream, 8)
 		if err != nil {
 			return nil, err
 		}
-		return math.Float64frombits(binary.LittleEndian.Uint64(data)), nil
+		return math.Float64frombits(numericByteOrderFor(platform).Uint64(data)), nil
 	case drdaTypeDecimal, drdaTypeNDecimal:
 		precision := int(field.params[0])
 		scale := int(field.params[1])
@@ -522,17 +531,40 @@ func readBytes(r *bytes.Reader, n int) ([]byte, error) {
 	return out, err
 }
 
-func signedLittleEndian(data []byte) int64 {
+// numericByteOrderFor returns the byte order binary numeric fields
+// (INTEGER/SMALLINT/BIGINT/FLOAT) are actually sent in. DRDA's TYPDEFNAM
+// governs this: IBM i's own native one (QTDSQL400) is big-endian - this
+// client assumed little-endian (QTDSQLX86/LUW's convention) unconditionally
+// everywhere, confirmed wrong on issue #3 via real IBM i data (COLUMN_COUNT/
+// ROW_LENGTH came back byte-reversed, verified against the same row read
+// via ODBC). Packed decimal (decodePackedDecimal) is unaffected - it's a
+// sequence of BCD digit nibbles in natural reading order, not a binary
+// integer, so there's no "endianness" to it.
+func numericByteOrderFor(platform db2Platform) binary.ByteOrder {
+	if platform == db2PlatformIBMi {
+		return binary.BigEndian
+	}
+	return binary.LittleEndian
+}
+
+func signedInt(data []byte, order binary.ByteOrder) int64 {
 	switch len(data) {
 	case 1:
 		return int64(int8(data[0]))
 	case 2:
-		return int64(int16(binary.LittleEndian.Uint16(data)))
+		return int64(int16(order.Uint16(data)))
 	case 4:
-		return int64(int32(binary.LittleEndian.Uint32(data)))
+		return int64(int32(order.Uint32(data)))
 	case 8:
-		return int64(binary.LittleEndian.Uint64(data))
+		return int64(order.Uint64(data))
 	default:
+		if order == binary.BigEndian {
+			var v int64
+			for _, b := range data {
+				v = (v << 8) | int64(b)
+			}
+			return v
+		}
 		var v int64
 		for i := len(data) - 1; i >= 0; i-- {
 			v = (v << 8) | int64(data[i])

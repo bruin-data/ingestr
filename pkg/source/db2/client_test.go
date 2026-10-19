@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
 	"strings"
@@ -15,6 +16,42 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestReadDRDAFieldDecodesIntegerBigEndianOnIBMi(t *testing.T) {
+	// 00 00 00 11 (big-endian 17) - the real COLUMN_COUNT value from
+	// issue #3, which this client previously decoded as little-endian
+	// and reported as 285212672 (verified wrong against the same row
+	// read via ODBC).
+	value, err := readDRDAField(bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x11}), drdaField{
+		typeCode: drdaTypeInteger,
+		params:   lengthParams(4),
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(17), value)
+}
+
+func TestReadDRDAFieldDecodesIntegerLittleEndianOnOtherPlatforms(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte{0x11, 0x00, 0x00, 0x00}), drdaField{
+		typeCode: drdaTypeInteger,
+		params:   lengthParams(4),
+	}, db2PlatformLUW)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(17), value, "non-IBM-i platforms keep the existing little-endian (QTDSQLX86) convention")
+}
+
+func TestReadDRDAFieldDecodesFloat8BigEndianOnIBMi(t *testing.T) {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], math.Float64bits(3.5))
+
+	value, err := readDRDAField(bytes.NewReader(buf[:]), drdaField{
+		typeCode: drdaTypeFloat8,
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, 3.5, value)
+}
 
 func TestReadDRDAFieldNonNullableDecimal(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte{0x12, 0x34, 0x5c}), drdaField{
@@ -1164,6 +1201,83 @@ func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 		"ACCRDB's own RDBNAM reverted to the raw alias - using the resolved name (v22) still never got ACCRDBRM back in two separate captures, while ACCSEC/SECCHK consistently succeed sending *LOCAL as-is on this server")
 }
 
+// minimalSQLDARD builds the shortest SQLDARD object parseSQLDARD accepts:
+// the 0xff shortcut byte (skips parseSQLCard's normal 54-byte-minimum
+// structure entirely), a non-zero marker byte, a 1-column count, and that
+// one column's minimum-length unnamed-column block. Column name and type
+// content don't matter for tests only checking whether handler.Columns
+// fires at all.
+func minimalSQLDARD() []byte {
+	obj := []byte{0xff, 0x01, 0x01, 0x00}
+	return append(obj, make([]byte, 45)...) // 16-byte column header + 29-byte unnamed-column block
+}
+
+func TestStreamSkipsDSCSQLSTTWhenPrepareReturnsSQLDARD(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("SIGLPAR"),
+		timeout:  time.Second,
+	}
+
+	var codePoints []uint16
+	var sawColumns bool
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		for {
+			p, err := readDSS(serverConn)
+			require.NoError(t, err)
+			codePoints = append(codePoints, p.codePoint)
+			if !p.chained {
+				break
+			}
+		}
+		// PRPSQLSTT's reply carries a real SQLDARD this time.
+		require.NoError(t, writeTestDSS(serverConn, cpSQLDARD, minimalSQLDARD(), false))
+
+		for {
+			p, err := readDSS(serverConn)
+			require.NoError(t, err)
+			codePoints = append(codePoints, p.codePoint)
+			if !p.chained {
+				break
+			}
+		}
+		require.NoError(t, writeTestDSS(serverConn, cpRDBCMM, nil, false))
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Stream(context.Background(), "SELECT 1 FROM QSYS2.SYSTABLES", db2StreamHandler{
+			Columns: func([]db2Column) error {
+				sawColumns = true
+				return nil
+			},
+		})
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Stream did not return in time")
+	}
+
+	require.True(t, sawColumns, "SQLDARD during PRPSQLSTT should still reach the caller's Columns handler")
+	require.Equal(t, []uint16{cpPRPSQLSTT, cpSQLSTT, cpOPNQRY}, codePoints,
+		"DSCSQLSTT must not be sent when PRPSQLSTT already returned a real SQLDARD")
+}
+
 func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
@@ -1182,6 +1296,11 @@ func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
 		// PRPSQLSTT + SQLSTT must be fully drained and replied to before
 		// OPNQRY is ever sent - if Stream still chained them together,
 		// this second drain would see OPNQRY mixed into the first one.
+		// drainOneRequest's generic RDBCMM reply carries no SQLDARD, so
+		// Stream is expected to follow up with a DSCSQLSTT round trip
+		// (see TestStreamSendsDSCSQLSTTWhenPrepareOmitsSQLDARD for the
+		// case where that happens for a real reason).
+		drainOneRequest(t, serverConn, &codePoints)
 		drainOneRequest(t, serverConn, &codePoints)
 		drainOneRequest(t, serverConn, &codePoints)
 	}()
@@ -1204,7 +1323,7 @@ func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
 		t.Fatal("Stream did not return in time")
 	}
 
-	require.Equal(t, []uint16{cpPRPSQLSTT, cpSQLSTT, cpOPNQRY}, codePoints)
+	require.Equal(t, []uint16{cpPRPSQLSTT, cpSQLSTT, cpDSCSQLSTT, cpOPNQRY}, codePoints)
 }
 
 // drainOneRequest reads DSS packets from conn until a non-chained one is

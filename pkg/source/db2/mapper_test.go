@@ -27,6 +27,7 @@ func TestMapDb2ToDataType(t *testing.T) {
 		{name: "date", input: "DATE", wantType: schema.TypeDate},
 		{name: "time", input: "TIME", wantType: schema.TypeTime},
 		{name: "timestamp", input: "TIMESTAMP", wantType: schema.TypeTimestamp},
+		{name: "timestamp (IBM i 8-char truncated system name)", input: "TIMESTMP", wantType: schema.TypeTimestamp},
 		{name: "boolean", input: "BOOLEAN", wantType: schema.TypeBoolean},
 	}
 
