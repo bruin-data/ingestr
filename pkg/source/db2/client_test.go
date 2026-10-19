@@ -109,6 +109,100 @@ func TestPackSECCHKReturnsEncryptionError(t *testing.T) {
 	require.ErrorContains(t, err, "expected 32-byte security token")
 }
 
+func TestParseSECCHKRMReturnsErrorForNonZeroSVRCOD(t *testing.T) {
+	// SVRCOD=16 (SEVERE ERROR), SECCHKCD=15 - the exact bytes a real IBM i
+	// host returns on issue #3 for every connection attempted so far, which
+	// every prior build silently ignored and treated as "authenticated".
+	object := append(packUint(cpSVRCOD, 16, 2), packUint(cpSECCHKCD, 15, 1)...)
+
+	err := parseSECCHKRM(object)
+
+	require.ErrorContains(t, err, "SVRCOD=16")
+	require.ErrorContains(t, err, "SECCHKCD=15")
+}
+
+func TestParseSECCHKRMReturnsNilForZeroSVRCOD(t *testing.T) {
+	object := packUint(cpSVRCOD, 0, 2)
+
+	require.NoError(t, parseSECCHKRM(object))
+}
+
+func TestParseSECCHKRMReturnsNilWhenSVRCODAbsent(t *testing.T) {
+	require.NoError(t, parseSECCHKRM(nil))
+}
+
+func TestHandshakeFailsWhenSECCHKRMReportsAuthenticationFailure(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	private, err := newPrivateKey()
+	require.NoError(t, err)
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("SIGLPAR"),
+		user:     "user",
+		password: "pass",
+		timeout:  time.Second,
+		private:  private,
+		platform: db2PlatformIBMi,
+	}
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		if _, err := readDSS(serverConn); err != nil { // EXCSAT
+			return
+		}
+		if _, err := readDSS(serverConn); err != nil { // ACCSEC
+			return
+		}
+		if writeTestDSS(serverConn, cpEXCSATRD, nil, true) != nil {
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEncryptedUserPassword, 2), false) != nil {
+			return
+		}
+
+		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		if _, err := readDSS(serverConn); err != nil { // SECCHK
+			return
+		}
+		// SVRCOD=16, SECCHKCD=15 - the real server's response, reproduced
+		// byte-for-byte from the issue #3 packet capture.
+		object := append(packUint(cpSVRCOD, 16, 2), packUint(cpSECCHKCD, 15, 1)...)
+		_ = writeTestDSS(serverConn, cpSECCHKRM, object, false)
+		// No ACCRDB should ever be sent - the handshake must fail here.
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handshake(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+
+	select {
+	case err := <-done:
+		require.ErrorContains(t, err, "SVRCOD=16")
+		require.ErrorContains(t, err, "SECCHKCD=15")
+	case <-time.After(time.Second):
+		t.Fatal("handshake did not return in time")
+	}
+}
+
 func TestCP500EncodingUsesCodePage500(t *testing.T) {
 	encoded, err := encodeString("[]{}@#$", "cp500")
 

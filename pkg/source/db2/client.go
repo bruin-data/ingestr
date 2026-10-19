@@ -520,7 +520,11 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 						config.Debug("[DB2] handshake: ACCRDBRM RDBNAM=%q, using as the real RDB name for PKGNAMCSN", c.rdbName)
 					}
 				}
-			case cpSECCHKRM, cpEXCSATRD:
+			case cpSECCHKRM:
+				if err := parseSECCHKRM(packet.object); err != nil && errResult == nil {
+					errResult = err
+				}
+			case cpEXCSATRD:
 			default:
 			}
 		}

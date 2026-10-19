@@ -60,6 +60,32 @@ func parseReplyObject(obj []byte) map[uint16][]byte {
 	return out
 }
 
+// parseSECCHKRM inspects a SECCHKRM reply's SVRCOD/SECCHKCD fields. DRDA
+// defines SVRCOD 0 as success; any nonzero value (4=WARNING, 8=ERROR,
+// 16=SEVERE, ...) means the security check failed, with SECCHKCD giving the
+// specific reason code. Every call site previously treated any SECCHKRM as
+// "authenticated" without looking at either field - a real IBM i host
+// confirmed via packet capture to return SVRCOD=16 on every connection in
+// this investigation, while the client silently proceeded to ACCRDB, which
+// the server then dropped because the session was never actually
+// authenticated.
+func parseSECCHKRM(obj []byte) error {
+	fields := parseReplyObject(obj)
+	v, ok := fields[cpSVRCOD]
+	if !ok || len(v) < 2 {
+		return nil
+	}
+	svrcod := binary.BigEndian.Uint16(v[:2])
+	if svrcod == 0 {
+		return nil
+	}
+	secchkcd := -1
+	if sv, ok := fields[cpSECCHKCD]; ok && len(sv) >= 1 {
+		secchkcd = int(sv[0])
+	}
+	return fmt.Errorf("authentication rejected by server (SECCHKRM SVRCOD=%d, SECCHKCD=%d): the negotiated security mechanism's credentials were not accepted", svrcod, secchkcd)
+}
+
 func parseSQLCard(obj []byte) ([]byte, error) {
 	if len(obj) == 0 {
 		return nil, nil

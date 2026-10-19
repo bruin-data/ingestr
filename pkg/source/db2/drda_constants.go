@@ -52,6 +52,8 @@ const (
 	cpSRVDGN    uint16 = 0x1153
 	cpSRVNAM    uint16 = 0x116D
 	cpSRVRLSLV  uint16 = 0x115A
+	cpSVRCOD    uint16 = 0x1149
+	cpSECCHKCD  uint16 = 0x11A4
 	cpTYPDEFNAM uint16 = 0x002F
 	cpTYPDEFOVR uint16 = 0x0035
 	cpPKGNAMCSN uint16 = 0x2113
