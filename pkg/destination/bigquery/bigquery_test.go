@@ -815,6 +815,87 @@ func TestPrepareTableRejectsIncompatibleConcurrentCreateWinner(t *testing.T) {
 	}
 }
 
+func TestPrepareTableDropFirstRecreatesIncompatibleTable(t *testing.T) {
+	tests := []struct {
+		name         string
+		existingType string
+		deleteStatus int
+		wantRecreate bool
+		wantErr      string
+	}{
+		{name: "compatible table is reused", existingType: "INTEGER"},
+		{name: "incompatible table is recreated", existingType: "STRING", deleteStatus: http.StatusNoContent, wantRecreate: true},
+		{name: "delete error reaches writer", existingType: "STRING", deleteStatus: http.StatusForbidden, wantErr: "failed to drop table"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deleteCalls, createCalls atomic.Int32
+			var jobID, sql string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+					var req struct {
+						JobReference  struct{ JobID string } `json:"jobReference"`
+						Configuration struct {
+							Query struct{ Query string } `json:"query"`
+						} `json:"configuration"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					jobID, sql = req.JobReference.JobID, req.Configuration.Query.Query
+					writeBigQueryTestJob(w, jobID, sql)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/queries/"):
+					writeBigQueryTestQueryResults(w, jobID)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"):
+					writeBigQueryTestJob(w, jobID, sql)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/"):
+					writeBigQueryTableMetadata(w, tt.existingType)
+				case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/tables/"):
+					deleteCalls.Add(1)
+					w.WriteHeader(tt.deleteStatus)
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tables"):
+					createCalls.Add(1)
+					writeBigQueryTableMetadata(w, "INTEGER")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+			dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US", knownDatasets: map[string]bool{"test-project.test-dataset": true}}
+
+			require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:     "test-dataset.events",
+				Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+				DropFirst: true,
+			}))
+			_, _, _, tableKey, err := dest.resolveTable("test-dataset.events")
+			require.NoError(t, err)
+			errCh := dest.takePendingTableErr(tableKey)
+			require.NotNil(t, errCh)
+			err = <-errCh
+
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				require.Zero(t, createCalls.Load())
+				return
+			}
+			require.NoError(t, err)
+			require.Contains(t, sql, "TRUNCATE TABLE")
+			want := int32(0)
+			if tt.wantRecreate {
+				want = 1
+			}
+			require.Equal(t, want, deleteCalls.Load())
+			require.Equal(t, want, createCalls.Load())
+		})
+	}
+}
+
 func TestValidateBigQuerySchemaCompatibilityParameterizedTypes(t *testing.T) {
 	tests := []struct {
 		name     string
