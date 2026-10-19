@@ -302,7 +302,8 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
-		if job.CDCStateManager != nil {
+		// Never-snapshot sources only emit WAL truncates; retain the checkpoint for replay.
+		if job.CDCStateManager != nil && !job.CDCStateManager.neverSnapshot {
 			if err := job.CDCStateManager.InvalidateBatchSnapshot(ctx, job.Config.SourceTable, job.Config.DestTable); err != nil {
 				return err
 			}
@@ -526,7 +527,8 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if job.CDCStateManager != nil {
+	// In never mode, every truncate is replayable WAL, not a replacement snapshot.
+	if job.CDCStateManager != nil && !job.CDCStateManager.neverSnapshot {
 		for _, tableInfo := range job.Tables {
 			if _, staged := stagingTables[tableInfo.Name]; !staged || !hasCDCColumns(tableInfo.Schema) || !writeResult.TruncatedTables[tableInfo.Name] {
 				continue

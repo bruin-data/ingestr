@@ -69,7 +69,7 @@ Requirements and behavior:
 - The `never` policy is saved with connector state and inherited when the flag is omitted. `--full-refresh` and switching that connector to `--cdc-snapshot-mode auto` are rejected. Keep the same connector identity, table selection, and staging namespace across runs.
 - Initial snapshots, recovery snapshots, schema-change snapshots, and automatic backfills are prohibited. Missing or invalid checkpoints, replaced destinations, and source schema or identity changes stop the run. Recovery requires restoring valid state and retained WAL, or explicitly establishing a new external baseline and connector; do not delete state to bypass these checks.
 - Required CDC metadata columns are added without rewriting existing row data. Untouched baseline rows have NULL CDC metadata; use `COALESCE(_cdc_deleted, false) = false` when selecting active rows. Updates and deletes populate metadata as changes arrive. Keyed replay is at least once.
-- Source WAL `TRUNCATE` events still clear the corresponding destination table. “Never snapshot” does not mean “ignore destructive source changes.”
+- Source WAL `TRUNCATE` events still clear the corresponding destination table. If interrupted before checkpoint persistence, the run replays the truncate and subsequent changes from its previous checkpoint; the destination may remain empty or partially populated until recovery finishes. “Never snapshot” does not mean “ignore destructive source changes.”
 
 Omit `--stream` for a one-shot run that catches up and exits. Without a saved policy or explicit flag, `auto` preserves the default behavior: resume when possible, otherwise allow initial or recovery snapshots and backfills as needed.
 

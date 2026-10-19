@@ -2583,6 +2583,33 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 				refresh.FullRefresh, refresh.Stream = true, false
 				require.ErrorContains(t, pipeline.New(&refresh).Run(ctx), "cannot be combined with CDC snapshot mode never")
 
+				// Fail after applying a WAL truncate but before its checkpoint is durable.
+				_, err = pool.Exec(ctx, `
+					CREATE FUNCTION landing.reject_order() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN RAISE EXCEPTION 'injected WAL truncate failure'; END $$;
+					CREATE TRIGGER reject_order BEFORE INSERT OR UPDATE ON landing.orders
+					FOR EACH ROW WHEN (NEW.id = 8) EXECUTE FUNCTION landing.reject_order();
+					TRUNCATE public.orders;
+					INSERT INTO public.orders VALUES (7, 'replayed first'), (8, 'replayed last');
+				`)
+				require.NoError(t, err)
+				interrupted := cfg
+				require.ErrorContains(t, pipeline.New(&interrupted).Run(ctx), "injected WAL truncate failure")
+				if streaming {
+					require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM landing.orders`).Scan(&rows))
+					require.Zero(t, rows, "the truncate must commit before the injected merge failure")
+				}
+				_, err = pool.Exec(ctx, `DROP FUNCTION landing.reject_order() CASCADE`)
+				require.NoError(t, err)
+				retry := cfg
+				retry.Stream = false
+				require.NoError(t, pipeline.New(&retry).Run(ctx))
+				var replayedIDs []int32
+				var replayedNames []string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT array_agg(id ORDER BY id), array_agg(name ORDER BY id) FROM landing.orders`).Scan(&replayedIDs, &replayedNames))
+				require.Equal(t, []int32{7, 8}, replayedIDs)
+				require.Equal(t, []string{"replayed first", "replayed last"}, replayedNames)
+
 				// A real WAL TRUNCATE still replicates; it is not a snapshot fallback.
 				_, err = pool.Exec(ctx, `TRUNCATE public.orders; INSERT INTO public.orders VALUES (5, 'after truncate')`)
 				require.NoError(t, err)
