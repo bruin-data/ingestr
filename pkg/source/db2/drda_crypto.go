@@ -114,8 +114,12 @@ func substitutePasswordSHA1(userID, password string, serverSeed, clientSeed []by
 	substituteHash.Write(substitutePasswordSequence)
 	substitute := substituteHash.Sum(nil)
 
-	config.Debug("[DB2] substitutePasswordSHA1: user_utf16be=%x password_utf16be=%x server_seed=%x client_seed=%x sequence=%x",
-		userIDBytes, passwordBytes, serverSeed, clientSeed, substitutePasswordSequence)
+	// password_utf16be is never logged, even in debug mode - it's the
+	// plaintext password. password_len substitutes for it: enough to spot
+	// an encoding/padding mistake (e.g. an unexpectedly even/odd byte
+	// count) without ever putting the credential itself in a log.
+	config.Debug("[DB2] substitutePasswordSHA1: user_utf16be=%x password_len=%d server_seed=%x client_seed=%x sequence=%x",
+		userIDBytes, len(passwordBytes), serverSeed, clientSeed, substitutePasswordSequence)
 	config.Debug("[DB2] substitutePasswordSHA1: token(sha1 of user_utf16be+password_utf16be)=%x", token)
 	config.Debug("[DB2] substitutePasswordSHA1: substitute(sha1 of token+server_seed+client_seed+user_utf16be+sequence)=%x", substitute)
 	return substitute

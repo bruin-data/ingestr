@@ -3,6 +3,7 @@ package db2
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
@@ -274,7 +275,7 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		return fmt.Errorf("sending ACCSEC: %w", err)
 	}
 
-	secmec, sectkn, err := c.parseACCSECRD()
+	secmec, _, sectkn, err := c.parseACCSECRD()
 	if err != nil {
 		return fmt.Errorf("reading ACCSECRD: %w", err)
 	}
@@ -301,15 +302,27 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		if curID, err = writeRequestDSS(c.conn, packACCSEC(c.database, resolved, nil), curID, false, true); err != nil {
 			return fmt.Errorf("re-sending ACCSEC with secmec=%d: %w", resolved, err)
 		}
-		confirmedSecmec, confirmedSectkn, err := c.parseACCSECRD()
+		confirmedSecmec, confirmedSecmecList, confirmedSectkn, err := c.parseACCSECRD()
 		if err != nil {
 			return fmt.Errorf("reading confirming ACCSECRD for secmec=%d: %w", resolved, err)
 		}
-		config.Debug("[DB2] handshake: confirming ACCSECRD received, secmec=%d, token_len=%d", confirmedSecmec, len(confirmedSectkn))
-		if confirmedSecmec != 0 {
+		config.Debug("[DB2] handshake: confirming ACCSECRD received, secmec=%d, secmecList=%v, token_len=%d", confirmedSecmec, confirmedSecmecList, len(confirmedSectkn))
+		if len(confirmedSecmecList) > 1 {
+			// DRDA's documented behavior when the proposed mechanism isn't
+			// supported: the server lists what it does support instead of
+			// confirming one value. Confirmed via the user's own packet
+			// capture on issue #3 - an 8-byte SECMEC field (four listed
+			// values, 8/7/9/10) that earlier builds misread as "the server
+			// confirmed SECMEC 8" by only looking at its first 2 bytes.
+			chosen, ok := pickSupportedSecMec(confirmedSecmecList)
+			if !ok {
+				return fmt.Errorf("server does not support any SECMEC this client implements (offered: %v)", confirmedSecmecList)
+			}
+			resolved = chosen
+		} else if confirmedSecmec != 0 {
 			resolved = confirmedSecmec
+			sectkn = confirmedSectkn
 		}
-		sectkn = confirmedSectkn
 		secmecDowngradedToEUSRIDPWD = claimedEncryptedNoToken && resolved == secmecEUSRIDPWD
 	}
 	secmec = resolved
@@ -329,34 +342,58 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	// plain-text: the real IBM i host on issue #3 returned SECCHKRM
 	// SVRCOD=16/SECCHKCD=15 (authentication rejected) for every connection
 	// in this investigation because SECCHK was sending plain-text
-	// credentials for a mechanism that doesn't accept them. Neither SECMEC
-	// 8 nor its substitute-password algorithms are documented in the open
-	// DRDA/DDM spec; both are ported from IBM's own JTOpen (jt400) client
-	// (see signon.go and substitutePasswordSHA1/512 in drda_crypto.go).
-	// Computing one requires a server seed that only the separate Sign-on
-	// Server protocol (not DRDA/DDM) provides, so that exchange happens
-	// here, once, right before building SECCHK.
+	// credentials for a mechanism that doesn't accept them. v27 computed
+	// the substitute from seeds exchanged over IBM i's separate Sign-on
+	// Server protocol (port 8476) - the user found the flaw in that on
+	// issue #3: those seeds belong to a different server job than the one
+	// SECCHK actually goes to on port 446, which never saw them and can't
+	// reproduce the substitute. Confirmed independently via Apache Derby's
+	// generic (non-IBM-i-specific) DRDA client, which has no side channel
+	// to get seeds from at all: NetConnection.flowUSRSSBPWDconnect -
+	// "The SECTKN parameter is used to flow the client and server
+	// encryption seeds on the ACCSEC and ACCSECRD commands." So the seed
+	// pair now comes from a dedicated ACCSEC/ACCSECRD round on this same
+	// connection instead. The Sign-on Server is still consulted, but only
+	// for the password level (which of the two substitute algorithms to
+	// use) - not for seeds.
 	var substituteCredential []byte
 	if secmec == secmecEUSRIDPWD {
+		drdaClientSeed := make([]byte, 8)
+		if _, err := rand.Read(drdaClientSeed); err != nil {
+			return fmt.Errorf("generating SECMEC 8 client seed: %w", err)
+		}
+		config.Debug("[DB2] handshake: re-proposing ACCSEC with secmec=8, client_seed=%x", drdaClientSeed)
+		if _, err = writeRequestDSS(c.conn, packACCSEC(c.database, secmecEUSRIDPWD, drdaClientSeed), 1, false, true); err != nil {
+			return fmt.Errorf("sending ACCSEC with secmec=8: %w", err)
+		}
+		confirmedSecmec8, _, drdaServerSeed, err := c.parseACCSECRD()
+		if err != nil {
+			return fmt.Errorf("reading confirming ACCSECRD for secmec=8: %w", err)
+		}
+		if confirmedSecmec8 != secmecEUSRIDPWD || len(drdaServerSeed) < 8 {
+			return fmt.Errorf("server did not confirm SECMEC 8 with an 8-byte server seed (secmec=%d, token_len=%d)", confirmedSecmec8, len(drdaServerSeed))
+		}
+		drdaServerSeed = drdaServerSeed[:8]
+		config.Debug("[DB2] handshake: SECMEC 8 confirmed, server_seed=%x", drdaServerSeed)
+
 		signonExchange := c.signonExchange
 		if signonExchange == nil {
 			signonExchange = exchangeSignonAttributes
 		}
 		attrs, err := signonExchange(ctx, c.host, c.ssl, c.timeout)
 		if err != nil {
-			return fmt.Errorf("exchanging Sign-on Server attributes for SECMEC 8: %w", err)
+			return fmt.Errorf("exchanging Sign-on Server attributes for password level: %w", err)
 		}
-		config.Debug("[DB2] handshake: Sign-on Server passwordLevel=%d client_seed=%x server_seed=%x",
-			attrs.passwordLevel, attrs.clientSeed, attrs.serverSeed)
+		config.Debug("[DB2] handshake: Sign-on Server passwordLevel=%d", attrs.passwordLevel)
 		// IBM i user profile names are always uppercase internally; the
 		// substitute algorithms are specified against that canonical form
 		// (confirmed via JTOpen's own EBCDIC round-trip, which only
 		// recognizes uppercase A-Z in the byte<->char tables it uses here).
 		substituteUser := strings.ToUpper(c.user)
 		if attrs.passwordLevel >= 4 {
-			substituteCredential = substitutePasswordSHA512(substituteUser, c.password, attrs.serverSeed, attrs.clientSeed)
+			substituteCredential = substitutePasswordSHA512(substituteUser, c.password, drdaServerSeed, drdaClientSeed)
 		} else {
-			substituteCredential = substitutePasswordSHA1(substituteUser, c.password, attrs.serverSeed, attrs.clientSeed)
+			substituteCredential = substitutePasswordSHA1(substituteUser, c.password, drdaServerSeed, drdaClientSeed)
 		}
 		config.Debug("[DB2] handshake: SECCHK PASSWORD field (substitute credential) hex=%x", substituteCredential)
 	}
@@ -431,30 +468,65 @@ func (c *db2Client) handshake(ctx context.Context) error {
 	return nil
 }
 
-func (c *db2Client) parseACCSECRD() (int, []byte, error) {
+// parseACCSECRD reads an ACCSECRD reply. secmec is the first (or only)
+// value in its SECMEC field, kept for callers that only ever dealt with a
+// single confirmed value; secmecList is every value in that field. DRDA
+// defines both shapes for this same field: a single value confirms the
+// mechanism the client proposed, but when the server doesn't support that
+// mechanism, it replies with a list of the mechanisms it does support
+// instead (confirmed independently via Apache Derby's generic DRDA client,
+// NetConnection.java: "the security mechanism returned from the server
+// matches the mechanism requested by the client" is only true when
+// secmecList.length == 1). Earlier builds only ever read the first 2 bytes
+// of this field and treated that as a confirmed value regardless of the
+// field's actual length - on issue #3, a real IBM i host returned an
+// 8-byte SECMEC field (four listed values: 8, 7, 9, 10), which was
+// misread as "the server confirmed SECMEC 8" instead of "the server
+// doesn't support what was proposed and listed its alternatives".
+func (c *db2Client) parseACCSECRD() (secmec int, secmecList []int, sectkn []byte, err error) {
 	chained := true
-	secmec := 0
-	var sectkn []byte
 	for chained {
-		packet, err := readDSS(c.conn)
-		if err != nil {
-			return 0, nil, err
+		packet, readErr := readDSS(c.conn)
+		if readErr != nil {
+			return 0, nil, nil, readErr
 		}
 		chained = packet.chained
 		switch packet.codePoint {
 		case cpACCSECRD:
 			fields := parseReplyObject(packet.object)
 			if v := fields[cpSECMEC]; len(v) >= 2 {
-				secmec = int(binary.BigEndian.Uint16(v[:2]))
+				for i := 0; i+2 <= len(v); i += 2 {
+					secmecList = append(secmecList, int(binary.BigEndian.Uint16(v[i:i+2])))
+				}
+				secmec = secmecList[0]
 			}
 			if v := fields[cpSECTKN]; len(v) > 0 {
 				sectkn = append([]byte(nil), v...)
 			}
 		case cpRDBNFNRM:
-			return 0, nil, fmt.Errorf("database not found")
+			return 0, nil, nil, fmt.Errorf("database not found")
 		}
 	}
-	return secmec, sectkn, nil
+	return secmec, secmecList, sectkn, nil
+}
+
+// pickSupportedSecMec chooses a security mechanism this client can actually
+// speak from a server's ACCSECRD "menu" reply (see parseACCSECRD). Prefers
+// secmecEUSRIDPWD (password substitute) since that's the only mechanism
+// besides plain-text/DH this client has real credential support for,
+// confirmed necessary against a real IBM i host on issue #3.
+func pickSupportedSecMec(menu []int) (int, bool) {
+	for _, m := range menu {
+		if m == secmecEUSRIDPWD {
+			return m, true
+		}
+	}
+	for _, m := range menu {
+		if m == secmecUserPassword {
+			return m, true
+		}
+	}
+	return 0, false
 }
 
 func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler) error {

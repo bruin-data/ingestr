@@ -159,7 +159,23 @@ func TestParseSECCHKRMReturnsNilWhenSVRCODAbsent(t *testing.T) {
 	require.NoError(t, parseSECCHKRM(nil))
 }
 
-func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
+// packSECMECMenu builds a single SECMEC field (LL+CP+data) carrying
+// multiple 2-byte values concatenated - the documented DRDA shape for an
+// ACCSECRD reply when the proposed mechanism isn't supported: the server
+// lists what it does support instead of confirming one value.
+func packSECMECMenu(values ...int) []byte {
+	data := make([]byte, 0, len(values)*2)
+	for _, v := range values {
+		data = append(data, byte(v>>8), byte(v))
+	}
+	field := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint16(field[0:2], uint16(len(field)))
+	binary.BigEndian.PutUint16(field[2:4], cpSECMEC)
+	copy(field[4:], data)
+	return field
+}
+
+func TestHandshakeChoosesSECMEC8FromMenuReply(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()
 	defer func() { _ = clientConn.Close() }()
@@ -167,8 +183,7 @@ func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
 	private, err := newPrivateKey()
 	require.NoError(t, err)
 
-	serverSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
-	clientSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	drdaServerSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
 	client := &db2Client{
 		conn:           clientConn,
 		database:       padDatabaseName("SIGLPAR"),
@@ -176,9 +191,10 @@ func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
 		password:       "pass",
 		timeout:        time.Second,
 		private:        private,
-		signonExchange: stubSignonExchange(3, serverSeed),
+		signonExchange: stubSignonExchange(3),
 	}
 
+	var dedicatedACCSECSent bool
 	var secchkObject []byte
 	serverDone := make(chan struct{})
 	go func() {
@@ -197,10 +213,111 @@ func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
 			return
 		}
 
-		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC
+		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC (secmec=3)
+			return
+		}
+		// A menu reply listing 7, 9, 10, 8 in that order - NOT starting
+		// with 8. The old bug (reading only the first 2 bytes of this
+		// field) would resolve this to 7, an unsupported mechanism this
+		// client has no credential path for, and skip the SECMEC 8 flow
+		// entirely.
+		menu := packSECMECMenu(7, secmecEncryptedUserPassword, 10, secmecEUSRIDPWD)
+		if writeTestDSS(serverConn, cpACCSECRD, menu, false) != nil {
+			return
+		}
+
+		dedicated, err := readDSS(serverConn) // dedicated ACCSEC for secmec=8
+		if err != nil {
+			return
+		}
+		if binary.BigEndian.Uint16(parseReplyObject(dedicated.object)[cpSECMEC]) == secmecEUSRIDPWD {
+			dedicatedACCSECSent = true
+		}
+		accsecrd := append(packUint(cpSECMEC, secmecEUSRIDPWD, 2), packBinary(cpSECTKN, drdaServerSeed)...)
+		if writeTestDSS(serverConn, cpACCSECRD, accsecrd, false) != nil {
+			return
+		}
+
+		packet, err := readDSS(serverConn) // SECCHK
+		if err != nil {
+			return
+		}
+		secchkObject = packet.object
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.handshake(context.Background())
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	_ = serverConn.Close()
+	<-done
+
+	require.True(t, dedicatedACCSECSent, "client must pick SECMEC 8 out of the full menu, not just its first listed value")
+	fields := parseReplyObject(secchkObject)
+	require.NotEqual(t, []byte("pass"), fields[cpPASSWORD], "must not fall back to plain-text credentials when 8 is buried in the menu")
+	require.Len(t, fields[cpPASSWORD], 20, "must send a real SHA-1 substitute, not a plain-text password")
+}
+
+func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	private, err := newPrivateKey()
+	require.NoError(t, err)
+
+	drdaServerSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
+	client := &db2Client{
+		conn:           clientConn,
+		database:       padDatabaseName("SIGLPAR"),
+		user:           "user",
+		password:       "pass",
+		timeout:        time.Second,
+		private:        private,
+		signonExchange: stubSignonExchange(3),
+	}
+
+	var capturedClientSeed []byte
+	var secchkObject []byte
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		if _, err := readDSS(serverConn); err != nil { // EXCSAT
+			return
+		}
+		if _, err := readDSS(serverConn); err != nil { // ACCSEC
+			return
+		}
+		if writeTestDSS(serverConn, cpEXCSATRD, nil, true) != nil {
+			return
+		}
+		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEncryptedUserPassword, 2), false) != nil {
+			return
+		}
+
+		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC (secmec=3)
 			return
 		}
 		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		// Dedicated ACCSEC/ACCSECRD round for SECMEC 8's own seed pair
+		// (not the Sign-on Server's) - confirmed necessary on issue #3.
+		dedicatedACCSEC, err := readDSS(serverConn)
+		if err != nil {
+			return
+		}
+		capturedClientSeed = parseReplyObject(dedicatedACCSEC.object)[cpSECTKN]
+		accsecrd := append(packUint(cpSECMEC, secmecEUSRIDPWD, 2), packBinary(cpSECTKN, drdaServerSeed)...)
+		if writeTestDSS(serverConn, cpACCSECRD, accsecrd, false) != nil {
 			return
 		}
 
@@ -226,9 +343,10 @@ func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
 	_ = serverConn.Close()
 	<-done
 
+	require.Len(t, capturedClientSeed, 8, "ACCSEC re-proposing SECMEC 8 must carry an 8-byte client seed in SECTKN")
 	fields := parseReplyObject(secchkObject)
-	wantCredential := substitutePasswordSHA1("USER", "pass", serverSeed, clientSeed)
-	require.Equal(t, wantCredential, fields[cpPASSWORD], "PASSWORD field must carry the SECMEC 8 substitute, not the plain-text password")
+	wantCredential := substitutePasswordSHA1("USER", "pass", drdaServerSeed, capturedClientSeed)
+	require.Equal(t, wantCredential, fields[cpPASSWORD], "PASSWORD field must carry the SECMEC 8 substitute computed from the DRDA ACCSEC/ACCSECRD seed pair, not the plain-text password or the Sign-on Server's seeds")
 	require.NotEqual(t, []byte("pass"), fields[cpPASSWORD])
 }
 
@@ -248,7 +366,7 @@ func TestHandshakeFailsWhenSECCHKRMReportsAuthenticationFailure(t *testing.T) {
 		timeout:        time.Second,
 		private:        private,
 		platform:       db2PlatformIBMi,
-		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		signonExchange: stubSignonExchange(3),
 	}
 
 	serverDone := make(chan struct{})
@@ -268,10 +386,18 @@ func TestHandshakeFailsWhenSECCHKRMReportsAuthenticationFailure(t *testing.T) {
 			return
 		}
 
-		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC
+		if _, err := readDSS(serverConn); err != nil { // re-proposed ACCSEC (secmec=3)
 			return
 		}
 		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		if _, err := readDSS(serverConn); err != nil { // dedicated ACCSEC for SECMEC 8's seed pair
+			return
+		}
+		accsecrd := append(packUint(cpSECMEC, secmecEUSRIDPWD, 2), packBinary(cpSECTKN, []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
+		if writeTestDSS(serverConn, cpACCSECRD, accsecrd, false) != nil {
 			return
 		}
 
@@ -590,7 +716,7 @@ func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
 		password:       "pass",
 		timeout:        time.Second,
 		private:        private,
-		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		signonExchange: stubSignonExchange(3),
 	}
 
 	serverDone := make(chan struct{})
@@ -617,6 +743,15 @@ func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
 			return
 		}
 		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		// Dedicated ACCSEC/ACCSECRD round for SECMEC 8's own seed pair.
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		accsecrd := append(packUint(cpSECMEC, secmecEUSRIDPWD, 2), packBinary(cpSECTKN, []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
+		if writeTestDSS(serverConn, cpACCSECRD, accsecrd, false) != nil {
 			return
 		}
 
@@ -673,7 +808,7 @@ func TestHandshakeFailsLoudlyWhenACCRDBRMNeverArrives(t *testing.T) {
 		timeout:        time.Second,
 		private:        private,
 		platform:       db2PlatformIBMi,
-		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		signonExchange: stubSignonExchange(3),
 	}
 
 	serverDone := make(chan struct{})
@@ -699,6 +834,15 @@ func TestHandshakeFailsLoudlyWhenACCRDBRMNeverArrives(t *testing.T) {
 			return
 		}
 		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		// Dedicated ACCSEC/ACCSECRD round for SECMEC 8's own seed pair.
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		accsecrd := append(packUint(cpSECMEC, secmecEUSRIDPWD, 2), packBinary(cpSECTKN, []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
+		if writeTestDSS(serverConn, cpACCSECRD, accsecrd, false) != nil {
 			return
 		}
 
@@ -772,7 +916,7 @@ func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 		password:       "pass",
 		timeout:        time.Second,
 		private:        private,
-		signonExchange: stubSignonExchange(3, []byte{1, 2, 3, 4, 5, 6, 7, 8}),
+		signonExchange: stubSignonExchange(3),
 	}
 
 	var accrdbRDBNAM string
@@ -797,6 +941,15 @@ func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 			return
 		}
 		if writeTestDSS(serverConn, cpACCSECRD, packUint(cpSECMEC, secmecEUSRIDPWD, 2), false) != nil {
+			return
+		}
+
+		// Dedicated ACCSEC/ACCSECRD round for SECMEC 8's own seed pair.
+		if _, err := readDSS(serverConn); err != nil {
+			return
+		}
+		accsecrd := append(packUint(cpSECMEC, secmecEUSRIDPWD, 2), packBinary(cpSECTKN, []byte{1, 2, 3, 4, 5, 6, 7, 8})...)
+		if writeTestDSS(serverConn, cpACCSECRD, accsecrd, false) != nil {
 			return
 		}
 
@@ -1126,14 +1279,16 @@ func TestPackSQLSTTRejectsOversizedQuery(t *testing.T) {
 // stubSignonExchange stands in for a real Sign-on Server connection in
 // handshake tests that aren't themselves testing the Sign-on Server
 // protocol (that's signon_test.go's job) but still exercise the SECMEC 8
-// downgrade path, which now needs *something* to answer the Sign-on Server
-// attribute exchange before SECCHK can be built.
-func stubSignonExchange(passwordLevel int, serverSeed []byte) func(context.Context, string, bool, time.Duration) (signonAttributes, error) {
+// path, which now only consults the Sign-on Server for the password level
+// (deciding SHA-1 vs SHA-512) - the seed pair the substitute actually uses
+// comes from a dedicated ACCSEC/ACCSECRD round on the DRDA connection
+// itself (see handshake), so the seeds returned here are unused filler.
+func stubSignonExchange(passwordLevel int) func(context.Context, string, bool, time.Duration) (signonAttributes, error) {
 	return func(context.Context, string, bool, time.Duration) (signonAttributes, error) {
 		return signonAttributes{
 			passwordLevel: passwordLevel,
-			serverSeed:    serverSeed,
-			clientSeed:    []byte{1, 2, 3, 4, 5, 6, 7, 8},
+			serverSeed:    []byte{0, 0, 0, 0, 0, 0, 0, 0},
+			clientSeed:    []byte{0, 0, 0, 0, 0, 0, 0, 0},
 		}, nil
 	}
 }
