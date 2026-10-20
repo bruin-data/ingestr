@@ -15,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -366,7 +367,7 @@ func TestAppend_KeepsPreviousFiles(t *testing.T) {
 	assert.Nil(t, d.table("b/reports/t").writtenKeys)
 }
 
-func TestReplace_WithoutPermissionKeepsPreviousFiles(t *testing.T) {
+func TestReplace_WithoutPermissionFails(t *testing.T) {
 	for _, tt := range []struct {
 		name                 string
 		denyList, denyDelete bool
@@ -382,8 +383,13 @@ func TestReplace_WithoutPermissionKeepsPreviousFiles(t *testing.T) {
 			d := connectFakeS3(t, endpoint, "")
 			d.customEndpoint = tt.customEndpoint
 
-			replace(t, d, "b/reports/t", noRows())
+			err := d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: true})
+			if err == nil {
+				require.NoError(t, d.WriteParallel(t.Context(), noRows(), destination.WriteOptions{Table: "b/reports/t"}))
+				err = d.FinalizeReplace(t.Context(), "b/reports/t")
+			}
 
+			require.ErrorContains(t, err, "replace needs list and delete permission")
 			assert.Equal(t, []string{"b/reports/t/0a1b2c3d.0.parquet"}, fake.remaining())
 		})
 	}
@@ -454,4 +460,38 @@ func TestReplace_NestedLayoutRemovesPreviousFiles(t *testing.T) {
 	replace(t, d, "b/reports/t", noRows())
 
 	assert.Equal(t, []string{"b/reports/t/0a1b2c3d/notes.txt"}, fake.remaining())
+}
+
+func TestReplace_TableFolderInBucketRootIsCleared(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/b/0a1b2c3d.0.parquet", "b/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "")
+	d.layout = "{table_name}/{load_id}.{file_id}.{ext}"
+
+	replace(t, d, "b", noRows())
+
+	assert.Equal(t, []string{"b/0a1b2c3d.0.parquet"}, fake.remaining())
+}
+
+func TestReplace_EndpointFromEnvironmentDeletesPerObject(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d.0.parquet")
+	t.Setenv("AWS_ENDPOINT_URL_S3", endpoint)
+	d := NewBlobstoreDestination()
+	require.NoError(t, d.Connect(t.Context(), "s3://?access_key_id=a&secret_access_key=b"))
+	d.s3Client = s3.New(d.s3Client.Options(), func(o *s3.Options) { o.UsePathStyle = true })
+
+	replace(t, d, "b/reports/t", noRows())
+
+	assert.Empty(t, fake.remaining())
+	assert.Equal(t, 1, fake.singleDeletes)
+	assert.Zero(t, fake.batchDeletes)
+}
+
+func TestDeleteS3Batches_ReportsEveryErrorCode(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/k1", "b/k2")
+	fake.denyDelete = true
+	d := connectFakeS3(t, endpoint, "")
+
+	err := d.deleteS3Batches(t.Context(), "b", []string{"k1", "k2"})
+
+	require.ErrorContains(t, err, "failed to delete 2 files in s3://b (codes: AccessDenied)")
 }

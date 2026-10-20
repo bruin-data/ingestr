@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -483,6 +484,10 @@ func finalizeReplace(ctx context.Context, dest destination.Destination, table st
 	if !ok {
 		return nil
 	}
+	// Another runner may hold the connector now; leave the previous data to it.
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if err := finalizer.FinalizeReplace(ctx, table); err != nil {
 		return fmt.Errorf("failed to finalize replace of %s: %w", table, err)
 	}
@@ -618,10 +623,16 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 	}
 
 	if !useStaging {
+		// Finalize every table even if one fails, so a failure leaves at most that table
+		// with previous files next to the new ones.
+		var errs []error
 		for _, tableInfo := range job.Tables {
 			if err := finalizeReplace(ctx, job.Destination, tableConfigs[tableInfo.Name].DestTable); err != nil {
-				return fmt.Errorf("table %s: %w", tableInfo.Name, err)
+				errs = append(errs, fmt.Errorf("table %s: %w", tableInfo.Name, err))
 			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			return err
 		}
 	}
 

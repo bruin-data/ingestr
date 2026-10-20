@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 
 	"cloud.google.com/go/storage"
@@ -15,7 +16,6 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 )
 
@@ -24,10 +24,9 @@ const (
 	deleteParallelism = 16
 )
 
-var (
-	errListUnsupported = errors.New("listing files is not supported for this provider")
-	errAccessDenied    = errors.New("access denied")
-)
+var errListUnsupported = errors.New("listing files is not supported for this provider")
+
+const replacePermissions = "replace needs list and delete permission on the bucket (S3: s3:ListBucket, s3:DeleteObject; GCS: storage.objects.list, storage.objects.delete); use the append strategy to keep existing files"
 
 // Stand-ins for the per-load layout values; they never occur in a real layout.
 const (
@@ -46,7 +45,7 @@ func (d *BlobstoreDestination) FinalizeReplace(ctx context.Context, table string
 		return nil
 	}
 	if err := d.removeStaleBlobs(ctx, t); err != nil {
-		return fmt.Errorf("failed to remove files from the previous load: %w", err)
+		return fmt.Errorf("failed to remove the previous files of %s, so some may remain next to the new ones; %s: %w", t.name, replacePermissions, err)
 	}
 	return nil
 }
@@ -56,11 +55,6 @@ func (d *BlobstoreDestination) FinalizeReplace(ctx context.Context, table string
 // layout. Files written after the listing are never removed. Concurrent replaces on one
 // path still need external coordination.
 func (d *BlobstoreDestination) listPreviousBlobs(ctx context.Context, t *blobTable) ([]string, error) {
-	if strings.Trim(t.basePath, "/") == "" {
-		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: the table has no path inside bucket %s, and the bucket root is never cleared\n", t.name, t.bucket)
-		return nil, nil
-	}
-
 	// The trailing slash in the prefix keeps "reports/t" from matching "reports/t2".
 	prefix := t.prefix()
 	rendered := layoutReplacer(t.name, loadIDToken, fileIDToken).Replace(d.layout)
@@ -71,16 +65,18 @@ func (d *BlobstoreDestination) listPreviousBlobs(ctx context.Context, t *blobTab
 		listPrefix += dir
 	}
 
+	if strings.Trim(listPrefix, "/") == "" {
+		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: its files go directly into the root of bucket %s, which is never cleared\n", t.name, t.bucket)
+		return nil, nil
+	}
+
 	keys, err := d.listBlobs(ctx, t.bucket, listPrefix, delimited)
 	switch {
 	case errors.Is(err, errListUnsupported):
 		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: removing old files is not supported for %s yet\n", t.name, d.provider)
 		return nil, nil
-	case isAccessDenied(err):
-		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: listing %s/%s needs list permission on the bucket: %v\n", t.name, t.bucket, listPrefix, err)
-		return nil, nil
 	case err != nil:
-		return nil, err
+		return nil, fmt.Errorf("failed to list the previous files of %s; %s: %w", t.name, replacePermissions, err)
 	}
 
 	pattern := layoutPattern(rendered)
@@ -118,29 +114,7 @@ func (d *BlobstoreDestination) removeStaleBlobs(ctx context.Context, t *blobTabl
 	}
 
 	config.Debug("[BLOBSTORE] Removing %d files from the previous load under %s/%s", len(stale), t.bucket, t.prefix())
-	err := d.deleteBlobs(ctx, t.bucket, stale)
-	if isAccessDenied(err) {
-		output.Warnf("[BLOBSTORE] replace kept %d files from the previous load of %s: deleting them needs delete permission on %s: %v\n", len(stale), t.name, t.bucket, err)
-		return nil
-	}
-	return err
-}
-
-// isAccessDenied reports a 403 from S3, an S3-compatible store, a proxy in front of one,
-// or GCS, whatever error code the body carries.
-func isAccessDenied(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, errAccessDenied) {
-		return true
-	}
-	var httpErr interface{ HTTPStatusCode() int }
-	if errors.As(err, &httpErr) && httpErr.HTTPStatusCode() == http.StatusForbidden {
-		return true
-	}
-	var gcsErr *googleapi.Error
-	return errors.As(err, &gcsErr) && gcsErr.Code == http.StatusForbidden
+	return d.deleteBlobs(ctx, t.bucket, stale)
 }
 
 // listBlobs lists the keys under prefix; delimited leaves out keys in subfolders.
@@ -170,7 +144,11 @@ func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix str
 		return keys, nil
 
 	case ProviderGCS:
-		it := d.gcsClient.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: prefix, Delimiter: delimiter})
+		query := &storage.Query{Prefix: prefix, Delimiter: delimiter}
+		if err := query.SetAttrSelection([]string{"Name"}); err != nil {
+			return nil, err
+		}
+		it := d.gcsClient.Bucket(bucket).Objects(ctx, query)
 		for {
 			attrs, err := it.Next()
 			if errors.Is(err, iterator.Done) {
@@ -232,13 +210,13 @@ func (d *BlobstoreDestination) deleteS3Batches(ctx context.Context, bucket strin
 			return fmt.Errorf("failed to delete files in s3://%s: %w", bucket, err)
 		}
 		if len(resp.Errors) > 0 {
-			first := resp.Errors[0]
-			err := fmt.Errorf("failed to delete %d files in s3://%s, first: %s: %s",
-				len(resp.Errors), bucket, aws.ToString(first.Key), aws.ToString(first.Message))
-			if aws.ToString(first.Code) == "AccessDenied" {
-				return fmt.Errorf("%w: %w", errAccessDenied, err)
+			codes := map[string]bool{}
+			for _, e := range resp.Errors {
+				codes[aws.ToString(e.Code)] = true
 			}
-			return err
+			first := resp.Errors[0]
+			return fmt.Errorf("failed to delete %d files in s3://%s (codes: %s), first: %s: %s",
+				len(resp.Errors), bucket, strings.Join(slices.Sorted(maps.Keys(codes)), ", "), aws.ToString(first.Key), aws.ToString(first.Message))
 		}
 	}
 	return nil

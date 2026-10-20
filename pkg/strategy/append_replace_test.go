@@ -979,6 +979,7 @@ type replaceFinalizingDestination struct {
 	*fakeDestination
 	atomicSwap bool
 	finalized  []string
+	failOn     map[string]error
 }
 
 func (d *replaceFinalizingDestination) SupportsAtomicSwap() bool { return d.atomicSwap }
@@ -987,7 +988,7 @@ func (d *replaceFinalizingDestination) FinalizeReplace(_ context.Context, table 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.finalized = append(d.finalized, table)
-	return nil
+	return d.failOn[table]
 }
 
 func TestReplaceStrategy_Execute_FinalizesDirectReplaceOnlyAfterWrite(t *testing.T) {
@@ -1020,7 +1021,7 @@ func TestReplaceStrategy_Execute_StagedReplaceIsNotFinalized(t *testing.T) {
 }
 
 func TestReplaceStrategy_ExecuteMultiTable_FinalizesOnlyAfterEveryTableIsWritten(t *testing.T) {
-	run := func(results ...source.RecordBatchResult) (*replaceFinalizingDestination, error) {
+	run := func(failOn map[string]error, results ...source.RecordBatchResult) (*replaceFinalizingDestination, error) {
 		orders, users := newTableInfo("public.orders"), newTableInfo("public.users")
 		records := make(chan source.RecordBatchResult, len(results))
 		for _, r := range results {
@@ -1028,7 +1029,7 @@ func TestReplaceStrategy_ExecuteMultiTable_FinalizesOnlyAfterEveryTableIsWritten
 		}
 		close(records)
 		src := &announcingMultiTableSource{tables: []source.SourceTableInfo{orders, users}, records: records}
-		dest := &replaceFinalizingDestination{fakeDestination: &fakeDestination{}}
+		dest := &replaceFinalizingDestination{fakeDestination: &fakeDestination{}, failOn: failOn}
 		job := &MultiTableIngestionJob{
 			Config:         &config.IngestConfig{},
 			Source:         src,
@@ -1039,11 +1040,25 @@ func TestReplaceStrategy_ExecuteMultiTable_FinalizesOnlyAfterEveryTableIsWritten
 		return dest, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job)
 	}
 
-	dest, err := run(source.RecordBatchResult{TableName: "public.orders"}, source.RecordBatchResult{TableName: "public.users"})
+	dest, err := run(nil, source.RecordBatchResult{TableName: "public.orders"}, source.RecordBatchResult{TableName: "public.users"})
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"landing.orders", "landing.users"}, dest.finalized)
 
-	dest, err = run(source.RecordBatchResult{TableName: "public.orders"}, source.RecordBatchResult{TableName: "public.orders", Err: errors.New("source failed")})
+	// A table that fails to finalize does not stop the others.
+	dest, err = run(map[string]error{"landing.orders": errors.New("orders failed")}, source.RecordBatchResult{TableName: "public.orders"}, source.RecordBatchResult{TableName: "public.users"})
+	require.ErrorContains(t, err, "orders failed")
+	require.ElementsMatch(t, []string{"landing.orders", "landing.users"}, dest.finalized)
+
+	dest, err = run(nil, source.RecordBatchResult{TableName: "public.orders"}, source.RecordBatchResult{TableName: "public.orders", Err: errors.New("source failed")})
 	require.ErrorContains(t, err, "source failed")
+	require.Empty(t, dest.finalized)
+}
+
+func TestFinalizeReplace_SkipsAfterConnectorLeaseLoss(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(source.ErrConnectorLeaseLost)
+	dest := &replaceFinalizingDestination{fakeDestination: &fakeDestination{}}
+
+	require.ErrorIs(t, finalizeReplace(ctx, dest, "landing.orders"), source.ErrConnectorLeaseLost)
 	require.Empty(t, dest.finalized)
 }

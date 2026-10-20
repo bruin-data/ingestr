@@ -92,7 +92,6 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 	d.provider = parsed.provider
 	d.uriBucket = parsed.bucket
 	d.uriPrefix = parsed.prefix
-	d.customEndpoint = parsed.endpointURL != ""
 	d.layout = parsed.layout
 	if d.layout == "" {
 		d.layout = "{load_id}.{file_id}.{ext}"
@@ -105,6 +104,7 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 			return fmt.Errorf("failed to create S3 client: %w", err)
 		}
 		d.s3Client = client
+		d.customEndpoint = client.Options().BaseEndpoint != nil
 		config.Debug("[BLOBSTORE] Connected to S3 with layout %s", d.layout)
 
 	case ProviderGCS:
@@ -270,9 +270,6 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	}
 	if ambiguous {
 		output.Warnf("[BLOBSTORE] table %s starts with the URI's bucket, so it is written to %s/%s and the URI path %s is ignored\n", opts.Table, bucket, basePath, d.uriPrefix)
-	}
-	if tableBucket, _ := parseBucketAndPath(opts.Table); d.uriBucket != "" && tableBucket != d.uriBucket && strings.Contains(opts.Table, "/") {
-		output.Warnf("[BLOBSTORE] table %s is written to %s/%s, under the URI's bucket; older ingestr versions ignored the URI's bucket and wrote it to bucket %s\n", opts.Table, bucket, basePath, tableBucket)
 	}
 
 	if opts.DropFirst {
