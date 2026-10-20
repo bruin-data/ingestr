@@ -60,7 +60,7 @@ func quoteQualifiedTable(database, table string) string {
 	return quoteIdent(database) + "." + quoteIdent(table)
 }
 
-func buildSelectQuery(database, table string, columns []schema.Column, opts source.ReadOptions) string {
+func buildSelectQuery(database, table string, columns []schema.Column, incrementalType schema.DataType, opts source.ReadOptions) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
 		colNames[i] = quoteIdent(col.Name)
@@ -71,10 +71,10 @@ func buildSelectQuery(database, table string, columns []schema.Column, opts sour
 	var conditions []string
 	if opts.IncrementalKey != "" {
 		if opts.IntervalStart != nil {
-			conditions = append(conditions, fmt.Sprintf("%s >= '%s'", quoteIdent(opts.IncrementalKey), opts.IntervalStart.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s >= %s", quoteIdent(opts.IncrementalKey), formatIncrementalLiteral(incrementalType, *opts.IntervalStart)))
 		}
 		if opts.IntervalEnd != nil {
-			conditions = append(conditions, fmt.Sprintf("%s <= '%s'", quoteIdent(opts.IncrementalKey), opts.IntervalEnd.Format("2006-01-02 15:04:05")))
+			conditions = append(conditions, fmt.Sprintf("%s <= %s", quoteIdent(opts.IncrementalKey), formatIncrementalLiteral(incrementalType, *opts.IntervalEnd)))
 		}
 	}
 	if len(conditions) > 0 {
@@ -84,6 +84,29 @@ func buildSelectQuery(database, table string, columns []schema.Column, opts sour
 		query += fmt.Sprintf(" LIMIT %d", opts.Limit)
 	}
 	return query
+}
+
+func incrementalKeyType(columns []schema.Column, name string) schema.DataType {
+	for _, col := range columns {
+		if strings.EqualFold(col.Name, name) {
+			return col.DataType
+		}
+	}
+	return schema.TypeString
+}
+
+// Athena (Trino) does not coerce varchar to timestamp/date, so typed columns need typed literals.
+func formatIncrementalLiteral(dt schema.DataType, t time.Time) string {
+	switch dt {
+	case schema.TypeDate:
+		return fmt.Sprintf("DATE '%s'", t.Format("2006-01-02"))
+	case schema.TypeTimestamp:
+		return fmt.Sprintf("TIMESTAMP '%s'", t.Format("2006-01-02 15:04:05.000000"))
+	case schema.TypeTimestampTZ:
+		return fmt.Sprintf("TIMESTAMP '%s UTC'", t.UTC().Format("2006-01-02 15:04:05.000000"))
+	default:
+		return fmt.Sprintf("'%s'", t.Format("2006-01-02 15:04:05"))
+	}
 }
 
 func (s *AthenaSource) queryAll(ctx context.Context, query, database string) ([]string, [][]string, error) {
