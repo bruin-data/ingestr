@@ -179,6 +179,8 @@ CDC state is stored in `_bruin_staging.cdc_state`, with ownership metadata in `_
 
 Stream Load rejects filtered or unselected rows. Batches whose JSON body would exceed StarRocks' 100 MB Stream Load limit are split automatically. Stream Loads, CDC merges, and cross-database replacement copies wait for committed loads to become query-visible before advancing. The client must be able to reach the backend HTTP address returned by the FE redirect. For a single-container Docker lab, expose the BE's `8040` port and use that mapped port as `http_port`, with the mapped FE `9030` port for SQL.
 
+StarRocks versions with older load metadata, including 3.3.5 and earlier, use `SHOW PROC` to find INSERT transactions. This requires the system `OPERATE` privilege. These servers expose a limited history of recent transactions; ingestion stops if the transaction cannot be found or its visibility cannot be verified. StarRocks 3.3.6 and newer provide the load metadata used for direct transaction lookup.
+
 Limits and operational requirements:
 
 - Tested with PostgreSQL 16.15, MySQL 8.0, and StarRocks 3.3.22. Destination tables are in StarRocks' internal catalog.
