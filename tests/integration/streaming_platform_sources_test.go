@@ -28,6 +28,7 @@ func TestRedis_BatchCutoff(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	ctx := context.Background()
 	redisURI := startRedisContainer(t, ctx)
 	client := newRedisClient(t, redisURI)
@@ -52,6 +53,7 @@ func TestRedis_Streaming(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	ctx := context.Background()
 	redisURI := startRedisContainer(t, ctx)
 	client := newRedisClient(t, redisURI)

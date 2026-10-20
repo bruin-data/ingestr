@@ -37,6 +37,7 @@ func TestCouchDBToDuckDBReplace(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	container, sourceURI, httpBase := startCouchDBContainer(t, ctx)

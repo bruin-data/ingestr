@@ -18,6 +18,7 @@ import (
 )
 
 func TestPostgresCDCToastAcrossBatches(t *testing.T) {
+	t.Parallel()
 	for _, multi := range []bool{false, true} {
 		for _, streaming := range []bool{false, true} {
 			t.Run(fmt.Sprintf("multi=%v/streaming=%v", multi, streaming), func(t *testing.T) {
@@ -75,6 +76,7 @@ func TestPostgresCDCToastAcrossBatches(t *testing.T) {
 }
 
 func TestPostgresCDCToastKeyMove(t *testing.T) {
+	t.Parallel()
 	for _, fullIdentity := range []bool{false, true} {
 		t.Run(fmt.Sprintf("full_identity=%v", fullIdentity), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -123,6 +125,7 @@ func TestPostgresCDCToastKeyMove(t *testing.T) {
 }
 
 func TestPostgresCDCReplicaIdentityKeys(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	container, uri := setupPostgresCDCContainer(t, ctx)
@@ -177,6 +180,7 @@ func TestPostgresCDCReplicaIdentityKeys(t *testing.T) {
 }
 
 func TestPostgresCDCGeneratedColumns(t *testing.T) {
+	t.Parallel()
 	for _, version := range []int{16, 18} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -254,6 +258,7 @@ func TestPostgresCDCGeneratedColumns(t *testing.T) {
 }
 
 func TestPostgresCDCPublicationOperations(t *testing.T) {
+	t.Parallel()
 	for _, version := range []int{14, 16} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -322,6 +327,7 @@ func TestPostgresCDCPublicationOperations(t *testing.T) {
 }
 
 func TestPostgresCDCPublicationLosesDeletesWhileStreaming(t *testing.T) {
+	t.Parallel()
 	for _, multi := range []bool{false, true} {
 		t.Run(fmt.Sprintf("multi=%v", multi), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

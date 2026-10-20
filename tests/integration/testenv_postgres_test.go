@@ -135,7 +135,7 @@ func TestMain(m *testing.M) {
 
 	var wg sync.WaitGroup
 
-	wg.Add(12)
+	wg.Add(14)
 	go func() {
 		defer wg.Done()
 		if !containerWanted("postgres") {
@@ -248,22 +248,25 @@ func TestMain(m *testing.M) {
 			elasticShared = elasticsearchEnv{container: c, uri: uri, baseURL: baseURL}
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		if !containerWanted("rabbitmq") {
+			return
+		}
+		if c, uri, err := startRabbitMQContainerForMain(ctx); err == nil {
+			rabbitmqShared = rabbitmqEnv{container: c, uri: uri}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if !containerWanted("mqtt") {
+			return
+		}
+		if c, uri, err := startMQTTContainerForMain(ctx); err == nil {
+			mqttShared = mqttEnv{container: c, uri: uri}
+		}
+	}()
 	wg.Wait()
-
-	// Start RabbitMQ container
-	if containerWanted("rabbitmq") {
-		rmqC, rmqURI, rmqErr := startRabbitMQContainerForMain(ctx)
-		if rmqErr == nil {
-			rabbitmqShared = rabbitmqEnv{container: rmqC, uri: rmqURI}
-		}
-	}
-
-	if containerWanted("mqtt") {
-		mqttC, mqttURI, mqttErr := startMQTTContainerForMain(ctx)
-		if mqttErr == nil {
-			mqttShared = mqttEnv{container: mqttC, uri: mqttURI}
-		}
-	}
 
 	code := m.Run()
 
