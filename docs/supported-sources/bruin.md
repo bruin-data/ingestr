@@ -20,7 +20,7 @@ URI parameters:
 
 To get your API key:
 
-1. Go to [cloud.getbruin.com](https://cloud.getbruin.com)
+1. Go to [cloud.getbruin.com](https://cloud.getbruin.com/?utm_source=ingestr-docs&utm_medium=referral&utm_campaign=ingestr&utm_content=supported-sources-bruin)
 2. Navigate to **Teams** section
 3. Click on **Create API Token**
 4. Make sure **Pipeline List** is selected as the permission
