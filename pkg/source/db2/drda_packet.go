@@ -181,14 +181,27 @@ func readDSS(r io.Reader) (dssPacket, error) {
 		if p.codePoint != cpQRYDTA {
 			return dssPacket{}, fmt.Errorf("extended DSS for unexpected codepoint: 0x%x", p.codePoint)
 		}
-		chunkLen := int(objLen) - 15
-		if chunkLen < 0 {
+		// Confirmed on issue #3 by exact arithmetic across a real 72-column
+		// table's QRYDTA (extended length 0x00008D68 = 36200 bytes): the
+		// first physical segment's payload is objLen-19 bytes, not
+		// objLen-15. The previous constant read 4 bytes too many - past
+		// the real segment boundary and into the next segment's own 2-byte
+		// continuation-length header - so the code then misread 2 bytes of
+		// that next segment's real row data as the continuation length
+		// (observed as 0). Those objLen-19 bytes begin with a 4-byte
+		// extended length field (the object's total size across every
+		// continuation segment, confirmed via the dump: 00 00 8d 68 =
+		// 36200) followed immediately by this segment's actual row data.
+		chunkLen := int(objLen) - 19
+		if chunkLen < 4 {
 			return dssPacket{}, fmt.Errorf("invalid extended DSS object length: %d", objLen)
 		}
-		object := make([]byte, chunkLen)
-		if _, err := io.ReadFull(r, object); err != nil {
+		chunk := make([]byte, chunkLen)
+		if _, err := io.ReadFull(r, chunk); err != nil {
 			return dssPacket{}, err
 		}
+		totalLen := binary.BigEndian.Uint32(chunk[:4])
+		object := chunk[4:]
 
 		nextLenBuf := make([]byte, 2)
 		if _, err := io.ReadFull(r, nextLenBuf); err != nil {
@@ -196,13 +209,6 @@ func readDSS(r io.Reader) (dssPacket, error) {
 		}
 		nextLen := binary.BigEndian.Uint16(nextLenBuf)
 		if nextLen < 2 {
-			// Reported on issue #3 immediately after a 72-column table's
-			// SQLDARD parsed - this extended-DSS path only ever applies to
-			// cpQRYDTA, so this is the first row-data fetch for that wide
-			// table, not the SQLDARD itself. Unconfirmed whether nextLen=0
-			// is a legitimate "no continuation, end of data" terminator
-			// this client doesn't yet recognize, or a genuine framing bug;
-			// logged here rather than guessed at.
 			config.Debug("[DB2] readDSS: invalid extended DSS continuation length=%d, chunk so far (%d bytes)=%x", nextLen, len(object), object)
 			return dssPacket{}, fmt.Errorf("invalid extended DSS continuation length: %d", nextLen)
 		}
@@ -212,6 +218,9 @@ func readDSS(r io.Reader) (dssPacket, error) {
 		}
 		object = append(object, extra...)
 		p.moreData = nextLen == 0x7ffe
+		if !p.moreData && uint32(len(object)) != totalLen {
+			config.Debug("[DB2] readDSS: extended DSS object length mismatch: assembled %d bytes, extended length field said %d", len(object), totalLen)
+		}
 		p.object = object
 		return p, nil
 	}

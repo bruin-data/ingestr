@@ -233,33 +233,50 @@ func parseDB2Column(b []byte, hasName bool, platform db2Platform) (db2Column, []
 
 	name := ""
 	if hasName {
+		// Confirmed on issue #3 by offline-parsing two full real captures
+		// (4 and 72 columns, 280 and 5909 bytes) against this exact layout
+		// and consuming every byte with nothing left over, across 76
+		// columns spanning VARCHAR/CHAR/DECIMAL/NUMERIC/INTEGER: 9 reserved
+		// bytes (null indicator, SQLUNNAMED, 6 more), then SQLNAME, then
+		// SQLLABEL, then SQLCOMMENTS (each a VCM-then-VCS pair - parseName
+		// already implements that framing correctly, prefer-first-non-
+		// empty), then 2 more reserved bytes, then a 2-byte 0xFF 0xFF
+		// trailer. The previous "6 bytes + conditional 1-or-3-byte skip"
+		// and "7-byte tail" were both wrong (based on one partially
+		// decoded capture), which misaligned every column after the
+		// first.
 		if len(b) < 9 {
 			return db2Column{}, nil, fmt.Errorf("short SQLDARD column name block")
 		}
-		b = b[6:]
-		if b[0] == 0x00 {
-			b = b[3:]
-		} else {
-			b = b[1:]
-		}
+		b = b[9:]
 
 		sqlName, next := parseName(b)
 		label, next := parseName(next)
 		_, next = parseName(next)
+		if len(next) < 2 {
+			return db2Column{}, nil, fmt.Errorf("short SQLDARD column comments tail")
+		}
+		next = next[2:]
 		b = next
-		if label != "" {
-			name = label
-		} else {
+		// Confirmed on issue #3: the previous "prefer label, fall back to
+		// SQLNAME" order reported the column's LABEL text as its name,
+		// masked on queries where SQLNAME and SQLLABEL happen to be
+		// identical. SQLNAME is the real column identifier.
+		if sqlName != "" {
 			name = sqlName
+		} else {
+			name = label
 		}
 		// parseName/parseVarchar return the raw bytes as a Go string with
-		// no decoding (see their own docs) - decode here, once, with the
-		// real encoding the server actually used, instead of leaving it
-		// as a raw passthrough that happens to be legible only for
-		// platforms that return UTF-8-ish ASCII.
-		name = decodeString([]byte(name), characterEncodingFor(platform))
-		if len(b) >= 7 {
-			b = b[7:]
+		// no decoding (see their own docs) - decode here, once. Confirmed
+		// on issue #3: SQLNAME/SQLLABEL are DRDA protocol-level metadata
+		// (like RDBNAM/PKGNAMCSN elsewhere in this client), encoded in
+		// cp500 regardless of platform - not the platform's data CCSID
+		// (characterEncodingFor), which is what the actual column DATA
+		// arrives in, a different thing.
+		name = decodeString([]byte(name), "cp500")
+		if len(b) >= 2 {
+			b = b[2:]
 		} else {
 			b = nil
 		}

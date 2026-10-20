@@ -1225,22 +1225,9 @@ func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 // one column's minimum-length unnamed-column block. Column name and type
 // content don't matter for tests only checking whether handler.Columns
 // fires at all.
-// TestParseSQLDARDDecodesRealIBMiCapture pins the exact SQLDARD shape
-// reported on issue #3: a single-column PRPSQLSTT reply (TABLE_NAME,
-// VARCHAR(128), CCSID 37) that the parser previously read as 0 columns.
-// Root causes, all confirmed against real captures: SQLNUMROWS is a
-// 4-byte field (not 2) at a fixed absolute offset of 0x18 (24) from the
-// start of the SQLDARD content - cross-checked against five captures of
-// varying column counts (1/4/5/32/72) - every per-column numeric field
-// follows the platform's byte order (not hardcoded little-endian), and
-// hasName can't be derived from SQLCAGRP's own null indicator (obj[0])
-// since this client's PRPSQLSTT/DSCSQLSTT always request names
-// regardless of that byte.
-func TestParseSQLDARDDecodesRealIBMiCapture(t *testing.T) {
-	name, err := encodeCP37("TABLE_NAME")
-	require.NoError(t, err)
-	require.Len(t, name, 10)
-
+// sqlDARDHeader builds the 24-byte SQLDHGRP header + 4-byte SQLNUMROWS
+// confirmed on issue #3 against five real captures (1/4/5/32/72 columns).
+func sqlDARDHeader(numRows uint32) []byte {
 	obj := []byte{0xff} // SQLCAGRP: null
 	obj = append(obj,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 10 bytes
@@ -1248,24 +1235,57 @@ func TestParseSQLDARDDecodesRealIBMiCapture(t *testing.T) {
 		0x00, 0x02, // 2 bytes (varies across captures)
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 10 bytes
 	) // SQLDHGRP: present, 24 bytes total including the leading null indicator
-	obj = append(obj, 0x00, 0x00, 0x00, 0x01) // SQLNUMROWS = 1
-	obj = append(obj,
-		0x00, 0x00, // precision = 0
-		0x00, 0x00, // scale = 0
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, // length = 128
-		0x01, 0xc0, // SQLTYPE 448 (VARCHAR)
-		0x00, 0x25, // CCSID 37
-	)
-	obj = append(obj, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)       // 6 reserved bytes ahead of the name block
-	obj = append(obj, 0x00, 0x00, 0x00)                         // SQLDOPTGRP-style flag byte (0x00) + its own 2-byte skip
-	obj = append(obj, 0x00, 0x00)                               // SQLNAME VCM: empty
-	obj = append(obj, 0x00, 0x0a)                               // SQLNAME VCS: length 10
-	obj = append(obj, name...)                                  // SQLNAME VCS: "TABLE_NAME" (cp37)
-	obj = append(obj, 0x00, 0x00)                               // SQLLABEL VCM: empty
-	obj = append(obj, 0x00, 0x0a)                               // SQLLABEL VCS: length 10
-	obj = append(obj, name...)                                  // SQLLABEL VCS: "TABLE_NAME" (cp37)
-	obj = append(obj, 0x00, 0x00, 0x00, 0x00)                   // unnamed VCM+VCS: both empty
-	obj = append(obj, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff) // 7-byte tail (SQLUDTGRP/SQLDXGRP null etc.), discarded
+	n := make([]byte, 4)
+	binary.BigEndian.PutUint32(n, numRows)
+	return append(obj, n...)
+}
+
+// sqlDARDColumn builds one column descriptor using the layout confirmed on
+// issue #3 by offline-parsing two full real captures (4 and 72 columns)
+// against it and consuming every byte with nothing left over, across 76
+// columns spanning VARCHAR/CHAR/DECIMAL/NUMERIC/INTEGER: precision(2)
+// scale(2) length(8) sqlType(2) ccsid(2), 9 reserved zero bytes, SQLNAME
+// (cp500 VCM+VCS), SQLLABEL (cp500 VCM+VCS), SQLCOMMENTS (empty VCM+VCS),
+// 2 more reserved zero bytes, then a 2-byte 0xFF 0xFF trailer.
+func sqlDARDColumn(t *testing.T, length uint64, sqlType uint16, ccsid uint16, sqlName, sqlLabel string) []byte {
+	t.Helper()
+	name, err := encodeCP500(sqlName)
+	require.NoError(t, err)
+	label, err := encodeCP500(sqlLabel)
+	require.NoError(t, err)
+
+	buf := make([]byte, 0, 16+9+4+len(name)+4+len(label)+6+2)
+	buf = append(buf, 0x00, 0x00) // precision
+	buf = append(buf, 0x00, 0x00) // scale
+	lengthBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(lengthBytes, length)
+	buf = append(buf, lengthBytes...)
+	typeBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(typeBytes, sqlType)
+	buf = append(buf, typeBytes...)
+	ccsidBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(ccsidBytes, ccsid)
+	buf = append(buf, ccsidBytes...)
+	buf = append(buf, make([]byte, 9)...) // null indicator, SQLUNNAMED, 6 reserved
+	buf = append(buf, 0x00, 0x00)         // SQLNAME VCM: empty
+	buf = append(buf, byte(len(name)>>8), byte(len(name)))
+	buf = append(buf, name...)
+	buf = append(buf, 0x00, 0x00) // SQLLABEL VCM: empty
+	buf = append(buf, byte(len(label)>>8), byte(len(label)))
+	buf = append(buf, label...)
+	buf = append(buf, 0x00, 0x00, 0x00, 0x00) // SQLCOMMENTS VCM+VCS: both empty
+	buf = append(buf, 0x00, 0x00)             // 2 more reserved bytes
+	buf = append(buf, 0xff, 0xff)             // trailing null-group indicators
+	return buf
+}
+
+// TestParseSQLDARDDecodesRealIBMiCapture pins the exact SQLDARD shape
+// reported on issue #3: a single-column PRPSQLSTT reply (TABLE_NAME,
+// VARCHAR(128), CCSID 37) that the parser previously read as 0 columns,
+// then misaligned once SQLNUMROWS itself was fixed.
+func TestParseSQLDARDDecodesRealIBMiCapture(t *testing.T) {
+	obj := sqlDARDHeader(1)
+	obj = append(obj, sqlDARDColumn(t, 128, 448, 37, "TABLE_NAME", "TABLE_NAME")...)
 
 	columns, err := parseSQLDARD(obj, db2PlatformIBMi)
 
@@ -1276,6 +1296,32 @@ func TestParseSQLDARDDecodesRealIBMiCapture(t *testing.T) {
 	require.Equal(t, 128, columns[0].Length)
 	require.Equal(t, 0, columns[0].Precision)
 	require.Equal(t, 0, columns[0].Scale)
+}
+
+// TestParseSQLDARDKeepsColumnsAlignedPastTheFirst pins the exact bug
+// reported on issue #3: once SQLNUMROWS parsed correctly, column 1 (and
+// every column after it) was still misaligned by a few bytes because the
+// column descriptor's own name-block skip lengths were wrong - confirmed
+// via the real symptom (column 1 decoded as SQLTYPE 9472/0x2500, length
+// 2147598336/0x8001C000, name ""). Also pins that SQLNAME (not SQLLABEL)
+// is the reported column name - the old "prefer label" order was masked
+// on the real capture only because that column's name and label happened
+// to be identical.
+func TestParseSQLDARDKeepsColumnsAlignedPastTheFirst(t *testing.T) {
+	obj := sqlDARDHeader(2)
+	obj = append(obj, sqlDARDColumn(t, 128, 448, 37, "TABLE_NAME", "Table Name")...)
+	obj = append(obj, sqlDARDColumn(t, 4, 496, 37, "COLUMN_COUNT", "Column Count")...)
+
+	columns, err := parseSQLDARD(obj, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Len(t, columns, 2)
+	require.Equal(t, "TABLE_NAME", columns[0].Name)
+	require.Equal(t, db2SQLTypeVarchar, columns[0].SQLType)
+	require.Equal(t, 128, columns[0].Length)
+	require.Equal(t, "COLUMN_COUNT", columns[1].Name, "column 1 must stay aligned and report SQLNAME, not SQLLABEL")
+	require.Equal(t, db2SQLTypeInteger, columns[1].SQLType)
+	require.Equal(t, 4, columns[1].Length)
 }
 
 func minimalSQLDARD() []byte {
@@ -1834,6 +1880,46 @@ func TestParseQRYDSCSkipsLeadingMDDTriplet(t *testing.T) {
 	require.Len(t, fields, 1)
 	require.Equal(t, drdaTypeInteger, fields[0].typeCode)
 	require.Equal(t, []byte{0x00, 0x04}, fields[0].params)
+}
+
+// TestReadDSSReassemblesExtendedQRYDTASegments pins the off-by-4 reported
+// on issue #3 for a real 72-column table's QRYDTA: the object's own
+// extended-length field, plus the two segments' real data, reconciled
+// exactly (32753 + (3449-2) = 36200). The old chunkLen formula
+// (objLen-15) read 4 bytes too many into the first segment, eating 4
+// bytes of the second segment's own 2-byte continuation-length header
+// plus 2 bytes of its real data, and misreading what was left as a
+// continuation length of 0.
+func TestReadDSSReassemblesExtendedQRYDTASegments(t *testing.T) {
+	data1 := []byte{0xff, 0x01, 0x02, 0x03, 0x04}
+	data2 := []byte{0x05, 0x06, 0x07}
+	total := uint32(len(data1) + len(data2))
+
+	chunk := make([]byte, 0, 4+len(data1))
+	extLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(extLenBuf, total)
+	chunk = append(chunk, extLenBuf...)
+	chunk = append(chunk, data1...)
+
+	buf := &bytes.Buffer{}
+	buf.Write([]byte{0xff, 0xff, 0xd0, 0x01, 0x00, 0x01}) // 6-byte DSS header, dssLen=0xffff
+	objLenBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(objLenBuf, uint16(len(chunk)+19))
+	buf.Write(objLenBuf)
+	cpBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(cpBuf, cpQRYDTA)
+	buf.Write(cpBuf)
+	buf.Write(chunk)
+	nextLenBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(nextLenBuf, uint16(len(data2)+2))
+	buf.Write(nextLenBuf)
+	buf.Write(data2)
+
+	p, err := readDSS(buf)
+
+	require.NoError(t, err)
+	require.Equal(t, append(append([]byte{}, data1...), data2...), p.object)
+	require.False(t, p.moreData)
 }
 
 func TestPackDSSObjectRejectsOversizedBody(t *testing.T) {
