@@ -31,6 +31,8 @@ type fakeS3 struct {
 	singleDeletes int
 	denyList      bool
 	denyDelete    bool
+	listPrefixes  []string
+	delimiters    []string
 }
 
 func newFakeS3(t *testing.T, keys ...string) (*fakeS3, string) {
@@ -61,9 +63,10 @@ func (f *fakeS3) remaining() []string {
 	return keys
 }
 
-func accessDenied(w http.ResponseWriter) {
+// forbidden answers like an S3-compatible store or proxy that does not use the AccessDenied code.
+func forbidden(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusForbidden)
-	_, _ = io.WriteString(w, `<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`)
+	_, _ = io.WriteString(w, `<Error><Code>Forbidden</Code><Message>no</Message></Error>`)
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,14 +79,21 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2":
 		f.lists++
 		if f.denyList {
-			accessDenied(w)
+			forbidden(w)
 			return
 		}
 		prefix := r.URL.Query().Get("prefix")
+		delimiter := r.URL.Query().Get("delimiter")
+		f.listPrefixes = append(f.listPrefixes, prefix)
+		f.delimiters = append(f.delimiters, delimiter)
 		var b strings.Builder
 		b.WriteString(`<ListBucketResult><IsTruncated>false</IsTruncated>`)
 		for k := range f.objects {
-			if key, ok := strings.CutPrefix(k, bucket+"/"); ok && strings.HasPrefix(key, prefix) {
+			key, ok := strings.CutPrefix(k, bucket+"/")
+			if ok && delimiter != "" && strings.Contains(strings.TrimPrefix(key, prefix), delimiter) {
+				continue
+			}
+			if ok && strings.HasPrefix(key, prefix) {
 				fmt.Fprintf(&b, `<Contents><Key>%s</Key></Contents>`, key)
 			}
 		}
@@ -112,7 +122,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete:
 		f.singleDeletes++
 		if f.denyDelete {
-			accessDenied(w)
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		delete(f.objects, bucket+"/"+key)
@@ -151,6 +161,7 @@ func replace(t *testing.T, d *BlobstoreDestination, table string, records <-chan
 	t.Helper()
 	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: table, DropFirst: true}))
 	require.NoError(t, d.WriteParallel(t.Context(), records, destination.WriteOptions{Table: table}))
+	require.NoError(t, d.FinalizeReplace(t.Context(), table))
 }
 
 // newFiles returns the keys under prefix that are not in before.
@@ -192,6 +203,9 @@ func TestResolveLocation(t *testing.T) {
 		{"my-bucket", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
 		// It could also mean my-bucket/exports/my-bucket/reports/t.
 		{"my-bucket", "exports", "my-bucket/reports/t", "my-bucket", "reports/t", true},
+		// A table named after the bucket is a path, not the bucket root.
+		{"logs", "", "logs", "logs", "logs", false},
+		{"logs", "exports", "logs", "logs", "exports/logs", false},
 	} {
 		d := &BlobstoreDestination{uriBucket: tt.uriBucket, uriPrefix: tt.uriPrefix}
 		bucket, path, ambiguous := d.resolveLocation(tt.table)
@@ -225,7 +239,7 @@ func TestLayoutPattern(t *testing.T) {
 			noMatch: []string{"usersXparquet", "orders.parquet"},
 		},
 	} {
-		pattern := (&BlobstoreDestination{layout: tt.layout}).layoutPattern(tt.table)
+		pattern := layoutPattern(layoutReplacer(tt.table, loadIDToken, fileIDToken).Replace(tt.layout))
 		for _, key := range tt.match {
 			assert.True(t, pattern.MatchString(key), "%s should match %s", tt.layout, key)
 		}
@@ -261,6 +275,7 @@ func TestReplace_KeepsFilesFromOverlappingLoad(t *testing.T) {
 	// Another replace on the same path writes its file while this load is running.
 	fake.put("b/reports/t/ffffffff.0.parquet")
 	require.NoError(t, d.WriteParallel(t.Context(), noRows(), destination.WriteOptions{Table: "b/reports/t"}))
+	require.NoError(t, d.FinalizeReplace(t.Context(), "b/reports/t"))
 
 	assert.Equal(t, []string{"b/reports/t/ffffffff.0.parquet"}, fake.remaining())
 }
@@ -316,6 +331,7 @@ func TestReplace_MultipleTablesAtOnce(t *testing.T) {
 	for table, column := range tables {
 		wg.Go(func() {
 			assert.NoError(t, d.WriteParallel(t.Context(), oneRow(column), destination.WriteOptions{Table: table}))
+			assert.NoError(t, d.FinalizeReplace(t.Context(), table))
 		})
 	}
 	wg.Wait()
@@ -389,4 +405,53 @@ func TestReplace_DeletesPerObjectOnlyOnCustomEndpoints(t *testing.T) {
 	assert.Empty(t, fake.remaining())
 	assert.Zero(t, fake.singleDeletes)
 	assert.Equal(t, 1, fake.batchDeletes)
+}
+
+func TestWriteParallel_NeverDeletes(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d.0.parquet")
+	d := connectFakeS3(t, endpoint, "")
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: true}))
+
+	// The truncate-boundary writer, used by CDC and multi-table loads, reports a source
+	// error after the data channel closed normally, so WriteParallel sees a clean end.
+	records := make(chan source.RecordBatchResult, 2)
+	records <- <-oneRow("id")
+	records <- source.RecordBatchResult{Err: errors.New("source failed")}
+	close(records)
+	_, err := destination.WriteWithTruncateBoundaries(t.Context(), d, records, destination.WriteOptions{Table: "b/reports/t"})
+	require.EqualError(t, err, "source failed")
+
+	assert.Contains(t, fake.remaining(), "b/reports/t/0a1b2c3d.0.parquet")
+	assert.Len(t, fake.remaining(), 2)
+	assert.Zero(t, fake.singleDeletes+fake.batchDeletes)
+}
+
+func TestReplace_ListsOnlyTheLayoutFolder(t *testing.T) {
+	for _, tt := range []struct {
+		layout, wantPrefix, wantDelimiter string
+	}{
+		{"{load_id}.{file_id}.{ext}", "reports/t/", "/"},
+		{"{table_name}/{load_id}.{file_id}.{ext}", "reports/t/t/", "/"},
+		// The folder changes per load, so subfolders have to be listed.
+		{"{load_id}/{file_id}.{ext}", "reports/t/", ""},
+	} {
+		fake, endpoint := newFakeS3(t)
+		d := connectFakeS3(t, endpoint, "")
+		d.layout = tt.layout
+
+		require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "b/reports/t", DropFirst: true}))
+
+		assert.Equal(t, []string{tt.wantPrefix}, fake.listPrefixes, tt.layout)
+		assert.Equal(t, []string{tt.wantDelimiter}, fake.delimiters, tt.layout)
+	}
+}
+
+func TestReplace_NestedLayoutRemovesPreviousFiles(t *testing.T) {
+	fake, endpoint := newFakeS3(t, "b/reports/t/0a1b2c3d/0.parquet", "b/reports/t/0a1b2c3d/notes.txt")
+	d := connectFakeS3(t, endpoint, "")
+	d.layout = "{load_id}/{file_id}.{ext}"
+
+	replace(t, d, "b/reports/t", noRows())
+
+	assert.Equal(t, []string{"b/reports/t/0a1b2c3d/notes.txt"}, fake.remaining())
 }

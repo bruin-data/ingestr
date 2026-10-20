@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/aws/smithy-go"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"golang.org/x/sync/errgroup"
@@ -30,8 +29,31 @@ var (
 	errAccessDenied    = errors.New("access denied")
 )
 
-// listPreviousBlobs returns the files a replace of t removes once the new files are
-// written. Files written after the listing are never removed. Concurrent replaces on one
+// Stand-ins for the per-load layout values; they never occur in a real layout.
+const (
+	loadIDToken = "\x00load_id\x00"
+	fileIDToken = "\x00file_id\x00"
+)
+
+// FinalizeReplace removes the files a replace of table found before writing, except the
+// ones it rewrote. The replace strategy calls it only after every row was written, so a
+// failed load keeps the previous files.
+func (d *BlobstoreDestination) FinalizeReplace(ctx context.Context, table string) error {
+	d.mu.Lock()
+	t, ok := d.tables[table]
+	d.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	if err := d.removeStaleBlobs(ctx, t); err != nil {
+		return fmt.Errorf("failed to remove files from the previous load: %w", err)
+	}
+	return nil
+}
+
+// listPreviousBlobs returns the files of t that a replace removes once the new files are
+// written: files directly in the folder the layout writes into whose names match the
+// layout. Files written after the listing are never removed. Concurrent replaces on one
 // path still need external coordination.
 func (d *BlobstoreDestination) listPreviousBlobs(ctx context.Context, t *blobTable) ([]string, error) {
 	if strings.Trim(t.basePath, "/") == "" {
@@ -41,21 +63,27 @@ func (d *BlobstoreDestination) listPreviousBlobs(ctx context.Context, t *blobTab
 
 	// The trailing slash in the prefix keeps "reports/t" from matching "reports/t2".
 	prefix := t.prefix()
-	keys, err := d.listBlobs(ctx, t.bucket, prefix)
+	rendered := layoutReplacer(t.name, loadIDToken, fileIDToken).Replace(d.layout)
+	listPrefix, delimited := prefix, true
+	if dir := rendered[:strings.LastIndex(rendered, "/")+1]; strings.Contains(dir, "\x00") {
+		delimited = false
+	} else {
+		listPrefix += dir
+	}
+
+	keys, err := d.listBlobs(ctx, t.bucket, listPrefix, delimited)
 	switch {
 	case errors.Is(err, errListUnsupported):
 		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: removing old files is not supported for %s yet\n", t.name, d.provider)
 		return nil, nil
 	case isAccessDenied(err):
-		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: listing %s/%s needs list permission on the bucket: %v\n", t.name, t.bucket, prefix, err)
+		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: listing %s/%s needs list permission on the bucket: %v\n", t.name, t.bucket, listPrefix, err)
 		return nil, nil
 	case err != nil:
 		return nil, err
 	}
 
-	// Only files this layout produces directly under the table path are part of the table;
-	// subfolders and other files under it are left alone.
-	pattern := d.layoutPattern(t.name)
+	pattern := layoutPattern(rendered)
 	var owned []string
 	for _, key := range keys {
 		if pattern.MatchString(strings.TrimPrefix(key, prefix)) {
@@ -65,20 +93,14 @@ func (d *BlobstoreDestination) listPreviousBlobs(ctx context.Context, t *blobTab
 	return owned, nil
 }
 
-// layoutPattern matches the keys, relative to the table path, that renderLayout produces
-// for table.
-func (d *BlobstoreDestination) layoutPattern(table string) *regexp.Regexp {
+func layoutPattern(rendered string) *regexp.Regexp {
 	pattern := strings.NewReplacer(
-		regexp.QuoteMeta("{table_name}"), regexp.QuoteMeta(layoutTableName(table)),
-		regexp.QuoteMeta("{load_id}"), "[0-9a-f]{8}",
-		regexp.QuoteMeta("{file_id}"), "[0-9]+",
-		regexp.QuoteMeta("{ext}"), "parquet",
-	).Replace(regexp.QuoteMeta(d.layout))
+		loadIDToken, loadIDPattern,
+		fileIDToken, "[0-9]+",
+	).Replace(regexp.QuoteMeta(rendered))
 	return regexp.MustCompile("^" + pattern + "$")
 }
 
-// removeStaleBlobs deletes the previous files of a replace that this load did not
-// rewrite. It runs after the new files are written, once per replace.
 func (d *BlobstoreDestination) removeStaleBlobs(ctx context.Context, t *blobTable) error {
 	t.mu.Lock()
 	var stale []string
@@ -104,6 +126,8 @@ func (d *BlobstoreDestination) removeStaleBlobs(ctx context.Context, t *blobTabl
 	return err
 }
 
+// isAccessDenied reports a 403 from S3, an S3-compatible store, a proxy in front of one,
+// or GCS, whatever error code the body carries.
 func isAccessDenied(err error) bool {
 	if err == nil {
 		return false
@@ -111,23 +135,29 @@ func isAccessDenied(err error) bool {
 	if errors.Is(err, errAccessDenied) {
 		return true
 	}
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.ErrorCode() == "AccessDenied"
+	var httpErr interface{ HTTPStatusCode() int }
+	if errors.As(err, &httpErr) && httpErr.HTTPStatusCode() == http.StatusForbidden {
+		return true
 	}
 	var gcsErr *googleapi.Error
 	return errors.As(err, &gcsErr) && gcsErr.Code == http.StatusForbidden
 }
 
-func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix string) ([]string, error) {
+// listBlobs lists the keys under prefix; delimited leaves out keys in subfolders.
+func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix string, delimited bool) ([]string, error) {
 	var keys []string
+	var delimiter string
+	if delimited {
+		delimiter = "/"
+	}
 
 	switch d.provider {
 	case ProviderS3:
-		pager := s3.NewListObjectsV2Paginator(d.s3Client, &s3.ListObjectsV2Input{
-			Bucket: aws.String(bucket),
-			Prefix: aws.String(prefix),
-		})
+		input := &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(prefix)}
+		if delimited {
+			input.Delimiter = aws.String(delimiter)
+		}
+		pager := s3.NewListObjectsV2Paginator(d.s3Client, input)
 		for pager.HasMorePages() {
 			page, err := pager.NextPage(ctx)
 			if err != nil {
@@ -140,7 +170,7 @@ func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix str
 		return keys, nil
 
 	case ProviderGCS:
-		it := d.gcsClient.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: prefix})
+		it := d.gcsClient.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: prefix, Delimiter: delimiter})
 		for {
 			attrs, err := it.Next()
 			if errors.Is(err, iterator.Done) {
@@ -149,7 +179,9 @@ func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix str
 			if err != nil {
 				return nil, fmt.Errorf("failed to list gs://%s/%s: %w", bucket, prefix, err)
 			}
-			keys = append(keys, attrs.Name)
+			if attrs.Name != "" {
+				keys = append(keys, attrs.Name)
+			}
 		}
 	}
 

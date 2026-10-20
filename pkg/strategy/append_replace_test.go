@@ -974,3 +974,76 @@ func TestReplaceStrategy_Execute_VerifyRowCountFails_DropsStaging(t *testing.T) 
 		t.Fatalf("expected SwapTable not to be called on row count verification failure")
 	}
 }
+
+type replaceFinalizingDestination struct {
+	*fakeDestination
+	atomicSwap bool
+	finalized  []string
+}
+
+func (d *replaceFinalizingDestination) SupportsAtomicSwap() bool { return d.atomicSwap }
+
+func (d *replaceFinalizingDestination) FinalizeReplace(_ context.Context, table string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.finalized = append(d.finalized, table)
+	return nil
+}
+
+func TestReplaceStrategy_Execute_FinalizesDirectReplaceOnlyAfterWrite(t *testing.T) {
+	job, src, base := minimalJob()
+	dest := &replaceFinalizingDestination{fakeDestination: base}
+	job.Destination = dest
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&ReplaceStrategy{}).Execute(t.Context(), job))
+	require.Equal(t, []string{job.Config.DestTable}, dest.finalized)
+
+	job, src, base = minimalJob()
+	base.writeErr = errors.New("write failed")
+	dest = &replaceFinalizingDestination{fakeDestination: base}
+	job.Destination = dest
+	src.readCh = mustClosedRecords()
+
+	require.ErrorContains(t, (&ReplaceStrategy{}).Execute(t.Context(), job), "write failed")
+	require.Empty(t, dest.finalized)
+}
+
+func TestReplaceStrategy_Execute_StagedReplaceIsNotFinalized(t *testing.T) {
+	job, src, base := minimalJob()
+	dest := &replaceFinalizingDestination{fakeDestination: base, atomicSwap: true}
+	job.Destination = dest
+	src.readCh = mustClosedRecords()
+
+	require.NoError(t, (&ReplaceStrategy{}).Execute(t.Context(), job))
+	require.Empty(t, dest.finalized)
+}
+
+func TestReplaceStrategy_ExecuteMultiTable_FinalizesOnlyAfterEveryTableIsWritten(t *testing.T) {
+	run := func(results ...source.RecordBatchResult) (*replaceFinalizingDestination, error) {
+		orders, users := newTableInfo("public.orders"), newTableInfo("public.users")
+		records := make(chan source.RecordBatchResult, len(results))
+		for _, r := range results {
+			records <- r
+		}
+		close(records)
+		src := &announcingMultiTableSource{tables: []source.SourceTableInfo{orders, users}, records: records}
+		dest := &replaceFinalizingDestination{fakeDestination: &fakeDestination{}}
+		job := &MultiTableIngestionJob{
+			Config:         &config.IngestConfig{},
+			Source:         src,
+			Destination:    dest,
+			Tables:         src.tables,
+			TableDestNames: map[string]string{orders.Name: "landing.orders", users.Name: "landing.users"},
+		}
+		return dest, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), job)
+	}
+
+	dest, err := run(source.RecordBatchResult{TableName: "public.orders"}, source.RecordBatchResult{TableName: "public.users"})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"landing.orders", "landing.users"}, dest.finalized)
+
+	dest, err = run(source.RecordBatchResult{TableName: "public.orders"}, source.RecordBatchResult{TableName: "public.orders", Err: errors.New("source failed")})
+	require.ErrorContains(t, err, "source failed")
+	require.Empty(t, dest.finalized)
+}

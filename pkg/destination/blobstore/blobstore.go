@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,7 @@ type BlobstoreDestination struct {
 	layout      string
 	uriBucket   string
 	uriPrefix   string
-	// customEndpoint is set for S3-compatible stores, which may not support batch deletes.
+
 	customEndpoint bool
 
 	mu sync.Mutex
@@ -68,8 +69,8 @@ type blobTable struct {
 
 	mu          sync.Mutex
 	arrowSchema *arrow.Schema
-	// For a replace, previousKeys are the files this load replaces, and writtenKeys the
-	// files it wrote. Both are cleared once the previous files are removed.
+	// Set by a replace until FinalizeReplace: the files found before the load, and the
+	// files the load wrote.
 	previousKeys []string
 	writtenKeys  map[string]struct{}
 }
@@ -270,6 +271,9 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	if ambiguous {
 		output.Warnf("[BLOBSTORE] table %s starts with the URI's bucket, so it is written to %s/%s and the URI path %s is ignored\n", opts.Table, bucket, basePath, d.uriPrefix)
 	}
+	if tableBucket, _ := parseBucketAndPath(opts.Table); d.uriBucket != "" && tableBucket != d.uriBucket && strings.Contains(opts.Table, "/") {
+		output.Warnf("[BLOBSTORE] table %s is written to %s/%s, under the URI's bucket; older ingestr versions ignored the URI's bucket and wrote it to bucket %s\n", opts.Table, bucket, basePath, tableBucket)
+	}
 
 	if opts.DropFirst {
 		if ambiguous {
@@ -307,22 +311,22 @@ func (d *BlobstoreDestination) table(name string) *blobTable {
 	return &blobTable{name: name, bucket: bucket, basePath: basePath}
 }
 
-// resolveLocation returns the bucket and base path for table. When the URI names a bucket,
-// table is a path under the URI's bucket and prefix. A table that starts with that same
-// bucket keeps the bucket/path form, so pipelines that already spell out the bucket in the
-// table name keep writing to the same place. With a URI prefix that form is ambiguous.
+// resolveLocation returns the bucket and base path for table. Without a bucket in the URI,
+// table is <bucket>/<path>. With one, table is a path under the URI's bucket and prefix,
+// except that <uri bucket>/<path> keeps writing where it did before the URI's bucket was
+// honored. With a URI prefix, that form is ambiguous.
 func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string, ambiguous bool) {
 	tableBucket, tablePath := parseBucketAndPath(table)
-	if d.uriBucket == "" {
+	switch {
+	case d.uriBucket == "":
 		return tableBucket, tablePath, false
-	}
-	if tableBucket == d.uriBucket {
+	case tableBucket == d.uriBucket && tablePath != "":
 		return tableBucket, tablePath, d.uriPrefix != ""
+	default:
+		return d.uriBucket, joinPath(d.uriPrefix, table), false
 	}
-	return d.uriBucket, joinPath(d.uriPrefix, table), false
 }
 
-// prefix is the key prefix of the table's files, shared by uploads and replace cleanup.
 func (t *blobTable) prefix() string {
 	if t.basePath == "" {
 		return ""
@@ -356,7 +360,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 	startTime := time.Now()
 	var totalRows int64
 	var batchNum int
-	loadID := uuid.New().String()[:8]
+	loadID := newLoadID()
 	fileID := 0
 	t := d.table(opts.Table)
 
@@ -465,12 +469,14 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		return err
 	}
 
-	if err := d.removeStaleBlobs(ctx, t); err != nil {
-		return fmt.Errorf("failed to remove files from the previous load: %w", err)
-	}
-
 	config.Debug("[BLOBSTORE] Total: %d rows written to %d files in %v", totalRows, fileID, time.Since(startTime))
 	return nil
+}
+
+const loadIDPattern = "[0-9a-f]{8}"
+
+func newLoadID() string {
+	return uuid.New().String()[:8]
 }
 
 func (d *BlobstoreDestination) writeBlob(ctx context.Context, t *blobTable, path string, data []byte) error {
@@ -613,14 +619,18 @@ func isAzureDatalakeAlreadyExists(err error) bool {
 }
 
 func (d *BlobstoreDestination) renderLayout(table, loadID string, fileID int) string {
-	tableName := layoutTableName(table)
-	result := d.layout
-	result = strings.ReplaceAll(result, "{table_name}", tableName)
-	result = strings.ReplaceAll(result, "{load_id}", loadID)
-	result = strings.ReplaceAll(result, "{file_id}", fmt.Sprintf("%d", fileID))
-	result = strings.ReplaceAll(result, "{ext}", "parquet")
+	return layoutReplacer(table, loadID, strconv.Itoa(fileID)).Replace(d.layout)
+}
 
-	return result
+// layoutReplacer fills the layout placeholders. layoutPattern turns the per-load values
+// into regular expressions, so a new per-load placeholder needs a pattern there too.
+func layoutReplacer(table, loadID, fileID string) *strings.Replacer {
+	return strings.NewReplacer(
+		"{table_name}", layoutTableName(table),
+		"{load_id}", loadID,
+		"{file_id}", fileID,
+		"{ext}", "parquet",
+	)
 }
 
 func layoutTableName(tableName string) string {

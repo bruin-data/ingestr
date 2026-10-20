@@ -418,6 +418,12 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		return fmt.Errorf("failed to write data: %w", err)
 	}
 
+	if !useStaging {
+		if err := finalizeReplace(ctx, job.Destination, writeTable); err != nil {
+			return err
+		}
+	}
+
 	// Only swap tables if using staging pattern
 	if useStaging {
 		if !writeOpts.AtomicCommit {
@@ -469,6 +475,17 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		}
 	}
 
+	return nil
+}
+
+func finalizeReplace(ctx context.Context, dest destination.Destination, table string) error {
+	finalizer, ok := dest.(destination.ReplaceFinalizer)
+	if !ok {
+		return nil
+	}
+	if err := finalizer.FinalizeReplace(ctx, table); err != nil {
+		return fmt.Errorf("failed to finalize replace of %s: %w", table, err)
+	}
 	return nil
 }
 
@@ -598,6 +615,14 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			}
 		}
 		return fmt.Errorf("failed to write multi-table data: %w", err)
+	}
+
+	if !useStaging {
+		for _, tableInfo := range job.Tables {
+			if err := finalizeReplace(ctx, job.Destination, tableConfigs[tableInfo.Name].DestTable); err != nil {
+				return fmt.Errorf("table %s: %w", tableInfo.Name, err)
+			}
+		}
 	}
 
 	if useStaging {
