@@ -85,7 +85,7 @@ func (s *JiraSource) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
-// Scoped tokens (e.g. service accounts) are rejected on the site URL and only work through the gateway.
+// Scoped tokens (e.g. service accounts) are rejected on the site URL (401, or 403 on some sites) and only work through the gateway.
 func (s *JiraSource) connect(ctx context.Context, siteURL string, creds jiraCredentials) error {
 	if creds.cloudID != "" {
 		s.client = newJiraClient(gatewayAPIURL(creds.cloudID), creds)
@@ -94,7 +94,7 @@ func (s *JiraSource) connect(ctx context.Context, siteURL string, creds jiraCred
 
 	s.client = newJiraClient(siteURL+"/rest/api/3", creds)
 	err := s.verifyCredentials(ctx)
-	if !errors.Is(err, errJiraUnauthorized) {
+	if !errors.Is(err, errJiraUnauthorized) && !errors.Is(err, errJiraForbidden) {
 		return err
 	}
 
@@ -148,7 +148,10 @@ func lookupCloudID(ctx context.Context, siteURL string) (string, error) {
 	return info.CloudID, nil
 }
 
-var errJiraUnauthorized = errors.New("jira rejected the credentials: check that the api_token is valid, not expired, and belongs to the given email")
+var (
+	errJiraUnauthorized = errors.New("jira rejected the credentials: check that the api_token is valid, not expired, and belongs to the given email")
+	errJiraForbidden    = errors.New("jira denied access for the credentials (status 403): check that the account has access to Jira")
+)
 
 // Jira runs requests with rejected credentials anonymously, so tables silently return 0 rows.
 func (s *JiraSource) verifyCredentials(ctx context.Context) error {
@@ -158,6 +161,9 @@ func (s *JiraSource) verifyCredentials(ctx context.Context) error {
 	}
 	if resp.StatusCode() == http.StatusUnauthorized {
 		return errJiraUnauthorized
+	}
+	if resp.StatusCode() == http.StatusForbidden {
+		return errJiraForbidden
 	}
 	if !resp.IsSuccess() {
 		return fmt.Errorf("failed to verify jira credentials: status %d: %s", resp.StatusCode(), resp.String())
