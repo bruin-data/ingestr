@@ -16,6 +16,15 @@ func TestMapAthenaToDataType_Primitives(t *testing.T) {
 
 	dt, _, _, _ = MapAthenaToDataType("timestamp with time zone")
 	require.Equal(t, schema.TypeTimestampTZ, dt)
+
+	dt, _, _, _ = MapAthenaToDataType("timestamp(6)")
+	require.Equal(t, schema.TypeTimestamp, dt)
+
+	dt, _, _, _ = MapAthenaToDataType("timestamp(3) with time zone")
+	require.Equal(t, schema.TypeTimestampTZ, dt)
+
+	dt, _, _, _ = MapAthenaToDataType("time(3)")
+	require.Equal(t, schema.TypeTime, dt)
 }
 
 func TestMapAthenaToDataType_Decimal(t *testing.T) {
