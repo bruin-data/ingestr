@@ -899,6 +899,114 @@ func TestParseResponseStreamsRowsBeforeResponseEnds(t *testing.T) {
 	}
 }
 
+// TestParseResponseKeepsSendingCNTQRYUntilEndqryrm pins the fix for the v39
+// data-loss bug reported on issue #3: a 5000-row custom query silently wrote
+// only 363 rows (the server's first two query blocks) and reported success,
+// because the old "needCNTQRY" flag reset itself to false unconditionally
+// right after sending a single CNTQRY, regardless of whether the reply to
+// that CNTQRY actually contained ENDQRYRM. This test's cursor needs two
+// continuation round trips (three query blocks total) before ENDQRYRM
+// arrives - the exact shape that silently truncated before the fix - and
+// asserts both that the client asks for a second round (not just one) and
+// that every row across all three blocks is delivered.
+func TestParseResponseKeepsSendingCNTQRYUntilEndqryrm(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second}
+
+	rowsCh := make(chan [][]any, 8)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{
+			Rows: func(rows [][]any) error {
+				rowsCh <- rows
+				return nil
+			},
+		})
+	}()
+
+	qryInsID := make([]byte, 8)
+	binary.BigEndian.PutUint64(qryInsID, 1)
+	require.NoError(t, writeTestDSS(serverConn, cpOPNQRYRM, packBinary(cpQRYINSID, qryInsID), true))
+	require.NoError(t, writeTestDSS(serverConn, cpQRYDSC, []byte{0x06, 0x76, 0xd0, drdaTypeInteger, 0x00, 0x04}, true))
+
+	rowBytes := func(v byte) []byte { return []byte{0xff, 0x00, v, 0x00, 0x00, 0x00} }
+
+	// Block 1: chain ends here, but no ENDQRYRM arrived - the cursor is
+	// still open and the client must ask for more.
+	require.NoError(t, writeTestDSS(serverConn, cpQRYDTA, rowBytes(1), false))
+
+	cntQRY1, err := readDSS(serverConn)
+	require.NoError(t, err)
+	require.Equal(t, cpCNTQRY, cntQRY1.codePoint, "client must send CNTQRY after the first query block")
+
+	// Block 2: still no ENDQRYRM. The v39 bug stopped here unconditionally
+	// after exactly one CNTQRY round trip.
+	require.NoError(t, writeTestDSS(serverConn, cpQRYDTA, rowBytes(2), false))
+
+	cntQRY2, err := readDSS(serverConn)
+	require.NoError(t, err)
+	require.Equal(t, cpCNTQRY, cntQRY2.codePoint, "client must send a second CNTQRY when the cursor is still open after the first continuation")
+
+	// Block 3, this time followed by the real end-of-cursor signal.
+	require.NoError(t, writeTestDSS(serverConn, cpQRYDTA, rowBytes(3), true))
+	require.NoError(t, writeTestDSS(serverConn, cpENDQRYRM, nil, false))
+
+	var allRows [][]any
+	for len(allRows) < 3 {
+		select {
+		case rows := <-rowsCh:
+			allRows = append(allRows, rows...)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for rows, got %d of 3", len(allRows))
+		}
+	}
+	require.Len(t, allRows, 3)
+	require.Equal(t, int64(1), allRows[0][0])
+	require.Equal(t, int64(2), allRows[1][0])
+	require.Equal(t, int64(3), allRows[2][0])
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("parseResponse did not finish after ENDQRYRM")
+	}
+}
+
+// TestParseResponseEndsOpenQueryOnSQLCODE100 pins the other half of the
+// issue #3 request: some DB2 flavors end a cursor with a SQLCARD carrying
+// SQLCODE +100 ("no more rows") instead of (or in addition to) ENDQRYRM.
+// Without recognizing this, a query ended this way would hang forever
+// sending further CNTQRY requests the server has nothing left to answer.
+func TestParseResponseEndsOpenQueryOnSQLCODE100(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{})
+	}()
+
+	qryInsID := make([]byte, 8)
+	binary.BigEndian.PutUint64(qryInsID, 1)
+	require.NoError(t, writeTestDSS(serverConn, cpOPNQRYRM, packBinary(cpQRYINSID, qryInsID), true))
+	require.NoError(t, writeTestDSS(serverConn, cpSQLCARD, buildSQLCard(t, 100, "02000", ""), false))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("parseResponse did not finish after SQLCARD SQLCODE=+100")
+	}
+}
+
 func TestHandshakeRenegotiatesACCSECWhenDowngrading(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer func() { _ = serverConn.Close() }()

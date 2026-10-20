@@ -88,18 +88,24 @@ func parseSECCHKRM(obj []byte) error {
 	return fmt.Errorf("authentication rejected by server (SECCHKRM SVRCOD=%d, SECCHKCD=%d): the negotiated security mechanism's credentials were not accepted", svrcod, secchkcd)
 }
 
-func parseSQLCard(obj []byte) ([]byte, error) {
+// parseSQLCard returns the remaining bytes after the SQLCARD, the SQLCODE it
+// carried (0 when the object is the empty/0xff "no SQLCARD" sentinel), and an
+// error for a negative SQLCODE. Callers that need to recognize SQLCODE +100
+// ("no more rows") - a valid, non-error end-of-cursor signal some DB2 flavors
+// send instead of, or in addition to, ENDQRYRM (reported on issue #3) - must
+// inspect the returned code themselves; a positive SQLCODE is never an error.
+func parseSQLCard(obj []byte) ([]byte, int32, error) {
 	if len(obj) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if obj[0] == 0xff {
-		return obj[1:], nil
+		return obj[1:], 0, nil
 	}
 	if len(obj) < 54 {
-		return nil, fmt.Errorf("short SQLCARD: %d bytes", len(obj))
+		return nil, 0, fmt.Errorf("short SQLCARD: %d bytes", len(obj))
 	}
 	if obj[0] != 0 {
-		return nil, fmt.Errorf("unexpected SQLCARD group flag: 0x%x", obj[0])
+		return nil, 0, fmt.Errorf("unexpected SQLCARD group flag: 0x%x", obj[0])
 	}
 
 	sqlCode := int32(binary.LittleEndian.Uint32(obj[1:5]))
@@ -115,13 +121,13 @@ func parseSQLCard(obj []byte) ([]byte, error) {
 	}
 
 	if sqlCode < 0 {
-		return rest, db2SQLError{
+		return rest, sqlCode, db2SQLError{
 			Code:    sqlCode,
 			State:   state,
 			Message: decodeString([]byte(message), "cp500"),
 		}
 	}
-	return rest, nil
+	return rest, sqlCode, nil
 }
 
 // characterEncodingFor returns the encoding character data actually comes
@@ -154,7 +160,7 @@ func parseSQLDARD(obj []byte, platform db2Platform) ([]db2Column, error) {
 	// 29-byte block per column instead of the real variable-length name
 	// block), producing a parse that silently read 0 usable columns.
 	hasName := true
-	rest, err := parseSQLCard(obj)
+	rest, _, err := parseSQLCard(obj)
 	if err != nil || len(rest) == 0 {
 		return nil, err
 	}

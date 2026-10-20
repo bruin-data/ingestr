@@ -600,7 +600,20 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 	var fields []drdaField
 	var errResult error
 	chained := true
-	needCNTQRY := false
+	// queryOpen tracks whether a cursor this call opened (via OPNQRYRM) is
+	// still open - i.e. whether more CNTQRY round trips are still owed
+	// before the fetch is complete. It is deliberately NOT a one-shot flag:
+	// reported on issue #3, the previous "needCNTQRY" variable reset itself
+	// to false unconditionally right before sending a single CNTQRY, so any
+	// result needing more than one continuation round trip (anything past
+	// the server's first couple of query blocks) silently stopped after
+	// exactly one CNTQRY - even though the cursor was still open and the
+	// server had more rows queued - and was reported as a complete,
+	// successful result. queryOpen instead stays true across as many
+	// outer-loop iterations/CNTQRY round trips as it takes, and is only
+	// cleared by an actual end-of-cursor signal: ENDQRYRM, or a SQLCARD
+	// carrying SQLCODE +100 (handled below).
+	queryOpen := false
 	qryInsID := uint64(0)
 	cntCorrelationID := uint16(1)
 
@@ -653,13 +666,24 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 					errResult = fmt.Errorf("server diagnostic code: %s", strings.TrimSpace(msg))
 				}
 			case cpSQLCARD:
-				if _, err := parseSQLCard(packet.object); err != nil {
+				_, sqlCode, err := parseSQLCard(packet.object)
+				if err != nil {
 					if sqlErr, ok := err.(db2SQLError); ok {
 						config.Debug("[DB2] parseResponse: SQLCARD SQLCODE=%d SQLSTATE=%s message=%q", sqlErr.Code, sqlErr.State, sqlErr.Message)
 					} else {
 						config.Debug("[DB2] parseResponse: SQLCARD parse error: %v", err)
 					}
 					errResult = err
+				} else {
+					config.Debug("[DB2] parseResponse: SQLCARD SQLCODE=%d", sqlCode)
+					if sqlCode == 100 && queryOpen {
+						// +100 = no more rows. Some DB2 flavors send this
+						// instead of (or alongside) ENDQRYRM to end a
+						// cursor - requested explicitly on issue #3 as a
+						// valid terminal condition alongside ENDQRYRM.
+						config.Debug("[DB2] parseResponse: SQLCARD SQLCODE=+100, ending open query")
+						queryOpen = false
+					}
 				}
 			case cpSQLDARD:
 				config.Debug("[DB2] parseResponse: SQLDARD wire bytes: %x", packet.object)
@@ -699,13 +723,13 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 					}
 				}
 			case cpOPNQRYRM:
-				needCNTQRY = true
+				queryOpen = true
 				cntCorrelationID = packet.correlationID
 				if v := parseReplyObject(packet.object)[cpQRYINSID]; len(v) >= 8 {
 					qryInsID = binary.BigEndian.Uint64(v[:8])
 				}
 			case cpENDQRYRM:
-				needCNTQRY = false
+				queryOpen = false
 			case cpQRYDSC:
 				config.Debug("[DB2] QRYDSC wire bytes: %x", packet.object)
 				parsed, err := parseQRYDSC(packet.object)
@@ -758,13 +782,13 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 			}
 		}
 
-		if needCNTQRY {
-			needCNTQRY = false
+		if queryOpen {
 			c.refreshDeadline(ctx)
 			cntQRY, err := c.packCNTQRY(qryInsID)
 			if err != nil {
 				return err
 			}
+			config.Debug("[DB2] parseResponse: sending CNTQRY (qryInsID=%d correlationID=%d)", qryInsID, cntCorrelationID)
 			if _, err := writeRequestDSS(c.conn, cntQRY, cntCorrelationID, false, true); err != nil {
 				return err
 			}
