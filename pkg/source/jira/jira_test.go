@@ -294,6 +294,9 @@ func TestJiraVerifyCredentials(t *testing.T) {
 			return
 		}
 		w.WriteHeader(status)
+		if status == http.StatusForbidden {
+			_, _ = w.Write([]byte("<html><body>null - null</body></html>"))
+		}
 	}))
 	defer srv.Close()
 
@@ -306,6 +309,12 @@ func TestJiraVerifyCredentials(t *testing.T) {
 	err := s.verifyCredentials(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "jira rejected the credentials") {
 		t.Fatalf("expected credentials error, got %v", err)
+	}
+
+	status = http.StatusForbidden
+	err = s.verifyCredentials(context.Background())
+	if !errors.Is(err, errJiraForbidden) || strings.Contains(err.Error(), "<html>") {
+		t.Fatalf("expected short forbidden error without the HTML body, got %v", err)
 	}
 }
 
