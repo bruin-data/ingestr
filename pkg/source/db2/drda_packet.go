@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/bruin-data/ingestr/internal/config"
 )
 
 type dssPacket struct {
@@ -175,6 +177,7 @@ func readDSS(r io.Reader) (dssPacket, error) {
 	p.codePoint = binary.BigEndian.Uint16(cpBuf)
 
 	if dssLen == 0xffff {
+		config.Debug("[DB2] readDSS: extended DSS, codepoint=0x%x objLen=%d", p.codePoint, objLen)
 		if p.codePoint != cpQRYDTA {
 			return dssPacket{}, fmt.Errorf("extended DSS for unexpected codepoint: 0x%x", p.codePoint)
 		}
@@ -193,6 +196,14 @@ func readDSS(r io.Reader) (dssPacket, error) {
 		}
 		nextLen := binary.BigEndian.Uint16(nextLenBuf)
 		if nextLen < 2 {
+			// Reported on issue #3 immediately after a 72-column table's
+			// SQLDARD parsed - this extended-DSS path only ever applies to
+			// cpQRYDTA, so this is the first row-data fetch for that wide
+			// table, not the SQLDARD itself. Unconfirmed whether nextLen=0
+			// is a legitimate "no continuation, end of data" terminator
+			// this client doesn't yet recognize, or a genuine framing bug;
+			// logged here rather than guessed at.
+			config.Debug("[DB2] readDSS: invalid extended DSS continuation length=%d, chunk so far (%d bytes)=%x", nextLen, len(object), object)
 			return dssPacket{}, fmt.Errorf("invalid extended DSS continuation length: %d", nextLen)
 		}
 		extra := make([]byte, int(nextLen)-2)

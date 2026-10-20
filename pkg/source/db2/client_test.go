@@ -1228,13 +1228,14 @@ func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 // TestParseSQLDARDDecodesRealIBMiCapture pins the exact SQLDARD shape
 // reported on issue #3: a single-column PRPSQLSTT reply (TABLE_NAME,
 // VARCHAR(128), CCSID 37) that the parser previously read as 0 columns.
-// Root causes, all confirmed against this real capture: SQLNUMROWS is a
-// 4-byte field (not 2), the RDBNAM/package-name fields parseSQLDARD used
-// to read between the SQLDHGRP header and SQLNUMROWS don't exist on the
-// wire, every per-column numeric field follows the platform's byte order
-// (not hardcoded little-endian), and hasName can't be derived from
-// SQLCAGRP's own null indicator (obj[0]) since this clients's PRPSQLSTT/
-// DSCSQLSTT always request names regardless of that byte.
+// Root causes, all confirmed against real captures: SQLNUMROWS is a
+// 4-byte field (not 2) at a fixed absolute offset of 0x18 (24) from the
+// start of the SQLDARD content - cross-checked against five captures of
+// varying column counts (1/4/5/32/72) - every per-column numeric field
+// follows the platform's byte order (not hardcoded little-endian), and
+// hasName can't be derived from SQLCAGRP's own null indicator (obj[0])
+// since this client's PRPSQLSTT/DSCSQLSTT always request names
+// regardless of that byte.
 func TestParseSQLDARDDecodesRealIBMiCapture(t *testing.T) {
 	name, err := encodeCP37("TABLE_NAME")
 	require.NoError(t, err)
@@ -1242,8 +1243,11 @@ func TestParseSQLDARDDecodesRealIBMiCapture(t *testing.T) {
 
 	obj := []byte{0xff} // SQLCAGRP: null
 	obj = append(obj,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x55, 0x00, 0x02, // SQLDHGRP: present, 13 bytes
-	)
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 10 bytes
+		0x55,       // constant
+		0x00, 0x02, // 2 bytes (varies across captures)
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 10 bytes
+	) // SQLDHGRP: present, 24 bytes total including the leading null indicator
 	obj = append(obj, 0x00, 0x00, 0x00, 0x01) // SQLNUMROWS = 1
 	obj = append(obj,
 		0x00, 0x00, // precision = 0

@@ -159,17 +159,21 @@ func parseSQLDARD(obj []byte, platform db2Platform) ([]db2Column, error) {
 		return nil, err
 	}
 
-	// SQLDHGRP: a 13-byte header (1-byte null indicator + 12 bytes this
-	// client doesn't otherwise use) - confirmed byte-for-byte on issue #3
-	// against a real IBM i capture. SQLNUMROWS (the column count) follows
-	// immediately; the RDBNAM/package-name varchar+name fields previously
-	// read here don't exist in a real capture and were silently eating
-	// SQLNUMROWS's own bytes.
+	// SQLDHGRP: a 24-byte header (1-byte null indicator + 23 bytes this
+	// client doesn't otherwise use) - confirmed on issue #3 against five
+	// real captures of varying column counts (1/4/5/32/72), which all
+	// placed SQLNUMROWS at a fixed absolute offset of 0x18 (24) from the
+	// start of the SQLDARD content. An earlier fix assumed a 13-byte
+	// header based on a single, incompletely-decoded capture; the
+	// corrected 24-byte figure (23 bytes to skip from here, since rest
+	// already starts 1 byte into the object) is cross-checked against
+	// every capture, not just one.
+	config.Debug("[DB2] parseSQLDARD: header bytes before SQLNUMROWS: %x", rest[:min(len(rest), 24)])
 	if rest[0] == 0x00 {
-		if len(rest) < 13 {
+		if len(rest) < 23 {
 			return nil, nil
 		}
-		rest = rest[13:]
+		rest = rest[23:]
 	} else {
 		rest = rest[1:]
 	}
