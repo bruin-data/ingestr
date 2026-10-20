@@ -1225,6 +1225,55 @@ func TestHandshakeSendsRawDatabaseAliasInACCRDB(t *testing.T) {
 // one column's minimum-length unnamed-column block. Column name and type
 // content don't matter for tests only checking whether handler.Columns
 // fires at all.
+// TestParseSQLDARDDecodesRealIBMiCapture pins the exact SQLDARD shape
+// reported on issue #3: a single-column PRPSQLSTT reply (TABLE_NAME,
+// VARCHAR(128), CCSID 37) that the parser previously read as 0 columns.
+// Root causes, all confirmed against this real capture: SQLNUMROWS is a
+// 4-byte field (not 2), the RDBNAM/package-name fields parseSQLDARD used
+// to read between the SQLDHGRP header and SQLNUMROWS don't exist on the
+// wire, every per-column numeric field follows the platform's byte order
+// (not hardcoded little-endian), and hasName can't be derived from
+// SQLCAGRP's own null indicator (obj[0]) since this clients's PRPSQLSTT/
+// DSCSQLSTT always request names regardless of that byte.
+func TestParseSQLDARDDecodesRealIBMiCapture(t *testing.T) {
+	name, err := encodeCP37("TABLE_NAME")
+	require.NoError(t, err)
+	require.Len(t, name, 10)
+
+	obj := []byte{0xff} // SQLCAGRP: null
+	obj = append(obj,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x55, 0x00, 0x02, // SQLDHGRP: present, 13 bytes
+	)
+	obj = append(obj, 0x00, 0x00, 0x00, 0x01) // SQLNUMROWS = 1
+	obj = append(obj,
+		0x00, 0x00, // precision = 0
+		0x00, 0x00, // scale = 0
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, // length = 128
+		0x01, 0xc0, // SQLTYPE 448 (VARCHAR)
+		0x00, 0x25, // CCSID 37
+	)
+	obj = append(obj, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)       // 6 reserved bytes ahead of the name block
+	obj = append(obj, 0x00, 0x00, 0x00)                         // SQLDOPTGRP-style flag byte (0x00) + its own 2-byte skip
+	obj = append(obj, 0x00, 0x00)                               // SQLNAME VCM: empty
+	obj = append(obj, 0x00, 0x0a)                               // SQLNAME VCS: length 10
+	obj = append(obj, name...)                                  // SQLNAME VCS: "TABLE_NAME" (cp37)
+	obj = append(obj, 0x00, 0x00)                               // SQLLABEL VCM: empty
+	obj = append(obj, 0x00, 0x0a)                               // SQLLABEL VCS: length 10
+	obj = append(obj, name...)                                  // SQLLABEL VCS: "TABLE_NAME" (cp37)
+	obj = append(obj, 0x00, 0x00, 0x00, 0x00)                   // unnamed VCM+VCS: both empty
+	obj = append(obj, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff) // 7-byte tail (SQLUDTGRP/SQLDXGRP null etc.), discarded
+
+	columns, err := parseSQLDARD(obj, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Len(t, columns, 1)
+	require.Equal(t, "TABLE_NAME", columns[0].Name)
+	require.Equal(t, db2SQLTypeVarchar, columns[0].SQLType)
+	require.Equal(t, 128, columns[0].Length)
+	require.Equal(t, 0, columns[0].Precision)
+	require.Equal(t, 0, columns[0].Scale)
+}
+
 func minimalSQLDARD() []byte {
 	obj := []byte{0xff, 0x01, 0x01, 0x00}
 	return append(obj, make([]byte, 45)...) // 16-byte column header + 29-byte unnamed-column block

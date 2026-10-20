@@ -143,28 +143,49 @@ func parseSQLDARD(obj []byte, platform db2Platform) ([]db2Column, error) {
 		return nil, nil
 	}
 
-	hasName := obj[0] == 0x00
+	// This client always requests RTNSQLDA=0xf1 ("with names") on both
+	// PRPSQLSTT and DSCSQLSTT (see packPRPSQLSTT/packDSCSQLSTT), so every
+	// SQLDARD this client receives includes a name block per column.
+	// Previously derived from obj[0] (the SQLCAGRP null indicator, a
+	// field with no relation to column naming) - confirmed wrong on issue
+	// #3 against a real IBM i capture where obj[0] was 0xff (SQLCAGRP
+	// null) yet every column clearly carried SQLNAME/SQLLABEL data, which
+	// the old hasName=false path skipped over entirely (reading a flat
+	// 29-byte block per column instead of the real variable-length name
+	// block), producing a parse that silently read 0 usable columns.
+	hasName := true
 	rest, err := parseSQLCard(obj)
 	if err != nil || len(rest) == 0 {
 		return nil, err
 	}
 
+	// SQLDHGRP: a 13-byte header (1-byte null indicator + 12 bytes this
+	// client doesn't otherwise use) - confirmed byte-for-byte on issue #3
+	// against a real IBM i capture. SQLNUMROWS (the column count) follows
+	// immediately; the RDBNAM/package-name varchar+name fields previously
+	// read here don't exist in a real capture and were silently eating
+	// SQLNUMROWS's own bytes.
 	if rest[0] == 0x00 {
 		if len(rest) < 13 {
 			return nil, nil
 		}
 		rest = rest[13:]
-		_, rest = parseVarchar(rest)
-		_, rest = parseName(rest)
 	} else {
 		rest = rest[1:]
 	}
 
-	if len(rest) < 2 {
+	if len(rest) < 4 {
 		return nil, nil
 	}
-	count := int(binary.LittleEndian.Uint16(rest[:2]))
-	rest = rest[2:]
+	// SQLNUMROWS is a 4-byte count, not 2 - confirmed on issue #3 against
+	// four real captures (00000001, 00000004, 00000005, 00000020 for 1/4/
+	// 5/32 columns respectively), read in the platform's numeric byte
+	// order like every other binary numeric field on the wire (see
+	// numericByteOrderFor's own doc comment for why TYPDEFNAM governs
+	// this).
+	count := int(numericByteOrderFor(platform).Uint32(rest[:4]))
+	rest = rest[4:]
+	config.Debug("[DB2] parseSQLDARD: SQLNUMROWS=%d", count)
 
 	columns := make([]db2Column, 0, count)
 	for i := 0; i < count; i++ {
@@ -173,11 +194,13 @@ func parseSQLDARD(obj []byte, platform db2Platform) ([]db2Column, error) {
 		}
 		col, next, err := parseDB2Column(rest, hasName, platform)
 		if err != nil {
+			config.Debug("[DB2] parseSQLDARD: column %d parse error: %v, remaining bytes=%x", i, err, rest)
 			if len(columns) > 0 {
 				break
 			}
 			return nil, err
 		}
+		config.Debug("[DB2] parseSQLDARD: column %d name=%q sqltype=%d length=%d precision=%d scale=%d", i, col.Name, col.SQLType, col.Length, col.Precision, col.Scale)
 		columns = append(columns, col)
 		rest = next
 	}
@@ -189,10 +212,19 @@ func parseDB2Column(b []byte, hasName bool, platform db2Platform) (db2Column, []
 		return db2Column{}, nil, fmt.Errorf("short SQLDARD column: %d bytes", len(b))
 	}
 
-	precision := int(binary.LittleEndian.Uint16(b[:2]))
-	scale := int(binary.LittleEndian.Uint16(b[2:4]))
-	length := int(binary.LittleEndian.Uint64(b[4:12]))
-	sqlType := int(binary.LittleEndian.Uint16(b[12:14]))
+	// Confirmed on issue #3 against a real capture: precision/scale/
+	// length/sqlType are binary numeric fields subject to the same
+	// TYPDEFNAM-driven byte order as everything else on the wire (see
+	// numericByteOrderFor) - previously hardcoded little-endian
+	// regardless of platform, which on IBM i read a 128-byte VARCHAR's
+	// length (wire bytes 00 00 00 00 00 00 00 80) as an astronomically
+	// large little-endian value, and SQLTYPE 448/VARCHAR (wire bytes 01
+	// c0) as 0xc001 (49153), neither of which is a valid SQL type.
+	order := numericByteOrderFor(platform)
+	precision := int(order.Uint16(b[:2]))
+	scale := int(order.Uint16(b[2:4]))
+	length := int(order.Uint64(b[4:12]))
+	sqlType := int(order.Uint16(b[12:14]))
 	b = b[16:]
 
 	name := ""
