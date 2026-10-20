@@ -579,6 +579,20 @@ func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) 
 			return nil, err
 		}
 		return decodePackedDecimal(data, scale)
+	case drdaTypeZoned, drdaTypeNZoned:
+		// IBM i reports NUMERIC columns as zoned decimal, confirmed on
+		// issue #3 against a real QRYDSC/SQLDARD pair: the 2-byte length
+		// field is precision-byte then scale-byte (same convention as
+		// drdaTypeDecimal above), and the wire length is the precision
+		// itself - one byte per digit, unlike packed decimal's two digits
+		// per byte.
+		precision := int(field.params[0])
+		scale := int(field.params[1])
+		data, err := readBytes(stream, precision)
+		if err != nil {
+			return nil, err
+		}
+		return decodeZonedDecimal(data, scale)
 	case drdaTypeDate, drdaTypeNDate:
 		ln := int(binary.BigEndian.Uint16(field.params))
 		data, err := readBytes(stream, ln)
@@ -643,7 +657,7 @@ func nullableDRDAType(t byte) bool {
 		drdaTypeNTime, drdaTypeNTimestamp, drdaTypeNVarByte, drdaTypeNChar,
 		drdaTypeNVarchar, drdaTypeNLong, drdaTypeNGraphic, drdaTypeNVarGraph,
 		drdaTypeNMix, drdaTypeNVarMix, drdaTypeNLongMix, drdaTypeNBoolean,
-		drdaTypeNDecFloat, drdaTypeNLobBytes, drdaTypeNLobCSBCS:
+		drdaTypeNDecFloat, drdaTypeNLobBytes, drdaTypeNLobCSBCS, drdaTypeNZoned:
 		return true
 	default:
 		return false
@@ -728,6 +742,43 @@ func decodePackedDecimal(data []byte, scale int) (decimal.Decimal, error) {
 	}
 	v = v.Shift(int32(-scale))
 	if signNibble == 'd' || signNibble == 'b' {
+		v = v.Neg()
+	}
+	return v, nil
+}
+
+// decodeZonedDecimal decodes IBM i's wire format for NUMERIC columns,
+// confirmed on issue #3 against a real capture (bytes f0 f0 f1, precision
+// 3 scale 0, decodes to 1): one byte per digit (the low nibble; the high
+// nibble is a zone, always 0xF, except on the last byte, whose high
+// nibble is the sign instead) - a fundamentally different layout from
+// drdaTypeDecimal's packed BCD (two digits per byte, sign in the low
+// nibble of the last byte). The sign nibble values (0xf/0xc/0xa/0xe
+// positive, 0xd/0xb negative) match the same convention decodePackedDecimal
+// already uses, just in the opposite nibble position of the last byte.
+func decodeZonedDecimal(data []byte, scale int) (decimal.Decimal, error) {
+	if len(data) == 0 {
+		return decimal.Zero, nil
+	}
+	digits := make([]byte, len(data))
+	for i, b := range data {
+		d := b & 0x0f
+		if d > 9 {
+			return decimal.Zero, fmt.Errorf("invalid zoned decimal digit nibble: %x", hex.EncodeToString(data))
+		}
+		digits[i] = '0' + d
+	}
+	trimmed := strings.TrimLeft(string(digits), "0")
+	if trimmed == "" {
+		trimmed = "0"
+	}
+	v, err := decimal.NewFromString(trimmed)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	v = v.Shift(int32(-scale))
+	signNibble := data[len(data)-1] >> 4
+	if signNibble == 0x0d || signNibble == 0x0b {
 		v = v.Neg()
 	}
 	return v, nil

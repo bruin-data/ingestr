@@ -129,18 +129,24 @@ const (
 )
 
 const (
-	drdaTypeInteger    byte = 0x02
-	drdaTypeNInteger   byte = 0x03
-	drdaTypeSmall      byte = 0x04
-	drdaTypeNSmall     byte = 0x05
-	drdaTypeOneByte    byte = 0x06
-	drdaTypeNOneByte   byte = 0x07
-	drdaTypeFloat8     byte = 0x0A
-	drdaTypeNFloat8    byte = 0x0B
-	drdaTypeFloat4     byte = 0x0C
-	drdaTypeNFloat4    byte = 0x0D
-	drdaTypeDecimal    byte = 0x0E
-	drdaTypeNDecimal   byte = 0x0F
+	drdaTypeInteger  byte = 0x02
+	drdaTypeNInteger byte = 0x03
+	drdaTypeSmall    byte = 0x04
+	drdaTypeNSmall   byte = 0x05
+	drdaTypeOneByte  byte = 0x06
+	drdaTypeNOneByte byte = 0x07
+	drdaTypeFloat8   byte = 0x0A
+	drdaTypeNFloat8  byte = 0x0B
+	drdaTypeFloat4   byte = 0x0C
+	drdaTypeNFloat4  byte = 0x0D
+	drdaTypeDecimal  byte = 0x0E
+	drdaTypeNDecimal byte = 0x0F
+	// drdaTypeZoned (IBM i NUMERIC) - confirmed on issue #3 via a real
+	// QRYDSC: 1 byte per digit (not nibble-packed like drdaTypeDecimal),
+	// low nibble the digit, high nibble the zone (0xF) except the last
+	// byte, whose high nibble is the sign instead. See decodeZonedDecimal.
+	drdaTypeZoned      byte = 0x10
+	drdaTypeNZoned     byte = 0x11
 	drdaTypeInteger8   byte = 0x16
 	drdaTypeNInteger8  byte = 0x17
 	drdaTypeNRowID     byte = 0x1F

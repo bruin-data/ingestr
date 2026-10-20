@@ -63,6 +63,48 @@ func TestReadDRDAFieldNonNullableDecimal(t *testing.T) {
 	require.Equal(t, "123.45", value.(interface{ String() string }).String())
 }
 
+// TestReadDRDAFieldDecodesZonedDecimal pins the exact byte example from
+// issue #3: IBM i reports NUMERIC columns as zoned decimal (DRDA type
+// 0x10), one byte per digit (low nibble), with the sign in the high
+// nibble of the last byte - bytes f0 f0 f1 (precision 3, scale 0) decode
+// to 1.
+func TestReadDRDAFieldDecodesZonedDecimal(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte{0xf0, 0xf0, 0xf1}), drdaField{
+		typeCode: drdaTypeZoned,
+		params:   []byte{3, 0},
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, "1", value.(interface{ String() string }).String())
+}
+
+// TestReadDRDAFieldDecodesNegativeZonedDecimal exercises the sign
+// convention issue #3 documented (0xd/0xb negative) but didn't have a
+// real captured negative value for - the digit bytes are the same
+// pattern as the confirmed positive case above, only the last byte's
+// sign nibble differs.
+func TestReadDRDAFieldDecodesNegativeZonedDecimal(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte{0xf0, 0xf0, 0xd1}), drdaField{
+		typeCode: drdaTypeZoned,
+		params:   []byte{3, 0},
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, "-1", value.(interface{ String() string }).String())
+}
+
+// TestReadDRDAFieldDecodesZonedDecimalWithScale confirms the scale byte
+// (field.params[1]) is applied the same way as drdaTypeDecimal's.
+func TestReadDRDAFieldDecodesZonedDecimalWithScale(t *testing.T) {
+	value, err := readDRDAField(bytes.NewReader([]byte{0xf1, 0xf2, 0xf3, 0xf4, 0xf5}), drdaField{
+		typeCode: drdaTypeZoned,
+		params:   []byte{5, 2},
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, "123.45", value.(interface{ String() string }).String())
+}
+
 func TestReadDRDAFieldTimestampTruncatesToMicroseconds(t *testing.T) {
 	value, err := readDRDAField(bytes.NewReader([]byte("2024-01-02-03.04.05.123456789012")), drdaField{
 		typeCode: drdaTypeTimestamp,
