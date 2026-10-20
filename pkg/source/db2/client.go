@@ -616,6 +616,11 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 			}
 			chained = packet.chained
 
+			// packet.moreData is always false now - readDSS fully
+			// assembles every continuation segment of an extended DSS
+			// object internally before returning (see its own doc
+			// comment; fixed on issue #3). This loop is inert, kept
+			// rather than removed since nothing else sets the field.
 			for packet.moreData {
 				c.refreshDeadline(ctx)
 				cntQRY, err := c.packCNTQRY(qryInsID)

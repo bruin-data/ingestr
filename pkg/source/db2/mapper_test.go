@@ -53,3 +53,19 @@ func TestMapDb2SQLTypeToDataType(t *testing.T) {
 	gotType, _, _, _ = MapDb2SQLTypeToDataType(db2SQLTypeNVarchar, 20, 0, 0)
 	require.Equal(t, schema.TypeString, gotType)
 }
+
+// TestMapDb2SQLTypeToDataTypeMapsZonedNumeric pins the real SQLTYPE value
+// for IBM i's zoned decimal NUMERIC, confirmed on issue #3 via a real
+// SQLDARD: 488 (literal, not the db2SQLTypeNumeric symbol - this test
+// must catch that constant drifting from the confirmed real value, which
+// referencing the same symbol here would not). The 504 this client
+// assumed before nothing had exercised it against a real server; a
+// column reported with SQLTYPE 488 fell through to the default case and
+// was destined as text instead of numeric(3,0) in Postgres.
+func TestMapDb2SQLTypeToDataTypeMapsZonedNumeric(t *testing.T) {
+	gotType, precision, scale, arrayType := MapDb2SQLTypeToDataType(488, 3, 3, 0)
+	require.Equal(t, schema.TypeDecimal, gotType)
+	require.Equal(t, 3, precision)
+	require.Equal(t, 0, scale)
+	require.Equal(t, schema.TypeUnknown, arrayType)
+}

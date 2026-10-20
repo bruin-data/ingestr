@@ -1964,6 +1964,59 @@ func TestReadDSSReassemblesExtendedQRYDTASegments(t *testing.T) {
 	require.False(t, p.moreData)
 }
 
+// TestReadDSSReassemblesThreeOrMoreExtendedQRYDTASegments pins the hang
+// reported on issue #3 for QRYDTA objects spanning 3+ segments. An
+// intermediate continuation segment's 2-byte header has its high bit set
+// ("more follows") with the segment's own length (including the header)
+// in the low 15 bits - treating that raw header as a literal byte count,
+// unmasked, made the old code try to read far more bytes than were ever
+// sent, blocking until the connection timed out. The one capture
+// available before this fix (TestReadDSSReassemblesExtendedQRYDTASegments
+// above) only ever exercised a final segment, whose high bit is clear by
+// definition, so it couldn't have caught this.
+func TestReadDSSReassemblesThreeOrMoreExtendedQRYDTASegments(t *testing.T) {
+	data1 := []byte{0xff, 0x01, 0x02, 0x03, 0x04}
+	data2 := []byte{0x05, 0x06, 0x07}
+	data3 := []byte{0x08, 0x09}
+	total := uint32(len(data1) + len(data2) + len(data3))
+
+	chunk := make([]byte, 0, 4+len(data1))
+	extLenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(extLenBuf, total)
+	chunk = append(chunk, extLenBuf...)
+	chunk = append(chunk, data1...)
+
+	buf := &bytes.Buffer{}
+	buf.Write([]byte{0xff, 0xff, 0xd0, 0x01, 0x00, 0x01}) // 6-byte DSS header, dssLen=0xffff
+	objLenBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(objLenBuf, uint16(len(chunk)+19))
+	buf.Write(objLenBuf)
+	cpBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(cpBuf, cpQRYDTA)
+	buf.Write(cpBuf)
+	buf.Write(chunk)
+
+	// Intermediate segment: high bit (0x8000, "more follows") set, low 15
+	// bits are this segment's own length including its 2-byte header.
+	seg2LenBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(seg2LenBuf, uint16(len(data2)+2)|0x8000)
+	buf.Write(seg2LenBuf)
+	buf.Write(data2)
+
+	// Final segment: high bit clear.
+	seg3LenBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(seg3LenBuf, uint16(len(data3)+2))
+	buf.Write(seg3LenBuf)
+	buf.Write(data3)
+
+	p, err := readDSS(buf)
+
+	require.NoError(t, err)
+	want := append(append(append([]byte{}, data1...), data2...), data3...)
+	require.Equal(t, want, p.object)
+	require.False(t, p.moreData)
+}
+
 func TestPackDSSObjectRejectsOversizedBody(t *testing.T) {
 	_, err := packDSSObject(cpSQLSTT, make([]byte, maxDSSObjectBodyLength+1))
 

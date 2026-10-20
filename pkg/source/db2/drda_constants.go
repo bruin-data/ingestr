@@ -112,20 +112,25 @@ const (
 	db2SQLTypeNFloat     = 481
 	db2SQLTypeDecimal    = 484
 	db2SQLTypeNDecimal   = 485
-	db2SQLTypeBigInt     = 492
-	db2SQLTypeNBigInt    = 493
-	db2SQLTypeInteger    = 496
-	db2SQLTypeNInteger   = 497
-	db2SQLTypeSmall      = 500
-	db2SQLTypeNSmall     = 501
-	db2SQLTypeNumeric    = 504
-	db2SQLTypeNNumeric   = 505
-	db2SQLTypeRowID      = 904
-	db2SQLTypeNRowID     = 905
-	db2SQLTypeDecFloat   = 996
-	db2SQLTypeNDecFloat  = 997
-	db2SQLTypeBoolean    = 2436
-	db2SQLTypeNBoolean   = 2437
+	// db2SQLTypeNumeric/NNumeric - confirmed 488/489 on issue #3 via a
+	// real SQLDARD for a zoned decimal NUMERIC(3,0) column (the 504/505
+	// previously here had never been seen on a real server; 488 fits the
+	// same "+4 from the previous type" spacing every other adjacent pair
+	// in this table follows, e.g. DECIMAL 484 -> this -> BIGINT 492).
+	db2SQLTypeNumeric   = 488
+	db2SQLTypeNNumeric  = 489
+	db2SQLTypeBigInt    = 492
+	db2SQLTypeNBigInt   = 493
+	db2SQLTypeInteger   = 496
+	db2SQLTypeNInteger  = 497
+	db2SQLTypeSmall     = 500
+	db2SQLTypeNSmall    = 501
+	db2SQLTypeRowID     = 904
+	db2SQLTypeNRowID    = 905
+	db2SQLTypeDecFloat  = 996
+	db2SQLTypeNDecFloat = 997
+	db2SQLTypeBoolean   = 2436
+	db2SQLTypeNBoolean  = 2437
 )
 
 const (
