@@ -93,11 +93,24 @@ my-org-bucket/
     └── records.parquet
 ```
 
-### Bucket and prefix in the URI, replace and append
+### Setting the bucket and prefix in the URI
 
-You can also set the bucket and an optional prefix in the URI, such as `gs://my-org-bucket/exports`. `--dest-table` is then a path under them, so `public.users` is written to `my-org-bucket/exports/public.users/`. A `--dest-table` that starts with the URI's bucket keeps the `<bucket>/<path>` form; when the URI has a prefix, ingestr warns about this and a `replace` keeps the existing files. Older versions ignored the bucket and prefix in the URI, so a `--dest-table` that starts with a different bucket is now written under the URI's bucket and prefix.
+You can also set the bucket and an optional prefix in the URI, such as `gs://my-org-bucket/exports`. `--dest-table` is then a path under them, so `public.users` is written to `my-org-bucket/exports/public.users/`. A `--dest-table` that starts with the URI's bucket, such as `my-org-bucket/records`, is still written to `my-org-bucket/records/`.
 
-With the `replace` strategy, ingestr writes the new files first and then deletes the files that were there before the load started and whose names match the `layout`, in the folder the layout writes into. Other files, other paths and subfolders are kept, unless the layout itself puts each load in its own folder, such as `{load_id}/{file_id}.{ext}`. A bucket root is never cleared. A load that fails keeps the previous files, which are removed only after every table's files are written; if deleting the previous files fails partway, some may already be removed, and running the load again finishes the cleanup. Running two `replace` loads on the same path at the same time is not supported and can leave files from both loads. `replace` needs `storage.objects.list` and `storage.objects.delete`; without them, the load fails. With `append`, existing files are kept.
+> [!NOTE]
+> Older versions ignored the bucket and prefix in the URI. A `--dest-table` such as `other-bucket/records` with a URI that names a different bucket is now written under the URI's bucket and prefix.
+
+### Replace and append
+
+With `replace`, each run replaces the files from the previous run at the destination path:
+
+- **Replaced:** files ingestr wrote there earlier, named after the `layout`, such as `<load_id>.<file_id>.parquet`.
+- **Kept:** any other files under the path, and other paths such as `records2/` next to `records/`. If the load fails, the previous files are kept too.
+- **Permissions:** `storage.objects.list` and `storage.objects.delete`. Without them, the load fails.
+
+ingestr never deletes files in the root of a bucket, so `replace` only cleans up when the files go into a folder.
+
+With `append`, each run adds new files and keeps the existing ones.
 
 ### Available Layout Placeholders
 
