@@ -349,6 +349,15 @@ func TestJiraConnectFallsBackToGateway(t *testing.T) {
 	}
 
 	gatewayPaths = nil
+	siteStatus = http.StatusForbidden
+	if err := s.connect(context.Background(), site.URL, creds); err != nil {
+		t.Fatalf("expected gateway fallback on 403 to succeed, got %v", err)
+	}
+	if len(gatewayPaths) != 1 || gatewayPaths[0] != "/abc-123/rest/api/3/myself" {
+		t.Fatalf("unexpected gateway calls %v", gatewayPaths)
+	}
+
+	gatewayPaths = nil
 	siteStatus = http.StatusOK
 	if err := s.connect(context.Background(), site.URL, creds); err != nil {
 		t.Fatalf("expected site URL to succeed, got %v", err)
