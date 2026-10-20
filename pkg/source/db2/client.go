@@ -657,15 +657,40 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 					errResult = err
 				}
 			case cpSQLDARD:
-				if columns, err := parseSQLDARD(packet.object, c.platform); err != nil {
+				config.Debug("[DB2] parseResponse: SQLDARD wire bytes: %x", packet.object)
+				columns, err := parseSQLDARD(packet.object, c.platform)
+				if err != nil {
+					config.Debug("[DB2] parseResponse: SQLDARD parse error: %v", err)
 					if errResult == nil {
 						errResult = err
 					}
-				} else if len(columns) > 0 {
-					if handler.Columns != nil {
+				} else {
+					config.Debug("[DB2] parseResponse: SQLDARD parsed %d column(s)", len(columns))
+					if len(columns) > 0 && handler.Columns != nil {
 						if err := handler.Columns(columns); err != nil {
 							return err
 						}
+					}
+				}
+			case cpPRMNSPRM:
+				// The object is a collection of length-prefixed codepoint
+				// fields, same framing as parseReplyObject already handles
+				// elsewhere (e.g. SECCHKRM) - the rejected parameter's own
+				// codepoint appears as one of the keys alongside SVRCOD.
+				fields := parseReplyObject(packet.object)
+				rejected := make([]string, 0, len(fields))
+				for cp := range fields {
+					if cp == cpSVRCOD {
+						continue
+					}
+					rejected = append(rejected, fmt.Sprintf("0x%x", cp))
+				}
+				config.Debug("[DB2] parseResponse: PRMNSPRM wire bytes: %x, parsed fields=%v", packet.object, fields)
+				if errResult == nil {
+					if len(rejected) > 0 {
+						errResult = fmt.Errorf("server rejected parameter(s) %s in the preceding command (PRMNSPRM)", strings.Join(rejected, ", "))
+					} else {
+						errResult = fmt.Errorf("server rejected a parameter in the preceding command (PRMNSPRM, raw=%x)", packet.object)
 					}
 				}
 			case cpOPNQRYRM:
@@ -996,6 +1021,19 @@ func (c *db2Client) packPRPSQLSTT() ([]byte, error) {
 // identical PKGNAMCSN (same package/section number) - DRDA's standard
 // mechanism for explicitly requesting a SQLDARD when a server doesn't
 // return one inline with PRPSQLSTT's own reply.
+//
+// Does NOT send RTNSQLDA. This body started as a copy of packPRPSQLSTT's,
+// which carries RTNSQLDA to ask PRPSQLSTT to also return a SQLDARD inline -
+// a flag that doesn't apply to DSCSQLSTT, whose entire purpose is already
+// "return a SQLDARD for this statement" unconditionally. Reported on issue
+// #3: every DSCSQLSTT sent by this client (including this param) got back a
+// PRMNSPRM ("parameter not supported") reply, 12 bytes, instead of a
+// SQLDARD - this is the one parameter here that isn't required by every
+// DSCSQLSTT (PKGNAMCSN is), making it the leading suspect. Flagged as a
+// reasoned hypothesis, not independently confirmed: the PRMNSPRM handling
+// added in parseResponse will show the actual rejected codepoint on the
+// next run, confirming or ruling this out directly instead of guessing
+// again.
 func (c *db2Client) packDSCSQLSTT() ([]byte, error) {
 	body := bytes.NewBuffer(nil)
 	pkg, err := c.packPKGNAMCSN(db2PackageSectionQuery)
@@ -1003,7 +1041,6 @@ func (c *db2Client) packDSCSQLSTT() ([]byte, error) {
 		return nil, err
 	}
 	body.Write(pkg)
-	body.Write(packBinary(cpRTNSQLDA, []byte{0xf1}))
 	return packDSSObject(cpDSCSQLSTT, body.Bytes())
 }
 

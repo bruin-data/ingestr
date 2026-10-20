@@ -259,6 +259,15 @@ type sdaDescriptor struct {
 	baseType     byte
 	ccsid        int
 	bytesPerChar int
+	// isLOB is set when the SDA's own maxLength field has its high bit set -
+	// the same "data carried via EXTDTA, not inline" signal this client
+	// already relies on for the literal FD:OCA LOB type codes (see the
+	// "& 0x7fff" mask in readDRDAField's drdaTypeNLobBytes/NLobCSBCS case).
+	// Confirmed on issue #3 for a DBCLOB column resolved through an SDA LID:
+	// base_type 0xd1, maxLength 0x8008, N-GDA param bytes 0x8009 - both
+	// carrying the same high bit. A column like this must not be resolved
+	// to VARGRAPHIC just because it shares VARGRAPHIC's CCSID/bytesPerChar.
+	isLOB bool
 }
 
 // parseSDATriplet decodes an SDA triplet's body: LID(1) baseType(1)
@@ -270,11 +279,13 @@ func parseSDATriplet(triplet []byte) (sdaDescriptor, bool) {
 	if len(body) < 10 {
 		return sdaDescriptor{}, false
 	}
+	maxLength := binary.BigEndian.Uint16(body[8:10])
 	return sdaDescriptor{
 		lid:          body[0],
 		baseType:     body[1],
 		ccsid:        int(binary.BigEndian.Uint16(body[4:6])),
 		bytesPerChar: int(body[6]),
+		isLOB:        maxLength&0x8000 != 0,
 	}, true
 }
 
@@ -321,6 +332,9 @@ func parseQRYDSC(obj []byte) ([]drdaField, error) {
 			for i := 0; i+3 <= len(body); i += 3 {
 				typeCode := body[i]
 				if desc, ok := sdaLIDs[typeCode]; ok {
+					if desc.isLOB {
+						return nil, fmt.Errorf("column %d: LOB data via SDA LID 0x%x (base_type 0x%x, ccsid %d) is not supported - exclude this column from the query", i/3, typeCode, desc.baseType, desc.ccsid)
+					}
 					resolved := resolveSDALID(desc)
 					config.Debug("[DB2] QRYDSC: column type 0x%x resolved via SDA LID to 0x%x (ccsid=%d, bytes_per_char=%d)", typeCode, resolved, desc.ccsid, desc.bytesPerChar)
 					typeCode = resolved
@@ -457,18 +471,18 @@ func readDRDAField(stream *bytes.Reader, field drdaField, platform db2Platform) 
 	case drdaTypeVarGraph, drdaTypeNVarGraph:
 		// See drdaTypeGraphic above - same UTF-16BE encoding, variable-
 		// length framing (2-byte inline length prefix) instead of fixed.
-		// The inline length is assumed to be a byte count, matching every
-		// other variable-length type here and IBM's own JTOpen client
-		// (SQLVargraphic.java: "maxLength is in bytes not counting 2 for
-		// LL") - not yet confirmed against a real wire capture with an
-		// actual GRAPHIC value, unlike the rest of this client's CCSID
-		// handling.
+		// Confirmed on issue #3 against a real IBM i capture: the inline
+		// length is a character count, not a byte count (JTOpen's "maxLength
+		// is in bytes" note describes the column's declared maximum, not
+		// this per-value prefix) - a 43-character value's prefix read as 43
+		// while the actual payload was 86 bytes (43 * 2 bytes/char for
+		// UTF-16BE), which decodeUTF16BE's odd-length check caught.
 		lnBytes, err := readBytes(stream, 2)
 		if err != nil {
 			return nil, err
 		}
 		ln := int(binary.BigEndian.Uint16(lnBytes))
-		data, err := readBytes(stream, ln)
+		data, err := readBytes(stream, ln*2)
 		if err != nil {
 			return nil, err
 		}

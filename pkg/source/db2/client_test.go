@@ -602,7 +602,8 @@ func TestReadDRDAFieldDecodesFixedGraphicAsUTF16BE(t *testing.T) {
 
 func TestReadDRDAFieldDecodesVarGraphicAsUTF16BE(t *testing.T) {
 	raw := encodeUTF16BEForTest("TABLE_TEXT")
-	lnBytes := []byte{byte(len(raw) >> 8), byte(len(raw))}
+	charCount := len(raw) / 2
+	lnBytes := []byte{byte(charCount >> 8), byte(charCount)}
 
 	value, err := readDRDAField(bytes.NewReader(append(lnBytes, raw...)), drdaField{
 		typeCode: drdaTypeVarGraph,
@@ -610,6 +611,23 @@ func TestReadDRDAFieldDecodesVarGraphicAsUTF16BE(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "TABLE_TEXT", value)
+}
+
+// TestReadDRDAFieldDecodesVarGraphicLengthPrefixAsCharacterCount pins the
+// exact case reported on issue #3: a 43-character VARGRAPHIC value whose
+// inline length prefix is 43 (a character count), not 86 (the actual byte
+// count of the UTF-16BE payload). Reading it as a byte count truncated the
+// payload and tripped decodeUTF16BE's odd-length check.
+func TestReadDRDAFieldDecodesVarGraphicLengthPrefixAsCharacterCount(t *testing.T) {
+	raw := encodeUTF16BEForTest(strings.Repeat("x", 43))
+	require.Len(t, raw, 86)
+
+	value, err := readDRDAField(bytes.NewReader(append([]byte{0x00, 0x2b}, raw...)), drdaField{
+		typeCode: drdaTypeVarGraph,
+	}, db2PlatformIBMi)
+
+	require.NoError(t, err)
+	require.Equal(t, strings.Repeat("x", 43), value)
 }
 
 func TestReadDRDAFieldRejectsOddLengthGraphicData(t *testing.T) {
@@ -1381,6 +1399,76 @@ func TestStreamSendsDSCSQLSTTForCustomQueriesWhenPrepareOmitsSQLDARD(t *testing.
 		"DSCSQLSTT must be sent when the caller needs column metadata and PRPSQLSTT didn't provide it")
 }
 
+func TestPackDSCSQLSTTDoesNotSendRTNSQLDA(t *testing.T) {
+	// packDSCSQLSTT started as a copy of packPRPSQLSTT, which carries
+	// RTNSQLDA (cpRTNSQLDA, 0x2116) to ask PRPSQLSTT to also return a
+	// SQLDARD inline - a flag that doesn't apply to DSCSQLSTT, whose whole
+	// purpose is already "return a SQLDARD for this statement". Reported
+	// on issue #3: every DSCSQLSTT sent by this client got back a
+	// PRMNSPRM ("parameter not supported") reply instead of a SQLDARD.
+	client := &db2Client{database: padDatabaseName("SIGLPAR")}
+
+	body, err := client.packDSCSQLSTT()
+
+	require.NoError(t, err)
+	require.NotContains(t, string(body), string([]byte{0x21, 0x16}),
+		"DSCSQLSTT must not carry RTNSQLDA (cpRTNSQLDA, 0x2116)")
+}
+
+func TestStreamSurfacesPRMNSPRMFromDSCSQLSTT(t *testing.T) {
+	// Confirmed on issue #3: a DSCSQLSTT round trip can get back a bare
+	// PRMNSPRM reply (0x1251, "parameter not supported") instead of a
+	// SQLDARD, and previously this client had no constant for 0x1251, so
+	// it fell through parseResponse's default case completely silently -
+	// Stream returned success with zero columns ever having arrived. This
+	// must now surface as a real, labeled error.
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{
+		conn:     clientConn,
+		database: padDatabaseName("SIGLPAR"),
+		timeout:  time.Second,
+	}
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		var codePoints []uint16
+		drainOneRequest(t, serverConn, &codePoints) // PRPSQLSTT+SQLSTT, generic reply (no SQLDARD)
+
+		dscSQLSTT, err := readDSS(serverConn)
+		require.NoError(t, err)
+		codePoints = append(codePoints, dscSQLSTT.codePoint)
+		// SVRCOD (2 bytes, value 8) + the rejected parameter's own
+		// codepoint (cpRTNSQLDA, 0x2116) as a nested, value-less field -
+		// same length-prefixed codepoint framing parseReplyObject already
+		// handles elsewhere.
+		prmnsprm := []byte{0x00, 0x06, 0x11, 0x49, 0x00, 0x08, 0x00, 0x04, 0x21, 0x16}
+		require.NoError(t, writeTestDSS(serverConn, cpPRMNSPRM, prmnsprm, false))
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Stream(context.Background(), "SELECT TABLE_NAME FROM QSYS2.SYSTABLES", db2StreamHandler{
+			Columns: func([]db2Column) error { return nil },
+		})
+	}()
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("server script did not complete in time")
+	}
+	select {
+	case err := <-done:
+		require.ErrorContains(t, err, "PRMNSPRM")
+	case <-time.After(time.Second):
+		t.Fatal("Stream did not return in time")
+	}
+}
+
 // drainOneRequest reads DSS packets from conn until a non-chained one is
 // seen, recording each codepoint, then writes back a single innocuous
 // reply so the caller's parseResponse completes without error.
@@ -1650,6 +1738,28 @@ func TestParseQRYDSCResolvesVARGRAPHICThroughSDALIDs(t *testing.T) {
 	require.Equal(t, []byte{0x00, 0x32}, fields[0].params)
 	require.Equal(t, drdaTypeNVarGraph, fields[1].typeCode, "LID 0x81 is odd (nullable column) - resolves to the nullable VARGRAPH type")
 	require.Equal(t, []byte{0x07, 0xd0}, fields[1].params)
+}
+
+func TestParseQRYDSCFailsClearlyForLOBResolvedThroughSDALID(t *testing.T) {
+	// The exact SDA + N-GDA bytes from a real IBM i host's QRYDSC reply on
+	// issue #3 for a DBCLOB column (MQT_DEFINITION): base_type 0xd1, CCSID
+	// 13488, 2 bytes/char - the same CCSID/bytes-per-char combination as
+	// VARGRAPHIC, which a resolver keying only on those two fields
+	// misresolved as VARGRAPHIC. The SDA's own maxLength (0x8008) and the
+	// N-GDA entry's own param bytes (0x8009) both have the high bit set -
+	// this client's own existing convention (see drdaTypeNLobBytes/
+	// NLobCSBCS) for "data carried via EXTDTA, not inline" - so this must
+	// be rejected clearly instead of being decoded as if it were inline
+	// UTF-16BE text.
+	obj := []byte{
+		0x0c, 0x70, 0x82, 0xd1, 0x00, 0x00, 0x34, 0xb0, 0x02, 0x01, 0x80, 0x08, // SDA: LID 0x82, base_type 0xd1, CCSID 13488, 2 bytes/char, maxLength high bit set
+		0x06, 0x76, 0xd0, 0x82, 0x80, 0x09, // N-GDA: column(LID=0x82, params=0x8009)
+	}
+
+	_, err := parseQRYDSC(obj)
+
+	require.ErrorContains(t, err, "LOB")
+	require.ErrorContains(t, err, "not supported")
 }
 
 func TestParseQRYDSCSkipsLeadingMDDTriplet(t *testing.T) {

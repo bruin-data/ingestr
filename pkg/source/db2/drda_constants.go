@@ -64,6 +64,15 @@ const (
 	cpSECCHKRM  uint16 = 0x1219
 	cpACCRDBRM  uint16 = 0x2201
 	cpEXTDTA    uint16 = 0x146C
+	// cpPRMNSPRM ("Parameter Not Supported") is a DDM reply message meaning
+	// the server rejected one of the parameters in the preceding command.
+	// Confirmed as 0x1251 via Apache Derby's own DDM implementation
+	// (java/org.apache.derby.server/.../impl/drda/CodePoint.java:
+	// "static final int PRMNSPRM = 0x1251;") - this client previously had no
+	// constant for it, so it fell through parseResponse's default case
+	// silently. Reported on issue #3: every DSCSQLSTT sent by this client
+	// got back a bare 0x1251 reply with no error surfaced.
+	cpPRMNSPRM uint16 = 0x1251
 )
 
 const (
