@@ -369,6 +369,18 @@ func TestReplaceFlow(t *testing.T) {
 				assert.Contains(t, files, "exports/orders/manual/0.parquet")
 			})
 
+			t.Run("container table with a static layout folder is cleaned", func(t *testing.T) {
+				store := newFakeAzureStore("exports/a1b2c3d4/0.parquet", "exports/manual/0.parquet", "a1b2c3d4/0.parquet")
+				d := newFakeAzureDestination(t, provider, "exports/{load_id}/{file_id}.{ext}", store)
+
+				require.NoError(t, runFlow(t, d, config.StrategyReplace, "lake", nil))
+				files := store.list()
+				assert.Len(t, files, 3)
+				assert.NotContains(t, files, "exports/a1b2c3d4/0.parquet")
+				assert.Contains(t, files, "exports/manual/0.parquet")
+				assert.Contains(t, files, "a1b2c3d4/0.parquet")
+			})
+
 			t.Run("fixed file name layout keeps the rewritten file", func(t *testing.T) {
 				store := newFakeAzureStore("exports/orders.parquet")
 				d := newFakeAzureDestination(t, provider, "{table_name}.{ext}", store)

@@ -69,14 +69,15 @@ func (d *BlobstoreDestination) prepareReplace(ctx context.Context, table string)
 }
 
 // replaceScope returns where to list a table's files and the pattern their path under
-// basePath must match. Layouts with a per-load folder are listed recursively.
+// basePath must match. Layouts with a per-load folder are listed recursively from the
+// static folders before it.
 func replaceScope(rendered, basePath string) (listPrefix string, recursive bool, pattern *regexp.Regexp) {
-	listPrefix = blobKey(basePath, "")
-	if dir := rendered[:strings.LastIndex(rendered, "/")+1]; strings.Contains(dir, "\x00") {
+	dir := rendered[:strings.LastIndex(rendered, "/")+1]
+	if token := strings.Index(dir, "\x00"); token != -1 {
 		recursive = true
-	} else {
-		listPrefix += dir
+		dir = dir[:strings.LastIndex(dir[:token], "/")+1]
 	}
+	listPrefix = blobKey(basePath, "") + dir
 
 	quoted := strings.NewReplacer(loadIDToken, loadIDPattern, fileIDToken, "[0-9]+").Replace(regexp.QuoteMeta(rendered))
 	return listPrefix, recursive, regexp.MustCompile("^" + quoted + "$")

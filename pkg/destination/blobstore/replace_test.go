@@ -44,6 +44,14 @@ func TestReplaceScope(t *testing.T) {
 			noMatch:       []string{"a1b2c3d4/sub/0.parquet", "other/0.parquet"},
 		},
 		{
+			name:          "static folder before a per-load folder is part of the prefix",
+			layout:        "exports/{load_id}/{file_id}.{ext}",
+			wantPrefix:    "exports/",
+			wantRecursive: true,
+			match:         []string{"exports/a1b2c3d4/0.parquet"},
+			noMatch:       []string{"a1b2c3d4/0.parquet", "exports/other/0.parquet"},
+		},
+		{
 			name:       "table at container root has no prefix",
 			layout:     "{load_id}.{file_id}.{ext}",
 			wantPrefix: "",
