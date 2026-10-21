@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -52,6 +53,8 @@ type BlobstoreDestination struct {
 	adlsClient  *azureDatalakeClient
 	bucketName  string
 	basePath    string
+	uriBucket   string
+	uriPrefix   string
 	layout      string
 	arrowSchema *arrow.Schema
 	schema      *schema.TableSchema
@@ -75,6 +78,8 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 	}
 
 	d.provider = parsed.provider
+	d.uriBucket = parsed.bucket
+	d.uriPrefix = parsed.prefix
 	d.layout = parsed.layout
 	if d.layout == "" {
 		d.layout = "{load_id}.{file_id}.{ext}"
@@ -258,7 +263,10 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	d.mu.Lock()
 	d.schema = opts.Schema
 
-	bucketName, basePath := parseBucketAndPath(opts.Table)
+	bucketName, basePath, uriIgnored := d.resolveLocation(opts.Table)
+	if uriIgnored {
+		output.Warnf("[BLOBSTORE] table %s is written to %s/%s; the URI's bucket and path are only used for table names without a \"/\"\n", opts.Table, bucketName, basePath)
+	}
 	d.bucketName = bucketName
 	d.basePath = basePath
 	d.tableName = opts.Table
@@ -274,6 +282,31 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 		return d.prepareReplace(ctx, opts.Table)
 	}
 	return nil
+}
+
+// resolveLocation returns the bucket and base path for table. A table with a "/", or one
+// named after the URI's bucket, is <bucket>/<path> as before; only other table names are
+// written under the URI's bucket and prefix. uriIgnored reports a URI bucket that went unused.
+func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string, uriIgnored bool) {
+	tableBucket, tablePath := parseBucketAndPath(table)
+	switch {
+	case d.uriBucket == "":
+		return tableBucket, tablePath, false
+	case strings.Contains(table, "/") || tableBucket == d.uriBucket:
+		return tableBucket, tablePath, tableBucket != d.uriBucket || d.uriPrefix != ""
+	default:
+		return d.uriBucket, joinPath(d.uriPrefix, table), false
+	}
+}
+
+func joinPath(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p = strings.Trim(p, "/"); p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "/")
 }
 
 func parseBucketAndPath(table string) (bucket, path string) {
@@ -302,7 +335,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		arrowSchema = opts.Schema.ToArrowSchema()
 	}
 	if opts.Table != "" {
-		bucket, basePath = parseBucketAndPath(opts.Table)
+		bucket, basePath, _ = d.resolveLocation(opts.Table)
 		tableName = opts.Table
 	}
 
@@ -634,6 +667,8 @@ func (d *BlobstoreDestination) GetTableSchema(ctx context.Context, table string)
 
 type parsedBlobstoreURI struct {
 	provider          Provider
+	bucket            string
+	prefix            string
 	accessKeyID       string
 	secretAccessKey   string
 	region            string
@@ -657,12 +692,16 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	switch u.Scheme {
 	case "s3":
 		parsed.provider = ProviderS3
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.accessKeyID = u.Query().Get("access_key_id")
 		parsed.secretAccessKey = u.Query().Get("secret_access_key")
 		parsed.region = u.Query().Get("region")
 		parsed.endpointURL = u.Query().Get("endpoint_url")
 	case "gs", "gcs":
 		parsed.provider = ProviderGCS
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.credentialsFile = u.Query().Get("credentials_file")
 	case "az", "azure":
 		parsed.provider = ProviderAzure

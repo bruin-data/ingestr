@@ -93,6 +93,28 @@ my-org-bucket/
     └── records.parquet
 ```
 
+### Setting the bucket and prefix in the URI
+
+You can also set the bucket and an optional prefix in the destination URI. A `--dest-table` without a `/`, such as `public.users`, is then written under them:
+
+```sh
+ingestr ingest \
+    --source-uri 'duckdb:///records.db' \
+    --source-table 'public.users' \
+    --dest-uri 'gs://my-org-bucket/exports?credentials_file=/path/to/service_account.json' \
+    --dest-table 'public.users'
+```
+
+Result:
+```
+my-org-bucket/
+└── exports
+    └── public.users
+        └── <load_id>.<file_id>.parquet
+```
+
+A `--dest-table` with a `/`, such as `my-org-bucket/records` or `other-bucket/records`, is still read as `<bucket>/<path>`, and the URI's bucket and prefix are not used. To write into a nested folder of the URI's bucket, add the folder to the URI's prefix.
+
 ### Available Layout Placeholders
 
 The following placeholders can be used in the `layout` parameter:

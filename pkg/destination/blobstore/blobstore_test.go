@@ -339,3 +339,46 @@ func TestStrategySupport(t *testing.T) {
 	assert.False(t, d.SupportsMergeStrategy())
 	assert.False(t, d.SupportsDeleteInsertStrategy())
 }
+
+func TestParseBlobstoreURI_BucketAndPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		uri, bucket, prefix string
+	}{
+		{"s3://?access_key_id=a", "", ""},
+		{"s3://my-bucket?access_key_id=a", "my-bucket", ""},
+		{"s3://my-bucket/exports/daily/?access_key_id=a", "my-bucket", "exports/daily"},
+		{"gs://my-bucket/exports", "my-bucket", "exports"},
+		{"az://?account_name=acct", "", ""},
+	} {
+		parsed, err := parseBlobstoreURI(tt.uri)
+		require.NoError(t, err, tt.uri)
+		assert.Equal(t, tt.bucket, parsed.bucket, tt.uri)
+		assert.Equal(t, tt.prefix, parsed.prefix, tt.uri)
+	}
+}
+
+func TestResolveLocation(t *testing.T) {
+	for _, tt := range []struct {
+		uriBucket, uriPrefix, table, wantBucket, wantPath string
+		wantURIIgnored                                    bool
+	}{
+		{"", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
+		{"", "", "my-bucket", "my-bucket", "", false},
+		{"my-bucket", "exports", "public.users", "my-bucket", "exports/public.users", false},
+		{"my-bucket", "", "public.users", "my-bucket", "public.users", false},
+		// Tables with a "/" keep naming their bucket, so working pipelines don't move.
+		{"my-bucket", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
+		{"my-bucket", "exports", "my-bucket/reports/t", "my-bucket", "reports/t", true},
+		{"my-bucket", "exports", "other-bucket/reports/t", "other-bucket", "reports/t", true},
+		{"my-bucket", "", "reports/t", "reports", "t", true},
+		// A table named after the URI's bucket is still that bucket's root.
+		{"logs", "", "logs", "logs", "", false},
+		{"logs", "exports", "logs", "logs", "", true},
+	} {
+		d := &BlobstoreDestination{uriBucket: tt.uriBucket, uriPrefix: tt.uriPrefix}
+		bucket, path, uriIgnored := d.resolveLocation(tt.table)
+		assert.Equal(t, tt.wantBucket, bucket, tt.table)
+		assert.Equal(t, tt.wantPath, path, tt.table)
+		assert.Equal(t, tt.wantURIIgnored, uriIgnored, tt.table)
+	}
+}
