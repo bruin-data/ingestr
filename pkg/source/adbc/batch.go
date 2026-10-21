@@ -3,6 +3,7 @@ package adbc
 import (
 	"database/sql"
 	"fmt"
+	"reflect"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -28,6 +29,80 @@ func CopyValue(v interface{}) interface{} {
 		return cp
 	default:
 		return v
+	}
+}
+
+// NormalizeNestedValue converts the tagged structs and typed maps the ADBC
+// sqldriver returns for STRUCT/MAP columns into map[string]any / []any.
+func NormalizeNestedValue(v interface{}) interface{} {
+	if v == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(v)
+	if !isNestedType(rv.Type()) {
+		return v
+	}
+	return nestedValue(rv)
+}
+
+func isNestedType(t reflect.Type) bool {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Map:
+		return true
+	case reflect.Struct:
+		return t.NumField() > 0 && t.Field(0).Tag.Get("arrow") != ""
+	case reflect.Slice, reflect.Array:
+		return isNestedType(t.Elem())
+	default:
+		return false
+	}
+}
+
+func nestedValue(rv reflect.Value) interface{} {
+	switch rv.Kind() {
+	case reflect.Invalid:
+		return nil
+	case reflect.Pointer, reflect.Interface:
+		if rv.IsNil() {
+			return nil
+		}
+		return nestedValue(rv.Elem())
+	case reflect.Map:
+		if rv.IsNil() {
+			return nil
+		}
+		out := make(map[string]interface{}, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out[fmt.Sprint(nestedValue(iter.Key()))] = nestedValue(iter.Value())
+		}
+		return out
+	case reflect.Struct:
+		if !isNestedType(rv.Type()) {
+			return rv.Interface()
+		}
+		out := make(map[string]interface{}, rv.NumField())
+		for i := range rv.NumField() {
+			out[rv.Type().Field(i).Tag.Get("arrow")] = nestedValue(rv.Field(i))
+		}
+		return out
+	case reflect.Slice, reflect.Array:
+		if rv.Kind() == reflect.Slice && rv.IsNil() {
+			return nil
+		}
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return rv.Interface()
+		}
+		out := make([]interface{}, rv.Len())
+		for i := range out {
+			out[i] = nestedValue(rv.Index(i))
+		}
+		return out
+	default:
+		return rv.Interface()
 	}
 }
 
@@ -66,7 +141,7 @@ func RowsToArrowBatch(rows *sql.Rows, arrowSchema *arrow.Schema, batchSize int, 
 		for i, val := range values {
 			actualVal := *val.(*interface{})
 			// CRITICAL: Copy values to avoid ADBC Arrow buffer lifetime issues
-			actualVal = CopyValue(actualVal)
+			actualVal = NormalizeNestedValue(CopyValue(actualVal))
 			arrowconv.AppendValue(builders[i], actualVal)
 			if maxBatchBytes > 0 {
 				accBytes += arrowconv.ValueBytes(actualVal)
@@ -82,18 +157,18 @@ func RowsToArrowBatch(rows *sql.Rows, arrowSchema *arrow.Schema, batchSize int, 
 		}
 	}
 
-	if rowCount == 0 {
-		for _, b := range builders {
-			b.Release()
-		}
-		return nil, 0, nil
-	}
-
 	if err := rows.Err(); err != nil {
 		for _, b := range builders {
 			b.Release()
 		}
 		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	if rowCount == 0 {
+		for _, b := range builders {
+			b.Release()
+		}
+		return nil, 0, nil
 	}
 
 	arrays := make([]arrow.Array, len(builders))
