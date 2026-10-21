@@ -81,12 +81,6 @@ func TestPrepareReplaceSkipsContainerRoot(t *testing.T) {
 	assert.Empty(t, d.replaces)
 }
 
-func TestPrepareReplaceIgnoresOtherProviders(t *testing.T) {
-	d := &BlobstoreDestination{provider: ProviderS3, layout: "{load_id}.{file_id}.{ext}"}
-	require.NoError(t, d.prepareReplace(t.Context(), "bucket/exports/users"))
-	assert.Empty(t, d.replaces)
-}
-
 func TestFinalizeReplaceKeepsRewrittenFiles(t *testing.T) {
 	d := &BlobstoreDestination{
 		provider: ProviderAzure,
@@ -106,7 +100,7 @@ func TestFinalizeReplaceKeepsRewrittenFiles(t *testing.T) {
 
 func TestFinalizeReplaceReportsDeleteFailure(t *testing.T) {
 	d := &BlobstoreDestination{
-		provider: ProviderS3,
+		provider: Provider("unknown"),
 		replaces: map[string]*replaceState{
 			"lake/users": {bucket: "lake", previous: []string{"users/a1b2c3d4.0.parquet"}, written: map[string]struct{}{}},
 		},

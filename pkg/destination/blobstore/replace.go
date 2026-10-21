@@ -2,19 +2,25 @@ package blobstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
+	"cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
 	datalakefilesystem "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/api/iterator"
 )
 
 const (
@@ -24,7 +30,7 @@ const (
 	fileIDToken       = "\x00file_id\x00"
 )
 
-const replacePermissions = "replace needs list and delete permission on the container (e.g. Storage Blob Data Contributor); use the append strategy to keep existing files"
+const replacePermissions = "replace needs list and delete permission on the bucket (S3: s3:ListBucket, s3:DeleteObject; GCS: storage.objects.list, storage.objects.delete; Azure: Storage Blob Data Contributor); use the append strategy to keep existing files"
 
 type replaceState struct {
 	bucket   string
@@ -35,14 +41,10 @@ type replaceState struct {
 // prepareReplace lists the files a replace of table removes once the new files are
 // written: files directly in the folder the layout writes into whose names match it.
 func (d *BlobstoreDestination) prepareReplace(ctx context.Context, table string) error {
-	if d.provider != ProviderAzure && d.provider != ProviderAzureDatalake {
-		return nil
-	}
-
 	bucket, basePath := parseBucketAndPath(table)
 	listPrefix, recursive, pattern := replaceScope(d.renderLayout(table, loadIDToken, fileIDToken), basePath)
 	if strings.Trim(listPrefix, "/") == "" {
-		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: its files go directly into the root of container %s, which is never cleared\n", table, bucket)
+		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: its files go directly into the root of bucket %s, which is never cleared\n", table, bucket)
 		return nil
 	}
 
@@ -121,7 +123,48 @@ func (d *BlobstoreDestination) FinalizeReplace(ctx context.Context, table string
 
 func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix string, recursive bool) ([]string, error) {
 	var keys []string
+	delimiter := "/"
+	if recursive {
+		delimiter = ""
+	}
+
 	switch d.provider {
+	case ProviderS3:
+		input := &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(prefix)}
+		if !recursive {
+			input.Delimiter = aws.String(delimiter)
+		}
+		pager := s3.NewListObjectsV2Paginator(d.s3Client, input)
+		for pager.HasMorePages() {
+			page, err := pager.NextPage(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, obj := range page.Contents {
+				keys = append(keys, aws.ToString(obj.Key))
+			}
+		}
+		return keys, nil
+
+	case ProviderGCS:
+		query := &storage.Query{Prefix: prefix, Delimiter: delimiter}
+		if err := query.SetAttrSelection([]string{"Name"}); err != nil {
+			return nil, err
+		}
+		it := d.gcsClient.Bucket(bucket).Objects(ctx, query)
+		for {
+			attrs, err := it.Next()
+			if errors.Is(err, iterator.Done) {
+				return keys, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			if attrs.Name != "" {
+				keys = append(keys, attrs.Name)
+			}
+		}
+
 	case ProviderAzure:
 		if recursive {
 			pager := d.azureClient.NewListBlobsFlatPager(bucket, &azblob.ListBlobsFlatOptions{Prefix: &prefix})
@@ -139,7 +182,7 @@ func (d *BlobstoreDestination) listBlobs(ctx context.Context, bucket, prefix str
 			return keys, nil
 		}
 		pager := d.azureClient.ServiceClient().NewContainerClient(bucket).
-			NewListBlobsHierarchyPager("/", &container.ListBlobsHierarchyOptions{Prefix: &prefix})
+			NewListBlobsHierarchyPager(delimiter, &container.ListBlobsHierarchyOptions{Prefix: &prefix})
 		for pager.More() {
 			page, err := pager.NextPage(ctx)
 			if err != nil {
@@ -197,8 +240,21 @@ func (d *BlobstoreDestination) deleteBlobs(ctx context.Context, bucket string, k
 
 func (d *BlobstoreDestination) deleteBlob(ctx context.Context, bucket, key string) error {
 	switch d.provider {
+	case ProviderS3:
+		_, err := d.s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+		return err
+
+	case ProviderGCS:
+		err := d.gcsClient.Bucket(bucket).Object(key).Delete(ctx)
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil
+		}
+		return err
+
 	case ProviderAzure:
-		_, err := d.azureClient.DeleteBlob(ctx, bucket, key, nil)
+		_, err := d.azureClient.DeleteBlob(ctx, bucket, key, &azblob.DeleteBlobOptions{
+			DeleteSnapshots: to.Ptr(azblob.DeleteSnapshotsOptionTypeInclude),
+		})
 		if bloberror.HasCode(err, bloberror.BlobNotFound) {
 			return nil
 		}

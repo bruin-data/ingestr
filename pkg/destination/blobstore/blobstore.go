@@ -296,8 +296,11 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 	fileID := 0
 
 	d.mu.Lock()
-	bucket, basePath, tableName := d.bucketName, d.basePath, d.tableName
+	bucket, basePath, tableName, arrowSchema := d.bucketName, d.basePath, d.tableName, d.arrowSchema
 	d.mu.Unlock()
+	if opts.Schema != nil {
+		arrowSchema = opts.Schema.ToArrowSchema()
+	}
 	if opts.Table != "" {
 		bucket, basePath = parseBucketAndPath(opts.Table)
 		tableName = opts.Table
@@ -350,11 +353,9 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		startBatch := time.Now()
 
 		if writer == nil {
-			d.mu.Lock()
-			if d.arrowSchema == nil {
-				d.arrowSchema = stripSchemaMetadata(record.Schema())
+			if arrowSchema == nil {
+				arrowSchema = stripSchemaMetadata(record.Schema())
 			}
-			d.mu.Unlock()
 
 			writerProps := parquet.NewWriterProperties(
 				parquet.WithCompression(compress.Codecs.Snappy),
@@ -366,7 +367,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 			)
 
 			var err error
-			writer, err = pqarrow.NewFileWriter(d.arrowSchema, &buffer, writerProps, arrowProps)
+			writer, err = pqarrow.NewFileWriter(arrowSchema, &buffer, writerProps, arrowProps)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to create parquet writer: %w", err)
@@ -375,8 +376,8 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 
 		recordToWrite := record
 		shouldRelease := false
-		if !record.Schema().Equal(d.arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), d.arrowSchema) {
-			normalized, err := normalizeRecordToSchema(record, d.arrowSchema)
+		if !record.Schema().Equal(arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), arrowSchema) {
+			normalized, err := normalizeRecordToSchema(record, arrowSchema)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to normalize record schema: %w", err)
