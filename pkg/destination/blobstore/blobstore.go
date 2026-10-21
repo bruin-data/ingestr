@@ -263,9 +263,9 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	d.mu.Lock()
 	d.schema = opts.Schema
 
-	bucketName, basePath, ambiguous := d.resolveLocation(opts.Table)
-	if ambiguous {
-		output.Warnf("[BLOBSTORE] table %s starts with the URI's bucket, so it is written to %s/%s and the URI path %s is ignored\n", opts.Table, bucketName, basePath, d.uriPrefix)
+	bucketName, basePath, uriIgnored := d.resolveLocation(opts.Table)
+	if uriIgnored {
+		output.Warnf("[BLOBSTORE] table %s is written to %s/%s; the URI's bucket and path are only used for table names without a \"/\"\n", opts.Table, bucketName, basePath)
 	}
 	d.bucketName = bucketName
 	d.basePath = basePath
@@ -284,17 +284,16 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	return nil
 }
 
-// resolveLocation returns the bucket and base path for table. Without a bucket in the URI,
-// table is <bucket>/<path>. With one, table is a path under the URI's bucket and prefix,
-// except that <uri bucket>/<path> keeps writing where it did before the URI's bucket was
-// honored. With a URI prefix, that form is ambiguous.
-func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string, ambiguous bool) {
+// resolveLocation returns the bucket and base path for table. A table with a "/", or one
+// named after the URI's bucket, is <bucket>/<path> as before; only other table names are
+// written under the URI's bucket and prefix. uriIgnored reports a URI bucket that went unused.
+func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string, uriIgnored bool) {
 	tableBucket, tablePath := parseBucketAndPath(table)
 	switch {
 	case d.uriBucket == "":
 		return tableBucket, tablePath, false
-	case tableBucket == d.uriBucket && tablePath != "":
-		return tableBucket, tablePath, d.uriPrefix != ""
+	case strings.Contains(table, "/") || tableBucket == d.uriBucket:
+		return tableBucket, tablePath, tableBucket != d.uriBucket || d.uriPrefix != ""
 	default:
 		return d.uriBucket, joinPath(d.uriPrefix, table), false
 	}

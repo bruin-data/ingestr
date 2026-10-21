@@ -360,22 +360,25 @@ func TestParseBlobstoreURI_BucketAndPrefix(t *testing.T) {
 func TestResolveLocation(t *testing.T) {
 	for _, tt := range []struct {
 		uriBucket, uriPrefix, table, wantBucket, wantPath string
-		wantAmbiguous                                     bool
+		wantURIIgnored                                    bool
 	}{
 		{"", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
+		{"", "", "my-bucket", "my-bucket", "", false},
 		{"my-bucket", "exports", "public.users", "my-bucket", "exports/public.users", false},
-		{"my-bucket", "", "reports/t", "my-bucket", "reports/t", false},
+		{"my-bucket", "", "public.users", "my-bucket", "public.users", false},
+		// Tables with a "/" keep naming their bucket, so working pipelines don't move.
 		{"my-bucket", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
-		// It could also mean my-bucket/exports/my-bucket/reports/t.
 		{"my-bucket", "exports", "my-bucket/reports/t", "my-bucket", "reports/t", true},
-		// A table named after the bucket is a path, not the bucket root.
-		{"logs", "", "logs", "logs", "logs", false},
-		{"logs", "exports", "logs", "logs", "exports/logs", false},
+		{"my-bucket", "exports", "other-bucket/reports/t", "other-bucket", "reports/t", true},
+		{"my-bucket", "", "reports/t", "reports", "t", true},
+		// A table named after the URI's bucket is still that bucket's root.
+		{"logs", "", "logs", "logs", "", false},
+		{"logs", "exports", "logs", "logs", "", true},
 	} {
 		d := &BlobstoreDestination{uriBucket: tt.uriBucket, uriPrefix: tt.uriPrefix}
-		bucket, path, ambiguous := d.resolveLocation(tt.table)
+		bucket, path, uriIgnored := d.resolveLocation(tt.table)
 		assert.Equal(t, tt.wantBucket, bucket, tt.table)
 		assert.Equal(t, tt.wantPath, path, tt.table)
-		assert.Equal(t, tt.wantAmbiguous, ambiguous, tt.table)
+		assert.Equal(t, tt.wantURIIgnored, uriIgnored, tt.table)
 	}
 }

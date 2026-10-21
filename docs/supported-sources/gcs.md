@@ -95,7 +95,7 @@ my-org-bucket/
 
 ### Setting the bucket and prefix in the URI
 
-You can also set the bucket and an optional prefix in the destination URI. `--dest-table` is then a path under them:
+You can also set the bucket and an optional prefix in the destination URI. A `--dest-table` without a `/`, such as `public.users`, is then written under them:
 
 ```sh
 ingestr ingest \
@@ -113,10 +113,7 @@ my-org-bucket/
         └── <load_id>.<file_id>.parquet
 ```
 
-A `--dest-table` that starts with the URI's bucket, such as `my-org-bucket/records`, is still written to `my-org-bucket/records/`, and the URI's prefix is not added.
-
-> [!NOTE]
-> Older versions ignored the bucket and prefix in the URI. A `--dest-table` such as `other-bucket/records` with a URI that names a different bucket is now written under the URI's bucket and prefix.
+A `--dest-table` with a `/`, such as `my-org-bucket/records` or `other-bucket/records`, is still read as `<bucket>/<path>`, and the URI's bucket and prefix are not used. To write into a nested folder of the URI's bucket, add the folder to the URI's prefix.
 
 ### Available Layout Placeholders
 
