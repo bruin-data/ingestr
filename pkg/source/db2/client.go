@@ -666,7 +666,8 @@ func (c *db2Client) parseResponse(ctx context.Context, handler db2StreamHandler)
 					errResult = fmt.Errorf("server diagnostic code: %s", strings.TrimSpace(msg))
 				}
 			case cpSQLCARD:
-				_, sqlCode, err := parseSQLCard(packet.object)
+				config.Debug("[DB2] parseResponse: SQLCARD wire bytes: %x", packet.object)
+				_, sqlCode, err := parseSQLCard(packet.object, c.platform)
 				if err != nil {
 					if sqlErr, ok := err.(db2SQLError); ok {
 						config.Debug("[DB2] parseResponse: SQLCARD SQLCODE=%d SQLSTATE=%s message=%q", sqlErr.Code, sqlErr.State, sqlErr.Message)
@@ -1099,7 +1100,7 @@ func (c *db2Client) packOPNQRY() ([]byte, error) {
 		return nil, err
 	}
 	body.Write(pkg)
-	body.Write(packUint(cpQRYBLKSZ, 65535, 4))
+	body.Write(packUint(cpQRYBLKSZ, queryBlockSize, 4))
 	body.Write(packUint(cpMAXBLKEXT, 65535, 2))
 	body.Write(packBinary(cpQRYCLSIMP, []byte{0x01}))
 	return packDSSObject(cpOPNQRY, body.Bytes())
@@ -1112,7 +1113,7 @@ func (c *db2Client) packCNTQRY(qryInsID uint64) ([]byte, error) {
 		return nil, err
 	}
 	body.Write(pkg)
-	body.Write(packUint(cpQRYBLKSZ, 65535, 4))
+	body.Write(packUint(cpQRYBLKSZ, queryBlockSize, 4))
 	insID := make([]byte, 8)
 	binary.BigEndian.PutUint64(insID, qryInsID)
 	body.Write(packBinary(cpQRYINSID, insID))

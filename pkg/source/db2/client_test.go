@@ -801,12 +801,14 @@ func TestPackPKGNAMCSNKeepsNonQuerySectionsUnchangedOnIBMi(t *testing.T) {
 // little-endian SQLCODE, blank-padded SQLSTATE, 44 bytes of filler up to
 // the fixed 54-byte header parseSQLCard requires, then an empty varchar,
 // the message (cp500-encoded), and an empty secondary message varchar.
-func buildSQLCard(t *testing.T, sqlCode int32, state, message string) []byte {
+func buildSQLCard(t *testing.T, platform db2Platform, sqlCode int32, state, message string) []byte {
 	t.Helper()
 	buf := make([]byte, 54)
 	buf[0] = 0x00
-	binary.LittleEndian.PutUint32(buf[1:5], uint32(sqlCode))
-	copy(buf[5:10], []byte(fmt.Sprintf("%-5s", state)))
+	numericByteOrderFor(platform).PutUint32(buf[1:5], uint32(sqlCode))
+	stateBytes, err := encodeString(fmt.Sprintf("%-5s", state), "cp500")
+	require.NoError(t, err)
+	copy(buf[5:10], stateBytes)
 
 	msgBytes, err := encodeString(message, "cp500")
 	require.NoError(t, err)
@@ -837,7 +839,7 @@ func TestParseResponseSQLCARDReplacesBareSQLERRRMDiagnostic(t *testing.T) {
 	srvdgn, err := encodeString("23765", "cp500")
 	require.NoError(t, err)
 	require.NoError(t, writeTestDSS(serverConn, cpSQLERRRM, packBinary(cpSRVDGN, srvdgn), true))
-	require.NoError(t, writeTestDSS(serverConn, cpSQLCARD, buildSQLCard(t, -204, "42704", "real diagnostic"), false))
+	require.NoError(t, writeTestDSS(serverConn, cpSQLCARD, buildSQLCard(t, db2PlatformAuto, -204, "42704", "real diagnostic"), false))
 
 	select {
 	case err := <-done:
@@ -997,13 +999,45 @@ func TestParseResponseEndsOpenQueryOnSQLCODE100(t *testing.T) {
 	qryInsID := make([]byte, 8)
 	binary.BigEndian.PutUint64(qryInsID, 1)
 	require.NoError(t, writeTestDSS(serverConn, cpOPNQRYRM, packBinary(cpQRYINSID, qryInsID), true))
-	require.NoError(t, writeTestDSS(serverConn, cpSQLCARD, buildSQLCard(t, 100, "02000", ""), false))
+	require.NoError(t, writeTestDSS(serverConn, cpSQLCARD, buildSQLCard(t, db2PlatformAuto, 100, "02000", ""), false))
 
 	select {
 	case err := <-done:
 		require.NoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("parseResponse did not finish after SQLCARD SQLCODE=+100")
+	}
+}
+
+// TestParseResponseEndsOpenQueryOnSQLCODE100OnIBMi pins the exact decode bug
+// reported on issue #3's v40 results: a real IBM i server's SQLCODE +100
+// (big-endian 0x00000064) was read as little-endian regardless of platform,
+// producing 0x64000000 = 1677721600 - so the SQLCODE +100 end-of-cursor path
+// could never fire on IBM i (every fetch so far ended via ENDQRYRM instead,
+// which is why this went unnoticed until now), and a real negative SQLCODE
+// (a genuine server error) would have been misread the same way.
+func TestParseResponseEndsOpenQueryOnSQLCODE100OnIBMi(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	defer func() { _ = clientConn.Close() }()
+
+	client := &db2Client{conn: clientConn, timeout: time.Second, platform: db2PlatformIBMi}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.parseResponse(context.Background(), db2StreamHandler{})
+	}()
+
+	qryInsID := make([]byte, 8)
+	binary.BigEndian.PutUint64(qryInsID, 1)
+	require.NoError(t, writeTestDSS(serverConn, cpOPNQRYRM, packBinary(cpQRYINSID, qryInsID), true))
+	require.NoError(t, writeTestDSS(serverConn, cpSQLCARD, buildSQLCard(t, db2PlatformIBMi, 100, "02000", ""), false))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("parseResponse did not finish after a big-endian SQLCARD SQLCODE=+100 on IBM i")
 	}
 }
 

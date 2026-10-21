@@ -94,7 +94,16 @@ func parseSECCHKRM(obj []byte) error {
 // ("no more rows") - a valid, non-error end-of-cursor signal some DB2 flavors
 // send instead of, or in addition to, ENDQRYRM (reported on issue #3) - must
 // inspect the returned code themselves; a positive SQLCODE is never an error.
-func parseSQLCard(obj []byte) ([]byte, int32, error) {
+//
+// SQLCODE is a binary integer field, so like every other binary integer this
+// client reads off the wire, its byte order follows the connection's
+// negotiated TYPDEFNAM/platform, not a hardcoded assumption. Reported on
+// issue #3 against a real IBM i server: a SQLCODE of +100 (0x00000064,
+// big-endian) was previously always read as little-endian regardless of
+// platform, producing 0x64000000 = 1677721600 - which meant the SQLCODE +100
+// end-of-cursor path could never fire on IBM i, and a real negative SQLCODE
+// (an actual server error) would have been misread the same way.
+func parseSQLCard(obj []byte, platform db2Platform) ([]byte, int32, error) {
 	if len(obj) == 0 {
 		return nil, 0, nil
 	}
@@ -108,8 +117,16 @@ func parseSQLCard(obj []byte) ([]byte, int32, error) {
 		return nil, 0, fmt.Errorf("unexpected SQLCARD group flag: 0x%x", obj[0])
 	}
 
-	sqlCode := int32(binary.LittleEndian.Uint32(obj[1:5]))
-	state := strings.TrimRight(string(obj[5:10]), "\x00 ")
+	sqlCode := int32(numericByteOrderFor(platform).Uint32(obj[1:5]))
+	// SQLSTATE is DRDA protocol-level metadata, not job-CCSID column data -
+	// the same category as RDBNAM/PRDID/SQLNAME, which this client already
+	// reads as CCSID 500 regardless of platform (see characterEncodingFor's
+	// own doc comment). The message text a few lines down already decodes
+	// as cp500 unconditionally; SQLSTATE previously didn't, reading it as
+	// raw ASCII bytes instead - inconsistent with that, and not yet
+	// confirmed against a real non-ASCII capture, so logged as raw hex by
+	// the caller for the next real SQLCARD to confirm.
+	state := strings.TrimRight(decodeString(obj[5:10], "cp500"), "\x00 ")
 	rest := obj[54:]
 
 	_, rest = parseVarchar(rest)
@@ -160,7 +177,7 @@ func parseSQLDARD(obj []byte, platform db2Platform) ([]db2Column, error) {
 	// 29-byte block per column instead of the real variable-length name
 	// block), producing a parse that silently read 0 usable columns.
 	hasName := true
-	rest, _, err := parseSQLCard(obj)
+	rest, _, err := parseSQLCard(obj, platform)
 	if err != nil || len(rest) == 0 {
 		return nil, err
 	}
