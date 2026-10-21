@@ -339,3 +339,43 @@ func TestStrategySupport(t *testing.T) {
 	assert.False(t, d.SupportsMergeStrategy())
 	assert.False(t, d.SupportsDeleteInsertStrategy())
 }
+
+func TestParseBlobstoreURI_BucketAndPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		uri, bucket, prefix string
+	}{
+		{"s3://?access_key_id=a", "", ""},
+		{"s3://my-bucket?access_key_id=a", "my-bucket", ""},
+		{"s3://my-bucket/exports/daily/?access_key_id=a", "my-bucket", "exports/daily"},
+		{"gs://my-bucket/exports", "my-bucket", "exports"},
+		{"az://?account_name=acct", "", ""},
+	} {
+		parsed, err := parseBlobstoreURI(tt.uri)
+		require.NoError(t, err, tt.uri)
+		assert.Equal(t, tt.bucket, parsed.bucket, tt.uri)
+		assert.Equal(t, tt.prefix, parsed.prefix, tt.uri)
+	}
+}
+
+func TestResolveLocation(t *testing.T) {
+	for _, tt := range []struct {
+		uriBucket, uriPrefix, table, wantBucket, wantPath string
+		wantAmbiguous                                     bool
+	}{
+		{"", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
+		{"my-bucket", "exports", "public.users", "my-bucket", "exports/public.users", false},
+		{"my-bucket", "", "reports/t", "my-bucket", "reports/t", false},
+		{"my-bucket", "", "my-bucket/reports/t", "my-bucket", "reports/t", false},
+		// It could also mean my-bucket/exports/my-bucket/reports/t.
+		{"my-bucket", "exports", "my-bucket/reports/t", "my-bucket", "reports/t", true},
+		// A table named after the bucket is a path, not the bucket root.
+		{"logs", "", "logs", "logs", "logs", false},
+		{"logs", "exports", "logs", "logs", "exports/logs", false},
+	} {
+		d := &BlobstoreDestination{uriBucket: tt.uriBucket, uriPrefix: tt.uriPrefix}
+		bucket, path, ambiguous := d.resolveLocation(tt.table)
+		assert.Equal(t, tt.wantBucket, bucket, tt.table)
+		assert.Equal(t, tt.wantPath, path, tt.table)
+		assert.Equal(t, tt.wantAmbiguous, ambiguous, tt.table)
+	}
+}

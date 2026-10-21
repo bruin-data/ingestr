@@ -41,7 +41,7 @@ type replaceState struct {
 // prepareReplace lists the files a replace of table removes once the new files are
 // written: files directly in the folder the layout writes into whose names match it.
 func (d *BlobstoreDestination) prepareReplace(ctx context.Context, table string) error {
-	bucket, basePath := parseBucketAndPath(table)
+	bucket, basePath, _ := d.resolveLocation(table)
 	listPrefix, recursive, pattern := replaceScope(d.renderLayout(table, loadIDToken, fileIDToken), basePath)
 	if strings.Trim(listPrefix, "/") == "" {
 		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: its files go directly into the root of bucket %s, which is never cleared\n", table, bucket)

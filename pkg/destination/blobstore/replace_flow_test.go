@@ -584,6 +584,30 @@ func TestReplaceFlow(t *testing.T) {
 	}
 }
 
+func TestReplaceFlowUnderURIPrefix(t *testing.T) {
+	for _, provider := range []Provider{ProviderS3, ProviderGCS} {
+		t.Run(string(provider), func(t *testing.T) {
+			store := newFakeObjectStore(
+				"exports/public.orders/a1b2c3d4.0.parquet",
+				"public.orders/a1b2c3d4.0.parquet",
+				"reports/a1b2c3d4.0.parquet",
+			)
+			d := newFakeObjectDestination(t, provider, "{load_id}.{file_id}.{ext}", store)
+			d.uriBucket, d.uriPrefix = "lake", "exports"
+
+			require.NoError(t, runFlow(t, d, config.StrategyReplace, "public.orders", nil))
+			files := store.list()
+			assert.NotContains(t, files, "exports/public.orders/a1b2c3d4.0.parquet")
+			assert.Contains(t, files, "public.orders/a1b2c3d4.0.parquet")
+			assert.Regexp(t, `^exports/public\.orders/[0-9a-f]{8}\.0\.parquet$`, newFiles([]string{"public.orders/a1b2c3d4.0.parquet", "reports/a1b2c3d4.0.parquet"}, files)[0])
+
+			require.NoError(t, runFlow(t, d, config.StrategyReplace, "lake/reports", nil))
+			assert.NotContains(t, store.list(), "reports/a1b2c3d4.0.parquet")
+			assert.Len(t, store.list(), 3)
+		})
+	}
+}
+
 func TestConcurrentTablesUseTheirOwnSchema(t *testing.T) {
 	store := newFakeObjectStore()
 	d := newFakeObjectDestination(t, ProviderAzure, "{load_id}.{file_id}.{ext}", store)
