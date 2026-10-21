@@ -147,7 +147,7 @@ func TestDestinations_TypedValues(t *testing.T) {
 					for _, id := range []int{1, 3} {
 						var value any
 						query := tc.sqlBackend.nameByIDQuery(table, id)
-						if tc.name == "duckdb" {
+						if tc.name == "duckdb" || tc.name == "quack" {
 							// The ADBC database/sql adapter exposes decimals as unscaled
 							// integers and loses list child validity. Ask DuckDB to encode
 							// those values, keeping readback independent of that adapter.

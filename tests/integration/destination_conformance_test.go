@@ -166,6 +166,20 @@ func destinationCases() []destCase {
 			replaceDedupCapable:    true,
 		},
 		{
+			name: "quack",
+			setup: func(t *testing.T, _ context.Context) (string, string, func()) {
+				uri, server := sharedQuackServer(t)
+				_ = server.Close()
+				return uri, fmt.Sprintf("main.conformance_%s", uniqueSuffix()), func() {}
+			},
+			sqlBackend:             quackBackend(),
+			mergeCapable:           true,
+			deleteInsertCapable:    true,
+			scd2Capable:            true,
+			schemaEvolutionCapable: true,
+			replaceDedupCapable:    true,
+		},
+		{
 			name: "csv",
 			setup: func(t *testing.T, _ context.Context) (string, string, func()) {
 				tmpDir := t.TempDir()
@@ -2637,7 +2651,7 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s.INFORMATION_SCHEMA.TABLES` WHERE STARTS_WITH(table_name, '%s__ingestr_repartition_')", schemaName, tableName)
 	case strings.HasPrefix(uri, "snowflake:"):
 		query = fmt.Sprintf(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '%s' AND table_name LIKE '%s_OLD_%%'`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
-	case strings.Contains(uri, "duckdb"):
+	case strings.Contains(uri, "duckdb") || strings.HasPrefix(uri, "quack:"):
 		// DuckDB: query information_schema
 		if schemaName == "" {
 			schemaName = "main"
@@ -2733,7 +2747,7 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 		var ddl string
 		require.NoError(t, db.QueryRow("SELECT GET_DDL('TABLE', ?)", table).Scan(&ddl))
 		return strings.Contains(strings.ToUpper(ddl), "PRIMARY KEY ("+strings.ToUpper(column)+")")
-	case strings.Contains(uri, "duckdb"):
+	case strings.Contains(uri, "duckdb") || strings.HasPrefix(uri, "quack:"):
 		if schemaName == "" {
 			schemaName = "main"
 		}
@@ -2910,7 +2924,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 			}
 			require.NoError(t, pipeline.New(cfg).Run(ctx))
 
-			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" || tc.name == "oracle" {
+			if tc.name == "duckdb" || tc.name == "quack" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" || tc.name == "oracle" {
 				assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
 					"target should keep its PRIMARY KEY after a deduplicated replace")
 			}
@@ -2977,7 +2991,7 @@ func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
 			}
 			require.NoError(t, pipeline.New(cfg).Run(ctx))
 
-			if tc.name == "duckdb" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" || tc.name == "oracle" {
+			if tc.name == "duckdb" || tc.name == "quack" || tc.name == "sqlite" || tc.name == "postgres" || tc.name == "mssql" || tc.name == "oracle" {
 				assert.True(t, hasPrimaryKey(t, tc.sqlBackend, destURI, destTable, "id"),
 					"target should keep its PRIMARY KEY after a deduplicated replace")
 			}
