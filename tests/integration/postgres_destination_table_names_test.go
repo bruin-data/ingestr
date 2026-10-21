@@ -84,32 +84,41 @@ func TestPostgresDestinationSkipsGeneratedColumns(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 
-	src := pgx.Identifier{schemaName, "src"}.Sanitize()
-	_, err = conn.Exec(ctx, "CREATE TABLE "+src+" (id int PRIMARY KEY, a int, b int); INSERT INTO "+src+" VALUES (1, 2, 3), (2, 5, 6)")
-	require.NoError(t, err)
+	sources := map[string]string{
+		"plain":     "(id int PRIMARY KEY, a int, b int)",
+		"generated": "(id int PRIMARY KEY, a int, b int, total int GENERATED ALWAYS AS (a + b) STORED)",
+	}
+	for name, columns := range sources {
+		src := pgx.Identifier{schemaName, name}.Sanitize()
+		_, err = conn.Exec(ctx, "CREATE TABLE "+src+" "+columns+"; INSERT INTO "+src+" (id, a, b) VALUES (1, 2, 3), (2, 5, 6)")
+		require.NoError(t, err)
+	}
 
-	for _, strategy := range []config.IncrementalStrategy{config.StrategyAppend, config.StrategyMerge} {
-		t.Run(string(strategy), func(t *testing.T) {
-			dst := pgx.Identifier{schemaName, "dst_" + string(strategy)}.Sanitize()
-			_, err := conn.Exec(ctx, "CREATE TABLE "+dst+" (id int PRIMARY KEY, a int, b int, total int GENERATED ALWAYS AS (a + b) STORED)")
-			require.NoError(t, err)
+	for name := range sources {
+		for _, strategy := range []config.IncrementalStrategy{config.StrategyAppend, config.StrategyMerge} {
+			t.Run(name+"/"+string(strategy), func(t *testing.T) {
+				dstName := "dst_" + name + "_" + string(strategy)
+				dst := pgx.Identifier{schemaName, dstName}.Sanitize()
+				_, err := conn.Exec(ctx, "CREATE TABLE "+dst+" "+sources["generated"])
+				require.NoError(t, err)
 
-			cfg := &config.IngestConfig{
-				SourceURI:           pgDest.uri,
-				SourceTable:         schemaName + ".src",
-				DestURI:             pgDest.uri,
-				DestTable:           schemaName + ".dst_" + string(strategy),
-				IncrementalStrategy: strategy,
-				PrimaryKeys:         []string{"id"},
-			}
-			require.NoError(t, cfg.Validate())
-			require.NoError(t, pipeline.New(cfg).Run(ctx))
+				cfg := &config.IngestConfig{
+					SourceURI:           pgDest.uri,
+					SourceTable:         schemaName + "." + name,
+					DestURI:             pgDest.uri,
+					DestTable:           schemaName + "." + dstName,
+					IncrementalStrategy: strategy,
+					PrimaryKeys:         []string{"id"},
+				}
+				require.NoError(t, cfg.Validate())
+				require.NoError(t, pipeline.New(cfg).Run(ctx))
 
-			rows, err := conn.Query(ctx, "SELECT total FROM "+dst+" ORDER BY id")
-			require.NoError(t, err)
-			totals, err := pgx.CollectRows(rows, pgx.RowTo[int])
-			require.NoError(t, err)
-			require.Equal(t, []int{5, 11}, totals)
-		})
+				rows, err := conn.Query(ctx, "SELECT total FROM "+dst+" ORDER BY id")
+				require.NoError(t, err)
+				totals, err := pgx.CollectRows(rows, pgx.RowTo[int])
+				require.NoError(t, err)
+				require.Equal(t, []int{5, 11}, totals)
+			})
+		}
 	}
 }
