@@ -1840,7 +1840,7 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 		LEFT JOIN pg_catalog.pg_namespace AS nsp ON nsp.nspname = c.table_schema
 		LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = nsp.oid AND rel.relname = c.table_name
 		LEFT JOIN pg_catalog.pg_attribute AS attr ON attr.attrelid = rel.oid AND attr.attname = c.column_name
-		WHERE c.table_schema = $1 AND c.table_name = $2
+		WHERE c.table_schema = $1 AND c.table_name = $2 AND COALESCE(c.is_generated, 'NEVER') <> 'ALWAYS'
 		ORDER BY c.ordinal_position`
 
 	rows, err := d.pool.Query(ctx, query, schemaName, tableName)
