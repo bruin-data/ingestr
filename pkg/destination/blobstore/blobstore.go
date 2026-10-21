@@ -16,6 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
 	datalakedirectory "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/directory"
 	datalakefile "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
+	datalakefilesystem "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -55,6 +56,7 @@ type BlobstoreDestination struct {
 	arrowSchema *arrow.Schema
 	schema      *schema.TableSchema
 	tableName   string
+	replaces    map[string]*replaceState
 	mu          sync.Mutex
 }
 
@@ -183,9 +185,10 @@ func createAzureClient(ctx context.Context, parsed *parsedBlobstoreURI) (*azblob
 }
 
 type azureDatalakeClient struct {
-	accountName        string
-	newFileClient      func(string) (*datalakefile.Client, error)
-	newDirectoryClient func(string) (*datalakedirectory.Client, error)
+	accountName         string
+	newFileClient       func(string) (*datalakefile.Client, error)
+	newDirectoryClient  func(string) (*datalakedirectory.Client, error)
+	newFileSystemClient func(string) (*datalakefilesystem.Client, error)
 }
 
 func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient, error) {
@@ -208,6 +211,9 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 		client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
 			return datalakedirectory.NewClientWithSharedKeyCredential(pathURL, cred, nil)
 		}
+		client.newFileSystemClient = func(fsURL string) (*datalakefilesystem.Client, error) {
+			return datalakefilesystem.NewClientWithSharedKeyCredential(fsURL, cred, nil)
+		}
 		return client, nil
 	}
 
@@ -218,6 +224,9 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 		}
 		client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
 			return datalakedirectory.NewClientWithNoCredential(adlsutil.AppendSASToken(pathURL, sasToken), nil)
+		}
+		client.newFileSystemClient = func(fsURL string) (*datalakefilesystem.Client, error) {
+			return datalakefilesystem.NewClientWithNoCredential(adlsutil.AppendSASToken(fsURL, sasToken), nil)
 		}
 		return client, nil
 	}
@@ -232,6 +241,9 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 	client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
 		return datalakedirectory.NewClient(pathURL, cred, nil)
 	}
+	client.newFileSystemClient = func(fsURL string) (*datalakefilesystem.Client, error) {
+		return datalakefilesystem.NewClient(fsURL, cred, nil)
+	}
 	return client, nil
 }
 
@@ -244,8 +256,6 @@ func (d *BlobstoreDestination) Close(ctx context.Context) error {
 
 func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	d.schema = opts.Schema
 
 	bucketName, basePath := parseBucketAndPath(opts.Table)
@@ -258,6 +268,11 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	}
 
 	config.Debug("[BLOBSTORE] Prepared table: bucket=%s, basePath=%s", d.bucketName, d.basePath)
+	d.mu.Unlock()
+
+	if opts.DropFirst {
+		return d.prepareReplace(ctx, opts.Table)
+	}
 	return nil
 }
 
@@ -280,7 +295,18 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 	loadID := uuid.New().String()[:8]
 	fileID := 0
 
-	config.Debug("[BLOBSTORE] Starting write to bucket=%s, basePath=%s with layout=%s", d.bucketName, d.basePath, d.layout)
+	d.mu.Lock()
+	bucket, basePath, tableName, arrowSchema := d.bucketName, d.basePath, d.tableName, d.arrowSchema
+	d.mu.Unlock()
+	if opts.Schema != nil {
+		arrowSchema = opts.Schema.ToArrowSchema()
+	}
+	if opts.Table != "" {
+		bucket, basePath = parseBucketAndPath(opts.Table)
+		tableName = opts.Table
+	}
+
+	config.Debug("[BLOBSTORE] Starting write to bucket=%s, basePath=%s with layout=%s", bucket, basePath, d.layout)
 
 	var buffer bytes.Buffer
 	var writer *pqarrow.FileWriter
@@ -296,10 +322,12 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		}
 		writer = nil
 
-		path := d.renderLayout(loadID, fileID)
-		if err := d.writeBlob(ctx, path, buffer.Bytes()); err != nil {
+		path := d.renderLayout(tableName, loadID, fmt.Sprintf("%d", fileID))
+		key := blobKey(basePath, path)
+		if err := d.writeBlob(ctx, bucket, key, buffer.Bytes()); err != nil {
 			return fmt.Errorf("failed to write to blob %s: %w", path, err)
 		}
+		d.markWritten(opts.Table, key)
 
 		config.Debug("[BLOBSTORE] Wrote %d rows to %s (%d bytes)", rowsInCurrentFile, path, buffer.Len())
 		fileID++
@@ -325,11 +353,9 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		startBatch := time.Now()
 
 		if writer == nil {
-			d.mu.Lock()
-			if d.arrowSchema == nil {
-				d.arrowSchema = stripSchemaMetadata(record.Schema())
+			if arrowSchema == nil {
+				arrowSchema = stripSchemaMetadata(record.Schema())
 			}
-			d.mu.Unlock()
 
 			writerProps := parquet.NewWriterProperties(
 				parquet.WithCompression(compress.Codecs.Snappy),
@@ -341,7 +367,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 			)
 
 			var err error
-			writer, err = pqarrow.NewFileWriter(d.arrowSchema, &buffer, writerProps, arrowProps)
+			writer, err = pqarrow.NewFileWriter(arrowSchema, &buffer, writerProps, arrowProps)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to create parquet writer: %w", err)
@@ -350,8 +376,8 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 
 		recordToWrite := record
 		shouldRelease := false
-		if !record.Schema().Equal(d.arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), d.arrowSchema) {
-			normalized, err := normalizeRecordToSchema(record, d.arrowSchema)
+		if !record.Schema().Equal(arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), arrowSchema) {
+			normalized, err := normalizeRecordToSchema(record, arrowSchema)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to normalize record schema: %w", err)
@@ -387,16 +413,18 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 	return nil
 }
 
-func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data []byte) error {
-	fullPath := path
-	if d.basePath != "" {
-		fullPath = strings.TrimSuffix(d.basePath, "/") + "/" + path
+func blobKey(basePath, path string) string {
+	if basePath == "" {
+		return path
 	}
+	return strings.TrimSuffix(basePath, "/") + "/" + path
+}
 
+func (d *BlobstoreDestination) writeBlob(ctx context.Context, bucket, fullPath string, data []byte) error {
 	switch d.provider {
 	case ProviderS3:
 		_, err := d.s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(d.bucketName),
+			Bucket:      aws.String(bucket),
 			Key:         aws.String(fullPath),
 			Body:        bytes.NewReader(data),
 			ContentType: aws.String("application/octet-stream"),
@@ -404,7 +432,7 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 		return err
 
 	case ProviderGCS:
-		obj := d.gcsClient.Bucket(d.bucketName).Object(fullPath)
+		obj := d.gcsClient.Bucket(bucket).Object(fullPath)
 		w := obj.NewWriter(ctx)
 		w.ContentType = "application/octet-stream"
 		if _, err := io.Copy(w, bytes.NewReader(data)); err != nil {
@@ -414,14 +442,14 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 		return w.Close()
 
 	case ProviderAzure:
-		_, err := d.azureClient.UploadBuffer(ctx, d.bucketName, fullPath, data, nil)
+		_, err := d.azureClient.UploadBuffer(ctx, bucket, fullPath, data, nil)
 		return err
 
 	case ProviderAzureDatalake:
 		if d.adlsClient == nil {
 			return fmt.Errorf("azure Data Lake Storage Gen2 client is not initialized")
 		}
-		return d.adlsClient.uploadBuffer(ctx, d.bucketName, fullPath, data)
+		return d.adlsClient.uploadBuffer(ctx, bucket, fullPath, data)
 	}
 
 	return fmt.Errorf("unsupported provider: %s", d.provider)
@@ -523,8 +551,7 @@ func isAzureDatalakeAlreadyExists(err error) bool {
 	)
 }
 
-func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
-	tableName := d.tableName
+func (d *BlobstoreDestination) renderLayout(tableName, loadID, fileID string) string {
 	if idx := strings.LastIndex(tableName, "/"); idx != -1 {
 		tableName = tableName[idx+1:]
 	}
@@ -538,7 +565,7 @@ func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
 	result := d.layout
 	result = strings.ReplaceAll(result, "{table_name}", tableName)
 	result = strings.ReplaceAll(result, "{load_id}", loadID)
-	result = strings.ReplaceAll(result, "{file_id}", fmt.Sprintf("%d", fileID))
+	result = strings.ReplaceAll(result, "{file_id}", fileID)
 	result = strings.ReplaceAll(result, "{ext}", "parquet")
 
 	return result

@@ -649,6 +649,13 @@ func DefaultMultiTableName(destSchema, sourceTable string) string {
 	return destSchema + "." + strings.ReplaceAll(sourceTable, ".", "_")
 }
 
+// ReplaceFinalizer is an optional interface for destinations that write a replace
+// directly into the target and complete it, such as by removing the previous data,
+// only once the strategy knows every row was written.
+type ReplaceFinalizer interface {
+	FinalizeReplace(ctx context.Context, table string) error
+}
+
 // ExactRowCountWaiter is an optional interface for destinations that can
 // verify when a table has become query-consistent at an exact row count.
 type ExactRowCountWaiter interface {
