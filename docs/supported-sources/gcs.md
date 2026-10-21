@@ -111,7 +111,7 @@ Example layouts:
 
 ### Replace strategy
 
-`replace` removes every parquet file in the destination path whose name matches the `layout` once the new files are written, including files another pipeline wrote to the same path with the same layout. Give each pipeline its own path, or include `{table_name}` in the layout. Files that don't match the layout are kept. If the load fails, the previous files stay. Files written directly into the root of a bucket are never removed. `replace` needs permission to list and delete files (`storage.objects.list` and `storage.objects.delete`); use `append` to keep existing files.
+`replace` removes every parquet file in the destination path whose name matches the `layout` once the new files are written, including files another pipeline wrote to the same path with the same layout. Give each pipeline its own destination path. Files that don't match the layout are kept. If the load fails, the previous files stay. Files written directly into the root of a bucket are never removed. `replace` needs permission to list and delete files (`storage.objects.list` and `storage.objects.delete`); use `append` to keep existing files.
 
 ## Supported File Formats
 `gs` source only supports loading files in the following formats:
