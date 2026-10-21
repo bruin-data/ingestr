@@ -127,3 +127,23 @@ func TestSchemes_IncludesMotherDuck(t *testing.T) {
 		}
 	}
 }
+
+func TestDialectColumnExpression(t *testing.T) {
+	var provider adbc.ColumnExpressionProvider = NewDialect()
+	cases := map[string]string{
+		"INTERVAL":                      `CAST("c" AS VARCHAR)`,
+		"TIME WITH TIME ZONE":           `CAST("c" AS VARCHAR)`,
+		"STRUCT(a INTEGER, b VARCHAR)":  `CAST(to_json("c") AS VARCHAR)`,
+		"MAP(VARCHAR, INTEGER)":         `CAST(to_json("c") AS VARCHAR)`,
+		"STRUCT(x INTEGER)[]":           `CAST(to_json("c") AS VARCHAR)`,
+		"VARCHAR":                       "",
+		"INTEGER[]":                     "",
+		"TIME":                          "",
+		"UNION(num INTEGER, s VARCHAR)": "",
+	}
+	for nativeType, want := range cases {
+		if got := provider.ColumnExpression(nativeType, `"c"`); got != want {
+			t.Errorf("ColumnExpression(%q) = %q, want %q", nativeType, got, want)
+		}
+	}
+}

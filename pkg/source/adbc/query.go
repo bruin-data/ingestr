@@ -46,9 +46,18 @@ func BuildArrowSchema(columns []schema.Column) *arrow.Schema {
 // BuildSelectQuery builds a SELECT query with optional conditions.
 // The dialect's QuoteIdentifier function is used to properly quote column names.
 func BuildSelectQuery(table string, columns []schema.Column, opts source.ReadOptions, quoteFunc func(string) string) string {
+	return BuildSelectQueryWithExpressions(table, columns, nil, opts, quoteFunc)
+}
+
+// BuildSelectQueryWithExpressions is BuildSelectQuery, selecting the columns in
+// exprs through their expression aliased back to the column name.
+func BuildSelectQueryWithExpressions(table string, columns []schema.Column, exprs map[string]string, opts source.ReadOptions, quoteFunc func(string) string) string {
 	colNames := make([]string, len(columns))
 	for i, col := range columns {
 		colNames[i] = quoteFunc(col.Name)
+		if expr, ok := exprs[col.Name]; ok {
+			colNames[i] = expr + " AS " + colNames[i]
+		}
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), table)

@@ -259,3 +259,21 @@ func (d *Dialect) ParsePrimaryKeyResult(rawValue interface{}) []string {
 	}
 	return nil
 }
+
+// ColumnExpression reads types the ADBC conversion loses through DuckDB itself:
+// INTERVAL and TIMETZ as text, nested values (and lists of them) as JSON.
+func (d *Dialect) ColumnExpression(nativeType, quotedColumn string) string {
+	t := strings.ToUpper(strings.TrimSpace(nativeType))
+	switch {
+	case t == "INTERVAL", t == "TIME WITH TIME ZONE", t == "TIMETZ":
+		return "CAST(" + quotedColumn + " AS VARCHAR)"
+	case isNestedDuckDBType(strings.TrimRight(t, "[]")):
+		return "CAST(to_json(" + quotedColumn + ") AS VARCHAR)"
+	default:
+		return ""
+	}
+}
+
+func isNestedDuckDBType(t string) bool {
+	return strings.HasPrefix(t, "STRUCT(") || strings.HasPrefix(t, "MAP(")
+}
