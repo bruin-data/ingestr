@@ -119,6 +119,7 @@ func uriToConnString(uri string) (string, string, error) {
 
 	query := u.Query()
 	query.Del("driver")
+	normalizeTrustServerCertificate(query)
 	if !query.Has("packet size") {
 		query.Set("packet size", defaultMSSQLPacketSize)
 	}
@@ -128,6 +129,23 @@ func uriToConnString(uri string) (string, string, error) {
 	connURL.RawQuery = query.Encode()
 
 	return connURL.String(), database, nil
+}
+
+// go-mssqldb parses TrustServerCertificate with strconv.ParseBool, which rejects the ODBC "yes"/"no" spelling.
+func normalizeTrustServerCertificate(query url.Values) {
+	for key, values := range query {
+		if !strings.EqualFold(key, "TrustServerCertificate") {
+			continue
+		}
+		for i, value := range values {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "yes":
+				values[i] = "true"
+			case "no":
+				values[i] = "false"
+			}
+		}
+	}
 }
 
 func (d *MSSQLDestination) Close(ctx context.Context) error {

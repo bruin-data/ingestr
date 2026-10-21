@@ -105,6 +105,7 @@ func URIToConnString(uri string) (string, string, error) {
 	database := strings.TrimPrefix(u.Path, "/")
 	query := u.Query()
 	deleteQueryParamCI(query, "driver")
+	normalizeTrustServerCertificate(query)
 
 	if _, hasPacketSize := normalizeQueryParamCI(query, "packet size"); !hasPacketSize {
 		query.Set("packet size", defaultPacketSize)
@@ -188,6 +189,23 @@ func normalizeQueryParamCI(query url.Values, canonical string) (string, bool) {
 		return value, true
 	}
 	return "", false
+}
+
+// go-mssqldb parses TrustServerCertificate with strconv.ParseBool, which rejects the ODBC "yes"/"no" spelling.
+func normalizeTrustServerCertificate(query url.Values) {
+	for key, values := range query {
+		if !strings.EqualFold(key, "TrustServerCertificate") {
+			continue
+		}
+		for i, value := range values {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "yes":
+				values[i] = "true"
+			case "no":
+				values[i] = "false"
+			}
+		}
+	}
 }
 
 func deleteQueryParamCI(query url.Values, key string) {

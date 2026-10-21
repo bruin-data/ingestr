@@ -21,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	mssqldb "github.com/microsoft/go-mssqldb"
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 type releaseCountingBatch struct {
@@ -46,6 +47,26 @@ func TestURIToConnStringDefaultsLargePacketSize(t *testing.T) {
 	}
 	if !strings.Contains(explicit, "packet+size=8192") || strings.Contains(explicit, "32767") {
 		t.Fatalf("explicit packet size was not preserved: %q", explicit)
+	}
+}
+
+func TestURIToConnStringAcceptsODBCTrustServerCertificate(t *testing.T) {
+	tests := map[string]bool{
+		"yes": true, "YES": true, "no": false,
+		"true": true, "false": false, "1": true, "0": false, "TRUE": true,
+	}
+	for value, want := range tests {
+		connString, _, err := uriToConnString("mssql://sa:secret@localhost:1433/warehouse?TrustServerCertificate=" + value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := msdsn.Parse(connString)
+		if err != nil {
+			t.Fatalf("go-mssqldb rejected %q: %v", connString, err)
+		}
+		if cfg.TrustServerCertificate != want {
+			t.Fatalf("TrustServerCertificate=%s parsed as %v, want %v", value, cfg.TrustServerCertificate, want)
+		}
 	}
 }
 
