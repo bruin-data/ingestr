@@ -11,4 +11,8 @@ func init() {
 		[]string{"ducklake"},
 		func() interface{} { return NewDuckLakeDestination() },
 	)
+	registry.RegisterDestination(
+		[]string{"quack"},
+		func() interface{} { return NewQuackDestination() },
+	)
 }

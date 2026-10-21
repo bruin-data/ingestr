@@ -135,6 +135,12 @@ type ColumnExpressionProvider interface {
 	ColumnExpression(nativeType, quotedColumn string) string
 }
 
+// QueryRewriter is an optional interface for dialects that rewrite every read
+// query before it runs (e.g. Quack ships queries to the remote server).
+type QueryRewriter interface {
+	RewriteQuery(query string) string
+}
+
 // PrimaryKeyEnforcementProvider identifies dialects whose detected primary-key
 // constraints enforce uniqueness.
 type PrimaryKeyEnforcementProvider interface {
