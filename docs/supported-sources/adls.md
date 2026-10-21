@@ -126,6 +126,8 @@ lakehouse/
 
 Azure Data Lake Storage Gen2 supports `replace` and `append` strategies. It does not support `merge`, `delete+insert`, or `scd2`.
 
+`replace` removes the previous load's parquet files from the destination path once the new files are written. Other files, subfolders and neighbouring paths are kept. If the load fails, the previous files stay. Files written directly into the root of a file system are never removed. `replace` needs permission to list and delete files (for example `Storage Blob Data Contributor`); use `append` to keep existing files.
+
 ::: info NOTE
 When reading from Azure Data Lake Storage Gen2, CSV, JSONL/NDJSON, parquet, gzip-compressed variants, and ZIP archive members are supported. Select ZIP members with `<file-system>/<archive.zip>!<member-glob>`, for example `lakehouse/releases/data.zip!**/*.csv`. When writing to Azure Data Lake Storage Gen2, only parquet output is supported.
 :::

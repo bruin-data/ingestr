@@ -289,19 +289,17 @@ func TestParseBucketAndPath(t *testing.T) {
 
 func TestRenderLayout(t *testing.T) {
 	d := &BlobstoreDestination{
-		tableName: "my_bucket/records",
-		layout:    "{table_name}/{load_id}.{file_id}.{ext}",
+		layout: "{table_name}/{load_id}.{file_id}.{ext}",
 	}
 
-	result := d.renderLayout("abc123", 0)
+	result := d.renderLayout("my_bucket/records", "abc123", "0")
 	assert.Equal(t, "records/abc123.0.parquet", result)
 
 	d.layout = "{table_name}.{ext}"
-	result = d.renderLayout("abc123", 0)
+	result = d.renderLayout("my_bucket/records", "abc123", "0")
 	assert.Equal(t, "records.parquet", result)
 
-	d.tableName = "public.users"
-	result = d.renderLayout("abc123", 0)
+	result = d.renderLayout("public.users", "abc123", "0")
 	assert.Equal(t, "users.parquet", result)
 }
 
