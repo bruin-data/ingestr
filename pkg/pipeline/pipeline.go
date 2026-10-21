@@ -1911,7 +1911,11 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if limiter, ok := p.dest.(destination.DecimalPrecisionLimiter); ok {
 		opts.MaxDecimalPrecision = limiter.MaxDecimalPrecision()
 	}
-	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
+	compareSource, err := destination.WithoutGeneratedColumns(ctx, p.dest, destTable, sourceSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get generated columns: %w", err)
+	}
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(compareSource), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}

@@ -200,7 +200,11 @@ func evolveDestinationTableIfIncarnation(
 	if limiter, ok := dest.(destination.DecimalPrecisionLimiter); ok {
 		compareOptions.MaxDecimalPrecision = limiter.MaxDecimalPrecision()
 	}
-	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
+	compareSource, err := destination.WithoutGeneratedColumns(ctx, dest, destTable, sourceSchema)
+	if err != nil {
+		return "", fmt.Errorf("failed to get generated columns: %w", err)
+	}
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(compareSource), destSchema, compareOptions)
 	if err != nil {
 		return "", fmt.Errorf("failed to compare schemas: %w", err)
 	}

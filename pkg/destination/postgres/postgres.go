@@ -1825,6 +1825,18 @@ func (d *PostgresDestination) SupportsCDCMerge() bool {
 	return true
 }
 
+func (d *PostgresDestination) GeneratedColumns(ctx context.Context, table string) ([]string, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := d.pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND is_generated = 'ALWAYS'`, schemaName, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query generated columns: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
@@ -1840,7 +1852,7 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 		LEFT JOIN pg_catalog.pg_namespace AS nsp ON nsp.nspname = c.table_schema
 		LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = nsp.oid AND rel.relname = c.table_name
 		LEFT JOIN pg_catalog.pg_attribute AS attr ON attr.attrelid = rel.oid AND attr.attname = c.column_name
-		WHERE c.table_schema = $1 AND c.table_name = $2
+		WHERE c.table_schema = $1 AND c.table_name = $2 AND COALESCE(c.is_generated, 'NEVER') <> 'ALWAYS'
 		ORDER BY c.ordinal_position`
 
 	rows, err := d.pool.Query(ctx, query, schemaName, tableName)

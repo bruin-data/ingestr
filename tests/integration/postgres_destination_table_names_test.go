@@ -7,8 +7,10 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
+	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -65,5 +67,58 @@ func TestPostgresDestinationPrepareQuotedTableNames(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestPostgresDestinationSkipsGeneratedColumns(t *testing.T) {
+	if pgDest.uri == "" {
+		t.Skip("shared postgres destination container not available")
+	}
+
+	ctx := t.Context()
+	schemaName := uniqueSchemaName(t, "generated_cols")
+	ensurePostgresSchema(t, ctx, pgDest.uri, schemaName)
+	t.Cleanup(func() { dropPostgresSchema(t, context.Background(), pgDest.uri, schemaName) })
+
+	conn, err := pgx.Connect(ctx, pgDest.uri)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+
+	sources := map[string]string{
+		"plain":     "(id int PRIMARY KEY, a int, b int)",
+		"generated": "(id int PRIMARY KEY, a int, b int, total int GENERATED ALWAYS AS (a + b) STORED)",
+	}
+	for name, columns := range sources {
+		src := pgx.Identifier{schemaName, name}.Sanitize()
+		_, err = conn.Exec(ctx, "CREATE TABLE "+src+" "+columns+"; INSERT INTO "+src+" (id, a, b) VALUES (1, 2, 3), (2, 5, 6)")
+		require.NoError(t, err)
+	}
+
+	for name := range sources {
+		for _, strategy := range []config.IncrementalStrategy{config.StrategyAppend, config.StrategyMerge} {
+			t.Run(name+"/"+string(strategy), func(t *testing.T) {
+				dstName := "dst_" + name + "_" + string(strategy)
+				dst := pgx.Identifier{schemaName, dstName}.Sanitize()
+				_, err := conn.Exec(ctx, "CREATE TABLE "+dst+" "+sources["generated"])
+				require.NoError(t, err)
+
+				cfg := &config.IngestConfig{
+					SourceURI:           pgDest.uri,
+					SourceTable:         schemaName + "." + name,
+					DestURI:             pgDest.uri,
+					DestTable:           schemaName + "." + dstName,
+					IncrementalStrategy: strategy,
+					PrimaryKeys:         []string{"id"},
+				}
+				require.NoError(t, cfg.Validate())
+				require.NoError(t, pipeline.New(cfg).Run(ctx))
+
+				rows, err := conn.Query(ctx, "SELECT total FROM "+dst+" ORDER BY id")
+				require.NoError(t, err)
+				totals, err := pgx.CollectRows(rows, pgx.RowTo[int])
+				require.NoError(t, err)
+				require.Equal(t, []int{5, 11}, totals)
+			})
+		}
 	}
 }
