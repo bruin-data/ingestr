@@ -91,7 +91,10 @@ func QuackBootstrapStatements(cfg *QuackConfig, alias string) []string {
 
 func WrapQuackBootstrapError(cfg *QuackConfig, stmt string, err error) error {
 	if strings.HasPrefix(stmt, "ATTACH") {
-		return fmt.Errorf("quack: failed to attach %s (Quack requires the DuckDB ADBC driver v1.5.3 or newer; upgrade with `dbc install duckdb`): %w", cfg.endpoint(), err)
+		if strings.Contains(err.Error(), "Unrecognized storage type") {
+			return fmt.Errorf("quack: failed to attach %s (Quack requires the DuckDB ADBC driver v1.5.3 or newer; upgrade with `dbc install duckdb`): %w", cfg.endpoint(), err)
+		}
+		return fmt.Errorf("quack: failed to attach %s: %w", cfg.endpoint(), err)
 	}
 	return fmt.Errorf("quack: %s failed: %w", stmt, err)
 }
@@ -152,9 +155,8 @@ func QuackSQLLiteral(v any) string {
 
 type QuackDialect struct {
 	*Dialect
-	cfg     *QuackConfig
-	db      *sql.DB
-	connErr error
+	cfg *QuackConfig
+	db  *sql.DB
 }
 
 func NewQuackDialect() *QuackDialect {
@@ -173,7 +175,7 @@ func (d *QuackDialect) BuildConnectionString(uri string) (string, error) {
 	return d.Dialect.BuildConnectionString("duckdb://:memory:")
 }
 
-func (d *QuackDialect) SetConnection(db *sql.DB) {
+func (d *QuackDialect) InitConnection(ctx context.Context, db *sql.DB) error {
 	d.db = db
 	for _, stmt := range QuackBootstrapStatements(d.cfg, QuackAttachAlias) {
 		if strings.HasPrefix(stmt, "ATTACH") {
@@ -181,11 +183,15 @@ func (d *QuackDialect) SetConnection(db *sql.DB) {
 		} else {
 			config.Debug("[QUACK] %s", stmt)
 		}
-		if err := execStmt(db, stmt); err != nil {
-			d.connErr = WrapQuackBootstrapError(d.cfg, stmt, err)
-			return
+		rows, err := db.QueryContext(ctx, stmt)
+		if err == nil {
+			err = rows.Close()
+		}
+		if err != nil {
+			return WrapQuackBootstrapError(d.cfg, stmt, err)
 		}
 	}
+	return nil
 }
 
 // RewriteQuery runs reads on the server: scanning an attached Quack table outside
@@ -197,10 +203,6 @@ func (d *QuackDialect) RewriteQuery(query string) string {
 // GetSchema runs the metadata queries on the server: the client's
 // information_schema and duckdb_constraints() don't cover attached Quack catalogs.
 func (d *QuackDialect) GetSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	if d.connErr != nil {
-		return nil, d.connErr
-	}
-
 	catalog, schemaName, tableName := d.ParseTableNameWithCatalog(table)
 	schemaSQL, pkSQL, args := schemaQuerySQL, primaryKeyQuerySQL, []any{schemaName, tableName}
 	if catalog != "" {

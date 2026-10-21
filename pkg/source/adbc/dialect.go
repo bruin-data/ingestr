@@ -167,6 +167,12 @@ type ConnectionAware interface {
 	SetConnection(db *sql.DB)
 }
 
+// ConnectionInitializer is an optional interface for dialects that run setup
+// statements after connecting; an error fails Connect.
+type ConnectionInitializer interface {
+	InitConnection(ctx context.Context, db *sql.DB) error
+}
+
 // URIAware is an optional interface for dialects that need access to the
 // original connection URI for native ADBC operations.
 type URIAware interface {

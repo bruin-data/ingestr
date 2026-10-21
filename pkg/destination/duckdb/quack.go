@@ -68,6 +68,22 @@ func (d *QuackDestination) Connect(ctx context.Context, uri string) error {
 	return nil
 }
 
+// The attachment exposes only the server's default database, so the bulk copy
+// can't reach tables in other databases.
+func (d *QuackDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := checkQuackTable(opts.Table); err != nil {
+		return err
+	}
+	return d.DuckDBDestination.PrepareTable(ctx, opts)
+}
+
+func checkQuackTable(table string) error {
+	if tn := duckTable(table); tn.Catalog != "" {
+		return fmt.Errorf("quack: destination table %q must be schema.table; database-qualified names are not supported", table)
+	}
+	return nil
+}
+
 func (d *QuackDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	return d.writeViaMemoryStage(ctx, records, opts)
 }
@@ -77,13 +93,16 @@ func (d *QuackDestination) WriteParallel(ctx context.Context, records <-chan sou
 }
 
 func (d *QuackDestination) writeViaMemoryStage(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if err := checkQuackTable(opts.Table); err != nil {
+		return err
+	}
 	d.writeMu.Lock()
 	defer d.writeMu.Unlock()
 
 	tn := duckTable(opts.Table)
 	remoteTarget := srcduckdb.QuackAttachAlias + "." + quoteIdentifier(canonicalDuckDBSchema(tn.Schema)) + "." + quoteIdentifier(tn.Table)
 	memName := fmt.Sprintf("%s_%d", duckLakeMemStageName(opts.Table), d.stageSeq.Add(1))
-	memQualified := "memory.main." + memName
+	memQualified := "memory.main." + quoteIdentifier(memName)
 
 	// The target was created through query(), so refresh the client's catalog cache first.
 	if err := d.execLocal(ctx, "FROM quack_clear_cache()"); err != nil {
@@ -97,7 +116,7 @@ func (d *QuackDestination) writeViaMemoryStage(ctx context.Context, records <-ch
 	defer func() { _ = d.execLocal(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+memQualified) }()
 
 	memOpts := opts
-	memOpts.Table = "main." + memName
+	memOpts.Table = "main." + quoteIdentifier(memName)
 	if err := d.DuckDBDestination.Write(ctx, records, memOpts); err != nil {
 		return fmt.Errorf("quack: load in-memory stage: %w", err)
 	}

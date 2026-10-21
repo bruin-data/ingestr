@@ -1,6 +1,7 @@
 package duckdb
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -67,4 +68,13 @@ func TestQuackSQLLiteral(t *testing.T) {
 	for _, c := range cases {
 		assert.Equal(t, c.want, QuackSQLLiteral(c.in))
 	}
+}
+
+func TestWrapQuackBootstrapError(t *testing.T) {
+	t.Parallel()
+
+	cfg := &QuackConfig{Host: "localhost"}
+	attach := QuackAttachStatement(cfg, QuackAttachAlias)
+	assert.Contains(t, WrapQuackBootstrapError(cfg, attach, errors.New(`Binder Error: Unrecognized storage type "quack"`)).Error(), "dbc install duckdb")
+	assert.NotContains(t, WrapQuackBootstrapError(cfg, attach, errors.New("Authentication failed")).Error(), "dbc install duckdb")
 }
