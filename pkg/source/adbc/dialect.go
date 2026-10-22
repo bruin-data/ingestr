@@ -128,6 +128,13 @@ type SchemaProvider interface {
 	GetSchema(ctx context.Context, table string) (*schema.TableSchema, error)
 }
 
+// ColumnExpressionProvider is an optional interface for dialects that read some
+// native types through a SQL expression because the driver conversion is lossy.
+// An empty result selects the column as-is.
+type ColumnExpressionProvider interface {
+	ColumnExpression(nativeType, quotedColumn string) string
+}
+
 // PrimaryKeyEnforcementProvider identifies dialects whose detected primary-key
 // constraints enforce uniqueness.
 type PrimaryKeyEnforcementProvider interface {

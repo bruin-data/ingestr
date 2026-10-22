@@ -111,7 +111,7 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 		})
 	}
 
-	tableSchema, err := s.getSchema(ctx, req.Name)
+	tableSchema, columnExprs, err := s.getSchema(ctx, req.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (s *ADBCSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 			return tableSchema, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, tableSchema, opts)
+			return s.read(ctx, tableName, tableSchema, columnExprs, opts)
 		},
 	}, nil
 }
@@ -185,11 +185,12 @@ func (s *ADBCSource) reconnectWithDataset(ctx context.Context, dsConnector Datas
 	return nil
 }
 
-func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
+// getSchema also returns the dialect's select expressions keyed by column name.
+func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, map[string]string, error) {
 	// Check if dialect requires special table name validation (e.g., BigQuery)
 	if datasetDialect, ok := s.dialect.(DatasetAwareDialect); ok {
 		if err := datasetDialect.ValidateTableName(table); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -200,7 +201,7 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 	// This must happen BEFORE using SchemaProvider or SQL queries
 	if dsConnector, ok := s.dialect.(DatasetConnector); ok && schemaName != "" {
 		if err := s.reconnectWithDataset(ctx, dsConnector, schemaName); err != nil {
-			return nil, fmt.Errorf("failed to reconnect with dataset: %w", err)
+			return nil, nil, fmt.Errorf("failed to reconnect with dataset: %w", err)
 		}
 	}
 
@@ -208,7 +209,8 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 	// This is much faster than SQL-based schema queries
 	if schemaProvider, ok := s.dialect.(SchemaProvider); ok {
 		config.Debug("[%s] Using native schema provider", s.dialect.Name())
-		return schemaProvider.GetSchema(ctx, table)
+		tableSchema, err := schemaProvider.GetSchema(ctx, table)
+		return tableSchema, nil, err
 	}
 
 	// Fallback to SQL-based schema fetching
@@ -236,15 +238,25 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 
 	rows, err := s.db.QueryContext(ctx, schemaQuery, schemaArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query schema: %w", err)
+		return nil, nil, fmt.Errorf("failed to query schema: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
+	exprProvider, _ := s.dialect.(ColumnExpressionProvider)
+	var columnExprs map[string]string
 	var columns []schema.Column
 	for rows.Next() {
 		var columnName, dataType, isNullable string
 		if err := rows.Scan(&columnName, &dataType, &isNullable); err != nil {
-			return nil, fmt.Errorf("failed to scan row: %w", err)
+			return nil, nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+		if exprProvider != nil {
+			if expr := exprProvider.ColumnExpression(dataType, s.dialect.QuoteIdentifier(columnName)); expr != "" {
+				if columnExprs == nil {
+					columnExprs = map[string]string{}
+				}
+				columnExprs[CopyString(columnName)] = expr
+			}
 		}
 
 		// Use dialect's type mapper
@@ -261,11 +273,11 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
 	if len(columns) == 0 {
-		return nil, fmt.Errorf("table %s not found or has no columns", table)
+		return nil, nil, fmt.Errorf("table %s not found or has no columns", table)
 	}
 
 	// Get primary keys using dialect's SQL template
@@ -287,7 +299,7 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 		Schema:      schemaName,
 		Columns:     columns,
 		PrimaryKeys: primaryKeys,
-	}, nil
+	}, columnExprs, nil
 }
 
 // parseTableName resolves the table identifier into (catalog, schema, table).
@@ -467,7 +479,7 @@ func (s *ADBCSource) customQueryColumns(colTypes []*sql.ColumnType) []schema.Col
 	return columns
 }
 
-func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema.TableSchema, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema.TableSchema, columnExprs map[string]string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	startTotal := time.Now()
 	config.Debug("[%s] Starting read from %s", s.dialect.Name(), table)
 
@@ -492,7 +504,7 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 			}
 			config.Debug("[%s] Storage API failed (%v), falling back to SQL-based reading", s.dialect.Name(), err)
 		}
-		return s.readQuery(ctx, table, columns, arrowSchema, batchSize, startTotal, readOpts)
+		return s.readQuery(ctx, table, columns, columnExprs, arrowSchema, batchSize, startTotal, readOpts)
 	}
 	discover := func(ctx context.Context, readOpts source.ReadOptions) (source.ExtractPartitionBounds, error) {
 		return s.discoverExtractPartitionBounds(ctx, table, readOpts)
@@ -501,13 +513,13 @@ func (s *ADBCSource) read(ctx context.Context, table string, tableSchema *schema
 	return source.ReadExtractPartitions(ctx, opts, tableSchema, read, discover)
 }
 
-func (s *ADBCSource) readQuery(ctx context.Context, table string, columns []schema.Column, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *ADBCSource) readQuery(ctx context.Context, table string, columns []schema.Column, columnExprs map[string]string, arrowSchema *arrow.Schema, batchSize int, startTotal time.Time, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	results := make(chan source.RecordBatchResult, source.RecordBatchBufferSize(opts, 8))
 
 	go func() {
 		defer close(results)
 
-		query := BuildSelectQuery(table, columns, opts, s.dialect.QuoteIdentifier)
+		query := BuildSelectQueryWithExpressions(table, columns, columnExprs, opts, s.dialect.QuoteIdentifier)
 		// Annotate the source read so a warehouse source (e.g. BigQuery) attributes
 		// the extract query's cost. Prepend keeps a leading comment (BigQuery,
 		// DuckDB); Snowflake strips it, so a Snowflake source would need a QUERY_TAG
