@@ -1206,6 +1206,47 @@ func TestWrite_BasicData(t *testing.T) {
 	}
 }
 
+func TestWrite_BatchLargerThanVectorSizeIntoCastColumn(t *testing.T) {
+	const rows = 3*2048 + 7
+	for name, env := range map[string][2]string{
+		"single":     {"INGESTR_DUCKDB_INGEST_CONNS", "1"},
+		"parallel":   {"INGESTR_DUCKDB_INGEST_CONNS", "4"},
+		"checkpoint": {"INGESTR_DUCKDB_CHECKPOINT_ROWS", "-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(env[0], env[1])
+			ctx := context.Background()
+			dest, path := connectTestDuckDB(t, ctx)
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table:     "cast_table",
+				Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}},
+				DropFirst: true,
+			}))
+
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			builder := array.NewInt64Builder(mem)
+			for i := range int64(rows) {
+				builder.Append(i)
+			}
+			values := builder.NewArray()
+			builder.Release()
+			arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+			records := make(chan source.RecordBatchResult, 1)
+			records <- source.RecordBatchResult{Batch: array.NewRecordBatch(arrowSchema, []arrow.Array{values}, rows)}
+			values.Release()
+			close(records)
+
+			require.NoError(t, dest.Write(ctx, records, destination.WriteOptions{Table: "cast_table"}))
+			mem.AssertSize(t, 0)
+
+			var count, sum int64
+			require.NoError(t, openDuckDB(t, ctx, path).QueryRowContext(ctx, "SELECT COUNT(*), SUM(id)::BIGINT FROM cast_table").Scan(&count, &sum))
+			assert.Equal(t, int64(rows), count)
+			assert.Equal(t, int64(rows*(rows-1)/2), sum)
+		})
+	}
+}
+
 func TestIngestConnections_UsePreparedTableConstraints(t *testing.T) {
 	t.Setenv("INGESTR_DUCKDB_INGEST_CONNS", "4")
 

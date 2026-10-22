@@ -407,8 +407,11 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 			continue
 		}
 
-		// Use standard Arrow RecordReader for each batch
-		reader, readerErr := array.NewRecordReader(res.Batch.Schema(), []arrow.RecordBatch{res.Batch})
+		slices := vectorSizedSlices(res.Batch)
+		reader, readerErr := array.NewRecordReader(res.Batch.Schema(), slices)
+		for _, slice := range slices {
+			slice.Release()
+		}
 		if readerErr != nil {
 			res.Batch.Release()
 			return fmt.Errorf("failed to create record reader: %w", readerErr)
@@ -584,12 +587,27 @@ func nextNonEmptyRecord(ctx context.Context, records <-chan source.RecordBatchRe
 	}
 }
 
+// duckDBVectorSize is DuckDB's STANDARD_VECTOR_SIZE. Appending a larger Arrow
+// batch into a column that needs a cast fails ("Vector::SetSize out of range").
+const duckDBVectorSize = 2048
+
+func vectorSizedSlices(batch arrow.RecordBatch) []arrow.RecordBatch {
+	n := batch.NumRows()
+	slices := make([]arrow.RecordBatch, 0, (n+duckDBVectorSize-1)/duckDBVectorSize)
+	for off := int64(0); off < n; off += duckDBVectorSize {
+		slices = append(slices, batch.NewSlice(off, min(off+duckDBVectorSize, n)))
+	}
+	return slices
+}
+
 type channelRecordReader struct {
 	refCount atomic.Int64
 	ctx      context.Context
 	records  <-chan source.RecordBatchResult
 	schema   *arrow.Schema
 	first    arrow.RecordBatch
+	pending  arrow.RecordBatch
+	offset   int64
 	current  arrow.RecordBatch
 	err      error
 	rows     atomic.Int64
@@ -618,6 +636,10 @@ func (r *channelRecordReader) Release() {
 		r.current.Release()
 		r.current = nil
 	}
+	if r.pending != nil {
+		r.pending.Release()
+		r.pending = nil
+	}
 	if r.first != nil {
 		r.first.Release()
 		r.first = nil
@@ -633,13 +655,30 @@ func (r *channelRecordReader) Next() bool {
 		r.current.Release()
 		r.current = nil
 	}
+	if r.pending == nil || r.offset >= r.pending.NumRows() {
+		if r.pending != nil {
+			r.pending.Release()
+			r.pending = nil
+		}
+		if !r.fetch() {
+			return false
+		}
+	}
+	end := min(r.offset+duckDBVectorSize, r.pending.NumRows())
+	r.current = r.pending.NewSlice(r.offset, end)
+	r.offset = end
+	r.rows.Add(r.current.NumRows())
+	return true
+}
+
+func (r *channelRecordReader) fetch() bool {
 	if r.err != nil {
 		return false
 	}
+	r.offset = 0
 	if r.first != nil {
-		r.current = r.first
+		r.pending = r.first
 		r.first = nil
-		r.rows.Add(r.current.NumRows())
 		return true
 	}
 
@@ -677,8 +716,7 @@ func (r *channelRecordReader) Next() bool {
 				res.Batch.Release()
 				batch = rewrapped
 			}
-			r.current = batch
-			r.rows.Add(r.current.NumRows())
+			r.pending = batch
 			return true
 		}
 	}
