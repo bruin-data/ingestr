@@ -64,6 +64,13 @@ func (s *ADBCSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping %s: %w", s.dialect.Name(), err)
 	}
 
+	if initializer, ok := s.dialect.(ConnectionInitializer); ok {
+		if err := initializer.InitConnection(ctx, db); err != nil {
+			_ = db.Close()
+			return err
+		}
+	}
+
 	s.db = db
 	s.uri = uri
 
@@ -236,6 +243,7 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 		schemaArgs = []any{schemaName, tableName}
 	}
 
+	schemaQuery, schemaArgs = s.rewriteQueryWithArgs(schemaQuery, schemaArgs)
 	rows, err := s.db.QueryContext(ctx, schemaQuery, schemaArgs...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to query schema: %w", err)
@@ -312,6 +320,20 @@ func (s *ADBCSource) parseTableName(table string) (catalog, schemaName, tableNam
 	return "", schemaName, tableName
 }
 
+func (s *ADBCSource) rewriteQuery(query string) string {
+	if r, ok := s.dialect.(QueryRewriter); ok {
+		return r.RewriteQuery(query)
+	}
+	return query
+}
+
+func (s *ADBCSource) rewriteQueryWithArgs(query string, args []any) (string, []any) {
+	if r, ok := s.dialect.(QueryRewriter); ok {
+		return r.RewriteQuery(query, args...), nil
+	}
+	return query, args
+}
+
 func isDatasetAware(d Dialect) bool {
 	_, ok := d.(DatasetAwareDialect)
 	return ok
@@ -341,6 +363,7 @@ func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, catalog, schemaName, 
 		return nil
 	}
 
+	pkSQL, args = s.rewriteQueryWithArgs(pkSQL, args)
 	rows, err := s.db.QueryContext(ctx, pkSQL, args...)
 	if err != nil {
 		config.Debug("[%s] Failed to query primary keys: %v", s.dialect.Name(), err)
@@ -405,7 +428,7 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 		}
 
 		config.Debug("[%s] Executing custom query: %s", s.dialect.Name(), query)
-		rows, err := runner.QueryContext(ctx, query)
+		rows, err := runner.QueryContext(ctx, s.rewriteQuery(query))
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
@@ -439,7 +462,7 @@ func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts 
 
 func (s *ADBCSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
 	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, s.rewriteQuery(query))
 	if err != nil {
 		return nil, fmt.Errorf("failed to inspect custom query schema: %w", err)
 	}
@@ -456,7 +479,7 @@ func (s *ADBCSource) discoverCustomQueryExtractPartitionBounds(ctx context.Conte
 	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
-	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+	if err := s.db.QueryRowContext(ctx, s.rewriteQuery(query)).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover custom query extract partition bounds: %w", err)
 	}
 	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
@@ -528,7 +551,7 @@ func (s *ADBCSource) readQuery(ctx context.Context, table string, columns []sche
 		config.Debug("[%s] Executing query: %s", s.dialect.Name(), query)
 
 		startQuery := time.Now()
-		rows, err := s.db.QueryContext(ctx, query)
+		rows, err := s.db.QueryContext(ctx, s.rewriteQuery(query))
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", err)}
 			return
@@ -572,7 +595,7 @@ func (s *ADBCSource) discoverExtractPartitionBounds(ctx context.Context, table s
 
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
-	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+	if err := s.db.QueryRowContext(ctx, s.rewriteQuery(query)).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
 	}
 	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)

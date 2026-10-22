@@ -2,7 +2,7 @@
 
 DuckDB is an in-memory database designed to be fast and reliable.
 
-ingestr supports DuckDB as both a source and a destination, and also supports reading from / writing to **DuckLake** lakehouse tables backed by DuckDB.
+ingestr supports DuckDB as both a source and a destination, and also supports reading from / writing to **DuckLake** lakehouse tables backed by DuckDB and remote DuckDB servers over the **Quack** protocol.
 
 ## URI format
 The URI format for DuckDB is as follows:
@@ -15,6 +15,40 @@ URI parameters:
 - `database-file`: the path to the DuckDB database file
 
 The same URI structure can be used both for sources and destinations.
+
+---
+
+## Quack (DuckDB client-server)
+
+[Quack](https://duckdb.org/quack/) is DuckDB's client-server protocol: a DuckDB instance started with `quack_serve` accepts connections from other DuckDB clients over HTTP. ingestr can read from and write to such a server with the `quack://` URI scheme:
+
+```plaintext
+quack://<host>[:<port>]?token=<token>
+```
+
+URI parameters:
+- `host`: the host the Quack server listens on
+- `port` (optional): the server port, defaults to `9494`
+- `token`: the authentication token set on the server with `quack_serve(..., token = '...')` (or the one it generated)
+- `disable_ssl` (optional): `true` to use plain HTTP for a non-local host, `false` to force HTTPS. Local hosts (`localhost`, `127.0.0.1`, `::1`) default to plain HTTP, all other hosts to HTTPS.
+
+Start a server from any DuckDB session:
+
+```sql
+CALL quack_serve('quack:localhost', token = 'my_secret_token');
+```
+
+Then use it as a source or a destination:
+
+```bash
+ingestr ingest \
+  --source-uri "postgresql://user:pass@localhost:5432/db" \
+  --source-table "public.users" \
+  --dest-uri "quack://localhost?token=my_secret_token" \
+  --dest-table "analytics.users"
+```
+
+Quack needs DuckDB 1.5.3 or newer. ingestr installs the DuckDB driver automatically on first use; if an older driver is already installed, upgrade it with `dbc install duckdb`. Quack is still in beta in DuckDB, and the protocol changes between DuckDB releases: the server and ingestr's DuckDB driver must run the same release (a 1.5.x client can't talk to a 2.x server and vice versa). Install a matching driver with `dbc install duckdb=<server version>`.
 
 ---
 

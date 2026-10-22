@@ -501,6 +501,20 @@ func multiTableDestinationCases() []multiTableDestCase {
 			sqlBackend: postgresBackend(),
 		},
 		{
+			name: "quack",
+			setup: func(t *testing.T, _ context.Context) (string, string, func()) {
+				uri, server := sharedQuackServer(t)
+				cleanup := func() {
+					for _, table := range []string{"users", "orders", "products"} {
+						_, _ = server.Exec("DROP TABLE IF EXISTS main." + table)
+					}
+				}
+				cleanup()
+				return uri, "main", func() { cleanup(); _ = server.Close() }
+			},
+			sqlBackend: quackBackend(),
+		},
+		{
 			name: "duckdb",
 			setup: func(t *testing.T, _ context.Context) (string, string, func()) {
 				// Each test gets its own DuckDB file using t.TempDir for cross-platform compatibility

@@ -399,6 +399,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("primer", "Primer", []string{"primer"}, true, false),
 		genericURIConnector("pulsar", "Apache Pulsar", []string{"pulsar", "pulsar+ssl"}, true, false),
 		genericURIConnector("pubsub", "Pub/Sub", []string{"pubsub"}, true, false),
+		genericURIConnector("quack", "DuckDB Quack", []string{"quack"}, true, true),
 		genericURIConnector("quickbooks", "QuickBooks", []string{"quickbooks"}, true, false),
 		genericURIConnector("rabbitmq", "RabbitMQ", []string{"amqp", "amqps"}, true, false),
 		genericURIConnector("redditads", "Reddit Ads", []string{"redditads"}, true, false),

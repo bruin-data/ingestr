@@ -14,4 +14,8 @@ func init() {
 		[]string{"ducklake"},
 		func() interface{} { return adbc.NewADBCSource(NewDuckLakeDialect()) },
 	)
+	registry.RegisterSource(
+		[]string{"quack"},
+		func() interface{} { return adbc.NewADBCSource(NewQuackDialect()) },
+	)
 }

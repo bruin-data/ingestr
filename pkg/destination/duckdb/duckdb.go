@@ -60,6 +60,9 @@ type DuckDBDestination struct {
 
 	// onStagingConsumed releases per-staging-table state after a committed swap.
 	onStagingConsumed func(stagingTable string)
+
+	// rewriteSQL, when set, rewrites every statement before it runs (Quack ships them to the server).
+	rewriteSQL func(query string, args []any) string
 }
 
 type duckDBManagedCDCRunLease struct {
@@ -1283,7 +1286,7 @@ func (d *DuckDBDestination) stagingPrimaryKeysUniqueLocked(ctx context.Context, 
 	}
 	defer func() { _ = stmt.Close() }()
 
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		config.LogFailedQuery(query, err)
 		return false, err
 	}
@@ -1349,7 +1352,7 @@ func (d *DuckDBDestination) tableHasRowsLocked(ctx context.Context, quotedTable 
 	defer func() { _ = stmt.Close() }()
 
 	query := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s LIMIT 1)", quotedTable)
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		config.LogFailedQuery(query, err)
 		return false, err
 	}
@@ -1683,7 +1686,7 @@ func (d *DuckDBDestination) GetMaxCDCLSN(ctx context.Context, table string) (str
 	}
 	defer func() { _ = stmt.Close() }()
 
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		if strings.Contains(err.Error(), "does not exist") ||
 			strings.Contains(err.Error(), "Catalog Error") {
 			return "", nil
@@ -1733,7 +1736,7 @@ func (d *DuckDBDestination) LoadCDCState(ctx context.Context, table, connectorID
 		return nil, err
 	}
 	defer func() { _ = stmt.Close() }()
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") {
 			return nil, nil
 		}
@@ -1807,7 +1810,7 @@ func (d *DuckDBDestination) ClaimCDCTarget(ctx context.Context, claimTable strin
 		return err
 	}
 	defer func() { _ = stmt.Close() }()
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		return err
 	}
 	reader, _, err := stmt.ExecuteQuery(ctx)
@@ -1899,7 +1902,7 @@ func (d *DuckDBDestination) ClaimAndPrepareEmptyCDCTarget(
 		return "", err
 	}
 	defer func() { _ = stmt.Close() }()
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		return "", err
 	}
 	reader, _, err := stmt.ExecuteQuery(ctx)
@@ -2011,7 +2014,7 @@ func (d *DuckDBDestination) duckDBTargetMetadataLocked(ctx context.Context, tabl
 		return duckDBTargetMetadata{}, false, err
 	}
 	defer func() { _ = stmt.Close() }()
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		return duckDBTargetMetadata{}, false, err
 	}
 	reader, _, err := stmt.ExecuteQuery(ctx)
@@ -2110,7 +2113,7 @@ func (d *DuckDBDestination) currentCatalog(ctx context.Context) (string, error) 
 		return "", err
 	}
 	defer func() { _ = stmt.Close() }()
-	if err := stmt.SetSqlQuery("SELECT current_database()"); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL("SELECT current_database()")); err != nil {
 		return "", err
 	}
 	reader, _, err := stmt.ExecuteQuery(ctx)
@@ -2140,7 +2143,7 @@ func (d *DuckDBDestination) LoadCDCStateFence(ctx context.Context, table, connec
 		return destination.CDCStateFence{}, err
 	}
 	defer func() { _ = stmt.Close() }()
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		if strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "Catalog Error") {
 			return destination.CDCStateFence{}, nil
 		}
@@ -2206,7 +2209,7 @@ func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table stri
 	}
 	defer func() { _ = stmt.Close() }()
 
-	if err := stmt.SetSqlQuery(query); err != nil {
+	if err := stmt.SetSqlQuery(d.statementSQL(query)); err != nil {
 		if strings.Contains(err.Error(), "does not exist") ||
 			strings.Contains(err.Error(), "Catalog Error") {
 			return nil, nil
@@ -2533,7 +2536,21 @@ func buildChangeConditions(columns []string, targetAlias, sourceAlias string) st
 	return strings.Join(conditions, " OR ")
 }
 
+func (d *DuckDBDestination) statementSQL(query string) string {
+	if d.rewriteSQL == nil {
+		return query
+	}
+	return d.rewriteSQL(query, nil)
+}
+
 func (d *DuckDBDestination) exec(ctx context.Context, sql string, args ...interface{}) error {
+	if d.rewriteSQL != nil {
+		sql, args = d.rewriteSQL(sql, args), nil
+	}
+	return d.execLocal(ctx, sql, args...)
+}
+
+func (d *DuckDBDestination) execLocal(ctx context.Context, sql string, args ...interface{}) error {
 	if d.conn == nil {
 		return fmt.Errorf("DuckDB destination not connected")
 	}
