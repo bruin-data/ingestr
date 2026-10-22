@@ -14,8 +14,15 @@ import (
 
 	"github.com/apache/arrow-adbc/go/adbc/drivermgr"
 	"github.com/apache/arrow-adbc/go/adbc/sqldriver"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
+	dstduckdb "github.com/bruin-data/ingestr/pkg/destination/duckdb"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 	srcduckdb "github.com/bruin-data/ingestr/pkg/source/duckdb"
 	"github.com/stretchr/testify/require"
 )
@@ -136,4 +143,85 @@ func TestDuckDBQuackRoundTrip(t *testing.T) {
 	require.Equal(t, "[a]", tags)
 	types := readDuckDBColumnTypes(t, destPath, "main.events")
 	require.Equal(t, "DECIMAL(10,2)", types["amount"])
+}
+
+// Transactions and the UTC session pin in the Quack destination are separate
+// query() calls, so they rely on the server keeping one session per client.
+func TestDuckDBQuackSessionSpansQueryCalls(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	uri, server := sharedQuackServer(t)
+	defer func() { _ = server.Close() }()
+	cfg, err := srcduckdb.ParseQuackURI(uri)
+	require.NoError(t, err)
+	table := "sess_" + uniqueSuffix()
+
+	client, err := sql.Open("adbc_generic", "driver=duckdb;path=:memory:")
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	client.SetMaxOpenConns(1)
+	for _, stmt := range srcduckdb.QuackBootstrapStatements(cfg, srcduckdb.QuackAttachAlias) {
+		_, err := client.Exec(stmt)
+		require.NoError(t, err)
+	}
+	remote := func(query string) *sql.Row {
+		return client.QueryRow(srcduckdb.QuackRemoteSQL(srcduckdb.QuackAttachAlias, query))
+	}
+	exec := func(query string) {
+		t.Helper()
+		rows, err := client.Query(srcduckdb.QuackRemoteSQL(srcduckdb.QuackAttachAlias, query))
+		require.NoError(t, err)
+		require.NoError(t, rows.Close())
+	}
+
+	exec("SET TimeZone='America/New_York'")
+	var tz string
+	require.NoError(t, remote("SELECT current_setting('TimeZone')").Scan(&tz))
+	require.Equal(t, "America/New_York", tz)
+
+	exec("CREATE TABLE " + table + " (i INTEGER)")
+	exec("BEGIN")
+	exec("INSERT INTO " + table + " VALUES (1)")
+	exec("ROLLBACK")
+	var count int
+	require.NoError(t, remote("SELECT count(*) FROM "+table).Scan(&count))
+	require.Equal(t, 0, count)
+}
+
+func TestDuckDBQuackUploadsInChunks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	t.Setenv("INGESTR_DUCKDB_CHECKPOINT_ROWS", "1500")
+	ctx := context.Background()
+	uri, server := sharedQuackServer(t)
+	defer func() { _ = server.Close() }()
+	target := "chunk_" + uniqueSuffix() + ".events"
+
+	dest := dstduckdb.NewQuackDestination()
+	require.NoError(t, dest.Connect(ctx, uri))
+	defer func() { _ = dest.Close(ctx) }()
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}}}
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{Table: target, Schema: tableSchema, DropFirst: true}))
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	records := make(chan source.RecordBatchResult, 5)
+	for b := range int64(5) {
+		builder := array.NewInt64Builder(memory.DefaultAllocator)
+		for i := range int64(1000) {
+			builder.Append(b*1000 + i)
+		}
+		values := builder.NewArray()
+		records <- source.RecordBatchResult{Batch: array.NewRecordBatch(arrowSchema, []arrow.Array{values}, 1000)}
+		values.Release()
+		builder.Release()
+	}
+	close(records)
+	require.NoError(t, dest.Write(ctx, records, destination.WriteOptions{Table: target}))
+
+	var count, distinct int
+	require.NoError(t, server.QueryRow("SELECT count(*), count(DISTINCT id) FROM "+target).Scan(&count, &distinct))
+	require.Equal(t, 5000, count)
+	require.Equal(t, 5000, distinct)
 }

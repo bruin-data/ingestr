@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -100,6 +101,16 @@ func WrapQuackBootstrapError(cfg *QuackConfig, stmt string, err error) error {
 	return fmt.Errorf("quack: %s failed: %w", stmt, err)
 }
 
+var quackStmtSeq atomic.Uint64
+
+// QuackRedactedStatement masks the token in a bootstrap statement so it can be logged.
+func QuackRedactedStatement(cfg *QuackConfig, stmt string) string {
+	if cfg.Token == "" {
+		return stmt
+	}
+	return strings.ReplaceAll(stmt, quoteSQLStringLiteral(cfg.Token), "'***'")
+}
+
 // QuackRemoteSQL wraps a statement so it runs on the Quack server. An attached
 // Quack catalog only supports scans, CREATE and INSERT, so everything else must
 // be shipped verbatim. Arguments are inlined through a server-side PREPARE.
@@ -109,9 +120,10 @@ func QuackRemoteSQL(alias, query string, args ...any) string {
 		for i, a := range args {
 			literals[i] = QuackSQLLiteral(a)
 		}
-		query = "PREPARE ingestr_quack_stmt AS " + query +
-			";\nEXECUTE ingestr_quack_stmt(" + strings.Join(literals, ", ") + ")" +
-			";\nDEALLOCATE ingestr_quack_stmt"
+		name := "ingestr_quack_stmt_" + strconv.FormatUint(quackStmtSeq.Add(1), 10)
+		query = "PREPARE " + name + " AS " + query +
+			";\nEXECUTE " + name + "(" + strings.Join(literals, ", ") + ")" +
+			";\nDEALLOCATE " + name
 	}
 	return "FROM " + alias + ".query(" + quoteSQLStringLiteral(query) + ")"
 }

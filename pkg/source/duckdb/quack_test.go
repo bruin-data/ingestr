@@ -2,6 +2,7 @@ package duckdb
 
 import (
 	"errors"
+	"regexp"
 	"testing"
 	"time"
 
@@ -41,11 +42,24 @@ func TestQuackRemoteSQL(t *testing.T) {
 		QuackRemoteSQL(QuackAttachAlias, `SELECT * FROM "a"."it's"`))
 
 	ts := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.FixedZone("x", 3600))
+	stmtName := regexp.MustCompile(`ingestr_quack_stmt_\d+`)
+	first := QuackRemoteSQL(QuackAttachAlias, "DELETE FROM t WHERE ts >= ? AND name = ?", ts, "o'k")
 	assert.Equal(t,
-		"FROM ingestr_quack.query('PREPARE ingestr_quack_stmt AS DELETE FROM t WHERE ts >= ? AND name = ?;\n"+
-			"EXECUTE ingestr_quack_stmt(TIMESTAMP ''2026-01-02 02:04:05.000006'', ''o''''k'');\n"+
-			"DEALLOCATE ingestr_quack_stmt')",
-		QuackRemoteSQL(QuackAttachAlias, "DELETE FROM t WHERE ts >= ? AND name = ?", ts, "o'k"))
+		"FROM ingestr_quack.query('PREPARE ingestr_quack_stmt_N AS DELETE FROM t WHERE ts >= ? AND name = ?;\n"+
+			"EXECUTE ingestr_quack_stmt_N(TIMESTAMP ''2026-01-02 02:04:05.000006'', ''o''''k'');\n"+
+			"DEALLOCATE ingestr_quack_stmt_N')",
+		stmtName.ReplaceAllString(first, "ingestr_quack_stmt_N"))
+	second := QuackRemoteSQL(QuackAttachAlias, "SELECT ?", 1)
+	assert.NotEqual(t, stmtName.FindString(first), stmtName.FindString(second))
+}
+
+func TestQuackRedactedStatement(t *testing.T) {
+	t.Parallel()
+
+	cfg := &QuackConfig{Host: "localhost", Token: "s3cr'et"}
+	redacted := QuackRedactedStatement(cfg, QuackAttachStatement(cfg, QuackAttachAlias))
+	assert.NotContains(t, redacted, "s3cr")
+	assert.Contains(t, redacted, "TOKEN '***'")
 }
 
 func TestQuackSQLLiteral(t *testing.T) {

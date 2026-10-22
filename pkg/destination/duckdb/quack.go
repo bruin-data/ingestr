@@ -3,6 +3,8 @@ package duckdb
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +55,7 @@ func (d *QuackDestination) Connect(ctx context.Context, uri string) error {
 			config.Debug("[QUACK] %s", stmt)
 		}
 		if err := d.execLocal(ctx, stmt); err != nil {
+			config.LogFailedQuery(srcduckdb.QuackRedactedStatement(cfg, stmt), err)
 			_ = d.Close(ctx)
 			return srcduckdb.WrapQuackBootstrapError(cfg, stmt, err)
 		}
@@ -92,7 +95,23 @@ func (d *QuackDestination) WriteParallel(ctx context.Context, records <-chan sou
 	return d.writeViaMemoryStage(ctx, records, opts)
 }
 
+// quackFlushRows bounds how many rows are buffered locally before each upload;
+// INGESTR_DUCKDB_CHECKPOINT_ROWS overrides it (-1 = upload every batch).
+func quackFlushRows() int64 {
+	if n, err := strconv.ParseInt(os.Getenv("INGESTR_DUCKDB_CHECKPOINT_ROWS"), 10, 64); err == nil && n != 0 {
+		return max(n, 1)
+	}
+	return 1_000_000
+}
+
+func (d *QuackDestination) execLocalLocked(ctx context.Context, sql string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.execLocal(ctx, sql)
+}
+
 func (d *QuackDestination) writeViaMemoryStage(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	defer drainAndReleaseDuckDBRecords(records)
 	if err := checkQuackTable(opts.Table); err != nil {
 		return err
 	}
@@ -105,24 +124,80 @@ func (d *QuackDestination) writeViaMemoryStage(ctx context.Context, records <-ch
 	memQualified := "memory.main." + quoteIdentifier(memName)
 
 	// The target was created through query(), so refresh the client's catalog cache first.
-	if err := d.execLocal(ctx, "FROM quack_clear_cache()"); err != nil {
+	if err := d.execLocalLocked(ctx, "FROM quack_clear_cache()"); err != nil {
 		return fmt.Errorf("quack: clear catalog cache: %w", err)
 	}
-	if err := d.execLocal(ctx, fmt.Sprintf(
+	if err := d.execLocalLocked(ctx, fmt.Sprintf(
 		"CREATE OR REPLACE TABLE %s AS SELECT * FROM %s WHERE 1=0", memQualified, remoteTarget,
 	)); err != nil {
 		return fmt.Errorf("quack: create in-memory stage: %w", err)
 	}
-	defer func() { _ = d.execLocal(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+memQualified) }()
+	defer func() { _ = d.execLocalLocked(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+memQualified) }()
 
 	memOpts := opts
 	memOpts.Table = "main." + quoteIdentifier(memName)
-	if err := d.DuckDBDestination.Write(ctx, records, memOpts); err != nil {
-		return fmt.Errorf("quack: load in-memory stage: %w", err)
+	flushRows := quackFlushRows()
+	for {
+		rows, exhausted, err := d.loadStageChunk(ctx, records, memOpts, flushRows)
+		if err != nil {
+			return fmt.Errorf("quack: load in-memory stage: %w", err)
+		}
+		if rows > 0 {
+			if err := d.execLocalLocked(ctx, fmt.Sprintf("INSERT INTO %s SELECT * FROM %s", remoteTarget, memQualified)); err != nil {
+				return fmt.Errorf("quack: copy stage to server: %w", err)
+			}
+			if err := d.execLocalLocked(ctx, "TRUNCATE "+memQualified); err != nil {
+				return fmt.Errorf("quack: clear in-memory stage: %w", err)
+			}
+		}
+		if exhausted {
+			return nil
+		}
 	}
+}
 
-	if err := d.execLocal(ctx, fmt.Sprintf("INSERT INTO %s SELECT * FROM %s", remoteTarget, memQualified)); err != nil {
-		return fmt.Errorf("quack: copy stage to server: %w", err)
+// loadStageChunk writes up to flushRows rows (whole batches) from records into
+// the in-memory stage and reports whether records is exhausted.
+func (d *QuackDestination) loadStageChunk(ctx context.Context, records <-chan source.RecordBatchResult, memOpts destination.WriteOptions, flushRows int64) (int64, bool, error) {
+	chunkCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	chunk := make(chan source.RecordBatchResult)
+	type fed struct {
+		rows      int64
+		exhausted bool
 	}
-	return nil
+	result := make(chan fed, 1)
+	go func() {
+		defer close(chunk)
+		var f fed
+		defer func() { result <- f }()
+		for f.rows < flushRows {
+			var res source.RecordBatchResult
+			select {
+			case <-chunkCtx.Done():
+				return
+			case r, ok := <-records:
+				if !ok {
+					f.exhausted = true
+					return
+				}
+				res = r
+			}
+			if res.Batch != nil {
+				f.rows += res.Batch.NumRows()
+			}
+			select {
+			case chunk <- res:
+			case <-chunkCtx.Done():
+				if res.Batch != nil {
+					res.Batch.Release()
+				}
+				return
+			}
+		}
+	}()
+	err := d.DuckDBDestination.Write(chunkCtx, chunk, memOpts)
+	cancel()
+	f := <-result
+	return f.rows, f.exhausted, err
 }
