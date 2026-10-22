@@ -11,8 +11,6 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
-	"github.com/bruin-data/ingestr/pkg/schema"
-	"github.com/bruin-data/ingestr/pkg/source/adbc"
 )
 
 const QuackAttachAlias = "ingestr_quack"
@@ -94,6 +92,9 @@ func WrapQuackBootstrapError(cfg *QuackConfig, stmt string, err error) error {
 		if strings.Contains(err.Error(), "Unrecognized storage type") {
 			return fmt.Errorf("quack: failed to attach %s (Quack requires the DuckDB ADBC driver v1.5.3 or newer; upgrade with `dbc install duckdb`): %w", cfg.endpoint(), err)
 		}
+		if msg := err.Error(); strings.Contains(msg, "HTTP 500") || strings.Contains(msg, "Failed to deserialize") {
+			return fmt.Errorf("quack: failed to attach %s (the server may run a different DuckDB version than ingestr's DuckDB driver; Quack needs both on the same release, e.g. install a matching driver with `dbc install duckdb=<server version>`): %w", cfg.endpoint(), err)
+		}
 		return fmt.Errorf("quack: failed to attach %s: %w", cfg.endpoint(), err)
 	}
 	return fmt.Errorf("quack: %s failed: %w", stmt, err)
@@ -156,7 +157,6 @@ func QuackSQLLiteral(v any) string {
 type QuackDialect struct {
 	*Dialect
 	cfg *QuackConfig
-	db  *sql.DB
 }
 
 func NewQuackDialect() *QuackDialect {
@@ -176,7 +176,6 @@ func (d *QuackDialect) BuildConnectionString(uri string) (string, error) {
 }
 
 func (d *QuackDialect) InitConnection(ctx context.Context, db *sql.DB) error {
-	d.db = db
 	for _, stmt := range QuackBootstrapStatements(d.cfg, QuackAttachAlias) {
 		if strings.HasPrefix(stmt, "ATTACH") {
 			config.Debug("[QUACK] ATTACH %s AS %s", d.cfg.endpoint(), QuackAttachAlias)
@@ -194,70 +193,9 @@ func (d *QuackDialect) InitConnection(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// RewriteQuery runs reads on the server: scanning an attached Quack table outside
-// the main schema drops the schema qualifier (DuckDB 1.5.x).
-func (d *QuackDialect) RewriteQuery(query string) string {
-	return QuackRemoteSQL(QuackAttachAlias, query)
-}
-
-// GetSchema runs the metadata queries on the server: the client's
-// information_schema and duckdb_constraints() don't cover attached Quack catalogs.
-func (d *QuackDialect) GetSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	catalog, schemaName, tableName := d.ParseTableNameWithCatalog(table)
-	schemaSQL, pkSQL, args := schemaQuerySQL, primaryKeyQuerySQL, []any{schemaName, tableName}
-	if catalog != "" {
-		schemaSQL, pkSQL, args = schemaQueryForCatalogSQL, primaryKeyQueryForCatalogSQL, []any{catalog, schemaName, tableName}
-	}
-
-	rows, err := d.db.QueryContext(ctx, QuackRemoteSQL(QuackAttachAlias, schemaSQL, args...))
-	if err != nil {
-		return nil, fmt.Errorf("failed to query schema: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var columns []schema.Column
-	for rows.Next() {
-		var columnName, dataType, isNullable string
-		if err := rows.Scan(&columnName, &dataType, &isNullable); err != nil {
-			return nil, fmt.Errorf("failed to scan row: %w", err)
-		}
-		dt, precision, scale, arrayType := d.MapDataType(dataType)
-		columns = append(columns, schema.Column{
-			Name:      adbc.CopyString(columnName),
-			DataType:  dt,
-			Nullable:  isNullable == "YES",
-			Precision: precision,
-			Scale:     scale,
-			ArrayType: arrayType,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
-	}
-	if len(columns) == 0 {
-		return nil, fmt.Errorf("table %s not found or has no columns", table)
-	}
-
-	var primaryKeys []string
-	var rawPK any
-	if err := d.db.QueryRowContext(ctx, QuackRemoteSQL(QuackAttachAlias, pkSQL, args...)).Scan(&rawPK); err != nil {
-		config.Debug("[QUACK] Failed to query primary keys: %v", err)
-	} else {
-		primaryKeys = d.ParsePrimaryKeyResult(adbc.CopyValue(rawPK))
-	}
-	for i := range columns {
-		for _, pk := range primaryKeys {
-			if columns[i].Name == pk {
-				columns[i].IsPrimaryKey = true
-				break
-			}
-		}
-	}
-
-	return &schema.TableSchema{
-		Name:        tableName,
-		Schema:      schemaName,
-		Columns:     columns,
-		PrimaryKeys: primaryKeys,
-	}, nil
+// RewriteQuery runs reads and metadata queries on the server: the client's
+// information_schema doesn't cover attached Quack catalogs, and scanning a table
+// outside the main schema drops the schema qualifier (DuckDB 1.5.x).
+func (d *QuackDialect) RewriteQuery(query string, args ...any) string {
+	return QuackRemoteSQL(QuackAttachAlias, query, args...)
 }

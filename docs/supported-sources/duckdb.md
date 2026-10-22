@@ -48,7 +48,7 @@ ingestr ingest \
   --dest-table "analytics.users"
 ```
 
-Quack needs DuckDB 1.5.3 or newer. ingestr installs the DuckDB driver automatically on first use; if an older driver is already installed, upgrade it with `dbc install duckdb`. Quack is still in beta in DuckDB, so the protocol may change between DuckDB releases.
+Quack needs DuckDB 1.5.3 or newer. ingestr installs the DuckDB driver automatically on first use; if an older driver is already installed, upgrade it with `dbc install duckdb`. Quack is still in beta in DuckDB, and the protocol changes between DuckDB releases: the server and ingestr's DuckDB driver must run the same release (a 1.5.x client can't talk to a 2.x server and vice versa). Install a matching driver with `dbc install duckdb=<server version>`.
 
 ---
 

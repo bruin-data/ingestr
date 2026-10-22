@@ -243,6 +243,7 @@ func (s *ADBCSource) getSchema(ctx context.Context, table string) (*schema.Table
 		schemaArgs = []any{schemaName, tableName}
 	}
 
+	schemaQuery, schemaArgs = s.rewriteQueryWithArgs(schemaQuery, schemaArgs)
 	rows, err := s.db.QueryContext(ctx, schemaQuery, schemaArgs...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to query schema: %w", err)
@@ -326,6 +327,13 @@ func (s *ADBCSource) rewriteQuery(query string) string {
 	return query
 }
 
+func (s *ADBCSource) rewriteQueryWithArgs(query string, args []any) (string, []any) {
+	if r, ok := s.dialect.(QueryRewriter); ok {
+		return r.RewriteQuery(query, args...), nil
+	}
+	return query, args
+}
+
 func isDatasetAware(d Dialect) bool {
 	_, ok := d.(DatasetAwareDialect)
 	return ok
@@ -355,6 +363,7 @@ func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, catalog, schemaName, 
 		return nil
 	}
 
+	pkSQL, args = s.rewriteQueryWithArgs(pkSQL, args)
 	rows, err := s.db.QueryContext(ctx, pkSQL, args...)
 	if err != nil {
 		config.Debug("[%s] Failed to query primary keys: %v", s.dialect.Name(), err)
