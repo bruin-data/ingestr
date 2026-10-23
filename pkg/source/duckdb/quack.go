@@ -36,7 +36,7 @@ func ParseQuackURI(uri string) (*QuackConfig, error) {
 				keys = append(keys, key)
 			}
 			sort.Strings(keys)
-			return nil, fmt.Errorf("unsupported DuckDB URI parameters %v; to connect to a Quack server use duckdb://host:port?quack=true&token=...", keys)
+			return nil, fmt.Errorf("unsupported DuckDB URI parameters %v; to connect to a Quack server use duckdb://host:port?quack=true&token=<token>", keys)
 		}
 		return nil, nil
 	}
@@ -48,7 +48,7 @@ func ParseQuackURI(uri string) (*QuackConfig, error) {
 
 	cfg := &QuackConfig{Host: u.Hostname(), Port: u.Port(), Token: q.Get("token")}
 	if cfg.Host == "" {
-		return nil, fmt.Errorf("quack: URI must include the server host, e.g. duckdb://localhost:9494?quack=true&token=...")
+		return nil, fmt.Errorf("quack: URI must include the server host, e.g. duckdb://localhost:9494?quack=true&token=<token>")
 	}
 	if u.Path != "" && u.Path != "/" {
 		return nil, fmt.Errorf("quack: URI must not include a database path")
