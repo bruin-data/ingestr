@@ -135,12 +135,6 @@ type ColumnExpressionProvider interface {
 	ColumnExpression(nativeType, quotedColumn string) string
 }
 
-// QueryRewriter is an optional interface for dialects that rewrite every read
-// query before it runs (e.g. Quack ships queries to the remote server).
-type QueryRewriter interface {
-	RewriteQuery(query string, args ...any) string
-}
-
 // PrimaryKeyEnforcementProvider identifies dialects whose detected primary-key
 // constraints enforce uniqueness.
 type PrimaryKeyEnforcementProvider interface {
@@ -165,12 +159,6 @@ type ConnectionAware interface {
 	// SetConnection provides the dialect with access to the database connection.
 	// This is called after successful connection in ADBCSource.Connect().
 	SetConnection(db *sql.DB)
-}
-
-// ConnectionInitializer is an optional interface for dialects that run setup
-// statements after connecting; an error fails Connect.
-type ConnectionInitializer interface {
-	InitConnection(ctx context.Context, db *sql.DB) error
 }
 
 // URIAware is an optional interface for dialects that need access to the
