@@ -874,7 +874,7 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 
 	dedupOrderBy := "(SELECT NULL)"
 	if incrementalKey != "" {
-		dedupOrderBy = quoteIdentifier(incrementalKey) + " DESC"
+		dedupOrderBy = quoteIdentifier(incrementalKey) + " DESC NULLS LAST"
 	}
 
 	var mergeSQL strings.Builder

@@ -7,7 +7,7 @@ import (
 
 // DedupStagingSelect builds a SELECT over the staging table that keeps a single
 // row per primary key. When quotedOrderByCol is non-empty, ROW_NUMBER orders by
-// it DESC so the latest row per key wins (e.g. the incremental key); otherwise
+// it DESC with NULLs last so the greatest non-NULL value per key wins; otherwise
 // it falls back to a no-op order for engines that require an ORDER BY inside
 // ROW_NUMBER. quotedColumns and quotedPrimaryKeys are already dialect-quoted,
 // comma-joined lists, and stagingExpr is the quoted staging table reference.
@@ -19,7 +19,8 @@ func DedupStagingSelect(quotedColumns, quotedPrimaryKeys, stagingExpr, quotedOrd
 
 	orderBy := "(SELECT NULL)"
 	if quotedOrderByCol != "" {
-		orderBy = quotedOrderByCol + " DESC"
+		// CASE works on engines without NULLS LAST syntax (e.g. MySQL, MSSQL).
+		orderBy = fmt.Sprintf("CASE WHEN %s IS NULL THEN 1 ELSE 0 END ASC, %s DESC", quotedOrderByCol, quotedOrderByCol)
 	}
 
 	// Avoid shadowing a source column, including on case-insensitive engines.
