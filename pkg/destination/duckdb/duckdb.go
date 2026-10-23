@@ -38,6 +38,9 @@ type DuckDBDestination struct {
 	catalog  string
 	mu       sync.Mutex
 
+	// quack is set when the URI points at a remote DuckDB (Quack) server.
+	quack *attachedCatalog
+
 	memoryLeaseMu   sync.Mutex
 	memoryLeaseHeld bool
 
@@ -76,6 +79,9 @@ func NewDuckDBDestination() *DuckDBDestination {
 func (d *DuckDBDestination) AcquireManagedCDCRunLease(_ context.Context, connectorID string) (source.ConnectorLease, error) {
 	if connectorID == "" {
 		return nil, fmt.Errorf("managed CDC connector ID is empty")
+	}
+	if d.quack != nil {
+		return nil, fmt.Errorf("quack does not support local managed CDC run leases")
 	}
 	if strings.HasPrefix(d.filePath, "md:") {
 		return nil, fmt.Errorf("MotherDuck does not support local managed CDC run leases")
@@ -158,6 +164,15 @@ func (d *DuckDBDestination) ReplaceStagingPolicy() destination.ReplaceStagingPol
 }
 
 func (d *DuckDBDestination) Connect(ctx context.Context, uri string) error {
+	quack, err := srcduckdb.ParseQuackURI(uri)
+	if err != nil {
+		return err
+	}
+	if quack != nil {
+		d.quack = &attachedCatalog{name: "quack", alias: srcduckdb.QuackAlias}
+		return d.connectAttached(ctx, "quack", quack.AttachStatements(), quack.AttachError)
+	}
+
 	path, err := parseDuckDBPath(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse DuckDB URI: %w", err)
@@ -346,10 +361,16 @@ func (d *DuckDBDestination) ensureSchemaExistsLocked(ctx context.Context, tn tab
 }
 
 func (d *DuckDBDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if d.quack != nil {
+		return d.quack.writeViaMemoryStage(ctx, d, records, opts)
+	}
 	return d.writeViaADBCIngest(ctx, records, opts)
 }
 
 func (d *DuckDBDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if d.quack != nil {
+		return d.quack.writeViaMemoryStage(ctx, d, records, opts)
+	}
 	return d.writeViaADBCIngest(ctx, records, opts)
 }
 
@@ -2536,6 +2557,13 @@ func buildChangeConditions(columns []string, targetAlias, sourceAlias string) st
 func (d *DuckDBDestination) exec(ctx context.Context, sql string, args ...interface{}) error {
 	if d.conn == nil {
 		return fmt.Errorf("DuckDB destination not connected")
+	}
+	if d.quack != nil && len(args) > 0 {
+		inlined, err := inlineQuackArgs(sql, args)
+		if err != nil {
+			return err
+		}
+		sql, args = inlined, nil
 	}
 
 	stmt, err := d.conn.NewStatement()
