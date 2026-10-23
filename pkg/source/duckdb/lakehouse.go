@@ -1,6 +1,7 @@
 package duckdb
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -469,7 +470,7 @@ func (d *DuckLakeDialect) SetConnection(db *sql.DB) {
 		return
 	}
 
-	if err := RunAttachStatements(db, "DUCKLAKE", stmts, d.cfg.AttachError); err != nil {
+	if err := RunAttachStatements(context.Background(), db, "DUCKLAKE", stmts, d.cfg.AttachError); err != nil {
 		config.Debug("[DUCKLAKE] %v", err)
 	}
 }
