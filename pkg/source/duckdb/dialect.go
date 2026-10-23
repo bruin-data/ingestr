@@ -64,7 +64,9 @@ var (
 )
 
 // Dialect implements the adbc.Dialect interface for DuckDB.
-type Dialect struct{}
+type Dialect struct {
+	quack *QuackConfig
+}
 
 // NewDialect creates a new DuckDB dialect.
 func NewDialect() *Dialect {
@@ -123,11 +125,27 @@ func tryLoadDriver() bool {
 }
 
 func (d *Dialect) BuildConnectionString(uri string) (string, error) {
+	quack, err := ParseQuackURI(uri)
+	if err != nil {
+		return "", err
+	}
+	if quack != nil {
+		d.quack = quack
+		uri = "duckdb://:memory:"
+	}
 	dbPath, err := parseDBPath(uri)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("driver=duckdb;path=%s", dbPath), nil
+}
+
+func (d *Dialect) InitConnection(_ context.Context, db *sql.DB) error {
+	if d.quack == nil {
+		return nil
+	}
+	PinSingleConnection(db)
+	return RunAttachStatements(db, "QUACK", d.quack.AttachStatements(), d.quack.AttachError)
 }
 
 // parseDBPath extracts the database path from a duckdb://, motherduck://, or md:// URI
