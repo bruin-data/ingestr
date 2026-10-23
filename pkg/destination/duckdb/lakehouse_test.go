@@ -65,7 +65,7 @@ func TestDuckLakePrepareTableRejectsRequiredPhysicalPrimaryKey(t *testing.T) {
 	require.ErrorContains(t, err, "DuckLake does not support physical primary key constraints")
 }
 
-func TestDuckLakeMemStageName(t *testing.T) {
+func TestMemStageName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -94,9 +94,9 @@ func TestDuckLakeMemStageName(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := duckLakeMemStageName(tt.target)
+			got := memStageName(tt.target, "ducklake")
 			if got != tt.want {
-				t.Errorf("duckLakeMemStageName(%q) = %q, want %q", tt.target, got, tt.want)
+				t.Errorf("memStageName(%q) = %q, want %q", tt.target, got, tt.want)
 			}
 			// The staged name must be a valid single SQL identifier body.
 			if strings.ContainsAny(got, ". -") {
