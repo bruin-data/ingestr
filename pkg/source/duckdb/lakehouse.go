@@ -1,7 +1,6 @@
 package duckdb
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -436,27 +435,6 @@ func defaultSecretName(alias, kind string) string {
 	return "ingestr_" + sanitizeIdentifier(alias) + "_" + kind
 }
 
-func sanitizeIdentifier(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	return b.String()
-}
-
-func escapeSQLStringLiteral(s string) string { return strings.ReplaceAll(s, "'", "''") }
-func quoteSQLStringLiteral(s string) string  { return "'" + escapeSQLStringLiteral(s) + "'" }
-
-func isSecretStatement(sql string) bool {
-	return strings.HasPrefix(strings.TrimSpace(sql), "CREATE OR REPLACE SECRET")
-}
-
 type DuckLakeDialect struct {
 	*Dialect
 	cfg *LakehouseConfig
@@ -483,11 +461,7 @@ func (d *DuckLakeDialect) SetConnection(db *sql.DB) {
 		return
 	}
 
-	// Pin the *sql.DB pool to exactly one physical connection.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-	db.SetConnMaxIdleTime(0)
+	PinSingleConnection(db)
 
 	stmts, err := NewLakehouseAttacher().GenerateAttachStatements(d.cfg, AttachAlias)
 	if err != nil {
@@ -495,34 +469,15 @@ func (d *DuckLakeDialect) SetConnection(db *sql.DB) {
 		return
 	}
 
-	for _, stmt := range stmts {
-		if isSecretStatement(stmt) {
-			config.Debug("[DUCKLAKE] CREATE OR REPLACE SECRET (redacted)") // Hide secrets in debug log
-		} else {
-			config.Debug("[DUCKLAKE] %s", stmt)
-		}
-		if err := execStmt(db, stmt); err != nil {
-			if IsStorageProbe(stmt) {
-				config.Debug("[DUCKLAKE] %v", TranslateProbeError(d.cfg.Storage.Path, err))
-			} else {
-				config.Debug("[DUCKLAKE] bootstrap failed at %q: %v", FirstLine(stmt), err)
-			}
-			return
-		}
+	if err := RunAttachStatements(db, "DUCKLAKE", stmts, d.cfg.AttachError); err != nil {
+		config.Debug("[DUCKLAKE] %v", err)
 	}
 }
 
-func execStmt(db *sql.DB, stmt string) error {
-	rows, err := db.QueryContext(context.Background(), stmt)
-	if err != nil {
-		return err
+// AttachError turns a failed storage probe into an actionable message.
+func (cfg *LakehouseConfig) AttachError(stmt string, err error) error {
+	if IsStorageProbe(stmt) {
+		return TranslateProbeError(cfg.Storage.Path, err)
 	}
-	return rows.Close()
-}
-
-func FirstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
+	return BootstrapError(stmt, err)
 }
