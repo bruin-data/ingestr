@@ -68,8 +68,9 @@ type PostgresCDCSource struct {
 	// selection restricts the capture set to the tables the user named. It is
 	// set once before any discovery runs and read-only afterwards, so the
 	// discovery timer and the stream-rebuild path can both consult it.
-	selection *source.TableSelection
-	cdcConfig CDCConfig
+	selection     *source.TableSelection
+	cdcConfig     CDCConfig
+	neverSnapshot bool
 	// serverVersion is the source's server_version_num, used to gate pgoutput
 	// options added in newer PostgreSQL releases.
 	serverVersion    int
@@ -1599,6 +1600,9 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 			continue
 		}
 		if resumeMetadataChanged(opts.CDCResumeIncarnations[table.Name], opts.CDCResumeSchemaFingerprints[table.Name], table.Incarnation, table.SchemaFingerprint) {
+			if s.neverSnapshot {
+				return nil, fmt.Errorf("CDC snapshot mode never: source metadata changed for %s; a new external baseline is required", table.Name)
+			}
 			delete(resumeLSNs, table.Name)
 			invalidations = append(invalidations, source.CDCSnapshotInvalidation{TableName: table.Name, Incarnation: table.Incarnation})
 		}

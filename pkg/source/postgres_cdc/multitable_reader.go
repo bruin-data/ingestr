@@ -248,6 +248,9 @@ func (r *MultiTableCDCReader) tablesWithoutResumeState() []source.SourceTableInf
 // no commit tokens — the temporary slot's consistent point is ahead of the
 // main slot, so confirming it would skip WAL not yet streamed.
 func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName string, tables []source.SourceTableInfo, replacements map[string]struct{}, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+	if err := r.source.requireSnapshotAllowed(); err != nil {
+		return err
+	}
 	conn, err := r.source.openReplicationConn(ctx)
 	if err != nil {
 		return err
@@ -371,6 +374,9 @@ type streamSignal struct {
 // was never emitted, so the rebuilt stream re-decodes it against the
 // refreshed schema and none of its data is lost.
 func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string, signal *streamSignal, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (pglogrepl.LSN, error) {
+	if err := r.source.requireSnapshotAllowed(); err != nil {
+		return 0, err
+	}
 	if len(signal.newTables) > 0 || len(signal.reincarnatedTables) > 0 {
 		if len(signal.newTables) > 0 {
 			output.Statusf("New table(s) detected on source: %s; adding to CDC stream\n", strings.Join(signal.newTables, ", "))
@@ -694,6 +700,9 @@ func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
 
 // executeSnapshot performs a full snapshot for all tables.
 func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+	if err := r.source.requireSnapshotAllowed(); err != nil {
+		return err
+	}
 	slotName := r.cdcConfig.SlotName
 	if slotName == "" {
 		slotName = generateMultiTableSlotName(r.cdcConfig.Publication, r.slotSuffix)

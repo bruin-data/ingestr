@@ -324,6 +324,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err != nil {
 			return err
 		}
+		if err := p.resolveCDCSnapshotMode(ctx, cdcStateManager); err != nil {
+			return err
+		}
 		if checker, ok := src.(source.TableExistenceChecker); ok {
 			exists, err := checker.TableExists(ctx, p.config.SourceTable)
 			if err != nil {
@@ -910,7 +913,18 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		job.TypeCaster = p.buildTypeCaster(originalSourceSchema, destSchema)
 	}
 	if cdcStateManager != nil {
-		var err error
+		baselineTables := []source.SourceTableInfo{{Name: p.config.SourceTable, Schema: fullSchema, PrimaryKeys: resolvedConfig.PrimaryKeys}}
+		baselineDestinations := map[string]string{p.config.SourceTable: p.config.DestTable}
+		baselinePositions := map[string]string{p.config.SourceTable: resolvedConfig.CDCResumeLSN}
+		bootstrap, err := p.prepareCDCNoSnapshot(ctx, cdcStateManager, baselineTables, baselineDestinations, baselinePositions, resolvedStrategy)
+		if err != nil {
+			return err
+		}
+		if bootstrap {
+			resolvedConfig.CDCResumeLSN = baselinePositions[p.config.SourceTable]
+			resolvedConfig.CDCResumeIncarnation = sourceIncarnation
+			resolvedConfig.CDCResumeSchemaFingerprint = sourceSchemaFingerprint
+		}
 		if managedMySQLCDC {
 			err = cdcStateManager.ClaimAndPrepareTarget(ctx, p.config.SourceTable, p.config.DestTable, destination.PrepareOptions{
 				Table:       p.config.DestTable,
@@ -924,8 +938,21 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		if err != nil {
 			return err
 		}
+		if bootstrap {
+			if err := job.ApplyEvolution(ctx); err != nil {
+				return err
+			}
+			if err := p.prepareCDCBaseline(ctx, cdcStateManager, baselineTables, baselineDestinations); err != nil {
+				return err
+			}
+		}
 		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
 			return err
+		}
+		if bootstrap {
+			if err := cdcStateManager.AdoptBaseline(ctx, baselinePositions); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1509,6 +1536,12 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			if err != nil {
 				return err
 			}
+			if err := p.resolveCDCSnapshotMode(ctx, manager); err != nil {
+				return err
+			}
+			if p.config.CDCSnapshotMode == "never" {
+				return fmt.Errorf("CDC snapshot mode never requires explicitly selected existing tables")
+			}
 			if err := manager.BeginRun(ctx, false); err != nil {
 				return err
 			}
@@ -1630,6 +1663,9 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		if err != nil {
 			return err
 		}
+		if err := p.resolveCDCSnapshotMode(ctx, cdcStateManager); err != nil {
+			return err
+		}
 		for _, table := range tables {
 			if err := cdcStateManager.RegisterTableState(ctx, table.Name, tableDestNames[table.Name], table.Incarnation, table.SchemaFingerprint); err != nil {
 				return err
@@ -1689,7 +1725,12 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		}
 	}
 
+	bootstrap := false
 	if cdcStateManager != nil {
+		bootstrap, err = p.prepareCDCNoSnapshot(ctx, cdcStateManager, tables, tableDestNames, cdcResumeLSNs, resolvedStrategy)
+		if err != nil {
+			return err
+		}
 		for _, table := range tables {
 			var err error
 			if isMySQLCDCSource(p.config.SourceURI) {
@@ -1759,8 +1800,23 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		},
 	}
 	if cdcStateManager != nil {
+		if bootstrap {
+			for _, table := range tables {
+				if err := job.ApplyEvolutionFor(ctx, table.Name); err != nil {
+					return err
+				}
+			}
+			if err := p.prepareCDCBaseline(ctx, cdcStateManager, tables, tableDestNames); err != nil {
+				return err
+			}
+		}
 		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
 			return err
+		}
+		if bootstrap {
+			if err := cdcStateManager.AdoptBaseline(ctx, cdcResumeLSNs); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -3328,6 +3384,9 @@ func validateReverseETLOverrideColumns(columnsSpec string, sourceSchema *schema.
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {
+	if err := cfg.ValidateCDCSnapshotMode(); err != nil {
+		return err
+	}
 	if cfg.IncrementalStrategy == "truncate+insert" {
 		return &config.ValidationError{
 			Field:   "incremental-strategy",
