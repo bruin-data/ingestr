@@ -112,6 +112,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 ## Sports, games, and public data
 
+- [AllRatesToday](/supported-sources/allratestoday.md)
 - [API-Football](/supported-sources/api-football.md)
 - [BallDontLie FIFA](/supported-sources/balldontlie.md)
 - [Chess.com](/supported-sources/chess.md)
