@@ -613,7 +613,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-func TestDeleteInsertStrategy_UsesIncrementalKeyFromLaterBatch(t *testing.T) {
+func TestDeleteInsertStrategy_RejectsMissingKeyEvenWhenLaterBatchHasKey(t *testing.T) {
 	job, src, dest := minimalJob()
 	strategy := &DeleteInsertStrategy{}
 
@@ -626,8 +626,7 @@ func TestDeleteInsertStrategy_UsesIncrementalKeyFromLaterBatch(t *testing.T) {
 	)
 
 	err := strategy.Execute(context.Background(), job)
-	require.NoError(t, err)
-	require.Len(t, dest.diCalls, 1)
-	assert.Equal(t, int64(5), dest.diCalls[0].IntervalStart)
-	assert.Equal(t, int64(10), dest.diCalls[0].IntervalEnd)
+	require.ErrorContains(t, err, "incremental key")
+	require.Empty(t, dest.diCalls)
+	require.Empty(t, dest.dropCalls)
 }
