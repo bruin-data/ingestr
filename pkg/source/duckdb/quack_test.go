@@ -34,7 +34,8 @@ func TestParseQuackURI(t *testing.T) {
 
 	for uri, msg := range map[string]string{
 		"duckdb://localhost:9494?quack=true":                       "token is required",
-		"duckdb://localhost:abc?quack=true&token=secret":           "invalid server address",
+		"duckdb://localhost:abc?quack=true&token=secret":           "invalid DuckDB URI",
+		"duckdb://localhost:abc?token=secret":                      "invalid DuckDB URI",
 		"duckdb://?quack=true&token=abc":                           "must include the server host",
 		"duckdb://localhost/file.db?quack=true&token=abc":          "must not include a database path",
 		"duckdb://localhost?quack=true&token=abc&disable_ssl=nope": "invalid disable_ssl value",

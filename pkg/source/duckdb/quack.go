@@ -26,10 +26,8 @@ func ParseQuackURI(uri string) (*QuackConfig, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
 		// The parse error echoes the URI, token included, so it is not wrapped.
-		if _, rawQuery, ok := strings.Cut(uri, "?"); ok {
-			if q, qerr := url.ParseQuery(rawQuery); qerr == nil && q.Get("quack") == "true" {
-				return nil, fmt.Errorf("quack: invalid server address in URI")
-			}
+		if strings.Contains(uri, "?") {
+			return nil, fmt.Errorf("invalid DuckDB URI; to connect to a Quack server use duckdb://host:port?quack=true&token=<token>")
 		}
 		return nil, nil //nolint:nilerr // not a URL-shaped path, so not a quack URI
 	}
