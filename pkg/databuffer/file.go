@@ -195,6 +195,20 @@ func (b *FileBuffer) readAndCastBatch(path string, targetSchema *arrow.Schema) (
 // When safe is false, lossy conversions (e.g. decimal → int64) are allowed to match
 // the behavior of user-specified column type overrides.
 func CastRecordToSchema(record arrow.RecordBatch, targetSchema *arrow.Schema, safe bool) (arrow.RecordBatch, error) {
+	return CastRecordToSchemaWithOptions(record, targetSchema, CastOptions{Safe: safe})
+}
+
+// CastOptions tunes CastRecordToSchemaWithOptions. Safe rejects lossy
+// conversions. JSONText keeps a string value cast to the JSON type verbatim
+// when it is valid JSON, which is what a column typed json by --columns or by
+// the destination holds; without it the string becomes a JSON string scalar,
+// which an inference merge of mixed-type fields relies on.
+type CastOptions struct {
+	Safe     bool
+	JSONText bool
+}
+
+func CastRecordToSchemaWithOptions(record arrow.RecordBatch, targetSchema *arrow.Schema, opts CastOptions) (arrow.RecordBatch, error) {
 	mem := memory.DefaultAllocator
 	numRows := record.NumRows()
 
@@ -225,7 +239,13 @@ func CastRecordToSchema(record arrow.RecordBatch, targetSchema *arrow.Schema, sa
 			continue
 		}
 
-		casted, err := castArrayToType(context.Background(), existingCol, field.Type, safe)
+		var casted arrow.Array
+		var err error
+		if opts.JSONText && isJSONType(field.Type) && isStringArray(existingCol) {
+			casted = castJSONTextToJSON(existingCol, field.Type.(arrow.ExtensionType))
+		} else {
+			casted, err = castArrayToType(context.Background(), existingCol, field.Type, opts.Safe)
+		}
 		if err != nil {
 			for j := 0; j < i; j++ {
 				cols[j].Release()
@@ -504,25 +524,47 @@ func castUnknownArrayToJSON(ext array.ExtensionArray, target arrow.DataType) (ar
 			builder.AppendNull()
 			continue
 		}
-
-		// Unknown storage is already JSON text; pass it through unless it came
-		// from a non-JSON fallback, in which case quote it as a JSON string.
-		if json.Valid([]byte(raw)) {
-			builder.Append(raw)
-			continue
-		}
-
-		jsonBytes, err := json.Marshal(raw)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode unknown value as JSON: %w", err)
-		}
-		builder.Append(string(jsonBytes))
+		// Unknown storage is already JSON text unless it came from a non-JSON fallback.
+		appendJSONText(builder, raw)
 	}
 
 	storageArr := builder.NewArray()
 	defer storageArr.Release()
 
 	return array.NewExtensionArrayWithStorage(extType, storageArr), nil
+}
+
+// appendJSONText passes JSON text through and quotes anything else as a JSON string.
+func appendJSONText(builder *array.StringBuilder, raw string) {
+	if json.Valid([]byte(raw)) {
+		builder.Append(raw)
+		return
+	}
+	quoted, _ := json.Marshal(raw)
+	builder.Append(string(quoted))
+}
+
+func isStringArray(arr arrow.Array) bool {
+	switch arr.DataType().ID() {
+	case arrow.STRING, arrow.LARGE_STRING, arrow.STRING_VIEW:
+		return true
+	}
+	return false
+}
+
+func castJSONTextToJSON(arr arrow.Array, target arrow.ExtensionType) arrow.Array {
+	builder := array.NewStringBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+	for i := 0; i < arr.Len(); i++ {
+		if arr.IsNull(i) {
+			builder.AppendNull()
+			continue
+		}
+		appendJSONText(builder, arr.ValueStr(i))
+	}
+	storage := builder.NewArray()
+	defer storage.Release()
+	return array.NewExtensionArrayWithStorage(target, storage)
 }
 
 func castArrayToJSON(arr arrow.Array, target arrow.DataType) (arrow.Array, error) {
