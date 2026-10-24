@@ -3097,7 +3097,7 @@ func TestBuildBufferReaderTarget_NoDriftIdenticalOrder(t *testing.T) {
 		tcol("age", schema.TypeInt32),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "age"})
 	if got.Field(0).Type.ID() != arrow.PrimitiveTypes.Int64.ID() {
@@ -3127,7 +3127,7 @@ func TestBuildBufferReaderTarget_SourceOnlyColumnIsDropped(t *testing.T) {
 		tcol("name", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3337,7 +3337,7 @@ func TestBuildBufferReaderTarget_OrderFollowsDest(t *testing.T) {
 		tcol("age", schema.TypeInt32),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "age"})
 }
@@ -3359,7 +3359,7 @@ func TestBuildBufferReaderTarget_SkipsIngestrMetadataColumn(t *testing.T) {
 		tcol("_dlt_load_id", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3378,7 +3378,7 @@ func TestBuildBufferReaderTarget_SkipsLoadTimestampColumn(t *testing.T) {
 		tcol("_ingestr_loaded_at", schema.TypeTimestampTZ),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3420,7 +3420,7 @@ func TestBuildBufferReaderTarget_SkipsRunIDColumn(t *testing.T) {
 		tcol("_ingestr_run_id", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3466,7 +3466,7 @@ func TestBuildBufferReaderTarget_IncludesSoftRemovedColumn(t *testing.T) {
 		tcol("email", schema.TypeString), // soft-removed from source
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "email"})
 	if !got.Field(2).Nullable {
@@ -3489,7 +3489,7 @@ func TestBuildBufferReaderTarget_UsesDestTypes(t *testing.T) {
 		tcol("created_at", schema.TypeString), // dest: STRING
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	if got.Field(1).Name != "created_at" {
 		t.Errorf("field 1 name = %q, want created_at", got.Field(1).Name)
@@ -3520,7 +3520,7 @@ func TestBuildBufferReaderTarget_HonorsRenamer(t *testing.T) {
 		tcol("created_at", schema.TypeString), // wider dest type
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"userId", "createdAt"})
 	if got.Field(1).Type.ID() != arrow.BinaryTypes.String.ID() {
@@ -3548,7 +3548,7 @@ func TestBuildBufferReaderTarget_KeepsAliasesForCanonicalDuplicate(t *testing.T)
 		tcol("user_id", schema.TypeInt64),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"_id", "userId", "user_id", "UserID"})
 }
@@ -3758,7 +3758,7 @@ func TestBuildBufferReaderTarget_EvolveScenario(t *testing.T) {
 		tcol("email", schema.TypeString), // added by Compare.ChangeAddColumn
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"age", "id", "name", "score", "email"})
 }
@@ -3776,7 +3776,7 @@ func TestBuildBufferReaderTarget_CaseInsensitiveMatch(t *testing.T) {
 		tcol("NAME", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -4392,4 +4392,23 @@ func TestStreamingRefreshPreservesCDCStrategyRestrictions(t *testing.T) {
 	cfg.Stream, cfg.FullRefresh = true, true
 	cfg.IncrementalStrategy = config.StrategyAppend
 	require.NoError(t, validateManagedChangeConfig(cfg), "PostgreSQL keyless streams retain append support")
+}
+
+// A dest json column keeps JSON text on replay only when inference typed the
+// source column string (json came from --columns or the existing table); a
+// column inference itself merged to json keeps quoting its string batches.
+func TestBuildBufferReaderTarget_JSONTextOnlyForInferredStrings(t *testing.T) {
+	p := &Pipeline{rawInferredSchema: tschema("t", tcol("payload", schema.TypeString), tcol("doc", schema.TypeJSON))}
+	src := tschema("t", tcol("payload", schema.TypeJSON), tcol("doc", schema.TypeJSON))
+	dest := tschema("t", tcol("payload", schema.TypeJSON), tcol("doc", schema.TypeJSON))
+
+	got, jsonText := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"payload", "doc"})
+	if !jsonText("payload") {
+		t.Error("payload: inferred string hinted to json should keep JSON text")
+	}
+	if jsonText("doc") {
+		t.Error("doc: inference-merged json should keep quoting")
+	}
 }

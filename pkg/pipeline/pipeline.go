@@ -794,8 +794,8 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 				preStagedData.Close()
 				preStagedData = nil
 			}
-			bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
-			bufferedRecords, err = inferBuffer.Reader(ctx, bufferTarget)
+			bufferTarget, jsonText := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
+			bufferedRecords, err = inferBuffer.Reader(ctx, bufferTarget, jsonText)
 			if err != nil {
 				return fmt.Errorf("failed to open buffer reader: %w", err)
 			}
@@ -1378,11 +1378,23 @@ func (p *Pipeline) inferSchemaFromData(
 // buildBufferReaderTarget builds the Arrow schema for buffer.Reader:
 // dest order, source names (for buffer file match), dest types (for staging
 // match). Ingestr/SCD2 metadata cols are skipped and dest-only cols get null-fill.
-func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.TableSchema) *arrow.Schema {
+// The returned predicate names the source columns whose string values the
+// replay keeps as JSON text: dest json columns that inference typed string, so
+// the json type came from --columns or the existing table rather than from a
+// mixed-type merge.
+func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.TableSchema) (*arrow.Schema, func(string) bool) {
 	var renameMap map[string]string
 	if p.columnRenamer != nil && p.columnRenamer.HasRenames() {
 		renameMap = p.columnRenamer.Mapping()
 	}
+
+	inferredString := make(map[string]bool)
+	if p.rawInferredSchema != nil {
+		for _, c := range p.rawInferredSchema.Columns {
+			inferredString[strings.ToLower(c.Name)] = c.DataType == schema.TypeString
+		}
+	}
+	jsonText := make(map[string]bool)
 
 	srcByDestName := make(map[string][]schema.Column, len(sourceSchema.Columns))
 	for _, c := range sourceSchema.Columns {
@@ -1404,13 +1416,16 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 				m := sc
 				m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
 				fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
+				if dc.DataType == schema.TypeJSON && inferredString[strings.ToLower(sc.Name)] {
+					jsonText[sc.Name] = true
+				}
 			}
 			continue
 		}
 		fields = append(fields, arrowField(dc.Name, dc, true)) // add soft deleted columns using dest names
 	}
 
-	return arrow.NewSchema(fields, nil)
+	return arrow.NewSchema(fields, nil), func(col string) bool { return jsonText[col] }
 }
 
 func arrowField(name string, col schema.Column, nullable bool) arrow.Field {

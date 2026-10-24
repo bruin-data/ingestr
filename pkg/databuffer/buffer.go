@@ -19,10 +19,11 @@ type DataBuffer interface {
 	Append(ctx context.Context, batch arrow.RecordBatch) error
 
 	// Reader returns a channel that replays all buffered batches,
-	// cast to the provided target schema.
+	// cast to the provided target schema. jsonText names the target columns
+	// whose string values are kept as JSON text (see CastOptions).
 	// The channel will be closed after all batches have been sent.
 	// Each batch should be released by the consumer after use.
-	Reader(ctx context.Context, targetSchema *arrow.Schema) (<-chan source.RecordBatchResult, error)
+	Reader(ctx context.Context, targetSchema *arrow.Schema, jsonText func(string) bool) (<-chan source.RecordBatchResult, error)
 
 	// Close releases buffer resources.
 	// After Close, the buffer should not be used.

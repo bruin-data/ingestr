@@ -254,7 +254,7 @@ func TestFileBuffer_Reader(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { _ = buf.Close() }()
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		// Channel should be immediately closed
@@ -267,7 +267,7 @@ func TestFileBuffer_Reader(t *testing.T) {
 		require.NoError(t, err)
 		_ = buf.Close()
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		assert.Nil(t, ch)
 		assert.ErrorIs(t, err, ErrBufferClosed)
 	})
@@ -282,7 +282,7 @@ func TestFileBuffer_Reader(t *testing.T) {
 		batch.Release()
 		require.NoError(t, err)
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		batches := readAllBatches(t, ch)
@@ -306,7 +306,7 @@ func TestFileBuffer_Reader(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		batches := readAllBatches(t, ch)
@@ -334,7 +334,7 @@ func TestFileBuffer_Reader(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 
-		ch, err := buf.Reader(ctx, targetSchema)
+		ch, err := buf.Reader(ctx, targetSchema, nil)
 		require.NoError(t, err)
 
 		// Read first batch then cancel
@@ -376,7 +376,7 @@ func TestFileBuffer_Reader(t *testing.T) {
 			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
 		}, nil)
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		batches := readAllBatches(t, ch)
@@ -413,7 +413,7 @@ func TestFileBuffer_SchemaCasting(t *testing.T) {
 			{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
 		}, nil)
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		batches := readAllBatches(t, ch)
@@ -464,7 +464,7 @@ func TestFileBuffer_SchemaCasting(t *testing.T) {
 			{Name: "email", Type: arrow.BinaryTypes.String, Nullable: true},
 		}, nil)
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		batches := readAllBatches(t, ch)
@@ -513,7 +513,7 @@ func TestFileBuffer_SchemaCasting(t *testing.T) {
 			{Name: "age", Type: arrow.BinaryTypes.String, Nullable: true},
 		}, nil)
 
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		batches := readAllBatches(t, ch)
@@ -850,21 +850,21 @@ func TestCastRecordToSchema_StringToJSON(t *testing.T) {
 	defer record.Release()
 
 	target := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: schema.JSONArrowType, Nullable: true}}, nil)
-	cast := func(jsonText bool) *array.String {
+	cast := func(jsonText func(string) bool) *array.String {
 		casted, err := CastRecordToSchemaWithOptions(record, target, CastOptions{Safe: true, JSONText: jsonText})
 		require.NoError(t, err)
 		t.Cleanup(casted.Release)
 		return casted.Column(0).(array.ExtensionArray).Storage().(*array.String)
 	}
 
-	text := cast(true)
+	text := cast(func(string) bool { return true })
 	assert.Equal(t, `{"k":"v"}`, text.Value(0))
 	assert.Equal(t, `[1,2]`, text.Value(1))
 	assert.Equal(t, `42`, text.Value(2))
 	assert.Equal(t, `"plain \"text\""`, text.Value(3))
 	assert.True(t, text.IsNull(4))
 
-	quoted := cast(false)
+	quoted := cast(nil)
 	assert.Equal(t, `"{\"k\":\"v\"}"`, quoted.Value(0))
 	assert.Equal(t, `"42"`, quoted.Value(2))
 	assert.True(t, quoted.IsNull(4))
@@ -1888,7 +1888,7 @@ func TestFileBuffer_UnknownToTimestamp(t *testing.T) {
 		{Name: "id", Type: schema.UnknownArrowType, Nullable: true},
 	}, nil)
 
-	ch, err := buf.Reader(context.Background(), targetSchema)
+	ch, err := buf.Reader(context.Background(), targetSchema, nil)
 	require.NoError(t, err)
 
 	batches := readAllBatches(t, ch)
@@ -1954,7 +1954,7 @@ func TestFileBuffer_UnknownNumbersToTimestamp(t *testing.T) {
 
 	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
 	targetSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tsType, Nullable: true}}, nil)
-	ch, err := buf.Reader(context.Background(), targetSchema)
+	ch, err := buf.Reader(context.Background(), targetSchema, nil)
 	require.NoError(t, err)
 
 	batches := readAllBatches(t, ch)
@@ -2005,7 +2005,7 @@ func TestFileBuffer_StringToTimestamp(t *testing.T) {
 		{Name: "created_at", Type: tsType, Nullable: true},
 	}, nil)
 
-	ch, err := buf.Reader(context.Background(), targetSchema)
+	ch, err := buf.Reader(context.Background(), targetSchema, nil)
 	require.NoError(t, err)
 
 	batches := readAllBatches(t, ch)
@@ -2064,7 +2064,7 @@ func TestFileBuffer_NumericToTimestamp(t *testing.T) {
 		{Name: "updated_at", Type: tsType, Nullable: true},
 	}, nil)
 
-	ch, err := buf.Reader(context.Background(), targetSchema)
+	ch, err := buf.Reader(context.Background(), targetSchema, nil)
 	require.NoError(t, err)
 
 	batches := readAllBatches(t, ch)
@@ -2162,7 +2162,7 @@ func TestFileBuffer_PreY2KEpochStringsToTimestamp(t *testing.T) {
 
 			tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
 			targetSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tsType, Nullable: true}}, nil)
-			ch, err := buf.Reader(context.Background(), targetSchema)
+			ch, err := buf.Reader(context.Background(), targetSchema, nil)
 			require.NoError(t, err)
 
 			batches := readAllBatches(t, ch)
@@ -2238,7 +2238,7 @@ func TestFileBuffer_PreY2KEpochNumbersToTimestamp(t *testing.T) {
 
 			tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
 			targetSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tsType, Nullable: true}}, nil)
-			ch, err := buf.Reader(context.Background(), targetSchema)
+			ch, err := buf.Reader(context.Background(), targetSchema, nil)
 			require.NoError(t, err)
 
 			batches := readAllBatches(t, ch)
@@ -2304,7 +2304,7 @@ func TestFileBuffer_RoundTrip(t *testing.T) {
 		}, nil)
 
 		// Read back
-		ch, err := buf.Reader(context.Background(), targetSchema)
+		ch, err := buf.Reader(context.Background(), targetSchema, nil)
 		require.NoError(t, err)
 
 		batches := readAllBatches(t, ch)
@@ -2329,4 +2329,72 @@ func TestFileBuffer_RoundTrip(t *testing.T) {
 		assert.Equal(t, "bob", nameCol.Value(1))
 		assert.Equal(t, "charlie", nameCol.Value(2))
 	})
+}
+
+func TestFileBuffer_Reader_JSONText(t *testing.T) {
+	src := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: arrow.BinaryTypes.String, Nullable: true}}, nil)
+	b := array.NewStringBuilder(memory.DefaultAllocator)
+	b.Append(`{"k":"v"}`)
+	b.AppendNull()
+	arr := b.NewArray()
+	b.Release()
+	batch := array.NewRecordBatch(src, []arrow.Array{arr}, 2)
+	arr.Release()
+	defer batch.Release()
+
+	target := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: schema.JSONArrowType, Nullable: true}}, nil)
+	replay := func(jsonText func(string) bool) *array.String {
+		buf, err := NewFileBuffer()
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = buf.Close() })
+		require.NoError(t, buf.Append(context.Background(), batch))
+		ch, err := buf.Reader(context.Background(), target, jsonText)
+		require.NoError(t, err)
+		batches := readAllBatches(t, ch)
+		t.Cleanup(func() { releaseBatches(batches) })
+		require.Len(t, batches, 1)
+		return batches[0].Column(0).(array.ExtensionArray).Storage().(*array.String)
+	}
+
+	text := replay(func(col string) bool { return col == "payload" })
+	assert.Equal(t, `{"k":"v"}`, text.Value(0))
+	assert.True(t, text.IsNull(1))
+
+	quoted := replay(nil)
+	assert.Equal(t, `"{\"k\":\"v\"}"`, quoted.Value(0))
+	assert.True(t, quoted.IsNull(1))
+}
+
+func TestCastRecordToSchema_UnknownJSONTextToJSON(t *testing.T) {
+	src := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: schema.UnknownArrowType, Nullable: true}}, nil)
+	builder := array.NewBuilder(memory.DefaultAllocator, schema.UnknownArrowType).(*array.ExtensionBuilder)
+	storage := builder.StorageBuilder().(*array.StringBuilder)
+	storage.Append(`"[{\"a\":1}]"`)
+	storage.Append(`"plain"`)
+	storage.Append(`1`)
+	storage.Append(`"null"`)
+	storage.AppendNull()
+	arr := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(src, []arrow.Array{arr}, 5)
+	arr.Release()
+	defer record.Release()
+
+	target := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: schema.JSONArrowType, Nullable: true}}, nil)
+	cast := func(jsonText func(string) bool) *array.String {
+		casted, err := CastRecordToSchemaWithOptions(record, target, CastOptions{Safe: true, JSONText: jsonText})
+		require.NoError(t, err)
+		t.Cleanup(casted.Release)
+		return casted.Column(0).(array.ExtensionArray).Storage().(*array.String)
+	}
+
+	text := cast(func(string) bool { return true })
+	assert.Equal(t, `[{"a":1}]`, text.Value(0))
+	assert.Equal(t, `"plain"`, text.Value(1))
+	assert.Equal(t, `1`, text.Value(2))
+	assert.Equal(t, `null`, text.Value(3))
+	assert.True(t, text.IsNull(4))
+
+	quoted := cast(nil)
+	assert.Equal(t, `"[{\"a\":1}]"`, quoted.Value(0))
 }
