@@ -91,7 +91,7 @@ These tables live in the connected Snowflake database (the catalog from the URI)
 
 ## Tuning the write path
 
-When Snowflake is the destination, ingestr coalesces record batches into larger Parquet files, uploads them to the table's implicit stage, and loads them with `COPY INTO`. Columns typed `json` (for example Postgres `jsonb`, or a column pinned with `--columns name:json`) are created as `VARIANT` and parsed with `PARSE_JSON` during the load, so `TYPEOF(col)` reports `OBJECT` or `ARRAY` and `col:key` paths work directly. A SQL `NULL` stays `NULL`, and a value in a `--columns name:json` column that is not valid JSON is stored as a JSON string rather than failing the load. Two environment variables tune that path; neither is normally needed.
+When Snowflake is the destination, ingestr coalesces record batches into larger Parquet files, uploads them to the table's implicit stage, and loads them with `COPY INTO`. Columns typed `json` (for example Postgres `jsonb`, or a column pinned with `--columns name:json`) are created as `VARIANT` and parsed with `PARSE_JSON` during the load, so `TYPEOF(col)` reports `OBJECT` or `ARRAY` and `col:key` paths work directly. A SQL `NULL` stays `NULL`; in a `--columns name:json` column the text `null` loads as SQL `NULL` (it is how a source that stores JSON as strings marks an absent value), and a value that is not valid JSON is stored as a JSON string rather than failing the load. Two environment variables tune that path; neither is normally needed.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
