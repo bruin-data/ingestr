@@ -223,6 +223,10 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 	tn := sfTable(opts.Table)
 	fullTable := quoteFQN(tn)
+	copyColumns, err := d.copyColumnsFor(ctx, fullTable, opts.Schema)
+	if err != nil {
+		return err
+	}
 
 	// Use the implicit table stage (@%table_name) which exists automatically
 	// for every table and doesn't require CREATE STAGE privilege. The stage is
@@ -385,7 +389,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				break drain
 			}
 		}
-		copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending)
+		copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending, copyColumns)
 		if err != nil {
 			fail(err)
 			continue
@@ -408,7 +412,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 			// Unreachable today: the loop above truncates pending after every
 			// COPY and returns on error. Kept so a future change to that loop
 			// cannot silently drop files.
-			copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending)
+			copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending, copyColumns)
 			if err != nil {
 				return fmt.Errorf("snowflake parallel write failed: %w", err)
 			}
@@ -417,7 +421,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 			// A FILES clause accepts at most 1,000 names. Once every upload is
 			// complete, the unique load prefix selects the same files without
 			// that limit and keeps direct writes in a single COPY statement.
-			if err := d.copyFiles(ctx, fullTable, stageName, loadID, nil); err != nil {
+			if err := d.copyFiles(ctx, fullTable, stageName, loadID, nil, copyColumns); err != nil {
 				return fmt.Errorf("snowflake parallel write failed: %w", err)
 			}
 			copiedFiles += len(pending)
@@ -590,9 +594,9 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 	return fileName, nil
 }
 
-func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageName, loadID string, files []string) error {
+func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageName, loadID string, files []string, columns []schema.Column) error {
 	startCopy := time.Now()
-	copySQL := buildCopyIntoSQL(fullTable, stageName, loadID, files)
+	copySQL := buildCopyIntoSQL(fullTable, stageName, loadID, files, columns)
 	if _, err := d.db.ExecContext(ctx, copySQL); err != nil {
 		config.LogFailedQuery(copySQL, err)
 		return fmt.Errorf("failed to COPY INTO: %w", err)
@@ -607,11 +611,11 @@ func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageNa
 
 const maxFilesPerCopy = 1000
 
-func (d *SnowflakeDestination) copyFilesInBatches(ctx context.Context, fullTable, stageName, loadID string, files []string) (int, error) {
+func (d *SnowflakeDestination) copyFilesInBatches(ctx context.Context, fullTable, stageName, loadID string, files []string, columns []schema.Column) (int, error) {
 	copied := 0
 	for len(files) > 0 {
 		batchSize := min(len(files), maxFilesPerCopy)
-		if err := d.copyFiles(ctx, fullTable, stageName, loadID, files[:batchSize]); err != nil {
+		if err := d.copyFiles(ctx, fullTable, stageName, loadID, files[:batchSize], columns); err != nil {
 			return copied, err
 		}
 		copied += batchSize
@@ -666,7 +670,7 @@ func snowflakeParquetWriterProperties() (*parquet.WriterProperties, pqarrow.Arro
 	return writerProps, arrowProps
 }
 
-func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string) string {
+func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string, columns []schema.Column) string {
 	var filesClause string
 	if len(files) > 0 {
 		quoted := make([]string, len(files))
@@ -677,8 +681,68 @@ func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string) strin
 	}
 	// The FROM location must end with '/': FILES entries are appended to it
 	// verbatim.
-	return fmt.Sprintf("COPY INTO %s FROM @%s/%s/%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
-		fullTable, stageName, loadID, filesClause)
+	location := fmt.Sprintf("@%s/%s/", stageName, loadID)
+	if !hasJSONColumn(columns) {
+		return fmt.Sprintf("COPY INTO %s FROM %s%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
+			fullTable, location, filesClause)
+	}
+	// COPY stores a parquet string in a VARIANT column verbatim, so JSON columns
+	// are parsed on the way in. MATCH_BY_COLUMN_NAME cannot be combined with a
+	// transform: the column list is explicit, GET_IGNORE_CASE keeps the match
+	// case-insensitive (table identifiers are upper-cased, parquet fields are
+	// not), and the other columns are cast because a transform does not coerce
+	// a VARIANT into BINARY, which BINARY_AS_TEXT = FALSE exposes as binary.
+	targets := make([]string, len(columns))
+	exprs := make([]string, len(columns))
+	for i, col := range columns {
+		targets[i] = quoteIdentifier(col.Name)
+		expr := fmt.Sprintf("GET_IGNORE_CASE($1, '%s')", strings.ReplaceAll(col.Name, "'", "''"))
+		if col.DataType == schema.TypeJSON {
+			exprs[i] = fmt.Sprintf("PARSE_JSON(%s::STRING)", expr)
+		} else {
+			exprs[i] = expr + "::" + MapDataTypeToSnowflake(col)
+		}
+	}
+	return fmt.Sprintf("COPY INTO %s (%s) FROM (SELECT %s FROM %s)%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE BINARY_AS_TEXT = FALSE) PURGE = TRUE",
+		fullTable, strings.Join(targets, ", "), strings.Join(exprs, ", "), location, filesClause)
+}
+
+// copyColumnsFor returns the write schema's columns that exist in the table
+// when one of them is JSON, and nil otherwise so the COPY keeps matching by
+// name. Naming only existing columns keeps the explicit list of the transform
+// COPY as tolerant of schema/table drift as MATCH_BY_COLUMN_NAME was.
+func (d *SnowflakeDestination) copyColumnsFor(ctx context.Context, fullTable string, s *schema.TableSchema) ([]schema.Column, error) {
+	if s == nil || !hasJSONColumn(s.Columns) {
+		return nil, nil
+	}
+	tableColumns, err := d.describeColumnNames(ctx, fullTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe %s before COPY: %w", fullTable, err)
+	}
+	return columnsInTable(s.Columns, tableColumns), nil
+}
+
+func columnsInTable(columns []schema.Column, tableColumns []string) []schema.Column {
+	present := make(map[string]bool, len(tableColumns))
+	for _, name := range tableColumns {
+		present[strings.ToUpper(name)] = true
+	}
+	kept := make([]schema.Column, 0, len(columns))
+	for _, col := range columns {
+		if present[strings.ToUpper(col.Name)] {
+			kept = append(kept, col)
+		}
+	}
+	return kept
+}
+
+func hasJSONColumn(columns []schema.Column) bool {
+	for _, col := range columns {
+		if col.DataType == schema.TypeJSON {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {

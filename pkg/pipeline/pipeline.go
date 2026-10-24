@@ -877,6 +877,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		runIDTransformer = transformer.NewRunID(runIDColumnForSchema(ingestSchema), runID)
 	}
 
+	schemaAligner := transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget()
+	if table.HasKnownSchema() || p.config.NoInference {
+		schemaAligner.EnableJSONText()
+	}
 	job := &strategy.IngestionJob{
 		Config:                 &resolvedConfig,
 		Table:                  table,
@@ -895,7 +899,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		WhitespaceTrimmer:      whitespaceTrimmer,
 		LoadTimestamp:          loadTimestampTransformer,
 		RunID:                  runIDTransformer,
-		SchemaAligner:          transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
+		SchemaAligner:          schemaAligner,
 		EvolutionPlan:          evolutionPlan,
 		CDCStateManager:        cdcStateManager,
 	}
@@ -1100,7 +1104,7 @@ func (p *Pipeline) buildSourceSchemaCaster(sourceSchema *schema.TableSchema) *tr
 		fields[i] = arrowField(col.Name, col, col.Nullable)
 	}
 
-	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil))
+	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil)).EnableJSONText()
 }
 
 // buildTypeCaster creates a TypeCaster when column type overrides differ from the source types.
@@ -1141,7 +1145,7 @@ func (p *Pipeline) buildTypeCaster(sourceSchema, destSchema *schema.TableSchema)
 		return nil
 	}
 
-	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil))
+	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil)).EnableJSONText()
 }
 
 func (p *Pipeline) createTracker(ctx context.Context) (progress.Tracker, error) {

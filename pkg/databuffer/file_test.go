@@ -834,6 +834,42 @@ func TestCastRecordToSchema_DecimalOverflowErrors(t *testing.T) {
 	})
 }
 
+func TestCastRecordToSchema_StringToJSON(t *testing.T) {
+	mem := memory.DefaultAllocator
+	sourceSchema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: arrow.BinaryTypes.String, Nullable: true}}, nil)
+	builder := array.NewStringBuilder(mem)
+	builder.Append(`{"k":"v"}`)
+	builder.Append(`[1,2]`)
+	builder.Append(`42`)
+	builder.Append(`plain "text"`)
+	builder.AppendNull()
+	strArr := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{strArr}, 5)
+	strArr.Release()
+	defer record.Release()
+
+	target := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: schema.JSONArrowType, Nullable: true}}, nil)
+	cast := func(jsonText bool) *array.String {
+		casted, err := CastRecordToSchemaWithOptions(record, target, CastOptions{Safe: true, JSONText: jsonText})
+		require.NoError(t, err)
+		t.Cleanup(casted.Release)
+		return casted.Column(0).(array.ExtensionArray).Storage().(*array.String)
+	}
+
+	text := cast(true)
+	assert.Equal(t, `{"k":"v"}`, text.Value(0))
+	assert.Equal(t, `[1,2]`, text.Value(1))
+	assert.Equal(t, `42`, text.Value(2))
+	assert.Equal(t, `"plain \"text\""`, text.Value(3))
+	assert.True(t, text.IsNull(4))
+
+	quoted := cast(false)
+	assert.Equal(t, `"{\"k\":\"v\"}"`, quoted.Value(0))
+	assert.Equal(t, `"42"`, quoted.Value(2))
+	assert.True(t, quoted.IsNull(4))
+}
+
 func TestCastRecordToSchema_UnknownToJSONEncodesScalarStrings(t *testing.T) {
 	mem := memory.DefaultAllocator
 
