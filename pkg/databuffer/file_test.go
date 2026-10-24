@@ -843,9 +843,11 @@ func TestCastRecordToSchema_StringToJSON(t *testing.T) {
 	builder.Append(`42`)
 	builder.Append(`plain "text"`)
 	builder.AppendNull()
+	builder.Append(`null`)
+	builder.Append(` null `)
 	strArr := builder.NewArray()
 	builder.Release()
-	record := array.NewRecordBatch(sourceSchema, []arrow.Array{strArr}, 5)
+	record := array.NewRecordBatch(sourceSchema, []arrow.Array{strArr}, 7)
 	strArr.Release()
 	defer record.Release()
 
@@ -863,11 +865,14 @@ func TestCastRecordToSchema_StringToJSON(t *testing.T) {
 	assert.Equal(t, `42`, text.Value(2))
 	assert.Equal(t, `"plain \"text\""`, text.Value(3))
 	assert.True(t, text.IsNull(4))
+	assert.True(t, text.IsNull(5), "JSON null text is an absent value, not a VARIANT null")
+	assert.True(t, text.IsNull(6))
 
 	quoted := cast(nil)
 	assert.Equal(t, `"{\"k\":\"v\"}"`, quoted.Value(0))
 	assert.Equal(t, `"42"`, quoted.Value(2))
 	assert.True(t, quoted.IsNull(4))
+	assert.Equal(t, `"null"`, quoted.Value(5), "an inference merge keeps the string null quoted")
 }
 
 func TestCastRecordToSchema_UnknownToJSONEncodesScalarStrings(t *testing.T) {
@@ -2392,9 +2397,10 @@ func TestCastRecordToSchema_UnknownJSONTextToJSON(t *testing.T) {
 	assert.Equal(t, `[{"a":1}]`, text.Value(0))
 	assert.Equal(t, `"plain"`, text.Value(1))
 	assert.Equal(t, `1`, text.Value(2))
-	assert.Equal(t, `null`, text.Value(3))
+	assert.True(t, text.IsNull(3), "JSON null text is an absent value, not a VARIANT null")
 	assert.True(t, text.IsNull(4))
 
 	quoted := cast(nil)
 	assert.Equal(t, `"[{\"a\":1}]"`, quoted.Value(0))
+	assert.Equal(t, `"null"`, quoted.Value(3))
 }

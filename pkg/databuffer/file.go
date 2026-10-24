@@ -555,7 +555,8 @@ func isStringArray(arr arrow.Array) bool {
 }
 
 // castJSONTextToJSON keeps string values as JSON text. Unknown storage holds
-// each value JSON-encoded, so a string value is unwrapped first.
+// each value JSON-encoded, so a string value is unwrapped first. JSON null
+// text marks an absent value and becomes SQL NULL rather than a null scalar.
 func castJSONTextToJSON(arr arrow.Array, target arrow.ExtensionType) arrow.Array {
 	unknown := isUnknownType(arr.DataType())
 	if ext, ok := arr.(array.ExtensionArray); ok {
@@ -575,6 +576,10 @@ func castJSONTextToJSON(arr arrow.Array, target arrow.ExtensionType) arrow.Array
 					raw = s
 				}
 			}
+		}
+		if strings.TrimSpace(raw) == "null" {
+			builder.AppendNull()
+			continue
 		}
 		appendJSONText(builder, raw)
 	}
