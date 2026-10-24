@@ -223,9 +223,9 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 	tn := sfTable(opts.Table)
 	fullTable := quoteFQN(tn)
-	var copyColumns []schema.Column
-	if opts.Schema != nil {
-		copyColumns = opts.Schema.Columns
+	copyColumns, err := d.copyColumnsFor(ctx, fullTable, opts.Schema)
+	if err != nil {
+		return err
 	}
 
 	// Use the implicit table stage (@%table_name) which exists automatically
@@ -705,6 +705,35 @@ func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string, colum
 	}
 	return fmt.Sprintf("COPY INTO %s (%s) FROM (SELECT %s FROM %s)%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE BINARY_AS_TEXT = FALSE) PURGE = TRUE",
 		fullTable, strings.Join(targets, ", "), strings.Join(exprs, ", "), location, filesClause)
+}
+
+// copyColumnsFor returns the write schema's columns that exist in the table
+// when one of them is JSON, and nil otherwise so the COPY keeps matching by
+// name. Naming only existing columns keeps the explicit list of the transform
+// COPY as tolerant of schema/table drift as MATCH_BY_COLUMN_NAME was.
+func (d *SnowflakeDestination) copyColumnsFor(ctx context.Context, fullTable string, s *schema.TableSchema) ([]schema.Column, error) {
+	if s == nil || !hasJSONColumn(s.Columns) {
+		return nil, nil
+	}
+	tableColumns, err := d.describeColumnNames(ctx, fullTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe %s before COPY: %w", fullTable, err)
+	}
+	return columnsInTable(s.Columns, tableColumns), nil
+}
+
+func columnsInTable(columns []schema.Column, tableColumns []string) []schema.Column {
+	present := make(map[string]bool, len(tableColumns))
+	for _, name := range tableColumns {
+		present[strings.ToUpper(name)] = true
+	}
+	kept := make([]schema.Column, 0, len(columns))
+	for _, col := range columns {
+		if present[strings.ToUpper(col.Name)] {
+			kept = append(kept, col)
+		}
+	}
+	return kept
 }
 
 func hasJSONColumn(columns []schema.Column) bool {

@@ -332,6 +332,19 @@ func TestBuildCopyIntoSQLWithoutJSONColumnsMatchesByName(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// The transform COPY names columns explicitly, so it only names the ones the
+// table has; MATCH_BY_COLUMN_NAME tolerated the same drift by ignoring them.
+func TestColumnsInTable(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "extra", DataType: schema.TypeJSON},
+		{Name: "data", DataType: schema.TypeJSON},
+		{Name: "name", DataType: schema.TypeString},
+	}
+	got := columnsInTable(columns, []string{"ID", "DATA", "NAME", "OTHER"})
+	assert.Equal(t, []schema.Column{columns[0], columns[2], columns[3]}, got)
+}
+
 func TestWriteParallelParsesJSONColumnsInCopy(t *testing.T) {
 	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0")
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
@@ -340,6 +353,7 @@ func TestWriteParallelParsesJSONColumnsInCopy(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
+	mock.ExpectQuery("DESCRIBE TABLE").WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("ID").AddRow("DATA"))
 	mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`COPY INTO "PUBLIC"\."EVENTS" \("ID", "DATA"\) FROM \(SELECT GET_IGNORE_CASE\(\$1, 'id'\)::BIGINT, PARSE_JSON\(GET_IGNORE_CASE\(\$1, 'data'\)::STRING\) FROM @"PUBLIC"\.%"EVENTS"/\d+/\) FILE_FORMAT`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -364,6 +378,7 @@ func TestWriteParallelParsesJSONColumnsInCopy(t *testing.T) {
 		Schema: &schema.TableSchema{Columns: []schema.Column{
 			{Name: "id", DataType: schema.TypeInt64},
 			{Name: "data", DataType: schema.TypeJSON},
+			{Name: "not_in_table", DataType: schema.TypeJSON},
 		}},
 		Parallelism: 1,
 	}))
