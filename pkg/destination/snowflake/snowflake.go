@@ -696,7 +696,7 @@ func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string, colum
 	exprs := make([]string, len(columns))
 	for i, col := range columns {
 		targets[i] = quoteIdentifier(col.Name)
-		expr := fmt.Sprintf("GET_IGNORE_CASE($1, '%s')", strings.ReplaceAll(col.Name, "'", "''"))
+		expr := fmt.Sprintf("GET_IGNORE_CASE($1, '%s')", strings.NewReplacer(`\`, `\\`, "'", "''").Replace(col.Name))
 		if col.DataType == schema.TypeJSON {
 			exprs[i] = fmt.Sprintf("PARSE_JSON(%s::STRING)", expr)
 		} else {

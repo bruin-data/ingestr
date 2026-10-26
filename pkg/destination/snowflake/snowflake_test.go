@@ -322,6 +322,16 @@ func TestBuildCopyIntoSQLParsesJSONColumns(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+func TestBuildCopyIntoSQLEscapesColumnNameLiterals(t *testing.T) {
+	columns := []schema.Column{
+		{Name: `back\slash`, DataType: schema.TypeString},
+		{Name: "it's", DataType: schema.TypeJSON},
+	}
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil, columns)
+	assert.Contains(t, got, `GET_IGNORE_CASE($1, 'back\\slash')::VARCHAR`)
+	assert.Contains(t, got, `PARSE_JSON(GET_IGNORE_CASE($1, 'it''s')::STRING)`)
+}
+
 func TestBuildCopyIntoSQLWithoutJSONColumnsMatchesByName(t *testing.T) {
 	columns := []schema.Column{
 		{Name: "id", DataType: schema.TypeInt64},
