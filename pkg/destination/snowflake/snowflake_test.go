@@ -313,12 +313,12 @@ func TestBuildCopyIntoSQLWithFilesList(t *testing.T) {
 // table with a JSON column is loaded through a transform that parses it.
 func TestBuildCopyIntoSQLParsesJSONColumns(t *testing.T) {
 	columns := []schema.Column{
-		{Name: "id", DataType: schema.TypeInt64},
-		{Name: "raw", DataType: schema.TypeBinary},
+		{Name: "ID", DataType: schema.TypeInt64},
+		{Name: "RAW", DataType: schema.TypeBinary},
 		{Name: "data", DataType: schema.TypeJSON},
 	}
 	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet"}, columns)
-	want := `COPY INTO "PUBLIC"."EVENTS" ("ID", "RAW", "DATA") FROM (SELECT GET_IGNORE_CASE($1, 'id')::BIGINT, GET_IGNORE_CASE($1, 'raw')::BINARY, PARSE_JSON(GET_IGNORE_CASE($1, 'data')::STRING) FROM @"PUBLIC".%"EVENTS"/123456789/) FILES = ('batch_0_1.parquet') FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE BINARY_AS_TEXT = FALSE) PURGE = TRUE`
+	want := `COPY INTO "PUBLIC"."EVENTS" ("ID", "RAW", "data") FROM (SELECT GET_IGNORE_CASE($1, 'ID')::BIGINT, GET_IGNORE_CASE($1, 'RAW')::BINARY, PARSE_JSON(GET_IGNORE_CASE($1, 'data')::STRING) FROM @"PUBLIC".%"EVENTS"/123456789/) FILES = ('batch_0_1.parquet') FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE BINARY_AS_TEXT = FALSE) PURGE = TRUE`
 	assert.Equal(t, want, got)
 }
 
@@ -351,8 +351,12 @@ func TestColumnsInTable(t *testing.T) {
 		{Name: "data", DataType: schema.TypeJSON},
 		{Name: "name", DataType: schema.TypeString},
 	}
-	got := columnsInTable(columns, []string{"ID", "DATA", "NAME", "OTHER"})
-	assert.Equal(t, []schema.Column{columns[0], columns[2], columns[3]}, got)
+	got := columnsInTable(columns, []string{"ID", "data", "NAME", "OTHER"})
+	assert.Equal(t, []schema.Column{
+		{Name: "ID", DataType: schema.TypeInt64},
+		{Name: "data", DataType: schema.TypeJSON},
+		{Name: "NAME", DataType: schema.TypeString},
+	}, got)
 }
 
 func TestWriteParallelParsesJSONColumnsInCopy(t *testing.T) {
@@ -365,7 +369,7 @@ func TestWriteParallelParsesJSONColumnsInCopy(t *testing.T) {
 
 	mock.ExpectQuery("DESCRIBE TABLE").WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("ID").AddRow("DATA"))
 	mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`COPY INTO "PUBLIC"\."EVENTS" \("ID", "DATA"\) FROM \(SELECT GET_IGNORE_CASE\(\$1, 'id'\)::BIGINT, PARSE_JSON\(GET_IGNORE_CASE\(\$1, 'data'\)::STRING\) FROM @"PUBLIC"\.%"EVENTS"/\d+/\) FILE_FORMAT`).
+	mock.ExpectExec(`COPY INTO "PUBLIC"\."EVENTS" \("ID", "DATA"\) FROM \(SELECT GET_IGNORE_CASE\(\$1, 'ID'\)::BIGINT, PARSE_JSON\(GET_IGNORE_CASE\(\$1, 'DATA'\)::STRING\) FROM @"PUBLIC"\.%"EVENTS"/\d+/\) FILE_FORMAT`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{
