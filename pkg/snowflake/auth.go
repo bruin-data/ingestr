@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
 	"github.com/youmark/pkcs8"
 )
 

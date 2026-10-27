@@ -76,7 +76,7 @@ require (
 	github.com/shopspring/decimal v1.4.0
 	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/simpleforce/simpleforce v0.0.0-20220429021116-acf4ac67ef68
-	github.com/snowflakedb/gosnowflake v1.19.0
+	github.com/snowflakedb/gosnowflake/v2 v2.3.0
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8
 	github.com/stretchr/testify v1.12.1
 	github.com/stripe/stripe-go/v81 v81.4.0
@@ -172,7 +172,6 @@ require (
 	github.com/ardielle/ardielle-go v1.5.2 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.20 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.0 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.20.12 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.9 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.3 // indirect
