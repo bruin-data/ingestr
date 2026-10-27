@@ -110,7 +110,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.57.0
 	resty.dev/v3 v3.0.0-beta.5
-	vitess.io/vitess v0.23.3
+	vitess.io/vitess v0.23.8
 )
 
 require (
