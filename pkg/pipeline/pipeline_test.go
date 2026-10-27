@@ -4411,4 +4411,10 @@ func TestBuildBufferReaderTarget_JSONTextOnlyForInferredStrings(t *testing.T) {
 	if jsonText("doc") {
 		t.Error("doc: inference-merged json should keep quoting")
 	}
+
+	p.config = &config.IngestConfig{Columns: "doc:json"}
+	_, jsonText = p.buildBufferReaderTarget(src, dest)
+	if !jsonText("doc") {
+		t.Error("doc: inference-merged json hinted by --columns should keep JSON text")
+	}
 }

@@ -695,8 +695,8 @@ func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string, colum
 	targets := make([]string, len(columns))
 	exprs := make([]string, len(columns))
 	for i, col := range columns {
-		targets[i] = quoteIdentifier(col.Name)
-		expr := fmt.Sprintf("GET_IGNORE_CASE($1, '%s')", strings.ReplaceAll(col.Name, "'", "''"))
+		targets[i] = `"` + strings.ReplaceAll(col.Name, `"`, `""`) + `"`
+		expr := fmt.Sprintf("GET_IGNORE_CASE($1, '%s')", strings.NewReplacer(`\`, `\\`, "'", "''").Replace(col.Name))
 		if col.DataType == schema.TypeJSON {
 			exprs[i] = fmt.Sprintf("PARSE_JSON(%s::STRING)", expr)
 		} else {
@@ -707,10 +707,11 @@ func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string, colum
 		fullTable, strings.Join(targets, ", "), strings.Join(exprs, ", "), location, filesClause)
 }
 
-// copyColumnsFor returns the write schema's columns that exist in the table
-// when one of them is JSON, and nil otherwise so the COPY keeps matching by
-// name. Naming only existing columns keeps the explicit list of the transform
-// COPY as tolerant of schema/table drift as MATCH_BY_COLUMN_NAME was.
+// copyColumnsFor returns the write schema's columns that exist in the table,
+// named exactly as in the table, when one of them is JSON, and nil otherwise
+// so the COPY keeps matching by name. Naming only existing columns keeps the
+// explicit list of the transform COPY as tolerant of schema/table drift as
+// MATCH_BY_COLUMN_NAME was.
 func (d *SnowflakeDestination) copyColumnsFor(ctx context.Context, fullTable string, s *schema.TableSchema) ([]schema.Column, error) {
 	if s == nil || !hasJSONColumn(s.Columns) {
 		return nil, nil
@@ -723,13 +724,14 @@ func (d *SnowflakeDestination) copyColumnsFor(ctx context.Context, fullTable str
 }
 
 func columnsInTable(columns []schema.Column, tableColumns []string) []schema.Column {
-	present := make(map[string]bool, len(tableColumns))
+	present := make(map[string]string, len(tableColumns))
 	for _, name := range tableColumns {
-		present[strings.ToUpper(name)] = true
+		present[strings.ToUpper(name)] = name
 	}
 	kept := make([]schema.Column, 0, len(columns))
 	for _, col := range columns {
-		if present[strings.ToUpper(col.Name)] {
+		if name, ok := present[strings.ToUpper(col.Name)]; ok {
+			col.Name = name
 			kept = append(kept, col)
 		}
 	}

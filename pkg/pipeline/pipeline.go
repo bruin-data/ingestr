@@ -1379,9 +1379,9 @@ func (p *Pipeline) inferSchemaFromData(
 // dest order, source names (for buffer file match), dest types (for staging
 // match). Ingestr/SCD2 metadata cols are skipped and dest-only cols get null-fill.
 // The returned predicate names the source columns whose string values the
-// replay keeps as JSON text: dest json columns that inference typed string, so
-// the json type came from --columns or the existing table rather than from a
-// mixed-type merge.
+// replay keeps as JSON text: dest json columns hinted json by --columns, or
+// that inference typed string, so the json type came from the existing table
+// rather than from a mixed-type merge.
 func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.TableSchema) (*arrow.Schema, func(string) bool) {
 	var renameMap map[string]string
 	if p.columnRenamer != nil && p.columnRenamer.HasRenames() {
@@ -1395,6 +1395,12 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 		}
 	}
 	jsonText := make(map[string]bool)
+	var overrides schemaevolution.ColumnOverrides
+	schemaNaming := ""
+	if p.config != nil {
+		overrides, _ = schemaevolution.ParseColumnOverrides(p.config.Columns)
+		schemaNaming = p.config.SchemaNaming
+	}
 
 	srcByDestName := make(map[string][]schema.Column, len(sourceSchema.Columns))
 	for _, c := range sourceSchema.Columns {
@@ -1416,7 +1422,8 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 				m := sc
 				m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
 				fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
-				if dc.DataType == schema.TypeJSON && inferredString[strings.ToLower(sc.Name)] {
+				ov, hinted := overrides.GetForColumn(sc.Name, schemaNaming)
+				if dc.DataType == schema.TypeJSON && (inferredString[strings.ToLower(sc.Name)] || hinted && ov.DataType == schema.TypeJSON) {
 					jsonText[sc.Name] = true
 				}
 			}
