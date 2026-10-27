@@ -8,11 +8,15 @@ import (
 )
 
 func TestParseQuackURI(t *testing.T) {
-	cfg, err := ParseQuackURI("duckdb://0.0.0.0:9494?quack=true&token=abc")
+	cfg, err := ParseQuackURI("duckdb://:abc@0.0.0.0:9494?quack=true")
 	require.NoError(t, err)
 	require.Equal(t, &QuackConfig{Host: "0.0.0.0", Port: "9494", Token: "abc"}, cfg)
 
-	cfg, err = ParseQuackURI("duckdb://my-server.com?quack=true&token=abc&disable_ssl=true")
+	cfg, err = ParseQuackURI("duckdb://:a%40b%3Ac@localhost?quack=true")
+	require.NoError(t, err)
+	require.Equal(t, "a@b:c", cfg.Token)
+
+	cfg, err = ParseQuackURI("duckdb://:abc@my-server.com?quack=true&disable_ssl=true")
 	require.NoError(t, err)
 	require.Equal(t, "quack:my-server.com", cfg.endpoint())
 	require.NotNil(t, cfg.DisableSSL)
@@ -29,21 +33,32 @@ func TestParseQuackURI(t *testing.T) {
 		require.Nil(t, cfg, uri)
 	}
 
-	_, err = ParseQuackURI("duckdb://myserver?token=secret123")
-	require.NotContains(t, err.Error(), "secret123")
+	for _, uri := range []string{
+		"duckdb://myserver?token=secret123",
+		"duckdb://:secret123@myserver",
+		"duckdb://secret123@myserver?quack=true",
+		"duckdb://:secret123@myserver:abc?quack=true",
+	} {
+		_, err = ParseQuackURI(uri)
+		require.Error(t, err, uri)
+		require.NotContains(t, err.Error(), "secret123", uri)
+	}
 
 	for uri, msg := range map[string]string{
-		"duckdb://localhost:9494?quack=true":                       "token is required",
-		"duckdb://localhost:abc?quack=true&token=secret":           "invalid DuckDB URI",
-		"duckdb://localhost:abc?token=secret":                      "invalid DuckDB URI",
-		"duckdb://?quack=true&token=abc":                           "must include the server host",
-		"duckdb://localhost/file.db?quack=true&token=abc":          "must not include a database path",
-		"duckdb://localhost?quack=true&token=abc&disable_ssl=nope": "invalid disable_ssl value",
-		"duckdb://localhost?quack=true&token=abc&tokn=x":           "unsupported URI parameter",
-		"duckdb://myserver?quak=true&token=abc":                    "unsupported DuckDB URI parameters",
-		"duckdb://myserver?token=abc":                              "unsupported DuckDB URI parameters",
-		"duckdb://localhost:9494?quack=false&token=abc":            "unsupported DuckDB URI parameters",
-		"duckdb:///tmp/a.db?access_mode=read_only":                 "unsupported DuckDB URI parameters",
+		"duckdb://localhost:9494?quack=true":                  "token is required",
+		"duckdb://localhost:9494?quack=true&token=abc":        "unsupported URI parameter",
+		"duckdb://abc@localhost:9494?quack=true":              "must not include a username",
+		"duckdb://:secret@localhost:abc?quack=true":           "invalid DuckDB URI",
+		"duckdb://localhost:abc?token=secret":                 "invalid DuckDB URI",
+		"duckdb://:abc@?quack=true":                           "must include the server host",
+		"duckdb://:abc@localhost/file.db?quack=true":          "must not include a database path",
+		"duckdb://:abc@localhost?quack=true&disable_ssl=nope": "invalid disable_ssl value",
+		"duckdb://:abc@localhost?quack=true&tokn=x":           "unsupported URI parameter",
+		"duckdb://:abc@myserver":                              "unsupported DuckDB URI credentials",
+		"duckdb://myserver?quak=true":                         "unsupported DuckDB URI parameters",
+		"duckdb://myserver?token=abc":                         "unsupported DuckDB URI parameters",
+		"duckdb://:abc@localhost:9494?quack=false":            "unsupported DuckDB URI credentials",
+		"duckdb:///tmp/a.db?access_mode=read_only":            "unsupported DuckDB URI parameters",
 	} {
 		_, err := ParseQuackURI(uri)
 		require.ErrorContains(t, err, msg, uri)
@@ -67,7 +82,7 @@ func TestQuackAttachStatements(t *testing.T) {
 
 func TestDialectBuildConnectionString_Quack(t *testing.T) {
 	d := NewDialect()
-	connStr, err := d.BuildConnectionString("duckdb://localhost:9494?quack=true&token=abc")
+	connStr, err := d.BuildConnectionString("duckdb://:abc@localhost:9494?quack=true")
 	require.NoError(t, err)
 	require.Equal(t, "driver=duckdb;path=:memory:", connStr)
 	require.NotNil(t, d.quack)

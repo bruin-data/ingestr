@@ -17,7 +17,7 @@ type QuackConfig struct {
 	DisableSSL *bool
 }
 
-// ParseQuackURI parses duckdb://host[:port]?quack=true&token=...; it returns nil
+// ParseQuackURI parses duckdb://:<token>@host[:port]?quack=true; it returns nil
 // for URIs that don't enable quack.
 func ParseQuackURI(uri string) (*QuackConfig, error) {
 	if !strings.HasPrefix(uri, "duckdb://") {
@@ -27,38 +27,45 @@ func ParseQuackURI(uri string) (*QuackConfig, error) {
 	if err != nil {
 		// The parse error echoes the URI, token included, so it is not wrapped.
 		if strings.Contains(uri, "?") {
-			return nil, fmt.Errorf("invalid DuckDB URI; to connect to a Quack server use duckdb://host:port?quack=true&token=<token>")
+			return nil, fmt.Errorf("invalid DuckDB URI; to connect to a Quack server use duckdb://:<token>@host:port?quack=true")
 		}
 		return nil, nil //nolint:nilerr // not a URL-shaped path, so not a quack URI
 	}
 	q := u.Query()
-	// Without quack mode the query string would become part of the local file name.
+	// Without quack mode the query string and credentials would become part of the local file name.
 	if q.Get("quack") != "true" {
+		if u.User != nil {
+			return nil, fmt.Errorf("unsupported DuckDB URI credentials; to connect to a Quack server use duckdb://:<token>@host:port?quack=true")
+		}
 		if u.RawQuery != "" {
 			keys := make([]string, 0, len(q))
 			for key := range q {
 				keys = append(keys, key)
 			}
 			sort.Strings(keys)
-			return nil, fmt.Errorf("unsupported DuckDB URI parameters %v; to connect to a Quack server use duckdb://host:port?quack=true&token=<token>", keys)
+			return nil, fmt.Errorf("unsupported DuckDB URI parameters %v; to connect to a Quack server use duckdb://:<token>@host:port?quack=true", keys)
 		}
 		return nil, nil
 	}
 	for key := range q {
-		if key != "quack" && key != "token" && key != "disable_ssl" {
+		if key != "quack" && key != "disable_ssl" {
 			return nil, fmt.Errorf("quack: unsupported URI parameter %q", key)
 		}
 	}
 
-	cfg := &QuackConfig{Host: u.Hostname(), Port: u.Port(), Token: q.Get("token")}
+	token, _ := u.User.Password()
+	cfg := &QuackConfig{Host: u.Hostname(), Port: u.Port(), Token: token}
 	if cfg.Host == "" {
-		return nil, fmt.Errorf("quack: URI must include the server host, e.g. duckdb://localhost:9494?quack=true&token=<token>")
+		return nil, fmt.Errorf("quack: URI must include the server host, e.g. duckdb://:<token>@localhost:9494?quack=true")
+	}
+	if u.User.Username() != "" {
+		return nil, fmt.Errorf("quack: URI must not include a username; put the token after a colon: duckdb://:<token>@host:port?quack=true")
 	}
 	if u.Path != "" && u.Path != "/" {
 		return nil, fmt.Errorf("quack: URI must not include a database path")
 	}
 	if cfg.Token == "" {
-		return nil, fmt.Errorf("quack: token is required (use ?token=<token> in URI)")
+		return nil, fmt.Errorf("quack: token is required (use duckdb://:<token>@host:port?quack=true)")
 	}
 	if v := q.Get("disable_ssl"); v != "" {
 		b, err := strconv.ParseBool(v)

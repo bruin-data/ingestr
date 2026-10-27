@@ -23,21 +23,21 @@ The same URI structure can be used both for sources and destinations.
 ingestr can read from and write to a remote DuckDB server started with [Quack](https://duckdb.org/quack/), DuckDB's client-server protocol:
 
 ```plaintext
-duckdb://<host>[:<port>]?quack=true&token=<token>
+duckdb://:<token>@<host>[:<port>]?quack=true
 ```
 
 URI parameters:
+- `token`: the server's authentication token, after a colon. URL-encode special characters, e.g. `@` as `%40`.
 - `host`: the host the server listens on
 - `port` (optional): the server port, defaults to `9494`
 - `quack`: set to `true` to connect to a Quack server
-- `token`: the server's authentication token
 - `disable_ssl` (optional): `true` for a server that doesn't use HTTPS. Only `localhost` connects over plain HTTP by default.
 
 ```bash
 ingestr ingest \
   --source-uri "postgresql://user:pass@localhost:5432/db" \
   --source-table "public.users" \
-  --dest-uri "duckdb://localhost:9494?quack=true&token=my_token" \
+  --dest-uri "duckdb://:my_token@localhost:9494?quack=true" \
   --dest-table "main.users"
 ```
 
