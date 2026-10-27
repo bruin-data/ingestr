@@ -2000,7 +2000,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: vitess.io/vitess
-      version: v0.23.3
+      version: v0.23.8
       licenses:
         - Apache-2.0
         - BSD-2-Clause
