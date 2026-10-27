@@ -298,15 +298,91 @@ func TestImplicitTableStageName(t *testing.T) {
 }
 
 func TestBuildCopyIntoSQLUsesParquetLogicalTypes(t *testing.T) {
-	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil)
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil, nil)
 	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
 	assert.Equal(t, want, got)
 }
 
 func TestBuildCopyIntoSQLWithFilesList(t *testing.T) {
-	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet", "batch_1_1.parquet"})
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet", "batch_1_1.parquet"}, nil)
 	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILES = ('batch_0_1.parquet', 'batch_1_1.parquet') FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
 	assert.Equal(t, want, got)
+}
+
+// A parquet string lands in a VARIANT column verbatim (TYPEOF = VARCHAR), so a
+// table with a JSON column is loaded through a transform that parses it.
+func TestBuildCopyIntoSQLParsesJSONColumns(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "raw", DataType: schema.TypeBinary},
+		{Name: "data", DataType: schema.TypeJSON},
+	}
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet"}, columns)
+	want := `COPY INTO "PUBLIC"."EVENTS" ("ID", "RAW", "DATA") FROM (SELECT GET_IGNORE_CASE($1, 'id')::BIGINT, GET_IGNORE_CASE($1, 'raw')::BINARY, PARSE_JSON(GET_IGNORE_CASE($1, 'data')::STRING) FROM @"PUBLIC".%"EVENTS"/123456789/) FILES = ('batch_0_1.parquet') FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE BINARY_AS_TEXT = FALSE) PURGE = TRUE`
+	assert.Equal(t, want, got)
+}
+
+func TestBuildCopyIntoSQLWithoutJSONColumnsMatchesByName(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString},
+	}
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil, columns)
+	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
+	assert.Equal(t, want, got)
+}
+
+// The transform COPY names columns explicitly, so it only names the ones the
+// table has; MATCH_BY_COLUMN_NAME tolerated the same drift by ignoring them.
+func TestColumnsInTable(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "extra", DataType: schema.TypeJSON},
+		{Name: "data", DataType: schema.TypeJSON},
+		{Name: "name", DataType: schema.TypeString},
+	}
+	got := columnsInTable(columns, []string{"ID", "DATA", "NAME", "OTHER"})
+	assert.Equal(t, []schema.Column{columns[0], columns[2], columns[3]}, got)
+}
+
+func TestWriteParallelParsesJSONColumnsInCopy(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0")
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("DESCRIBE TABLE").WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("ID").AddRow("DATA"))
+	mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`COPY INTO "PUBLIC"\."EVENTS" \("ID", "DATA"\) FROM \(SELECT GET_IGNORE_CASE\(\$1, 'id'\)::BIGINT, PARSE_JSON\(GET_IGNORE_CASE\(\$1, 'data'\)::STRING\) FROM @"PUBLIC"\.%"EVENTS"/\d+/\) FILE_FORMAT`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "data", Type: schema.JSONArrowType, Nullable: true},
+	}, nil)
+	builder := array.NewRecordBuilder(mem, arrowSchema)
+	builder.Field(0).(*array.Int64Builder).Append(1)
+	builder.Field(1).(*array.ExtensionBuilder).Builder.(*array.StringBuilder).Append(`{"a":1}`)
+	record := builder.NewRecordBatch()
+	builder.Release()
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: record}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table: "public.events",
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "data", DataType: schema.TypeJSON},
+			{Name: "not_in_table", DataType: schema.TypeJSON},
+		}},
+		Parallelism: 1,
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestCopyFilesInBatchesCapsFilesClause(t *testing.T) {
@@ -328,7 +404,7 @@ func TestCopyFilesInBatchesCapsFilesClause(t *testing.T) {
 	}
 
 	dest := &SnowflakeDestination{db: db}
-	copied, err := dest.copyFilesInBatches(t.Context(), `"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", files)
+	copied, err := dest.copyFilesInBatches(t.Context(), `"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", files, nil)
 	require.NoError(t, err)
 	assert.Equal(t, len(files), copied)
 	require.NoError(t, mock.ExpectationsWereMet())

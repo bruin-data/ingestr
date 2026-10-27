@@ -14,6 +14,7 @@ type TypeCaster struct {
 	targetSchema *arrow.Schema
 	safe         bool
 	retarget     bool
+	jsonText     func(string) bool
 }
 
 func NewTypeCaster(targetSchema *arrow.Schema) *TypeCaster {
@@ -22,6 +23,16 @@ func NewTypeCaster(targetSchema *arrow.Schema) *TypeCaster {
 
 func NewSafeTypeCaster(targetSchema *arrow.Schema) *TypeCaster {
 	return &TypeCaster{targetSchema: targetSchema, safe: true}
+}
+
+// EnableJSONText keeps a string column cast to the JSON type as JSON text:
+// for a known-schema source, a column typed json by --columns or by the
+// destination holds documents, not strings to quote (a value that is not valid
+// JSON is still stored as a JSON string). Inference flows leave it off; the
+// buffer replay decides per column (see Pipeline.buildBufferReaderTarget).
+func (tc *TypeCaster) EnableJSONText() *TypeCaster {
+	tc.jsonText = func(string) bool { return true }
+	return tc
 }
 
 // EnableRetarget makes the caster follow mid-stream schema announcements
@@ -39,7 +50,7 @@ func (tc *TypeCaster) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, err
 		batch.Retain()
 		return batch, nil
 	}
-	return databuffer.CastRecordToSchema(batch, tc.targetSchema, tc.safe)
+	return databuffer.CastRecordToSchemaWithOptions(batch, tc.targetSchema, databuffer.CastOptions{Safe: tc.safe, JSONText: tc.jsonText})
 }
 
 func (tc *TypeCaster) OutputSchema(_ *arrow.Schema) *arrow.Schema {
