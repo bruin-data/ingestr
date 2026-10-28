@@ -295,3 +295,84 @@ func TestStreamingSoftSnapshotReplaceWithoutStateManagerTruncates(t *testing.T) 
 	require.True(t, dest.targetTruncated())
 	require.Empty(t, dest.retireCalls)
 }
+
+func TestStreamingSoftSnapshotReplaceHardDeletesRetiredRows(t *testing.T) {
+	loop, dest, _ := softReplacementLoop(t)
+	loop.cfg.CDCDeleteBehavior = config.CDCDeleteHard
+
+	require.NoError(t, loop.run(t.Context(), softReplacementRecords(t, softMarker(), softSnapshotBoundary)))
+
+	require.Len(t, dest.retireCalls, 1)
+	require.True(t, dest.retireCalls[0].HardDelete)
+}
+
+func resumedSnapshotRecords(t *testing.T) chan source.RecordBatchResult {
+	t.Helper()
+	records := make(chan source.RecordBatchResult, 4)
+	records <- source.RecordBatchResult{TableName: "public.items", Truncate: true, CDCSnapshotPosition: softSnapshotBoundary, CDCSnapshotResumed: true}
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: int64RecordBatch(t, "id", []int64{7, 8}, nil)}
+	records <- source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{
+		Position:             softCheckpoint,
+		SnapshotPositions:    map[string]string{"public.items": softSnapshotBoundary},
+		SnapshotIncarnations: map[string]string{"public.items": "100"},
+	}}
+	close(records)
+	return records
+}
+
+func TestStreamingResumedSnapshotKeepsRowsAndRetiresAtOriginalBoundary(t *testing.T) {
+	loop, dest, st := softReplacementLoop(t)
+	// Rows the interrupted run made durable carry positions at and beyond the
+	// boundary; a fresh replacement would fall back to truncating them.
+	dest.maxLSN = "00000000/00000099"
+
+	require.NoError(t, loop.run(t.Context(), resumedSnapshotRecords(t)))
+
+	require.False(t, dest.targetTruncated(), "a resumed snapshot must keep the rows already written")
+	require.Equal(t, []string{"state", "merge", "truncate:raw.items_staging", "retire:" + softSnapshotBoundary, "state"}, dest.recordedOrder())
+	require.Nil(t, st.softReplace)
+	require.Equal(t, softCheckpoint, resumedSnapshotPosition(t, dest))
+}
+
+func resumedSnapshotPosition(t *testing.T, dest *softReplaceDestination) string {
+	t.Helper()
+	restarted, err := NewCDCStateManager(dest, "stream-soft-replacement", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "100"))
+	position, err := restarted.ResumePosition(t.Context(), "public.items")
+	require.NoError(t, err)
+	return position
+}
+
+func TestStreamingResumedSnapshotWithoutSoftReplaceKeepsRows(t *testing.T) {
+	loop, dest, _ := softReplacementLoop(t)
+	dest.soft = false
+
+	require.NoError(t, loop.run(t.Context(), resumedSnapshotRecords(t)))
+
+	require.False(t, dest.targetTruncated())
+	require.Empty(t, dest.retireCalls)
+	require.Equal(t, softCheckpoint, resumedSnapshotPosition(t, dest))
+}
+
+func TestStreamingPersistsSnapshotProgress(t *testing.T) {
+	loop, dest, _ := softReplacementLoop(t)
+	records := make(chan source.RecordBatchResult, 4)
+	records <- softMarker()
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)}
+	records <- source.RecordBatchResult{TableName: "public.items", CommitToken: source.CDCStateCommitToken{SnapshotProgress: map[string]source.CDCSnapshotProgress{
+		"public.items": {Boundary: softSnapshotBoundary, Key: `["2"]`, Incarnation: "101"},
+	}}}
+	close(records)
+
+	require.NoError(t, loop.run(t.Context(), records))
+
+	restarted, err := NewCDCStateManager(dest, "stream-soft-replacement", "raw.items", "")
+	require.NoError(t, err)
+	require.NoError(t, restarted.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "101"))
+	resume, ok, err := restarted.SnapshotResume(t.Context(), "public.items")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, `["2"]`, resume.Key)
+	require.Equal(t, softSnapshotBoundary, resume.Boundary)
+}

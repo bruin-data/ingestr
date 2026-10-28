@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,54 @@ func TestBigQueryDestinationCDCMergeAvoidsInternalAliasCollisions(t *testing.T) 
 		FROM %s WHERE id = 1
 	`, bqQualifiedTable(project, dataset, targetTable)))
 	require.Equal(t, [][]bigquery.Value{{"active", "user-marker", "user-marker-2", "user-lsn", "user-lsn-2", "00000000000000000020", true, "2026-01-03"}}, rows)
+}
+
+func TestBigQueryDestinationCDCMergeHardDelete(t *testing.T) {
+	if os.Getenv("GONG_TEST_BIGQUERY_URI") == "" {
+		t.Skip("set GONG_TEST_BIGQUERY_URI to run")
+	}
+
+	dest, client, project, dataset := bqDedupSetup(t)
+	ctx := t.Context()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	targetTable := "cdc_hard_target_" + suffix
+	stagingTable := "cdc_hard_staging_" + suffix
+	defer bqDropTables(ctx, client, dataset, stagingTable, targetTable)
+	defer func() { _ = dest.Close(ctx) }()
+
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (id INT64, payload STRING, _cdc_lsn STRING, _cdc_deleted BOOL, _cdc_synced_at TIMESTAMP)`, bqQualifiedTable(project, dataset, targetTable))))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (id INT64, payload STRING, _cdc_lsn STRING, _cdc_deleted BOOL, _cdc_synced_at TIMESTAMP, _cdc_unchanged_cols STRING)`, bqQualifiedTable(project, dataset, stagingTable))))
+
+	runCDCHardDeleteScenario(t, ctx, cdcHardDeleteHarness{
+		dest:         dest,
+		targetTable:  dataset + "." + targetTable,
+		stagingTable: dataset + "." + stagingTable,
+		dialect: cdcHardDeleteDialect{
+			boolean:   func(v bool) string { return fmt.Sprint(v) },
+			timestamp: func(v string) string { return "TIMESTAMP '" + v + " 00:00:00 UTC'" },
+			unchanged: func(cols []string) string {
+				if len(cols) == 0 {
+					return "'[]'"
+				}
+				return `'["` + strings.Join(cols, `","`) + `"]'`
+			},
+		},
+		insert: func(t *testing.T, table, values string) {
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", bqQualifiedTable(project, dataset, strings.TrimPrefix(table, dataset+".")), values)))
+		},
+		truncate: func(t *testing.T, table string) {
+			require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+bqQualifiedTable(project, dataset, strings.TrimPrefix(table, dataset+"."))))
+		},
+		readRows: func(t *testing.T) map[int64]cdcHardDeleteRow {
+			rows := bqRunQuery(t, ctx, client, fmt.Sprintf(`SELECT id, COALESCE(payload, ''), COALESCE(_cdc_lsn, ''), _cdc_deleted FROM %s`, bqQualifiedTable(project, dataset, targetTable)))
+			got := make(map[int64]cdcHardDeleteRow, len(rows))
+			for _, row := range rows {
+				got[row[0].(int64)] = cdcHardDeleteRow{payload: row[1].(string), lsn: row[2].(string), deleted: row[3].(bool)}
+			}
+			return got
+		},
+		predicate: "t.`id` > 100",
+	})
 }
 
 func testBigQueryDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {

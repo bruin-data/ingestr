@@ -189,6 +189,49 @@ func TestIngestConfigValidate_TableNaming(t *testing.T) {
 	})
 }
 
+func TestIngestConfigValidate_CDCDeleteBehavior(t *testing.T) {
+	tests := []struct {
+		name      string
+		sourceURI string
+		behavior  CDCDeleteBehavior
+		strategy  IncrementalStrategy
+		wantErr   string
+	}{
+		{name: "default soft", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteSoft},
+		{name: "empty", sourceURI: "postgres+cdc://localhost/db"},
+		{name: "hard for CDC", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard},
+		{name: "hard for change tracking", sourceURI: "mssql+ct://localhost/db", behavior: CDCDeleteHard},
+		{name: "hard with explicit merge", sourceURI: "mysql+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyMerge},
+		{name: "hard with append", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyAppend, wantErr: "requires the \"merge\" incremental strategy"},
+		{name: "hard for non-CDC source", sourceURI: "postgres://localhost/db", behavior: CDCDeleteHard, wantErr: "CDC and Change Tracking sources only"},
+		{name: "soft for non-CDC source", sourceURI: "postgres://localhost/db", behavior: CDCDeleteSoft},
+		{name: "unknown", sourceURI: "postgres+cdc://localhost/db", behavior: "purge", wantErr: "invalid value"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = tt.sourceURI
+			cfg.DestURI = "duckdb://out.duckdb"
+			cfg.SourceTable = "public.users"
+			cfg.CDCDeleteBehavior = tt.behavior
+			if tt.strategy != "" {
+				cfg.IncrementalStrategy = tt.strategy
+				cfg.IncrementalStrategyExplicit = true
+			}
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "cdc-delete-behavior") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected cdc-delete-behavior error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestIngestConfigValidate_IncrementalPredicateDefersStrategyValidation(t *testing.T) {
 	newCfg := func() *IngestConfig {
 		cfg := DefaultConfig()

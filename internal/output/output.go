@@ -154,15 +154,16 @@ func emitLog(level slog.Level, msg string) {
 // StartInfo carries the fields of the start event. Primitive types only, so this
 // package stays a leaf.
 type StartInfo struct {
-	SourceType     string
-	DestType       string
-	SourceTable    string
-	DestTable      string
-	Strategy       string
-	IncrementalKey string
-	PrimaryKey     []string
-	SchemaNaming   string
-	CDCTableNaming string
+	SourceType        string
+	DestType          string
+	SourceTable       string
+	DestTable         string
+	Strategy          string
+	IncrementalKey    string
+	PrimaryKey        []string
+	SchemaNaming      string
+	CDCTableNaming    string
+	CDCDeleteBehavior string
 }
 
 // EventStart emits the start event (JSON mode only).
@@ -189,6 +190,9 @@ func EventStart(i StartInfo) {
 	}
 	if i.CDCTableNaming != "" {
 		attrs = append(attrs, slog.String("cdc_table_naming", i.CDCTableNaming))
+	}
+	if i.CDCDeleteBehavior != "" {
+		attrs = append(attrs, slog.String("cdc_delete_behavior", i.CDCDeleteBehavior))
 	}
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "ingestion started", attrs...)
 }

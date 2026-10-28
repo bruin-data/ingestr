@@ -205,6 +205,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC || managedChangeTracking
+	if err := validateCDCDeleteBehavior(p.config, dest, managedDestinationCDC); err != nil {
+		return err
+	}
 	if p.config.Stream && p.config.FullRefresh && !managedDestinationCDC {
 		return fmt.Errorf("--full-refresh --stream requires a PostgreSQL, MySQL, or SQL Server change source and destination-managed CDC state")
 	}
@@ -1670,6 +1673,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	// For CDC sources, query per-table max LSNs for resume
 	var cdcResumeLSNs map[string]string
+	var cdcSnapshotResumes map[string]source.CDCSnapshotProgress
 	if cdcStateManager != nil && !p.config.FullRefresh {
 		cdcResumeLSNs = make(map[string]string)
 		stateEmpty, err := cdcStateManager.StateEmpty(ctx)
@@ -1691,6 +1695,19 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				cdcResumeLSNs[table.Name] = resumeLSN
 				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
 			} else {
+				if p.config.Stream && resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
+					resume, ok, err := cdcStateManager.SnapshotResume(ctx, table.Name)
+					if err != nil {
+						return err
+					}
+					if ok {
+						if cdcSnapshotResumes == nil {
+							cdcSnapshotResumes = make(map[string]source.CDCSnapshotProgress)
+						}
+						cdcSnapshotResumes[table.Name] = resume
+						config.Debug("[PIPELINE] Interrupted snapshot of %s can resume after key %s", table.Name, resume.Key)
+					}
+				}
 				if stateEmpty {
 					if err := rejectUnprovenLegacyCDCTarget(ctx, p.dest, table.Name, tableDestNames[table.Name]); err != nil {
 						return err
@@ -1767,19 +1784,20 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	job := &strategy.MultiTableIngestionJob{
-		Config:            &resolvedConfig,
-		Source:            src,
-		Destination:       p.dest,
-		Tables:            tables,
-		TableDestNames:    tableDestNames,
-		Tracker:           tracker,
-		CDCResumeLSNs:     cdcResumeLSNs,
-		EvolutionPlans:    evolutionPlans,
-		CDCStateManager:   cdcStateManager,
-		WhitespaceTrimmer: whitespaceTrimmer,
-		LoadTimestamp:     loadTimestampTransformer,
-		RunID:             runIDTransformer,
-		ColumnRenamers:    columnRenamers,
+		Config:             &resolvedConfig,
+		Source:             src,
+		Destination:        p.dest,
+		Tables:             tables,
+		TableDestNames:     tableDestNames,
+		Tracker:            tracker,
+		CDCResumeLSNs:      cdcResumeLSNs,
+		CDCSnapshotResumes: cdcSnapshotResumes,
+		EvolutionPlans:     evolutionPlans,
+		CDCStateManager:    cdcStateManager,
+		WhitespaceTrimmer:  whitespaceTrimmer,
+		LoadTimestamp:      loadTimestampTransformer,
+		RunID:              runIDTransformer,
+		ColumnRenamers:     columnRenamers,
 		NormalizeTableInfo: func(ctx context.Context, table source.SourceTableInfo, destTable string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
 			return p.normalizeMultiTableInfo(ctx, table, destTable)
 		},
@@ -3445,6 +3463,23 @@ func validateIncrementalPredicate(cfg *config.IngestConfig, dest destination.Des
 	}
 	if sup, ok := dest.(destination.IncrementalPredicateSupport); !ok || !sup.SupportsIncrementalPredicate() {
 		return fmt.Errorf("destination scheme %q does not support --incremental-predicate", dest.GetScheme())
+	}
+	return nil
+}
+
+// validateCDCDeleteBehavior admits hard deletes only where the merge can apply
+// them and the resume position lives in destination-managed state. Sources that
+// resume from MAX(_cdc_lsn) over the target rows would lose the position of
+// every change whose row a hard delete removed.
+func validateCDCDeleteBehavior(cfg *config.IngestConfig, dest destination.Destination, managedDestinationCDC bool) error {
+	if !cfg.HardDeletesCDC() {
+		return nil
+	}
+	if !destination.SupportsCDCHardDelete(dest) {
+		return fmt.Errorf("--cdc-delete-behavior=%s is not supported by destination scheme %q", config.CDCDeleteHard, dest.GetScheme())
+	}
+	if !managedDestinationCDC {
+		return fmt.Errorf("--cdc-delete-behavior=%s requires destination-managed CDC state (PostgreSQL, MySQL/MariaDB, or SQL Server CDC, or SQL Server Change Tracking started with --stream --full-refresh); this run resumes from the destination rows that hard deletes remove", config.CDCDeleteHard)
 	}
 	return nil
 }

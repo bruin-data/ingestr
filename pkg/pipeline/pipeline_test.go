@@ -1492,6 +1492,25 @@ func TestValidateMySQLCDCMutationFencing(t *testing.T) {
 		"the PostgreSQL destination must satisfy every MySQL CDC fencing capability, including atomic multi-table merge")
 }
 
+type mockCDCHardDeleteDestination struct {
+	mockDestination
+	supported bool
+}
+
+func (d *mockCDCHardDeleteDestination) SupportsCDCHardDelete() bool { return d.supported }
+
+func TestValidateCDCDeleteBehavior(t *testing.T) {
+	hard := &config.IngestConfig{CDCDeleteBehavior: config.CDCDeleteHard}
+	soft := &config.IngestConfig{CDCDeleteBehavior: config.CDCDeleteSoft}
+	capable := &mockCDCHardDeleteDestination{mockDestination: mockDestination{scheme: "mock"}, supported: true}
+
+	require.NoError(t, validateCDCDeleteBehavior(soft, &mockDestination{scheme: "mock"}, false))
+	require.NoError(t, validateCDCDeleteBehavior(hard, capable, true))
+	require.ErrorContains(t, validateCDCDeleteBehavior(hard, &mockDestination{scheme: "mock"}, true), `not supported by destination scheme "mock"`)
+	require.ErrorContains(t, validateCDCDeleteBehavior(hard, &mockCDCHardDeleteDestination{mockDestination: mockDestination{scheme: "mock"}}, true), "not supported")
+	require.ErrorContains(t, validateCDCDeleteBehavior(hard, capable, false), "requires destination-managed CDC state")
+}
+
 func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {
 	err := validateChangeTrackingDestination(&mockDestination{scheme: "mock"})
 

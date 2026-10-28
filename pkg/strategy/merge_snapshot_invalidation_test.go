@@ -11,6 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
@@ -260,4 +261,18 @@ func TestBatchMergeInvalidationKeepsOriginalDestinationPin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMergeStagingOptionsHardDeleteOnlyForCDC(t *testing.T) {
+	dest := &fakeDestination{}
+	cdcSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+		{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+	}}
+	plainSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+
+	require.True(t, mergeStagingOptions(dest, "stage", "target", []string{"id"}, cdcSchema, "", "", "", true).CDCHardDelete)
+	require.False(t, mergeStagingOptions(dest, "stage", "target", []string{"id"}, cdcSchema, "", "", "", false).CDCHardDelete)
+	require.False(t, mergeStagingOptions(dest, "stage", "target", []string{"id"}, plainSchema, "", "", "", true).CDCHardDelete)
 }

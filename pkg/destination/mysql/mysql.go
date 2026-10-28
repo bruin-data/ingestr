@@ -1234,6 +1234,12 @@ func (d *MySQLDestination) mergeTableInTx(ctx context.Context, tx *sql.Tx, opts 
 			buildJoinCondition(opts.PrimaryKeys, "active", "latest"),
 		)
 		insertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
+		if opts.CDCHardDelete {
+			// Rows whose latest change is a delete are removed below, so only
+			// rows whose latest change is live need their image upserted.
+			upsertSource = fmt.Sprintf("(SELECT latest.*, 0 AS %s FROM %s WHERE latest.`_cdc_deleted` = 0) AS source", equalDeleteMarker, latestSource)
+			insertSource = fmt.Sprintf("(SELECT latest.* FROM %s WHERE latest.`_cdc_deleted` = 0) AS source", latestSource)
+		}
 	}
 	primaryKeyMatchCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
@@ -1307,7 +1313,20 @@ func (d *MySQLDestination) mergeTableInTx(ctx context.Context, tx *sql.Tx, opts 
 		}
 	}
 
-	if isCDC {
+	if isCDC && opts.CDCHardDelete {
+		deleteSQL := fmt.Sprintf(
+			"DELETE target FROM %s AS target INNER JOIN %s ON %s WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` >= target.`_cdc_lsn`)",
+			quoteTable(opts.TargetTable),
+			dedupSource(""),
+			matchCondition,
+		)
+		config.Debug("[MERGE] Executing CDC hard delete: %s", deleteSQL)
+
+		if _, err := tx.ExecContext(ctx, deleteSQL); err != nil {
+			config.LogFailedQuery(deleteSQL, err)
+			return fmt.Errorf("failed to delete CDC-deleted records: %w", err)
+		}
+	} else if isCDC {
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
@@ -1619,6 +1638,7 @@ func (d *MySQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MySQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MySQLDestination) SupportsAtomicSwap() bool           { return true }
 func (d *MySQLDestination) SupportsCDCMerge() bool             { return true }
+func (d *MySQLDestination) SupportsCDCHardDelete() bool        { return true }
 func (d *MySQLDestination) SupportsCDCUnchangedCols() bool     { return true }
 
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.

@@ -148,6 +148,42 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.Contains(t, sql, `WHEN MATCHED AND (`+predicate+`) AND (target."_CDC_LSN" IS NULL`)
 	})
 
+	t.Run("cdc_hard_delete", func(t *testing.T) {
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		soft := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
+		assert.Equal(t, soft, buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil, "", false))
+
+		sql := buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil, "", true)
+
+		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC`)
+		assert.Contains(t, sql, "WHEN MATCHED AND source.\"_CDC_DELETED\" = true AND (target.\"_CDC_LSN\" IS NULL OR source.\"_CDC_LSN\" >= target.\"_CDC_LSN\") THEN\n  DELETE\n")
+		assert.Contains(t, sql, `WHEN MATCHED AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND source."_CDC_DELETED" = true AND COALESCE(target."_CDC_DELETED", false) = false)) AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `target."NAME" = source."NAME"`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED AND source.\"_CDC_DELETED\" = false THEN\n")
+		assert.NotContains(t, sql, `target."_CDC_DELETED" = true`)
+		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN")
+		assert.Less(t, strings.Index(sql, "DELETE\n"), strings.Index(sql, "UPDATE SET"))
+	})
+
+	t.Run("cdc_hard_delete_incremental_predicate", func(t *testing.T) {
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		predicate := `target."ID" > 100`
+		sql := buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil, predicate, true)
+
+		assert.Contains(t, sql, "ON target.\"ID\" = source.\"ID\"\n")
+		assert.Contains(t, sql, `WHEN MATCHED AND (`+predicate+`) AND source."_CDC_DELETED" = true AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" >= target."_CDC_LSN") THEN`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (`+predicate+`) AND (target."_CDC_LSN" IS NULL`)
+	})
+
+	t.Run("cdc_hard_delete_only_pk_and_metadata", func(t *testing.T) {
+		columns := []string{"ID", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT"}
+		sql := buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"ID"}, columns, "", nil, "", true)
+
+		assert.Contains(t, sql, "  DELETE\n")
+		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED AND source.\"_CDC_DELETED\" = false THEN\n")
+	})
+
 	t.Run("non_cdc_internal_alias_collision", func(t *testing.T) {
 		columns := []string{"id", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)

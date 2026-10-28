@@ -75,10 +75,11 @@ func TestSnapshotRowsToBatchDoesNotTreatFirstRowDecodeErrorAsEmpty(t *testing.T)
 	columns := append([]schema.Column{{Name: "id", DataType: schema.TypeInt64}}, cdcMetaColumns()...)
 	snapshot := &Snapshot{tableSchema: &schema.TableSchema{Columns: columns}}
 
-	record, count, err := snapshot.rowsToBatch(
+	record, count, _, err := snapshot.rowsToBatch(
 		&failedSnapshotRows{err: sentinel},
 		buildArrowSchema(columns),
 		columns[:1],
+		0,
 		100,
 		0,
 		"0/1",

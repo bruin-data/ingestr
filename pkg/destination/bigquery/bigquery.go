@@ -2232,7 +2232,7 @@ func (d *BigQueryDestination) PrepareMergeTable(ctx context.Context, opts destin
 	}
 
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQLWithPredicate(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning, opts.IncrementalPredicate)
+	mergeSQL := d.buildMergeSQLWithPredicate(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning, opts.IncrementalPredicate, opts.CDCHardDelete)
 	return &preparedBigQueryMerge{destination: d, sql: mergeSQL}, nil
 }
 
@@ -2558,12 +2558,13 @@ func (d *BigQueryDestination) buildMergeSQL(project, targetDataset, targetTable,
 }
 
 func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning) string {
-	return d.buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nonNullablePKs, pruning, "")
+	return d.buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nonNullablePKs, pruning, "", false)
 }
 
-func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string) string {
+func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string, cdcHardDelete bool) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	hardDelete := cdcHardDelete && hasCDCDeleted && len(primaryKeys) > 0
 	hasActiveColumn := quoteIdentifier("__ingestr_has_active")
 	activeLSNColumn := quoteIdentifier("__ingestr_active_lsn")
 	if hasCDCDeleted && len(primaryKeys) > 0 {
@@ -2642,7 +2643,22 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 	sql.WriteString(mergePartitionPruningDeclarations(stagingRef, pruning))
 	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
 
-	if hasCDCDeleted && len(primaryKeys) > 0 {
+	if hardDelete {
+		// Hard-delete CDC mode: only the latest change overall matters. A live
+		// latest change carries the full row image, and a delete latest change
+		// removes the row, so no active-image composition is needed.
+		pkPartition := make([]string, len(primaryKeys))
+		for i, pk := range primaryKeys {
+			pkPartition[i] = quoteIdentifier(pk)
+		}
+		fmt.Fprintf(
+			&sql,
+			"USING (SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) = 1) AS s\n",
+			stagingRef,
+			strings.Join(pkPartition, ", "),
+			destination.CDCLatestOverallOrderBy(quoteIdentifier),
+		)
+	} else if hasCDCDeleted && len(primaryKeys) > 0 {
 		// CDC mode: compose the merge source from two per-PK dedups of staging:
 		// data columns come from the latest non-deleted change (so a trailing
 		// delete doesn't discard the last update's values), while the CDC
@@ -2700,7 +2716,23 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 
 	fmt.Fprintf(&sql, "ON %s\n", onClause)
 
-	if hasCDCDeleted {
+	if hardDelete {
+		matchedGuard := func(condition string) string {
+			if incrementalPredicate != "" {
+				return "(" + incrementalPredicate + ") AND " + condition
+			}
+			return condition
+		}
+		fmt.Fprintf(&sql, "WHEN MATCHED AND %s THEN\n", matchedGuard("s.`_cdc_deleted` = true AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` >= t.`_cdc_lsn`)"))
+		sql.WriteString("  DELETE\n")
+		if len(updateSets) > 0 {
+			fmt.Fprintf(&sql, "WHEN MATCHED AND %s THEN\n", matchedGuard("s.`_cdc_deleted` = false AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`)"))
+			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+		}
+		sql.WriteString("WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN\n")
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	} else if hasCDCDeleted {
 		newerLSN := "(t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false))"
 		if incrementalPredicate != "" {
 			newerLSN = "(" + incrementalPredicate + ") AND " + newerLSN
@@ -3085,6 +3117,8 @@ func (d *BigQueryDestination) SupportsCDCUnchangedCols() bool { return true }
 func (d *BigQueryDestination) SupportsCDCMerge() bool {
 	return true
 }
+
+func (d *BigQueryDestination) SupportsCDCHardDelete() bool { return true }
 
 func (d *BigQueryDestination) RequiresSerializedCDCRuns() bool { return true }
 

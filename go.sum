@@ -2811,7 +2811,5 @@ software.sslmate.com/src/go-pkcs12 v0.6.0 h1:f3sQittAeF+pao32Vb+mkli+ZyT+VwKaD01
 software.sslmate.com/src/go-pkcs12 v0.6.0/go.mod h1:Qiz0EyvDRJjjxGyUQa2cCNZn/wMyzrRJ/qcDXOQazLI=
 tags.cncf.io/container-device-interface v1.1.0 h1:RnxNhxF1JOu6CJUVpetTYvrXHdxw9j9jFYgZpI+anSY=
 tags.cncf.io/container-device-interface v1.1.0/go.mod h1:76Oj0Yqp9FwTx/pySDc8Bxjpg+VqXfDb50cKAXVJ34Q=
-vitess.io/vitess v0.23.3 h1:zvZFEG6/3IvmDmXlFlqs7353tNYDTjhlriMMSHGz1vs=
-vitess.io/vitess v0.23.3/go.mod h1:Q6qWoQw3mAEBOMg0Hn28sb5EWi7pRJ9885zrVtU6MGM=
 vitess.io/vitess v0.23.8 h1:YRyeSmqkEbdmSztpJkztepdU11xdnDSuxTEu4mCEYuE=
 vitess.io/vitess v0.23.8/go.mod h1:VUzU+ZR7EmzUtDdUBR9uezNvH5qC+a5iX80Gi739t00=

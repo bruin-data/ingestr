@@ -25,23 +25,27 @@ import (
 )
 
 const (
-	cdcStateVersion           = "2"
-	cdcStateTableName         = "cdc_state"
-	cdcTargetTableName        = "cdc_targets"
-	cdcStateKindCheckpoint    = "checkpoint"
-	cdcStateKindSnapshot      = "snapshot"
-	cdcStateKindDestination   = "destination"
-	cdcStateKindRun           = "run"
-	cdcStateStatusInProgress  = "in_progress"
-	cdcStateStatusResuming    = "resuming"
-	zeroCDCPosition           = "00000000/00000000"
-	cdcStatePruneThreshold    = 100
-	cdcStatePruneBatchSize    = 900
-	cdcStateMaxPruneBatchSize = 10000
-	cdcStateWriteBatchSize    = 1000
-	cdcStateInvalidationMax   = 8
-	cdcManagementConnectorID  = "__ingestr_cdc_management__"
-	cdcManagementSourceTable  = "__ingestr_cdc_management__"
+	cdcStateVersion         = "2"
+	cdcStateTableName       = "cdc_state"
+	cdcTargetTableName      = "cdc_targets"
+	cdcStateKindCheckpoint  = "checkpoint"
+	cdcStateKindSnapshot    = "snapshot"
+	cdcStateKindDestination = "destination"
+	cdcStateKindRun         = "run"
+	// cdcStateKindSnapshotProgress records how far a key-ordered snapshot got.
+	// Its position is JSON (cdcSnapshotProgressState), which the position
+	// decoders reject, so only the snapshot-progress code reads or prunes it.
+	cdcStateKindSnapshotProgress = "snapshot_progress"
+	cdcStateStatusInProgress     = "in_progress"
+	cdcStateStatusResuming       = "resuming"
+	zeroCDCPosition              = "00000000/00000000"
+	cdcStatePruneThreshold       = 100
+	cdcStatePruneBatchSize       = 900
+	cdcStateMaxPruneBatchSize    = 10000
+	cdcStateWriteBatchSize       = 1000
+	cdcStateInvalidationMax      = 8
+	cdcManagementConnectorID     = "__ingestr_cdc_management__"
+	cdcManagementSourceTable     = "__ingestr_cdc_management__"
 )
 
 var cdcStateSchema = &schema.TableSchema{Columns: []schema.Column{
@@ -125,6 +129,7 @@ type CDCStateManager struct {
 	lateTargetModes      map[string]lateTargetMode
 	lateTargetRaw        map[string]string
 	snapshotEpochs       map[string]uint64
+	progressSequence     int64
 	entries              []destination.CDCStateEntry
 	generations          []int64
 	generationRuns       map[int64]map[string]struct{}
@@ -239,7 +244,17 @@ func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, d
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false)
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, true)
+}
+
+// ResumeSnapshot starts a replacement snapshot epoch that continues an
+// interrupted snapshot, keeping its progress so rows it already made durable
+// remain counted if this run is interrupted too.
+func (m *CDCStateManager) ResumeSnapshot(ctx context.Context, sourceTable, destTable, incarnation string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, false)
 }
 
 // InvalidateBatchSnapshot prevents resume while a fully staged replacement is
@@ -249,10 +264,14 @@ func (m *CDCStateManager) InvalidateBatchSnapshot(ctx context.Context, sourceTab
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.invalidateSnapshot(ctx, sourceTable, destTable, "", true)
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, "", true, true)
 }
 
-func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, destTable, incarnation string, preserveSnapshot bool) error {
+// invalidateSnapshot starts a new snapshot epoch. Unless resetProgress is
+// false, it also durably discards snapshot progress in the same write, before
+// the caller empties or replaces the target, so a later run can never resume
+// after rows that no longer exist.
+func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, destTable, incarnation string, preserveSnapshot, resetProgress bool) error {
 	if err := m.claimTarget(ctx, sourceTable, destTable); err != nil {
 		return err
 	}
@@ -267,7 +286,13 @@ func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, d
 	}
 	epoch := m.snapshotEpochs[sourceTable] + 1
 	position := encodeCDCStatePositionWithSchema(zeroCDCPosition, incarnation, m.currentSchemas[sourceTable], epoch)
-	if err := m.writeState(ctx, sourceTable, destTable, cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, position); err != nil {
+	events := []cdcStateWriteEvent{m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, position)}
+	if resetProgress {
+		if reset, ok := m.snapshotProgressReset(sourceTable, destTable); ok {
+			events = append(events, reset)
+		}
+	}
+	if err := m.writeStateEvents(ctx, events); err != nil {
 		return fmt.Errorf("failed to invalidate CDC snapshot for %s: %w", sourceTable, err)
 	}
 	m.snapshotEpochs[sourceTable] = epoch
@@ -1234,11 +1259,17 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 		}
 		position = encodeCDCStatePositionWithSchema(position, incarnation, schemaFingerprint, m.snapshotEpochs[sourceTable])
 		events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, destination.CDCStateStatusComplete, position))
+		if _, completed := token.SnapshotPositions[sourceTable]; completed {
+			if reset, ok := m.snapshotProgressReset(sourceTable, destTable); ok {
+				events = append(events, reset)
+			}
+		}
 		if destinationIncarnation := capturedDestinations[sourceTable]; destinationIncarnation != "" {
 			destinationPosition := encodeCDCDestinationState(positions[sourceTable], destinationIncarnation, m.snapshotEpochs[sourceTable])
 			events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindDestination, m.generation, destination.CDCStateStatusComplete, destinationPosition))
 		}
 	}
+	events = append(events, m.snapshotProgressEvents(token)...)
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
 	}
@@ -1683,7 +1714,7 @@ func (m *CDCStateManager) supersededEventIDs() []string {
 			stale = append(stale, entry.EventID)
 		}
 	}
-	return stale
+	return append(stale, m.supersededSnapshotProgress()...)
 }
 
 // retainedResumeGenerations names the generations that still hold the newest

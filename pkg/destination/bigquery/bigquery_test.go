@@ -3465,7 +3465,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		sql := dest.buildMergeSQLWithPredicate(
 			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, []string{"id", "event_date", "name"}, nil, "",
-			map[string]bool{"id": true}, nil, "t.`event_date` >= DATE '2026-07-01'",
+			map[string]bool{"id": true}, nil, "t.`event_date` >= DATE '2026-07-01'", false,
 		)
 
 		if !contains(sql, "ON t.`id` = s.`id` AND (t.`event_date` >= DATE '2026-07-01')\n") {
@@ -3598,7 +3598,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		sql := dest.buildMergeSQLWithPredicate(
 			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "",
-			map[string]bool{"id": true}, nil, predicate,
+			map[string]bool{"id": true}, nil, predicate, false,
 		)
 
 		if !contains(sql, "ON t.`id` = s.`id`\n") {
@@ -3609,6 +3609,66 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 		if !contains(sql, "WHEN MATCHED AND ("+predicate+") AND (t.`_cdc_lsn` IS NULL") {
 			t.Fatalf("CDC matched update does not apply the incremental predicate:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_hard_delete_mode", func(t *testing.T) {
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", "_cdc_unchanged_cols"}
+		sql := dest.buildMergeSQLWithPredicate(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, columns, nil, "", map[string]bool{"id": true}, nil, "", true,
+		)
+
+		want := "MERGE `my-project`.`target_ds`.`target_tbl` AS t\n" +
+			"USING (SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS s\n" +
+			"ON t.`id` = s.`id`\n" +
+			"WHEN MATCHED AND s.`_cdc_deleted` = true AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` >= t.`_cdc_lsn`) THEN\n" +
+			"  DELETE\n" +
+			"WHEN MATCHED AND s.`_cdc_deleted` = false AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) THEN\n" +
+			"  UPDATE SET t.`name` = IF('name' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(LOWER(s.`_cdc_unchanged_cols`)), [])), t.`name`, s.`name`), t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_deleted` = s.`_cdc_deleted`, t.`_cdc_synced_at` = s.`_cdc_synced_at`\n" +
+			"WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN\n" +
+			"  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)\n" +
+			"  VALUES (s.`id`, s.`name`, s.`_cdc_lsn`, s.`_cdc_deleted`, s.`_cdc_synced_at`)"
+		if sql != want {
+			t.Fatalf("unexpected hard-delete merge SQL:\ngot:\n%s\n\nwant:\n%s", sql, want)
+		}
+	})
+
+	t.Run("cdc_hard_delete_mode_applies_predicate_and_pruning", func(t *testing.T) {
+		predicate := "t.`id` > 100"
+		sql := dest.buildMergeSQLWithPredicate(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id", "day"}, []string{"id", "day", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "",
+			map[string]bool{"id": true, "day": true}, &mergePartitionPruning{Column: "day", IsDate: true}, predicate, true,
+		)
+
+		if !contains(sql, "ON t.`id` = s.`id` AND t.`day` = s.`day` AND (t.`day` BETWEEN _ingestr_merge_partition_min AND _ingestr_merge_partition_max OR (_ingestr_merge_partition_has_null AND t.`day` IS NULL))\n") {
+			t.Fatalf("hard-delete merge must keep PK match plus partition pruning, without the predicate:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND ("+predicate+") AND s.`_cdc_deleted` = true AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` >= t.`_cdc_lsn`) THEN\n  DELETE\n") {
+			t.Fatalf("hard delete does not apply the incremental predicate:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND ("+predicate+") AND s.`_cdc_deleted` = false AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) THEN\n  UPDATE SET") {
+			t.Fatalf("hard-delete upsert does not apply the incremental predicate:\n%s", sql)
+		}
+		if contains(sql, "__ingestr_has_active") || contains(sql, "AS act") {
+			t.Fatalf("hard-delete merge should not compose the latest active image:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_hard_delete_flag_leaves_soft_and_non_cdc_sql_unchanged", func(t *testing.T) {
+		cdcColumns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		soft := dest.buildMergeSQLWithPredicate("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, cdcColumns, nil, "", nil, nil, "", false)
+		if soft != dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, cdcColumns, nil, "") {
+			t.Fatalf("soft CDC merge SQL changed")
+		}
+
+		plainColumns := []string{"id", "name"}
+		plainHard := dest.buildMergeSQLWithPredicate("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, plainColumns, nil, "", nil, nil, "", true)
+		if plainHard != dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, plainColumns, nil, "") {
+			t.Fatalf("hard-delete flag must not affect non-CDC merges:\n%s", plainHard)
 		}
 	})
 
