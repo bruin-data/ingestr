@@ -58,6 +58,13 @@ auto-detected, database-enforced primary keys unique; user-supplied keys,
 custom-query keys, and informational constraints remain untrusted and continue
 through deduplication.
 
+Keyed CDC batch full refreshes with `--cdc-delete-behavior=hard` always use the
+normalised staging path, even when source keys are guaranteed unique. Its merge
+honors `CDCHardDelete`, so a delete arriving after the snapshot removes that key
+before the swap. Raw and normalised staging are prepared in CDC mode to admit
+key-only delete events; the normalised table and swap schema omit staging-only
+CDC columns. Soft-delete and non-CDC replacement retain the unique-key fast path.
+
 ## 5. Swap: Staging -> Destination (replace strategy, `SwapTable`)
 
 Two swap mechanisms:

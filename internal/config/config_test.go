@@ -191,11 +191,13 @@ func TestIngestConfigValidate_TableNaming(t *testing.T) {
 
 func TestIngestConfigValidate_CDCDeleteBehavior(t *testing.T) {
 	tests := []struct {
-		name      string
-		sourceURI string
-		behavior  CDCDeleteBehavior
-		strategy  IncrementalStrategy
-		wantErr   string
+		name        string
+		sourceURI   string
+		behavior    CDCDeleteBehavior
+		strategy    IncrementalStrategy
+		fullRefresh bool
+		stream      bool
+		wantErr     string
 	}{
 		{name: "default soft", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteSoft},
 		{name: "empty", sourceURI: "postgres+cdc://localhost/db"},
@@ -203,6 +205,10 @@ func TestIngestConfigValidate_CDCDeleteBehavior(t *testing.T) {
 		{name: "hard for change tracking", sourceURI: "mssql+ct://localhost/db", behavior: CDCDeleteHard},
 		{name: "hard with explicit merge", sourceURI: "mysql+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyMerge},
 		{name: "hard with append", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyAppend, wantErr: "requires the \"merge\" incremental strategy"},
+		{name: "hard refresh with explicit merge", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyMerge, fullRefresh: true},
+		{name: "hard refresh with explicit replace", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyReplace, fullRefresh: true},
+		{name: "hard refresh overrides append", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyAppend, fullRefresh: true},
+		{name: "hard streaming refresh rejects append", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyAppend, fullRefresh: true, stream: true, wantErr: "requires the \"merge\" incremental strategy"},
 		{name: "hard for non-CDC source", sourceURI: "postgres://localhost/db", behavior: CDCDeleteHard, wantErr: "CDC and Change Tracking sources only"},
 		{name: "soft for non-CDC source", sourceURI: "postgres://localhost/db", behavior: CDCDeleteSoft},
 		{name: "unknown", sourceURI: "postgres+cdc://localhost/db", behavior: "purge", wantErr: "invalid value"},
@@ -214,6 +220,8 @@ func TestIngestConfigValidate_CDCDeleteBehavior(t *testing.T) {
 			cfg.DestURI = "duckdb://out.duckdb"
 			cfg.SourceTable = "public.users"
 			cfg.CDCDeleteBehavior = tt.behavior
+			cfg.FullRefresh = tt.fullRefresh
+			cfg.Stream = tt.stream
 			if tt.strategy != "" {
 				cfg.IncrementalStrategy = tt.strategy
 				cfg.IncrementalStrategyExplicit = true

@@ -3503,12 +3503,15 @@ func validateCDCDeleteStrategy(cfg *config.IngestConfig, resolvedStrategy config
 	if !cfg.HardDeletesCDC() || resolvedStrategy == config.StrategyMerge {
 		return nil
 	}
+	if cfg.FullRefresh && !cfg.Stream && resolvedStrategy == config.StrategyReplace {
+		return nil
+	}
 	if resolvedStrategy == config.StrategyAppend && len(primaryKeys) == 0 {
 		return nil
 	}
 	return &config.ValidationError{
 		Field:   "cdc-delete-behavior",
-		Message: fmt.Sprintf("%q requires the %q incremental strategy for keyed tables, but the resolved strategy is %q", config.CDCDeleteHard, config.StrategyMerge, resolvedStrategy),
+		Message: fmt.Sprintf("%q requires the %q incremental strategy for keyed tables or a non-streaming full refresh, but the resolved strategy is %q", config.CDCDeleteHard, config.StrategyMerge, resolvedStrategy),
 	}
 }
 

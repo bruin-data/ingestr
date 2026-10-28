@@ -72,6 +72,11 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 
 	targetTable := job.Config.DestTable
 	stagingTable := managedStagingTableName(job.Destination, targetTable, "ti", job.Config.StagingDataset, job.Config.RunID)
+	hardDelete := job.Config.HardDeletesCDC() && hasCDCColumns(job.Schema) && len(job.Config.PrimaryKeys) > 0
+	var cdcKeys []string
+	if hardDelete {
+		cdcKeys = job.Config.PrimaryKeys
+	}
 	output.Statusf("[REPLACE] %s | Using in-place replacement with staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 
 	if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
@@ -79,6 +84,8 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 		Schema:      destination.DestinationTableSchema(job.Schema),
 		DropFirst:   false,
 		PrimaryKeys: job.Config.PrimaryKeys,
+		CDCMode:     hardDelete,
+		CDCKeys:     cdcKeys,
 		PartitionBy: job.Config.PartitionBy,
 		ClusterBy:   job.Config.ClusterBy,
 	}); err != nil {
@@ -90,6 +97,8 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 		Schema:       job.Schema,
 		DropFirst:    true,
 		PrimaryKeys:  nil,
+		CDCMode:      hardDelete,
+		CDCKeys:      cdcKeys,
 		PartitionBy:  job.Config.PartitionBy,
 		ClusterBy:    job.Config.ClusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,
@@ -150,19 +159,39 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 
 	stagingPrimaryKeysUnique := effectivePrimaryKeysGuaranteedUnique(job)
 	incrementalKey := mergeIncrementalKeyForSchema(job.Schema, job.Config.IncrementalKey)
+	stagingSchema := job.Schema
+	if hardDelete {
+		stagingTable, err = deduplicateStaging(ctx, job.Destination, stagingTable, targetTable,
+			job.Config.StagingDataset, incrementalKey, job.Schema, job.Config.PrimaryKeys,
+			job.Config.PartitionBy, job.Config.ClusterBy, job.Config.RunID, true)
+		if err != nil {
+			return err
+		}
+		stagingPrimaryKeysUnique = true
+		stagingSchema = destination.DestinationTableSchema(job.Schema)
+		if !job.Config.KeepStaging {
+			defer func() {
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				defer cancelCleanup()
+				if dropErr := job.Destination.DropTable(cleanupCtx, stagingTable); dropErr != nil {
+					config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
+				}
+			}()
+		}
+	}
 	insertOpts := destination.InsertFromStagingOptions{
 		StagingTable: stagingTable,
 		TargetTable:  targetTable,
-		Columns:      job.Schema.ColumnNames(),
+		Columns:      stagingSchema.ColumnNames(),
 	}
 	mergeOpts := destination.MergeOptions{
 		StagingTable:             stagingTable,
 		TargetTable:              targetTable,
 		PrimaryKeys:              job.Config.PrimaryKeys,
 		StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
-		Columns:                  job.Schema.ColumnNames(),
+		Columns:                  stagingSchema.ColumnNames(),
 		IncrementalKey:           incrementalKey,
-		Schema:                   job.Schema,
+		Schema:                   stagingSchema,
 	}
 	var preparedStagingWrite destination.PreparedStagingTableWrite
 	if !supportsAtomicFinalize {
@@ -185,7 +214,7 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 			TargetTable:              targetTable,
 			PrimaryKeys:              job.Config.PrimaryKeys,
 			StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
-			Columns:                  job.Schema.ColumnNames(),
+			Columns:                  stagingSchema.ColumnNames(),
 			IncrementalKey:           incrementalKey,
 		}); err != nil {
 			return fmt.Errorf("failed to atomically insert from staging: %w", err)
@@ -207,7 +236,7 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 		}
 	}
 
-	if !job.Config.KeepStaging {
+	if !job.Config.KeepStaging && !hardDelete {
 		if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
 			config.Debug("[REPLACE] Warning: failed to drop staging table: %v", err)
 		}

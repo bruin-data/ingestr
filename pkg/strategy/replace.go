@@ -173,14 +173,23 @@ func intersects(left, right []string) bool {
 // nil primary keys, since it already carries the PK and lives in the target's
 // schema (so the swap is a same-schema atomic rename rather than a second
 // recreate+copy). Staging tables are cleaned up on error.
-func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTable, targetTable, stagingDataset, incrementalKey string, tableSchema *schema.TableSchema, primaryKeys []string, partitionBy string, clusterBy []string, runID string) (string, error) {
+func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTable, targetTable, stagingDataset, incrementalKey string, tableSchema *schema.TableSchema, primaryKeys []string, partitionBy string, clusterBy []string, runID string, hardDelete bool) (string, error) {
 	normalised := GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID)
+	hardDelete = hardDelete && hasCDCColumns(tableSchema)
+	normalisedSchema := tableSchema
+	var cdcKeys []string
+	if hardDelete {
+		normalisedSchema = destination.DestinationTableSchema(tableSchema)
+		cdcKeys = primaryKeys
+	}
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        normalised,
 		TargetTable:  targetTable,
-		Schema:       tableSchema,
+		Schema:       normalisedSchema,
 		DropFirst:    true,
 		PrimaryKeys:  primaryKeys,
+		CDCMode:      hardDelete,
+		CDCKeys:      cdcKeys,
 		PartitionBy:  partitionBy,
 		ClusterBy:    clusterBy,
 		ExpiresAfter: destination.ManagedStagingTTL,
@@ -190,14 +199,18 @@ func deduplicateStaging(ctx context.Context, dest destination.Destination, rawTa
 		}
 		return "", fmt.Errorf("failed to prepare normalised staging table: %w", err)
 	}
-	if err := dest.MergeTable(ctx, destination.MergeOptions{
+	mergeOpts := destination.MergeOptions{
 		StagingTable:   rawTable,
 		TargetTable:    normalised,
 		PrimaryKeys:    primaryKeys,
 		Columns:        tableSchema.ColumnNames(),
 		IncrementalKey: incrementalKey,
 		Schema:         tableSchema,
-	}); err != nil {
+	}
+	if hardDelete {
+		mergeOpts = mergeStagingOptions(dest, rawTable, normalised, primaryKeys, tableSchema, incrementalKey, "", "", true)
+	}
+	if err := dest.MergeTable(ctx, mergeOpts); err != nil {
 		for _, t := range []string{rawTable, normalised} {
 			if dropErr := dest.DropTable(ctx, t); dropErr != nil {
 				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
@@ -307,11 +320,12 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		config.Debug("[STRATEGY] Direct write to target (no staging): %s", writeTable)
 	}
 
-	shouldDedup := !effectivePrimaryKeysGuaranteedUnique(job) &&
+	hardDelete := job.Config.HardDeletesCDC() && hasCDCColumns(job.Schema) && len(job.Config.PrimaryKeys) > 0
+	shouldDedup := (hardDelete || !effectivePrimaryKeysGuaranteedUnique(job)) &&
 		replaceShouldDedup(job.Destination, job.Config.PrimaryKeys)
 	stagedDedup := useStaging && shouldDedup
 	directDedup := !useStaging && shouldDedup && supportsDirectReplaceDeduplication(job.Destination)
-	deferStagingPrimaryKey := useStaging && replaceShouldDeferStagingPrimaryKey(job)
+	deferStagingPrimaryKey := useStaging && !hardDelete && replaceShouldDeferStagingPrimaryKey(job)
 
 	// Staged dedup loads into a PK-free table so duplicate keys can land.
 	stagingPrimaryKeys := job.Config.PrimaryKeys
@@ -335,6 +349,10 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 	}
 	if useStaging {
 		prepareOpts.ExpiresAfter = destination.ManagedStagingTTL
+	}
+	if hardDelete {
+		prepareOpts.CDCMode = true
+		prepareOpts.CDCKeys = job.Config.PrimaryKeys
 	}
 
 	if err := job.Destination.PrepareTable(ctx, prepareOpts); err != nil {
@@ -448,7 +466,7 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		if stagedDedup {
 			normalised, err := deduplicateStaging(ctx, job.Destination, writeTable, targetTable,
 				job.Config.StagingDataset, job.Config.IncrementalKey, job.Schema,
-				job.Config.PrimaryKeys, job.Config.PartitionBy, job.Config.ClusterBy, job.Config.RunID)
+				job.Config.PrimaryKeys, job.Config.PartitionBy, job.Config.ClusterBy, job.Config.RunID, hardDelete)
 			if err != nil {
 				return err
 			}
@@ -463,6 +481,9 @@ func (s *ReplaceStrategy) Execute(ctx context.Context, job *IngestionJob) error 
 		swapOpts.PrimaryKeys = swapPrimaryKeys
 		swapOpts.IncrementalKey = job.Config.IncrementalKey
 		swapOpts.Schema = job.Schema
+		if hardDelete {
+			swapOpts.Schema = destination.DestinationTableSchema(job.Schema)
+		}
 		if err := job.Destination.SwapTable(ctx, swapOpts); err != nil {
 			if dropErr := job.Destination.DropTable(ctx, swapTable); dropErr != nil {
 				config.Debug("[REPLACE] Warning: failed to drop staging table: %v", dropErr)
@@ -539,6 +560,10 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 
 			dedup := directDedup && replaceShouldDedup(job.Destination, ti.PrimaryKeys)
 			prepareOpts := destination.PrepareOptions{Table: writeTable, TargetTable: destTable, Schema: ti.Schema, DropFirst: true}
+			if job.Config.HardDeletesCDC() && hasCDCColumns(ti.Schema) && len(ti.PrimaryKeys) > 0 {
+				prepareOpts.CDCMode = true
+				prepareOpts.CDCKeys = ti.PrimaryKeys
+			}
 			if dedup {
 				prepareOpts.PrimaryKeys = ti.PrimaryKeys
 			}
@@ -644,7 +669,7 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			swapPrimaryKeys := tableInfo.PrimaryKeys
 			if replaceShouldDedup(job.Destination, tableInfo.PrimaryKeys) {
 				normalised, err := deduplicateStaging(ctx, job.Destination, stagingTable, destTable,
-					job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil, job.Config.RunID)
+					job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil, job.Config.RunID, job.Config.HardDeletesCDC())
 				if err != nil {
 					return fmt.Errorf("failed to deduplicate table %s: %w", tableInfo.Name, err)
 				}
@@ -659,6 +684,9 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			}
 			swapOpts.PrimaryKeys = swapPrimaryKeys
 			swapOpts.Schema = tableInfo.Schema
+			if job.Config.HardDeletesCDC() && hasCDCColumns(tableInfo.Schema) && len(tableInfo.PrimaryKeys) > 0 {
+				swapOpts.Schema = destination.DestinationTableSchema(tableInfo.Schema)
+			}
 			if err := job.Destination.SwapTable(ctx, swapOpts); err != nil {
 				return fmt.Errorf("failed to swap table %s: %w", tableInfo.Name, err)
 			}

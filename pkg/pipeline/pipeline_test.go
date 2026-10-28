@@ -1591,7 +1591,10 @@ func TestValidateCDCDeleteStrategyAfterResolution(t *testing.T) {
 		{name: "keyless default resolves to append", strategy: config.StrategyReplace, wantStrategy: config.StrategyAppend},
 		{name: "keyless streaming refresh resolves to append", fullRefresh: true, stream: true, wantStrategy: config.StrategyAppend},
 		{name: "streaming refresh resolves to merge", primaryKeys: []string{"id"}, fullRefresh: true, stream: true, wantStrategy: config.StrategyMerge},
-		{name: "batch refresh resolves to replace", primaryKeys: []string{"id"}, fullRefresh: true, wantStrategy: config.StrategyReplace, wantErr: true},
+		{name: "batch refresh resolves to replace", primaryKeys: []string{"id"}, fullRefresh: true, wantStrategy: config.StrategyReplace},
+		{name: "explicit merge batch refresh resolves to replace", strategy: config.StrategyMerge, explicit: true, primaryKeys: []string{"id"}, fullRefresh: true, wantStrategy: config.StrategyReplace},
+		{name: "keyless batch refresh resolves to replace", fullRefresh: true, wantStrategy: config.StrategyReplace},
+		{name: "streaming refresh rejects keyed append", strategy: config.StrategyAppend, primaryKeys: []string{"id"}, fullRefresh: true, stream: true, wantStrategy: config.StrategyAppend, wantErr: true},
 		{name: "soft deletes allow append with keys", strategy: config.StrategyAppend, primaryKeys: []string{"id"}, softDeletes: true, wantStrategy: config.StrategyAppend},
 		{name: "source resolves to append with keys", strategy: config.StrategyMerge, primaryKeys: []string{"id"}, handlesIncrementality: true, tableStrategy: config.StrategyAppend, wantStrategy: config.StrategyAppend, wantErr: true},
 	} {

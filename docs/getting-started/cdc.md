@@ -48,6 +48,8 @@ To remove deleted rows instead, pass `--cdc-delete-behavior=hard`. The merge the
 
 Switching an existing connector from `soft` to `hard` leaves tombstones it already wrote in place until that key changes again; delete them with `DELETE ... WHERE _cdc_deleted` or rebuild the table with `--full-refresh`.
 
+A non-streaming full refresh supports `hard` even though it uses the replace strategy. It rebuilds the table from a fresh snapshot, applies any CDC deletes received during snapshot catch-up, and replaces the destination with the live rows. With `--stream --full-refresh`, keyed tables continue using merge after the snapshot.
+
 ```bash
 ingestr ingest \
   --source-uri 'postgres+cdc://user:pass@localhost:5432/shop' \
