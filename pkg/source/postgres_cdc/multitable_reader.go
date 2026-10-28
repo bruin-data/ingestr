@@ -188,18 +188,16 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 		}
 
 		for {
-			barrierNonce := ""
-			var sqlBarrierLSN pglogrepl.LSN
+			var barrier batchBarrier
 			if !opts.Streaming {
 				var err error
-				barrierNonce, sqlBarrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
+				barrier, err = r.source.beginBatchBarrier(ctx)
 				if err != nil {
 					_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
 					return
 				}
-				config.Debug("[CDC] Batch mode: emitted logical-decoding barrier; SQL returned %s", sqlBarrierLSN)
 			}
-			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, sqlBarrierLSN, slotName, results, opts)
+			signal, err := r.streamChanges(ctx, startLSN, barrier, slotName, results, opts)
 			if err != nil {
 				var schemaErr *SchemaChangedError
 				if !opts.Streaming || !errors.As(err, &schemaErr) {
@@ -267,17 +265,7 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 	defer func() { _ = conn.Close(ctx) }()
 
 	tempSlot := backfillSlotName(slotName)
-	created, err := pglogrepl.CreateReplicationSlot(
-		ctx,
-		conn,
-		tempSlot,
-		"pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{
-			Temporary:      true,
-			SnapshotAction: "EXPORT_SNAPSHOT",
-			Mode:           pglogrepl.LogicalReplication,
-		},
-	)
+	created, err := r.source.createLogicalSlot(ctx, conn, tempSlot, true)
 	if err != nil {
 		return fmt.Errorf("failed to create backfill slot: %w", err)
 	}
@@ -589,6 +577,11 @@ func shapeChangedTables(prev map[string]*schema.TableSchema, refreshed []source.
 // detectNewTables lists the tables the stream should currently cover and
 // returns those missing from the active table set.
 func (r *MultiTableCDCReader) detectTableChanges(ctx context.Context) ([]string, []string, []string, error) {
+	if r.source.standby && r.source.managedPublication {
+		if err := r.source.checkManagedPublicationOnStandby(ctx); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	eligible, err := r.source.listEligibleTableIncarnations(ctx)
 	if err != nil {
 		return nil, nil, nil, err
@@ -746,17 +739,7 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	config.Debug("[CDC] Creating persistent replication slot: %s", slotName)
 
 	// Create replication slot with snapshot export
-	result, err := pglogrepl.CreateReplicationSlot(
-		ctx,
-		r.source.replConn,
-		slotName,
-		"pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{
-			Temporary:      false,
-			SnapshotAction: "EXPORT_SNAPSHOT",
-			Mode:           pglogrepl.LogicalReplication,
-		},
-	)
+	result, err := r.source.createLogicalSlot(ctx, r.source.replConn, slotName, false)
 	if err != nil {
 		return fmt.Errorf("failed to create replication slot: %w", err)
 	}
@@ -896,8 +879,7 @@ func resumableSnapshotKeys(table source.SourceTableInfo) []string {
 }
 
 // streamChanges streams WAL changes, filtering per-table based on resume LSNs.
-// For batch mode, barrierNonce identifies the logical message that ends this
-// replication phase.
+// For batch mode, barrier identifies where this replication phase ends.
 //
 // Small WAL transactions (single-row changes) are accumulated per-table and
 // flushed as larger batches to avoid overwhelming the destination with
@@ -907,14 +889,14 @@ func resumableSnapshotKeys(table source.SourceTableInfo) []string {
 // should cover but doesn't, and watches for mid-stream schema changes surfaced
 // by the decoder. Either way it flushes what it has and returns a signal so
 // the caller can rebuild the stream; a nil signal means normal termination.
-func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrierNonce string, sqlBarrierLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
+func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrier batchBarrier, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
 	config.Debug("[CDC] Multi-table streaming from LSN: %s", startLSN)
 
 	cdcConfigWithSlot := r.cdcConfig
 	cdcConfigWithSlot.SlotName = slotName
 
 	// Create multi-table replicator
-	repl, err := NewMultiTableReplicator(r.source, r.tables, cdcConfigWithSlot, startLSN, r, opts.Streaming, barrierNonce)
+	repl, err := NewMultiTableReplicator(r.source, r.tables, cdcConfigWithSlot, startLSN, r, opts.Streaming, barrier)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create replicator: %w", err)
 	}
@@ -936,7 +918,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	}
 
 	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
-	// confirms the slot only after the data is durable. barrierNonce is empty in
+	// confirms the slot only after the data is durable. The barrier is inactive in
 	// streaming mode, so the barrier exit below never triggers.
 	var token tokenFunc
 	if opts.Streaming {
@@ -974,6 +956,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	// actually advanced (instead of every 100ms idle tick).
 	var lastIdleToken pglogrepl.LSN
 	lastHeartbeat := time.Now()
+	lastBusyToken := time.Now()
 
 	// New-table discovery runs on a timer in streaming mode only: a batch run
 	// picks up new tables at its next start, where Connect has already
@@ -1062,9 +1045,13 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 			if err := accum.flushStaleContext(ctx, results, token, streamingMaxAge(opts.ReadOptions), time.Now()); err != nil {
 				return nil, err
 			}
+			lastIdleToken, err = maybeEmitBusyCommitToken(ctx, repl, accum, results, lastIdleToken, &lastBusyToken)
+			if err != nil {
+				return nil, err
+			}
 		}
 
-		if barrierNonce != "" && repl.BarrierReached() {
+		if barrier.active() && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
 				decodedBarrierLSN := repl.BarrierLSN()
@@ -1081,7 +1068,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				if err := repl.Close(ctx); err != nil {
 					return nil, err
 				}
-				warnIfBarrierLSNsDiverge(sqlBarrierLSN, decodedBarrierLSN)
+				if barrier.nonce != "" {
+					warnIfBarrierLSNsDiverge(barrier.sqlLSN, decodedBarrierLSN)
+				}
 				// The keepalive holds the walsender open until finalization.
 				r.source.checkpointBatchBarrier(ctx, decodedBarrierLSN, startLSN, slotName)
 				return nil, nil

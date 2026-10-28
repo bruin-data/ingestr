@@ -173,7 +173,7 @@ func TestPublicationCoverageGapForcesReplacementOnSameOIDReturn(t *testing.T) {
 }
 
 func TestReplicatorDetectsCatalogSchemaChangeWithoutRelationMessage(t *testing.T) {
-	repl, err := NewReplicator(NewPostgresCDCSource(), "public.items", &schema.TableSchema{}, CDCConfig{DiscoverInterval: time.Nanosecond}, 0, true, "")
+	repl, err := NewReplicator(NewPostgresCDCSource(), "public.items", &schema.TableSchema{}, CDCConfig{DiscoverInterval: time.Nanosecond}, 0, true, batchBarrier{})
 	require.NoError(t, err)
 	require.NoError(t, repl.ExpectTableIncarnation("42"))
 	repl.ExpectTableSchemaFingerprint("old")

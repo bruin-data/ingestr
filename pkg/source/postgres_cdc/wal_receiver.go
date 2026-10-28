@@ -69,16 +69,21 @@ type walReceiver struct {
 	// first reads it (errc only delivers once). Decode-side access only.
 	savedErr error
 	budget   *byteBudget
+
+	// replyProbe, when set, replaces the standby status cadence and requests a
+	// keepalive with every update, so a standby batch run promptly learns
+	// how far the walsender has decoded.
+	replyProbe time.Duration
 }
 
-func startWALReceiverWithBudget(ctx context.Context, conn *pgconn.PgConn, streaming bool, startLSN pglogrepl.LSN, pos *streamPosition, lag *lagState, budget *byteBudget) *walReceiver {
-	return startWALReceiverFuncsWithBudget(
+func startWALReceiverWithBudget(ctx context.Context, conn *pgconn.PgConn, streaming bool, startLSN pglogrepl.LSN, pos *streamPosition, lag *lagState, budget *byteBudget, replyProbe time.Duration) *walReceiver {
+	return startWALReceiverWithProbe(
 		ctx,
 		conn.ReceiveMessage,
 		func(ctx context.Context, ssu pglogrepl.StandbyStatusUpdate) error {
 			return sendStandbyStatusUpdate(ctx, conn, ssu)
 		},
-		streaming, startLSN, pos, lag, budget,
+		streaming, startLSN, pos, lag, budget, replyProbe,
 	)
 }
 
@@ -104,6 +109,20 @@ func startWALReceiverFuncsWithBudget(
 	lag *lagState,
 	budget *byteBudget,
 ) *walReceiver {
+	return startWALReceiverWithProbe(ctx, receive, sendStatusUpdate, streaming, startLSN, pos, lag, budget, 0)
+}
+
+func startWALReceiverWithProbe(
+	ctx context.Context,
+	receive func(ctx context.Context) (pgproto3.BackendMessage, error),
+	sendStatusUpdate func(ctx context.Context, ssu pglogrepl.StandbyStatusUpdate) error,
+	streaming bool,
+	startLSN pglogrepl.LSN,
+	pos *streamPosition,
+	lag *lagState,
+	budget *byteBudget,
+	replyProbe time.Duration,
+) *walReceiver {
 	rctx, cancel := context.WithCancel(ctx)
 	r := &walReceiver{
 		receive:          receive,
@@ -117,6 +136,7 @@ func startWALReceiverFuncsWithBudget(
 		done:             make(chan struct{}),
 		cancel:           cancel,
 		budget:           budget,
+		replyProbe:       replyProbe,
 	}
 	r.received.Store(uint64(startLSN))
 	go r.run(rctx)
@@ -190,8 +210,12 @@ func (r *walReceiver) run(ctx context.Context) {
 			return
 		}
 
-		if time.Since(lastStatus) >= standbyStatusInterval {
-			if err := r.sendStatus(ctx, time.Since(lastMessageAt) > silenceProbeAfter); err != nil {
+		statusInterval := standbyStatusInterval
+		if r.replyProbe > 0 {
+			statusInterval = r.replyProbe
+		}
+		if time.Since(lastStatus) >= statusInterval {
+			if err := r.sendStatus(ctx, r.replyProbe > 0 || time.Since(lastMessageAt) > silenceProbeAfter); err != nil {
 				r.fail(fmt.Errorf("failed to send standby status (replication connection lost): %w", err))
 				return
 			}

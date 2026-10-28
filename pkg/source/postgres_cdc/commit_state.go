@@ -180,6 +180,27 @@ func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batc
 	}
 }
 
+// keepaliveCheckpointer is implemented by replicators whose keepalives advance
+// the decoded position, which is the case on a standby. A standby walsender
+// sends a keepalive with nearly every replayed transaction, so a stream behind
+// busy unpublished tables never looks idle and checkpoints on a timer instead.
+type keepaliveCheckpointer interface {
+	lowWaterReporter
+	CheckpointsOnKeepalive() bool
+}
+
+// maybeEmitBusyCommitToken is emitIdleCommitToken for a stream that keeps
+// receiving keepalives. Rows still in the accumulator are excluded from the
+// safe position, so it does not need the flush an idle tick performs.
+func maybeEmitBusyCommitToken(ctx context.Context, repl any, accum *batchAccumulator, results chan<- source.RecordBatchResult, lastEmitted pglogrepl.LSN, lastAttempt *time.Time) (pglogrepl.LSN, error) {
+	checkpointer, ok := repl.(keepaliveCheckpointer)
+	if !ok || !checkpointer.CheckpointsOnKeepalive() || time.Since(*lastAttempt) < streamHeartbeatInterval {
+		return lastEmitted, nil
+	}
+	*lastAttempt = time.Now()
+	return emitIdleCommitToken(ctx, checkpointer, accum, results, lastEmitted)
+}
+
 type streamHeartbeatEmitter interface {
 	EmitStreamHeartbeat(ctx context.Context) error
 }

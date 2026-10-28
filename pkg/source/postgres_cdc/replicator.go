@@ -22,6 +22,8 @@ type Replicator struct {
 	decoder                   *Decoder
 	clientXLogPos             pglogrepl.LSN
 	barrierNonce              string
+	barrierTarget             pglogrepl.LSN
+	standby                   bool
 	barrierSeen               bool
 	barrierLSN                pglogrepl.LSN
 	standbyTimer              time.Time
@@ -88,7 +90,7 @@ func (r *Replicator) checkTableIncarnation(ctx context.Context) error {
 	return nil
 }
 
-func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, startLSN pglogrepl.LSN, streaming bool, barrierNonce string) (*Replicator, error) {
+func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, startLSN pglogrepl.LSN, streaming bool, barrier batchBarrier) (*Replicator, error) {
 	schemaName, tblName := parseTableName(tableName)
 
 	decoder := NewDecoder(tableSchema, schemaName, tblName)
@@ -105,7 +107,9 @@ func NewReplicator(src *PostgresCDCSource, tableName string, tableSchema *schema
 		startLSN:         startLSN,
 		decoder:          decoder,
 		clientXLogPos:    startLSN,
-		barrierNonce:     barrierNonce,
+		barrierNonce:     barrier.nonce,
+		barrierTarget:    barrier.target,
+		standby:          src.standby,
 		standbyTimer:     time.Now(),
 		lastMessageAt:    time.Now(),
 		started:          false,
@@ -152,7 +156,7 @@ func (r *Replicator) Start(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to start replication: %w", err)
+		return fmt.Errorf("failed to start replication: %w", r.source.explainSlotFailure(ctx, r.cdcConfig.SlotName, err))
 	}
 
 	r.started = true
@@ -177,7 +181,7 @@ func (r *Replicator) BarrierLSN() pglogrepl.LSN {
 }
 
 func (r *Replicator) EmitStreamHeartbeat(ctx context.Context) error {
-	if r.source.serverVersion < 140000 {
+	if r.source.serverVersion < 140000 || r.standby {
 		return nil
 	}
 	return emitStreamHeartbeat(ctx, r.source.queryPool)
@@ -203,6 +207,35 @@ func (r *Replicator) handleLogicalMessage(data []byte) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// observeStandbyKeepalive advances the decoded position on a standby, where
+// keepalives replace the logical messages a primary would decode, and ends a
+// standby batch run once decoding passes its target.
+func (r *Replicator) observeStandbyKeepalive(walEnd pglogrepl.LSN) {
+	if !r.standby {
+		return
+	}
+	_, inFlight := r.decoder.InFlightTxLSN()
+	position, ok := standbyResumePosition(walEnd, inFlight)
+	if !ok {
+		return
+	}
+	if position > r.clientXLogPos {
+		r.clientXLogPos = position
+	}
+	if r.barrierTarget != 0 && !r.barrierSeen && walEnd >= r.barrierTarget {
+		r.barrierSeen = true
+		r.barrierLSN = position
+	}
+}
+
+func (r *Replicator) CheckpointsOnKeepalive() bool {
+	return r.standby
+}
+
+func (r *Replicator) awaitingBarrierTarget() bool {
+	return r.barrierTarget != 0 && !r.barrierSeen
 }
 
 func (r *Replicator) standbyStatus() pglogrepl.StandbyStatusUpdate {
@@ -239,9 +272,13 @@ func (r *Replicator) NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, 
 
 	// Send standby status periodically. A send failure means the replication
 	// connection is broken, so surface it rather than spinning on dead reads.
-	if time.Since(r.standbyTimer) > 10*time.Second {
+	statusInterval := 10 * time.Second
+	if r.awaitingBarrierTarget() {
+		statusInterval = standbyBarrierProbeInterval
+	}
+	if time.Since(r.standbyTimer) > statusInterval {
 		status := r.standbyStatus()
-		status.ReplyRequested = time.Since(r.lastMessageAt) > silenceProbeAfter
+		status.ReplyRequested = r.awaitingBarrierTarget() || time.Since(r.lastMessageAt) > silenceProbeAfter
 		err := sendStandbyStatusUpdate(
 			ctx,
 			r.source.replConn,
@@ -299,6 +336,7 @@ func (r *Replicator) NextChanges(ctx context.Context) ([]Change, pglogrepl.LSN, 
 			}
 
 			r.source.lag.observe(pkm.ServerWALEnd)
+			r.observeStandbyKeepalive(pkm.ServerWALEnd)
 
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])

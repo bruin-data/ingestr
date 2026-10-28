@@ -379,7 +379,7 @@ func TestMultiTableReplicatorDoesNotAdvanceProcessedLSNOnFinalDrainError(t *test
 
 func TestMultiTableReplicatorSeparatesWALAndDecoderBudgets(t *testing.T) {
 	src := &PostgresCDCSource{serverVersion: 160000, lag: newLagState()}
-	repl, err := NewMultiTableReplicator(src, nil, CDCConfig{}, 5, nil, true, "")
+	repl, err := NewMultiTableReplicator(src, nil, CDCConfig{}, 5, nil, true, batchBarrier{})
 	require.NoError(t, err)
 	require.NotSame(t, repl.decoderBudget, repl.walBudget)
 	require.True(t, repl.decoderBudget.tryReserve(defaultDecoderMemoryBytes))
