@@ -988,6 +988,65 @@ func TestRunMultiTableStreamingPostgresCDCDoesNotExitOnEmptyInitialTableSet(t *t
 	require.ErrorContains(t, err, "ReadAll must not run", "streaming CDC must reach ReadAll so a table appearing after the first GetTables call can be announced")
 }
 
+type lateTableSource struct {
+	staticMultiTableSource
+	table source.SourceTableInfo
+}
+
+func (s *lateTableSource) ReadAll(context.Context, source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: s.table.Name, TableInfo: &s.table}
+	close(records)
+	return records, nil
+}
+
+type lateTableClaimCountingDestination struct {
+	emptyInitialManagedDestination
+	claimCalls int
+}
+
+func (d *lateTableClaimCountingDestination) ClaimCDCTarget(context.Context, string, destination.CDCTargetClaim) error {
+	d.claimCalls++
+	return nil
+}
+
+func TestRunMultiTableRejectsHardDeleteAppendForLateKeyedTable(t *testing.T) {
+	for _, schemaOnlyKey := range []bool{false, true} {
+		t.Run(fmt.Sprintf("schema_only_key=%t", schemaOnlyKey), func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://source/db"
+			cfg.Stream = true
+			cfg.FullRefresh = true
+			cfg.IncrementalStrategy = config.StrategyAppend
+			cfg.CDCDeleteBehavior = config.CDCDeleteHard
+			cfg.SchemaNaming = "snake_case"
+			cfg.NoLoadTimestamp = true
+			cfg.NoRunID = true
+			cfg.Progress = config.ProgressLog
+			cfg.FlushInterval = time.Hour
+			cfg.FlushRecords = 1
+			dest := &lateTableClaimCountingDestination{}
+			p := &Pipeline{config: cfg, dest: dest, cdcConnectorID: "connector"}
+			table := source.SourceTableInfo{
+				Name: "public.late_events",
+				Schema: &schema.TableSchema{
+					Columns: []schema.Column{{Name: "eventId", DataType: schema.TypeInt64}},
+				},
+			}
+			if schemaOnlyKey {
+				table.Schema.PrimaryKeys = []string{"eventId"}
+			} else {
+				table.PrimaryKeys = []string{"eventId"}
+			}
+
+			err := p.runMultiTable(t.Context(), &lateTableSource{table: table})
+			require.ErrorContains(t, err, "failed to normalize table public.late_events")
+			require.ErrorContains(t, err, `cdc-delete-behavior "hard" requires the "merge" incremental strategy`)
+			require.Zero(t, dest.claimCalls, "hard-delete strategy must be checked before claiming a newly discovered keyed table")
+		})
+	}
+}
+
 func TestMultiTableDestinationNamesChecksDestinationOverrideCollisions(t *testing.T) {
 	tables := []source.SourceTableInfo{{Name: "public.orders"}, {Name: "sales.orders"}}
 

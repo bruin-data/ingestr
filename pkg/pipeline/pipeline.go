@@ -1807,7 +1807,14 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		RunID:              runIDTransformer,
 		ColumnRenamers:     columnRenamers,
 		NormalizeTableInfo: func(ctx context.Context, table source.SourceTableInfo, destTable string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
-			return p.normalizeMultiTableInfo(ctx, table, destTable)
+			normalized, renamer, err := p.normalizeMultiTableInfo(ctx, table, destTable)
+			if err != nil {
+				return source.SourceTableInfo{}, nil, err
+			}
+			if err := validateCDCDeleteStrategy(&resolvedConfig, resolvedStrategy, normalized.PrimaryKeys); err != nil {
+				return source.SourceTableInfo{}, nil, err
+			}
+			return normalized, renamer, nil
 		},
 	}
 	if cdcStateManager != nil {
