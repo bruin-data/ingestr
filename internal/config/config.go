@@ -433,7 +433,7 @@ func (c *IngestConfig) validateCDCDeleteBehavior() error {
 				Message: fmt.Sprintf("%q applies to CDC and Change Tracking sources only", CDCDeleteHard),
 			}
 		}
-		if c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge && !(c.FullRefresh && !c.Stream) {
+		if c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge && (!c.FullRefresh || c.Stream) {
 			return &ValidationError{
 				Field:   "cdc-delete-behavior",
 				Message: fmt.Sprintf("%q requires the %q incremental strategy or a non-streaming full refresh", CDCDeleteHard, StrategyMerge),
