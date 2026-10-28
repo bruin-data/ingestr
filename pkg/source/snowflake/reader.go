@@ -21,7 +21,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	srcadbc "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/bruin-data/ingestr/pkg/tablename"
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
+	"github.com/snowflakedb/gosnowflake/v2/arrowbatches"
 )
 
 // Default parallelism settings - can be overridden via environment variables:
@@ -66,8 +67,8 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	config.Debug("[SNOWFLAKE-NATIVE] Query: %s", query)
 
 	// Create Arrow batch context with microsecond timestamps (our standard)
-	arrowCtx := sf.WithArrowBatches(ctx)
-	arrowCtx = sf.WithArrowBatchesTimestampOption(arrowCtx, sf.UseMicrosecondTimestamp)
+	arrowCtx := arrowbatches.WithArrowBatches(ctx)
+	arrowCtx = arrowbatches.WithTimestampOption(arrowCtx, arrowbatches.UseMicrosecondTimestamp)
 	// Note: WithHigherPrecision changes decimal handling - don't use it for simpler type mapping
 
 	// Attribute the extract read via Snowflake's QUERY_TAG (Snowflake strips
@@ -109,7 +110,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 		return nil, fmt.Errorf("unexpected rows type, expected SnowflakeRows")
 	}
 
-	batches, err := sfRows.GetArrowBatches()
+	batches, err := arrowbatches.GetArrowBatches(sfRows)
 	if err != nil {
 		_ = rows.Close()
 		_ = conn.Close()
@@ -155,7 +156,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 		var fetchWg sync.WaitGroup
 		for batchIdx, batch := range batches {
 			fetchWg.Add(1)
-			go func(idx int, b *sf.ArrowBatch) {
+			go func(idx int, b *arrowbatches.ArrowBatch) {
 				defer fetchWg.Done()
 
 				// Acquire semaphore slot

@@ -27,7 +27,7 @@ import (
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
 )
 
 type SnowflakeDestination struct {
@@ -571,10 +571,7 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 	// for the worker's entire lifetime. This lets the pool (bounded by
 	// SetMaxOpenConns) be shared safely across all tables in a multi-table
 	// write, regardless of numTables * parallelism.
-	uploadCtx := sf.WithFileStream(w.ctx, w.buf)
-	uploadCtx = sf.WithFileTransferOptions(uploadCtx, &sf.SnowflakeFileTransferOptions{
-		RaisePutGetError: true,
-	})
+	uploadCtx := sf.WithFilePutStream(w.ctx, w.buf)
 
 	// The stage path is a directory prefix; the local file name names the
 	// staged object, which COPY's FILES list references as <loadID>/<fileName>.
