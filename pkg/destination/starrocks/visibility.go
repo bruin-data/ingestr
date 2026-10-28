@@ -90,6 +90,9 @@ func (d *StarRocksDestination) deleteVisible(ctx context.Context, table, query s
 	if err := conn.QueryRowContext(ctx, "SELECT last_query_id()").Scan(&queryID); err != nil {
 		return fmt.Errorf("read StarRocks delete query id: %w", err)
 	}
+	if err := conn.Close(); err != nil {
+		return fmt.Errorf("release StarRocks delete connection: %w", err)
+	}
 	database, _ := d.tableParts(table)
 	label := "delete_" + queryID
 	txnID, err := d.insertTransactionID(ctx, database, label)

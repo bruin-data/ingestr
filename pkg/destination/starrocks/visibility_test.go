@@ -1,12 +1,14 @@
 package starrocks
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
@@ -228,6 +230,51 @@ func TestInsertVisibleWaitsForPublication(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestDeleteVisibleReleasesConnectionBeforeWaiting(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		states []string
+		legacy bool
+	}{
+		{"modern committed then visible", []string{"COMMITTED", "VISIBLE"}, false},
+		{"modern aborted", []string{"ABORTED"}, false},
+		{"legacy committed then visible", []string{"COMMITTED", "VISIBLE"}, true},
+		{"legacy aborted", []string{"ABORTED"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, mock := newVisibilityTestDestination(t)
+			d.db.SetMaxOpenConns(1)
+			d.legacyLoadMetadata.Store(tc.legacy)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+
+			query := "DELETE FROM `testdb`.`events` WHERE `_cdc_deleted` = true"
+			mock.ExpectExec(regexp.QuoteMeta(query)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT last_query_id()")).
+				WillReturnRows(sqlmock.NewRows([]string{"query_id"}).AddRow("query-123"))
+			if tc.legacy {
+				expectTransactionDatabase(mock, "testdb")
+				mock.ExpectQuery(regexp.QuoteMeta("SHOW PROC '/transactions/123/running'")).
+					WillReturnRows(sqlmock.NewRows([]string{"TransactionId", "Label"}).AddRow("42", "delete_query-123"))
+			} else {
+				mock.ExpectQuery(regexp.QuoteMeta(insertTransactionQuery)).WithArgs("testdb", "delete_query-123").
+					WillReturnRows(sqlmock.NewRows([]string{"txn_id"}).AddRow(int64(42)))
+			}
+			for _, state := range tc.states {
+				mock.ExpectQuery(regexp.QuoteMeta("SHOW TRANSACTION FROM `testdb` WHERE ID = 42")).
+					WillReturnRows(sqlmock.NewRows([]string{"TransactionStatus"}).AddRow(state))
+			}
+			err := d.deleteVisible(ctx, "testdb.events", query)
+			if tc.states[len(tc.states)-1] == "ABORTED" {
+				require.ErrorContains(t, err, "aborted")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Zero(t, d.db.Stats().InUse)
 		})
 	}
 }
