@@ -4550,3 +4550,25 @@ func TestBuildBufferReaderTarget_JSONTextOnlyForInferredStrings(t *testing.T) {
 		t.Error("doc: inference-merged json hinted by --columns should keep JSON text")
 	}
 }
+
+func TestResolveInterval(t *testing.T) {
+	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	cfg := &config.IngestConfig{IntervalStart: &start, IntervalEnd: &end}
+	for _, tc := range []struct {
+		name      string
+		table     source.SourceTable
+		wantStart *time.Time
+		wantEnd   *time.Time
+	}{
+		{name: "interval-ignoring table has no interval", table: &source.DynamicSourceTable{TableName: "rates", TableIgnoresInterval: true}},
+		{name: "regular table keeps interval", table: &source.DynamicSourceTable{TableName: "rates"}, wantStart: &start, wantEnd: &end},
+		{name: "table without the interface keeps interval", table: &mockSourceTable{}, wantStart: &start, wantEnd: &end},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotStart, gotEnd := resolveInterval(cfg, tc.table)
+			require.Equal(t, tc.wantStart, gotStart)
+			require.Equal(t, tc.wantEnd, gotEnd)
+		})
+	}
+}

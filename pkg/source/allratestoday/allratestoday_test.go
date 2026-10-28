@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/assert"
@@ -140,8 +141,13 @@ func TestGetTable_Strategies(t *testing.T) {
 	banks, err := s.GetTable(context.Background(), source.TableRequest{Name: "central_banks"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"code"}, banks.PrimaryKeys())
+	assert.Equal(t, config.StrategyReplace, banks.Strategy())
 
 	rates, err := s.GetTable(context.Background(), source.TableRequest{Name: "central_bank_rates:ecb"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"bank", "date", "base", "quote", "rate_type"}, rates.PrimaryKeys())
+	assert.Equal(t, config.StrategyDeleteInsert, rates.Strategy())
+	assert.Equal(t, "date", rates.IncrementalKey())
+	assert.Equal(t, "date", rates.(source.PartitionedTable).PartitionBy())
+	assert.True(t, rates.(source.IntervalIgnoringTable).IgnoresInterval())
 }

@@ -12,7 +12,7 @@ reporting in a currency other than EUR. For plain ECB reference rates with histo
 > [!NOTE]
 > The open endpoints serve only the **latest** table each institution has published, so this
 > source cannot backfill history. Schedule it (daily, after the institution's publication time)
-> and the `merge` strategy keeps one set of rows per published date. Requests are rate limited
+> and each run replaces the rows for that published date. Requests are rate limited
 > per IP. The data is free to use, including commercially, with a visible link to
 > allratestoday.com wherever the rates are shown; see the
 > [open API terms](https://allratestoday.com/open-api/).
@@ -30,11 +30,15 @@ There are no URI parameters.
 | Table | PK | Inc Key | Inc Strategy | Details |
 |---|---|---|---|---|
 | `central_banks` | `code` | – | replace | Institutions with a published table: code, name, latest published date, cadence and a stale flag. |
-| `central_bank_rates:<bank>` | `bank`, `date`, `base`, `quote`, `rate_type` | – | merge | The latest published table of one institution, e.g. `central_bank_rates:rbi`. |
+| `central_bank_rates:<bank>` | `bank`, `date`, `base`, `quote`, `rate_type` | `date` | delete+insert | The latest published table of one institution, e.g. `central_bank_rates:rbi`. |
 
 Each row of `central_bank_rates` reads as "1 `base` = `rate` `quote`" on `date`, as published.
 `rate_type` is what the institution calls the rate (`reference`, `middle`, `buy`, `sell`, ...).
 Banks that publish buy and sell rates produce one row per type.
+
+Load each bank into its own destination table: a run replaces every row with the same `date`, so banks sharing a table would overwrite each other's rates.
+
+`central_bank_rates` ignores `--interval-start` and `--interval-end`: the API has no date filter and always returns the institution's latest table, so each run replaces only that table's date.
 
 ## Example
 

@@ -367,6 +367,11 @@ type SnapshotResetEmitter interface {
 	EmitsSnapshotResets() bool
 }
 
+// IntervalIgnoringTable is implemented by tables that ignore --interval-start/--interval-end.
+type IntervalIgnoringTable interface {
+	IgnoresInterval() bool
+}
+
 // PartitionedTable is an optional interface that a SourceTable can implement
 // to declare a partition key for the destination table.
 type PartitionedTable interface {

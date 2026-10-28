@@ -822,6 +822,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.RunID = runID
 	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
 	resolvedConfig.WriteNulls = config.ResolveWriteNulls(resolvedConfig.ReverseETLDestination, resolvedConfig.WriteNullsSet, resolvedConfig.WriteNulls)
+	resolvedConfig.IntervalStart, resolvedConfig.IntervalEnd = resolveInterval(&resolvedConfig, table)
 
 	applyPartitionNaming(&resolvedConfig, originalSourceSchema, tableSchema, namingConv)
 	if err := validatePartitionBy(&resolvedConfig, p.config.PartitionBy, tableSchema); err != nil {
@@ -2821,6 +2822,16 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 		s = config.StrategyReplace
 	}
 	return s
+}
+
+func resolveInterval(cfg *config.IngestConfig, table source.SourceTable) (*time.Time, *time.Time) {
+	if it, ok := table.(source.IntervalIgnoringTable); ok && it.IgnoresInterval() {
+		if cfg.IntervalStart != nil || cfg.IntervalEnd != nil {
+			config.Debug("[PIPELINE] Table %s ignores --interval-start/--interval-end", table.Name())
+		}
+		return nil, nil
+	}
+	return cfg.IntervalStart, cfg.IntervalEnd
 }
 
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {
