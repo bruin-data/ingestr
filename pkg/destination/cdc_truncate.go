@@ -24,12 +24,14 @@ type CDCSnapshotSoftReplacer interface {
 
 // CDCRetireOptions marks every live row whose _cdc_lsn is NULL or below
 // Boundary as deleted at Boundary. Existing tombstones are left unchanged.
+// HardDelete removes those rows instead.
 type CDCRetireOptions struct {
 	Table               string
 	PrimaryKeys         []string
 	Boundary            string
 	SyncedAt            time.Time
 	ExpectedIncarnation string
+	HardDelete          bool
 }
 
 func SupportsCDCSnapshotSoftReplace(dest Destination) (CDCSnapshotSoftReplacer, bool) {

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -331,6 +332,55 @@ func TestSnowflakeDestinationCDCMergePreservesUnchangedVariant(t *testing.T) {
 	)).Scan(&payloadIsNull, &status))
 	require.True(t, payloadIsNull, "intentional NULL with empty marker must clear the target")
 	require.Equal(t, "cleared", status)
+}
+
+func TestSnowflakeDestinationCDCMergeHardDelete(t *testing.T) {
+	snowflakeTestURI := os.Getenv("GONG_TEST_SNOWFLAKE_URI")
+	if snowflakeTestURI == "" {
+		t.Skip("GONG_TEST_SNOWFLAKE_URI not set")
+	}
+
+	ctx := t.Context()
+	targetTable := "PUBLIC.CDC_HARD_TARGET_" + uniqueSuffix()
+	stagingTable := "PUBLIC.CDC_HARD_STAGING_" + uniqueSuffix()
+	dest := snowflakedest.NewSnowflakeDestination()
+	require.NoError(t, dest.Connect(ctx, snowflakeTestURI))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := snowflakeOpenDB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+stagingTable)
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+targetTable)
+	})
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (ID NUMBER(38,0), PAYLOAD VARCHAR, _CDC_LSN VARCHAR, _CDC_DELETED BOOLEAN, _CDC_SYNCED_AT TIMESTAMP_NTZ)`, targetTable)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (ID NUMBER(38,0), PAYLOAD VARCHAR, _CDC_LSN VARCHAR, _CDC_DELETED BOOLEAN, _CDC_SYNCED_AT TIMESTAMP_NTZ, _CDC_UNCHANGED_COLS VARCHAR)`, stagingTable)))
+
+	runCDCHardDeleteScenario(t, ctx, cdcHardDeleteHarness{
+		dest:         dest,
+		targetTable:  targetTable,
+		stagingTable: stagingTable,
+		dialect: cdcHardDeleteDialect{
+			boolean:   func(v bool) string { return fmt.Sprint(v) },
+			timestamp: func(v string) string { return "'" + v + "'" },
+			unchanged: func(cols []string) string {
+				if len(cols) == 0 {
+					return "'[]'"
+				}
+				return `'["` + strings.Join(cols, `","`) + `"]'`
+			},
+		},
+		insert: func(t *testing.T, table, values string) {
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", table, values)))
+		},
+		truncate: func(t *testing.T, table string) {
+			require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+table))
+		},
+		readRows: func(t *testing.T) map[int64]cdcHardDeleteRow {
+			return readCDCHardDeleteRows(t, db, fmt.Sprintf(`SELECT ID, COALESCE(PAYLOAD, ''), COALESCE(_CDC_LSN, ''), _CDC_DELETED FROM %s`, targetTable))
+		},
+		predicate: `target."ID" > 100`,
+	})
 }
 
 func assertSnowflakeCDCRow(t *testing.T, ctx context.Context, db *sql.DB, table, wantPayload, wantLSN string, wantDeleted bool) {

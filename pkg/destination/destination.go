@@ -107,7 +107,11 @@ type MergeOptions struct {
 	// CDCExpectedIncarnation fences a managed CDC merge to the physical target
 	// that was bound before the source read began.
 	CDCExpectedIncarnation string
-	Parallelism            int
+	// CDCHardDelete removes rows whose latest change is a delete instead of
+	// keeping them as _cdc_deleted tombstones. Only set for destinations that
+	// implement CDCHardDeleteCapable.
+	CDCHardDelete bool
+	Parallelism   int
 }
 
 type CDCAtomicTableMerge struct {
@@ -610,6 +614,18 @@ type ConnectionChecker interface {
 // to indicate they handle CDC deletes during merge operations.
 type CDCMergeAware interface {
 	SupportsCDCMerge() bool
+}
+
+// CDCHardDeleteCapable advertises that the CDC merge honors
+// MergeOptions.CDCHardDelete, and CDCRetireOptions.HardDelete when the
+// destination also soft-replaces snapshots.
+type CDCHardDeleteCapable interface {
+	SupportsCDCHardDelete() bool
+}
+
+func SupportsCDCHardDelete(dest Destination) bool {
+	capable, ok := dest.(CDCHardDeleteCapable)
+	return ok && capable.SupportsCDCHardDelete()
 }
 
 // AtomicCommitWriter is an optional interface for destinations that can make a

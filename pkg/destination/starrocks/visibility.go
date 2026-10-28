@@ -53,14 +53,51 @@ func (d *StarRocksDestination) transactionState(ctx context.Context, database st
 // load is query-visible. StarRocks reports a publish timeout as a successful
 // COMMITTED insert, which later reads would not yet observe.
 func (d *StarRocksDestination) insertVisible(ctx context.Context, table, body string) error {
+	return d.insertVisibleWithHint(ctx, table, "", body)
+}
+
+// insertVisibleWithHint is insertVisible with an optimizer hint placed after
+// INSERT, where StarRocks applies it to the whole statement.
+func (d *StarRocksDestination) insertVisibleWithHint(ctx context.Context, table, hint, body string) error {
 	database, name := d.tableParts(table)
 	label := d.nextLabel(name)
-	if _, err := d.db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s WITH LABEL %s %s", d.tableRef(table), quoteColumn(label), body)); err != nil {
+	if hint != "" {
+		hint += " "
+	}
+	if _, err := d.db.ExecContext(ctx, fmt.Sprintf("INSERT %sINTO %s WITH LABEL %s %s", hint, d.tableRef(table), quoteColumn(label), body)); err != nil {
 		return err
 	}
 	txnID, err := d.insertTransactionID(ctx, database, label)
 	if err != nil {
 		return fmt.Errorf("look up StarRocks insert %s transaction: %w", label, err)
+	}
+	return d.waitForPublish(ctx, database, txnID)
+}
+
+// deleteVisible runs a DELETE and waits until it is query-visible. StarRocks
+// has no DELETE ... WITH LABEL; it labels the load delete_<query id>, so the
+// label is recovered from last_query_id() on the same connection.
+func (d *StarRocksDestination) deleteVisible(ctx context.Context, table, query string) error {
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	var queryID string
+	if err := conn.QueryRowContext(ctx, "SELECT last_query_id()").Scan(&queryID); err != nil {
+		return fmt.Errorf("read StarRocks delete query id: %w", err)
+	}
+	if err := conn.Close(); err != nil {
+		return fmt.Errorf("release StarRocks delete connection: %w", err)
+	}
+	database, _ := d.tableParts(table)
+	label := "delete_" + queryID
+	txnID, err := d.insertTransactionID(ctx, database, label)
+	if err != nil {
+		return fmt.Errorf("look up StarRocks delete %s transaction: %w", label, err)
 	}
 	return d.waitForPublish(ctx, database, txnID)
 }

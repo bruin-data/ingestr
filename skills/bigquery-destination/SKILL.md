@@ -58,6 +58,13 @@ auto-detected, database-enforced primary keys unique; user-supplied keys,
 custom-query keys, and informational constraints remain untrusted and continue
 through deduplication.
 
+Keyed CDC batch full refreshes with `--cdc-delete-behavior=hard` always use the
+normalised staging path, even when source keys are guaranteed unique. Its merge
+honors `CDCHardDelete`, so a delete arriving after the snapshot removes that key
+before the swap. Raw and normalised staging are prepared in CDC mode to admit
+key-only delete events; the normalised table and swap schema omit staging-only
+CDC columns. Soft-delete and non-CDC replacement retain the unique-key fast path.
+
 ## 5. Swap: Staging -> Destination (replace strategy, `SwapTable`)
 
 Two swap mechanisms:
@@ -173,6 +180,7 @@ The function name only carries the granularity: `partitionByClause` (CTAS swap, 
 - **Target partition pruning** (`buildMergePartitionPruning`): when the target's time-partition field is part of the merge PK (type DATE/TIMESTAMP/DATETIME, and not subject to a type cast), the script `DECLARE`s the staging min/max (and a has-null flag) of that field and adds a `t.<partition> BETWEEN min AND max` predicate to the `ON` clause, so the MERGE scans only the affected target partitions instead of the whole table. Skipped (with a debug log of the reason) when the partition field isn't a PK, has an unsupported type, or requires casting.
 - **Type casts** (`buildCastMap`): staging/target schemas are compared and mismatched columns are `CAST` on the staging side of the MERGE.
 - **CDC ordering:** CDC matches use the primary key (plus safe partition pruning) without the user incremental predicate; that predicate applies only to matched updates so an existing row cannot become a duplicate insert. Matched updates require a greater `_cdc_lsn`, except an equal-LSN delete may supersede an active row. The merge source combines the latest active row image with the latest overall CDC metadata; row data is applied only when that active image is not older than the target, while newer delete metadata can still advance independently. Its synthetic composition aliases are allocated case-insensitively around source columns. An unknown delete-only key is materialized as a payload-null tombstone so its LSN fences stale replay. PostgreSQL CDC is serialized by its source lease. MySQL CDC is rejected outright: `Pipeline.Run` requires a `ManagedCDCRunLeaser`, which BigQuery does not implement (nor any of the `CDCConditional*` fencing interfaces `validateMySQLCDCMutationFencing` demands). The remaining change sources (`mssql+ct`, `mssql+cdc`, `mongodb+cdc`, `vitess+cdc`, `ps_mysql+cdc`) have no run lease either, but `warnUnserializedCDCRuns` (`pkg/pipeline/pipeline.go`) only warns for them — it used to reject them. BigQuery's informational primary key cannot prevent two concurrent MERGEs from inserting the same absent key, so overlapping runs of one connector can leave permanent duplicate rows; run such connectors serially. Tracked in [#1190](https://github.com/bruin-data/ingestr/issues/1190).
+- **CDC hard delete** (`--cdc-delete-behavior=hard`, `MergeOptions.CDCHardDelete`; BigQuery advertises `SupportsCDCHardDelete`): still one atomic MERGE, but the source is just the latest change per PK overall (`_cdc_lsn DESC, _cdc_deleted DESC`, no active-image composition). Clauses, in order: `WHEN MATCHED AND s._cdc_deleted AND (t._cdc_lsn IS NULL OR s._cdc_lsn >= t._cdc_lsn) THEN DELETE`; `WHEN MATCHED AND NOT s._cdc_deleted AND (t._cdc_lsn IS NULL OR s._cdc_lsn > t._cdc_lsn) THEN UPDATE` (same SET list as soft mode, so it also revives older soft-mode tombstones); `WHEN NOT MATCHED AND NOT s._cdc_deleted THEN INSERT` (no tombstones). The incremental predicate guards both matched clauses; partition pruning stays in `ON`. Soft-mode SQL is unchanged.
 - Operates in place on the existing destination; does not repartition. If the target was just created asynchronously by `PrepareTable` (the dedup path's normalised staging), MergeTable waits for that pending creation before running, so the MERGE doesn't 404.
 
 ## 11. Append Strategy

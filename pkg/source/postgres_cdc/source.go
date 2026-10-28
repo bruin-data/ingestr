@@ -1605,6 +1605,21 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 	}
 	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, resumeLSNs, opts.CDCSlotSuffix)
 	reader.initialInvalidations = invalidations
+	if opts.Streaming && len(resumeLSNs) > 0 {
+		// A table resumes its snapshot only while the stream itself resumes;
+		// a run without any resume position snapshots everything afresh.
+		for _, table := range tables {
+			resume, ok := opts.CDCSnapshotResumes[table.Name]
+			if !ok || resumeLSNs[table.Name] != "" || resumableSnapshotKeys(table) == nil ||
+				resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
+				continue
+			}
+			if reader.snapshotResumes == nil {
+				reader.snapshotResumes = make(map[string]source.CDCSnapshotProgress)
+			}
+			reader.snapshotResumes[table.Name] = resume
+		}
+	}
 	if opts.Streaming {
 		reader.initialAnnouncements = newlyObservedTables(tables, opts.KnownTables)
 	}

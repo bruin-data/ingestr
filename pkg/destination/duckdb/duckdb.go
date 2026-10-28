@@ -1132,6 +1132,12 @@ func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destinati
 			destination.QuoteTableName(opts.StagingTable),
 			imageRowNumber,
 		)
+		if opts.CDCHardDelete {
+			// Rows whose latest change is a delete are removed below, so only
+			// rows whose latest change is live need their image upserted.
+			updateSource = fmt.Sprintf(`(SELECT latest.*, false AS %s FROM %s WHERE latest."_cdc_deleted" = false) AS source`, equalDeleteMarker, latestSource)
+			insertSource = fmt.Sprintf(`(SELECT latest.* FROM %s WHERE latest."_cdc_deleted" = false) AS source`, latestSource)
+		}
 	}
 	insertCondition := onCondition
 	if isCDC {
@@ -1231,7 +1237,19 @@ func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destinati
 		}
 	}
 
-	if isCDC {
+	if isCDC && opts.CDCHardDelete {
+		deleteSQL := fmt.Sprintf(
+			`DELETE FROM %s AS target USING %s WHERE %s AND source."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" >= target."_cdc_lsn")`,
+			quotedTargetTable,
+			dedupSource(""),
+			onCondition,
+		)
+		config.Debug("[DUCKDB MERGE] Executing CDC hard delete: %s", deleteSQL)
+
+		if err := d.exec(ctx, deleteSQL); err != nil {
+			return fmt.Errorf("failed to delete CDC-deleted records: %w", err)
+		}
+	} else if isCDC {
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
@@ -1658,6 +1676,7 @@ func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
 func (d *DuckDBDestination) SupportsCDCMerge() bool             { return true }
+func (d *DuckDBDestination) SupportsCDCHardDelete() bool        { return true }
 func (d *DuckDBDestination) SupportsCDCUnchangedCols() bool     { return true }
 func (d *DuckDBDestination) SupportsCDCConditionalMerge() bool  { return true }
 

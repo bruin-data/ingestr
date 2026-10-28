@@ -815,7 +815,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	if err != nil {
 		return fmt.Errorf("failed to build merge cast map: %w", err)
 	}
-	mergeSQL := buildMergeSQLWithPredicate(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap, opts.IncrementalPredicate)
+	mergeSQL := buildMergeSQLWithOptions(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap, opts.IncrementalPredicate, opts.CDCHardDelete)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -881,6 +881,10 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 }
 
 func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string, incrementalPredicate string) string {
+	return buildMergeSQLWithOptions(stagingTable, targetTable, primaryKeys, allColumns, incrementalKey, castMap, incrementalPredicate, false)
+}
+
+func buildMergeSQLWithOptions(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string, incrementalPredicate string, cdcHardDelete bool) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	stagingFull := quoteFQN(sfTable(stagingTable))
 	targetFull := quoteFQN(sfTable(targetTable))
@@ -1015,6 +1019,27 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 		if strings.TrimSpace(incrementalPredicate) != "" {
 			matchedCondition = fmt.Sprintf("(%s) AND %s", incrementalPredicate, matchedCondition)
 		}
+
+		if cdcHardDelete {
+			deleteCondition := fmt.Sprintf(
+				"source.%s = true AND (target.%s IS NULL OR source.%s >= target.%s)",
+				cdcDeleted, cdcLSN, cdcLSN, cdcLSN,
+			)
+			if strings.TrimSpace(incrementalPredicate) != "" {
+				deleteCondition = fmt.Sprintf("(%s) AND %s", incrementalPredicate, deleteCondition)
+			}
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s THEN\n", deleteCondition)
+			mergeSQL.WriteString("  DELETE\n")
+			if len(updateSets) > 0 {
+				fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND source.%s = false THEN\n", matchedCondition, cdcDeleted)
+				fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+			}
+			fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND source.%s = false THEN\n", cdcDeleted)
+			fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+			fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
+			return mergeSQL.String()
+		}
+
 		if len(updateSets) > 0 {
 			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND %s THEN\n", matchedCondition, hasRowData)
 			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
@@ -1559,6 +1584,8 @@ func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 }
 
 func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
+
+func (d *SnowflakeDestination) SupportsCDCHardDelete() bool { return true }
 
 func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
 

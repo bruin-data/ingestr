@@ -796,6 +796,9 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	}
 
 	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, opts.IncrementalPredicate)
+	if opts.CDCHardDelete && destination.HasCDCDeletedColumn(opts.Columns) {
+		mergeSQL = buildCDCHardDeleteMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalPredicate)
+	}
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -1237,6 +1240,74 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 	)
 }
 
+// buildCDCHardDeleteMergeSQL builds a CDC MERGE that applies the latest change
+// per PK: a live change upserts the row, a delete removes it. Neither touches a
+// target row that already carries a newer position.
+func buildCDCHardDeleteMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalPredicate string) string {
+	quotedColumns := quoteColumns(columns)
+	targetColumns := destination.DestinationColumns(columns)
+	quotedTargetColumns := quoteColumns(targetColumns)
+	nonPKColumns := filterColumns(targetColumns, primaryKeys)
+	stagingCols := strings.Join(quotedColumns, ", ")
+	dedupRowNumber := quoteColumn(newMSSQLInternalNameAllocator(columns)("__bruin_dedup_rn"))
+
+	onConditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
+	}
+	latest := fmt.Sprintf(
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1)`,
+		stagingCols, stagingCols, strings.Join(quoteColumns(primaryKeys), ", "), destination.CDCLatestOverallOrderBy(quoteColumn), dedupRowNumber, quoteTable(stagingTable), dedupRowNumber,
+	)
+
+	predicate := ""
+	if strings.TrimSpace(incrementalPredicate) != "" {
+		predicate = "(" + incrementalPredicate + ") AND "
+	}
+	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
+	updates := make([]string, len(nonPKColumns))
+	for i, col := range nonPKColumns {
+		quoted := quoteColumn(col)
+		if !hasUnchangedCols || destination.IsCDCColumn(col) {
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
+			continue
+		}
+		unchanged := fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
+			quoteColumn(destination.CDCUnchangedColsColumn),
+			strings.ReplaceAll(col, "'", "''"),
+		)
+		updates[i] = fmt.Sprintf("target.%s = CASE WHEN NOT %s THEN source.%s ELSE target.%s END", quoted, unchanged, quoted, quoted)
+	}
+	updateClause := ""
+	if len(updates) > 0 {
+		updateClause = fmt.Sprintf(
+			"WHEN MATCHED AND %ssource.[_cdc_deleted] = 0 AND (target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn]) THEN UPDATE SET %s\n",
+			predicate,
+			strings.Join(updates, ", "),
+		)
+	}
+	sourceCols := make([]string, len(quotedTargetColumns))
+	for i, col := range quotedTargetColumns {
+		sourceCols[i] = "source." + col
+	}
+
+	return fmt.Sprintf(
+		`MERGE %s AS target
+USING %s AS source
+ON %s
+WHEN MATCHED AND %ssource.[_cdc_deleted] = 1 AND (target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] >= target.[_cdc_lsn]) THEN DELETE
+%sWHEN NOT MATCHED AND source.[_cdc_deleted] = 0 THEN INSERT (%s) VALUES (%s);`,
+		quoteTable(targetTable),
+		latest,
+		strings.Join(onConditions, " AND "),
+		predicate,
+		updateClause,
+		strings.Join(quotedTargetColumns, ", "),
+		strings.Join(sourceCols, ", "),
+	)
+}
+
 func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) (err error) {
 	defer func() { err = explainWriteError(err, nil) }()
 	startOp := time.Now()
@@ -1423,6 +1494,7 @@ func (d *MSSQLDestination) SupportsAtomicSwap() bool               { return true
 func (d *MSSQLDestination) DeferReplaceStagingPrimaryKey() bool    { return true }
 func (d *MSSQLDestination) DeferredReplaceStagingParallelism() int { return 12 }
 func (d *MSSQLDestination) SupportsCDCMerge() bool                 { return true }
+func (d *MSSQLDestination) SupportsCDCHardDelete() bool            { return true }
 func (d *MSSQLDestination) SupportsCDCUnchangedCols() bool         { return true }
 
 func (d *MSSQLDestination) ValidateManagedCDCState() error {
