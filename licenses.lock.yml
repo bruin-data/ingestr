@@ -1456,7 +1456,7 @@ dependencies:
         - MIT
       status: allowed
     - module: github.com/snowflakedb/gosnowflake/v2
-      version: v2.3.0
+      version: v2.2.0
       licenses:
         - Apache-2.0
       status: allowed
