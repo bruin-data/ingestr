@@ -108,19 +108,8 @@ func (s *Snapshot) Execute(ctx context.Context, results chan<- source.RecordBatc
 
 	config.Debug("[CDC] Creating persistent replication slot: %s", s.slotName)
 
-	// Create PERSISTENT replication slot and get the snapshot name
-	// SnapshotAction must be "EXPORT_SNAPSHOT" to get a snapshot we can use with SET TRANSACTION SNAPSHOT
-	result, err := pglogrepl.CreateReplicationSlot(
-		ctx,
-		s.source.replConn,
-		s.slotName,
-		"pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{
-			Temporary:      false, // Persistent slot for incremental CDC
-			SnapshotAction: "EXPORT_SNAPSHOT",
-			Mode:           pglogrepl.LogicalReplication,
-		},
-	)
+	// Create a persistent slot whose exported snapshot SET TRANSACTION SNAPSHOT can use
+	result, err := s.source.createLogicalSlot(ctx, s.source.replConn, s.slotName, false)
 	if err != nil {
 		return 0, "", fmt.Errorf("failed to create replication slot: %w", err)
 	}

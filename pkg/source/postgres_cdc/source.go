@@ -72,7 +72,14 @@ type PostgresCDCSource struct {
 	cdcConfig CDCConfig
 	// serverVersion is the source's server_version_num, used to gate pgoutput
 	// options added in newer PostgreSQL releases.
-	serverVersion    int
+	serverVersion int
+	// standby is true when the source is a hot standby. It cannot write WAL or
+	// run DDL, so batch runs stop at its replay position instead of an emitted
+	// barrier and the managed publication must already exist on the primary.
+	standby bool
+	// standbyGapWarned is the last list of tables reported as missing from the
+	// managed publication on a standby, so each gap is reported once.
+	standbyGapWarned string
 	generatedColumns sync.Map
 	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
 	// It is shared between the pipeline goroutine (CommitStream) and the
@@ -262,9 +269,14 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	// (protocol v2 streaming, binary tuple format).
 	var serverVersion int
 	var database string
-	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int, current_database()").Scan(&serverVersion, &database); err != nil {
+	var standby bool
+	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int, current_database(), pg_is_in_recovery()").Scan(&serverVersion, &database, &standby); err != nil {
 		queryPool.Close()
 		return fmt.Errorf("failed to determine PostgreSQL server identity: %w", err)
+	}
+	if standby && serverVersion < 160000 {
+		queryPool.Close()
+		return fmt.Errorf("reading CDC from a PostgreSQL standby requires PostgreSQL 16 or newer (server reports %d); connect to the primary or upgrade", serverVersion)
 	}
 	if cdcConfig.Binary && serverVersion < 140000 {
 		queryPool.Close()
@@ -292,6 +304,7 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
 	s.serverVersion = serverVersion
+	s.standby = standby
 	s.generatedColumns.Clear()
 	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, database, cdcConfig)
 
@@ -348,6 +361,9 @@ func (s *PostgresCDCSource) PrepareConnector(ctx context.Context) error {
 }
 
 func (s *PostgresCDCSource) reconcileManagedPublication(ctx context.Context) error {
+	if s.standby {
+		return s.checkManagedPublicationOnStandby(ctx)
+	}
 	lockConn, err := pgx.ConnectConfig(ctx, s.queryPool.Config().ConnConfig.Copy())
 	if err != nil {
 		return fmt.Errorf("failed to open PostgreSQL session for publication preparation: %w", err)
@@ -1466,7 +1482,9 @@ func (s *PostgresCDCSource) listEligibleTableIncarnations(ctx context.Context) (
 func (s *PostgresCDCSource) listAllEligibleTableIncarnations(ctx context.Context) (map[string]string, error) {
 	names := make(map[string]string)
 
-	if s.managedPublication {
+	// A standby cannot add tables to the managed publication, so only its
+	// current membership can be streamed.
+	if s.managedPublication && !s.standby {
 		rows, err := s.queryPool.Query(ctx, `
 			SELECT n.nspname, c.relname, c.oid::text
 			FROM pg_class c
@@ -1644,7 +1662,10 @@ func newlyObservedTables(tables []source.SourceTableInfo, knownNames []string) [
 
 const (
 	pgErrAlreadyExists = "42710"
-	pgErrDuplicate     = "23505"
+	// pgErrObjectNotInPrerequisiteState is raised when replicating from an
+	// invalidated slot.
+	pgErrObjectNotInPrerequisiteState = "55000"
+	pgErrDuplicate                    = "23505"
 )
 
 var (
