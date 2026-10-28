@@ -822,6 +822,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.RunID = runID
 	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
 	resolvedConfig.WriteNulls = config.ResolveWriteNulls(resolvedConfig.ReverseETLDestination, resolvedConfig.WriteNullsSet, resolvedConfig.WriteNulls)
+	dropIntervalForLatestSnapshot(&resolvedConfig, table)
 
 	applyPartitionNaming(&resolvedConfig, originalSourceSchema, tableSchema, namingConv)
 	if err := validatePartitionBy(&resolvedConfig, p.config.PartitionBy, tableSchema); err != nil {
@@ -2821,6 +2822,15 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 		s = config.StrategyReplace
 	}
 	return s
+}
+
+func dropIntervalForLatestSnapshot(cfg *config.IngestConfig, table source.SourceTable) {
+	lt, ok := table.(source.LatestSnapshotTable)
+	if !ok || !lt.IgnoresInterval() || (cfg.IntervalStart == nil && cfg.IntervalEnd == nil) {
+		return
+	}
+	config.Debug("[PIPELINE] Table %s returns the latest snapshot only, ignoring --interval-start/--interval-end", table.Name())
+	cfg.IntervalStart, cfg.IntervalEnd = nil, nil
 }
 
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {

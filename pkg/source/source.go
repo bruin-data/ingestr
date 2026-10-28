@@ -367,6 +367,12 @@ type SnapshotResetEmitter interface {
 	EmitsSnapshotResets() bool
 }
 
+// LatestSnapshotTable is implemented by tables that always return the source's latest
+// snapshot, so the run interval must not bound delete+insert; the data's own range does.
+type LatestSnapshotTable interface {
+	IgnoresInterval() bool
+}
+
 // PartitionedTable is an optional interface that a SourceTable can implement
 // to declare a partition key for the destination table.
 type PartitionedTable interface {

@@ -20,6 +20,7 @@ type DynamicSourceTable struct {
 	TableStrategy                    config.IncrementalStrategy
 	TablePartitionBy                 string
 	TableSupportsExtractPartitioning bool
+	TableIgnoresInterval             bool
 	KnownSchema                      bool
 	SchemaFn                         func(ctx context.Context) (*schema.TableSchema, error)
 	ReadSchemaFn                     func(ctx context.Context, opts ReadOptions) (*schema.TableSchema, error)
@@ -48,6 +49,10 @@ func (t *DynamicSourceTable) Strategy() config.IncrementalStrategy {
 
 func (t *DynamicSourceTable) PartitionBy() string {
 	return t.TablePartitionBy
+}
+
+func (t *DynamicSourceTable) IgnoresInterval() bool {
+	return t.TableIgnoresInterval
 }
 
 func (t *DynamicSourceTable) SupportsExtractPartitioning() bool {

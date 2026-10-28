@@ -4550,3 +4550,29 @@ func TestBuildBufferReaderTarget_JSONTextOnlyForInferredStrings(t *testing.T) {
 		t.Error("doc: inference-merged json hinted by --columns should keep JSON text")
 	}
 }
+
+func TestDropIntervalForLatestSnapshot(t *testing.T) {
+	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	for _, tc := range []struct {
+		name     string
+		table    source.SourceTable
+		wantKept bool
+	}{
+		{name: "latest snapshot table drops interval", table: &source.DynamicSourceTable{TableName: "rates", TableIgnoresInterval: true}, wantKept: false},
+		{name: "regular table keeps interval", table: &source.DynamicSourceTable{TableName: "rates"}, wantKept: true},
+		{name: "table without the interface keeps interval", table: &mockSourceTable{}, wantKept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.IngestConfig{IntervalStart: &start, IntervalEnd: &end}
+			dropIntervalForLatestSnapshot(&cfg, tc.table)
+			if tc.wantKept {
+				require.Equal(t, &start, cfg.IntervalStart)
+				require.Equal(t, &end, cfg.IntervalEnd)
+				return
+			}
+			require.Nil(t, cfg.IntervalStart)
+			require.Nil(t, cfg.IntervalEnd)
+		})
+	}
+}

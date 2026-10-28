@@ -39,6 +39,10 @@ Banks that publish buy and sell rates produce one row per type.
 Load each bank into its own destination table: a run replaces every row with the same `date`,
 so banks sharing a table would overwrite each other's rates.
 
+`central_bank_rates` does not accept `--interval-start` and `--interval-end`. Each run fetches
+the institution's latest table and replaces only the date that table carries; any interval you
+pass is ignored.
+
 ## Example
 
 List the institutions, then load the Reserve Bank of India reference rates into DuckDB:

@@ -137,7 +137,9 @@ func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.
 		TableIncrementalKey: incrementalKey,
 		TableStrategy:       strategy,
 		TablePartitionBy:    partitionBy,
-		KnownSchema:         false,
+		// The open endpoints only serve the latest table, so delete the data's dates, not the run interval.
+		TableIgnoresInterval: tableName == "central_bank_rates",
+		KnownSchema:          false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return tableSchema, nil
 		},
