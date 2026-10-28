@@ -3,8 +3,8 @@
 //
 // Each table is the latest one the institution has published (for example the RBI reference
 // rate, the NBP table A middle rates or the Bank of England spot rates). The open endpoints
-// serve only the latest table, so the rates table is merge-only: a scheduled run accumulates
-// one table per publication.
+// serve only the latest table, so the rates table is delete+insert on date: a scheduled run
+// accumulates one table per publication.
 package allratestoday
 
 import (
@@ -124,15 +124,20 @@ func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.
 	tableSchema, primaryKeys := getSchema(tableName)
 
 	strategy := config.StrategyReplace
+	var incrementalKey, partitionBy string
 	if tableName == "central_bank_rates" {
-		strategy = config.StrategyMerge
+		strategy = config.StrategyDeleteInsert
+		incrementalKey = "date"
+		partitionBy = "date"
 	}
 
 	return &source.DynamicSourceTable{
-		TableName:        tableName,
-		TablePrimaryKeys: primaryKeys,
-		TableStrategy:    strategy,
-		KnownSchema:      false,
+		TableName:           tableName,
+		TablePrimaryKeys:    primaryKeys,
+		TableIncrementalKey: incrementalKey,
+		TableStrategy:       strategy,
+		TablePartitionBy:    partitionBy,
+		KnownSchema:         false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return tableSchema, nil
 		},
