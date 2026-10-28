@@ -1511,6 +1511,57 @@ func TestValidateCDCDeleteBehavior(t *testing.T) {
 	require.ErrorContains(t, validateCDCDeleteBehavior(hard, capable, false), "requires destination-managed CDC state")
 }
 
+func TestValidateCDCDeleteStrategyAfterResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		strategy              config.IncrementalStrategy
+		explicit              bool
+		primaryKeys           []string
+		fullRefresh           bool
+		stream                bool
+		softDeletes           bool
+		handlesIncrementality bool
+		tableStrategy         config.IncrementalStrategy
+		wantStrategy          config.IncrementalStrategy
+		wantErr               bool
+	}{
+		{name: "programmatic append with keys", strategy: config.StrategyAppend, primaryKeys: []string{"id"}, wantStrategy: config.StrategyAppend, wantErr: true},
+		{name: "explicit append with keys", strategy: config.StrategyAppend, explicit: true, primaryKeys: []string{"id"}, wantStrategy: config.StrategyAppend, wantErr: true},
+		{name: "default replace resolves to merge", strategy: config.StrategyReplace, primaryKeys: []string{"id"}, wantStrategy: config.StrategyMerge},
+		{name: "empty strategy resolves to merge", primaryKeys: []string{"id"}, wantStrategy: config.StrategyMerge},
+		{name: "keyless default resolves to append", strategy: config.StrategyReplace, wantStrategy: config.StrategyAppend},
+		{name: "keyless streaming refresh resolves to append", fullRefresh: true, stream: true, wantStrategy: config.StrategyAppend},
+		{name: "streaming refresh resolves to merge", primaryKeys: []string{"id"}, fullRefresh: true, stream: true, wantStrategy: config.StrategyMerge},
+		{name: "batch refresh resolves to replace", primaryKeys: []string{"id"}, fullRefresh: true, wantStrategy: config.StrategyReplace, wantErr: true},
+		{name: "soft deletes allow append with keys", strategy: config.StrategyAppend, primaryKeys: []string{"id"}, softDeletes: true, wantStrategy: config.StrategyAppend},
+		{name: "source resolves to append with keys", strategy: config.StrategyMerge, primaryKeys: []string{"id"}, handlesIncrementality: true, tableStrategy: config.StrategyAppend, wantStrategy: config.StrategyAppend, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.IngestConfig{
+				SourceURI:                   "postgres+cdc://localhost/db",
+				CDCDeleteBehavior:           config.CDCDeleteHard,
+				IncrementalStrategy:         tc.strategy,
+				IncrementalStrategyExplicit: tc.explicit,
+				FullRefresh:                 tc.fullRefresh,
+				Stream:                      tc.stream,
+			}
+			if tc.softDeletes {
+				cfg.CDCDeleteBehavior = config.CDCDeleteSoft
+			}
+			table := &mockSourceTable{pks: tc.primaryKeys, strategy: tc.tableStrategy}
+			src := &incrementalitySource{handlesIncrementality: tc.handlesIncrementality}
+			resolvedStrategy := resolveStrategy(cfg, src, table)
+			require.Equal(t, tc.wantStrategy, resolvedStrategy)
+			err := validateCDCDeleteStrategy(cfg, resolvedStrategy, resolvePrimaryKeys(cfg, table))
+			if tc.wantErr {
+				require.ErrorContains(t, err, `cdc-delete-behavior "hard" requires the "merge" incremental strategy`)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {
 	err := validateChangeTrackingDestination(&mockDestination{scheme: "mock"})
 

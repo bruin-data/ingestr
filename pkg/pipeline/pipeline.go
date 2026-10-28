@@ -451,6 +451,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
 	preFetchConfig.PrimaryKeys = resolvePrimaryKeys(p.config, table)
 	preFetchConfig.PartitionBy = resolvePartitionBy(p.config, table)
+	if err := validateCDCDeleteStrategy(p.config, preFetchStrategy, preFetchConfig.PrimaryKeys); err != nil {
+		return err
+	}
 	if err := validateExtractPartitionStrategy(p.config, preFetchStrategy, dest); err != nil {
 		return err
 	}
@@ -1603,6 +1606,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 	if p.config.FullRefresh && !p.config.Stream {
 		resolvedStrategy = config.StrategyReplace
+	}
+	for _, table := range tables {
+		if err := validateCDCDeleteStrategy(p.config, resolvedStrategy, table.PrimaryKeys); err != nil {
+			return fmt.Errorf("table %q: %w", table.Name, err)
+		}
 	}
 
 	if shouldWarnCDCStrategy(p.config, resolvedStrategy) {
@@ -3482,6 +3490,19 @@ func validateCDCDeleteBehavior(cfg *config.IngestConfig, dest destination.Destin
 		return fmt.Errorf("--cdc-delete-behavior=%s requires destination-managed CDC state (PostgreSQL, MySQL/MariaDB, or SQL Server CDC, or SQL Server Change Tracking started with --stream --full-refresh); this run resumes from the destination rows that hard deletes remove", config.CDCDeleteHard)
 	}
 	return nil
+}
+
+func validateCDCDeleteStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy, primaryKeys []string) error {
+	if !cfg.HardDeletesCDC() || resolvedStrategy == config.StrategyMerge {
+		return nil
+	}
+	if resolvedStrategy == config.StrategyAppend && len(primaryKeys) == 0 {
+		return nil
+	}
+	return &config.ValidationError{
+		Field:   "cdc-delete-behavior",
+		Message: fmt.Sprintf("%q requires the %q incremental strategy for keyed tables, but the resolved strategy is %q", config.CDCDeleteHard, config.StrategyMerge, resolvedStrategy),
+	}
 }
 
 func validateChangeTrackingDestination(dest destination.Destination) error {
