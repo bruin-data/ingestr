@@ -36,12 +36,8 @@ Each row of `central_bank_rates` reads as "1 `base` = `rate` `quote`" on `date`,
 `rate_type` is what the institution calls the rate (`reference`, `middle`, `buy`, `sell`, ...).
 Banks that publish buy and sell rates produce one row per type.
 
-Load each bank into its own destination table: a run replaces every row with the same `date`,
-so banks sharing a table would overwrite each other's rates.
-
-`central_bank_rates` does not accept `--interval-start` and `--interval-end`. Each run fetches
-the institution's latest table and replaces only the date that table carries; any interval you
-pass is ignored.
+`central_bank_rates` ignores `--interval-start` and `--interval-end`: the API has no date filter
+and always returns the institution's latest table, so each run replaces only that table's date.
 
 ## Example
 

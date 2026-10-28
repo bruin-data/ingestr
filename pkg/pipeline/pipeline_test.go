@@ -4551,28 +4551,24 @@ func TestBuildBufferReaderTarget_JSONTextOnlyForInferredStrings(t *testing.T) {
 	}
 }
 
-func TestDropIntervalForLatestSnapshot(t *testing.T) {
+func TestResolveInterval(t *testing.T) {
 	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 	end := start.Add(24 * time.Hour)
+	cfg := &config.IngestConfig{IntervalStart: &start, IntervalEnd: &end}
 	for _, tc := range []struct {
-		name     string
-		table    source.SourceTable
-		wantKept bool
+		name      string
+		table     source.SourceTable
+		wantStart *time.Time
+		wantEnd   *time.Time
 	}{
-		{name: "latest snapshot table drops interval", table: &source.DynamicSourceTable{TableName: "rates", TableIgnoresInterval: true}, wantKept: false},
-		{name: "regular table keeps interval", table: &source.DynamicSourceTable{TableName: "rates"}, wantKept: true},
-		{name: "table without the interface keeps interval", table: &mockSourceTable{}, wantKept: true},
+		{name: "interval-ignoring table has no interval", table: &source.DynamicSourceTable{TableName: "rates", TableIgnoresInterval: true}},
+		{name: "regular table keeps interval", table: &source.DynamicSourceTable{TableName: "rates"}, wantStart: &start, wantEnd: &end},
+		{name: "table without the interface keeps interval", table: &mockSourceTable{}, wantStart: &start, wantEnd: &end},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.IngestConfig{IntervalStart: &start, IntervalEnd: &end}
-			dropIntervalForLatestSnapshot(&cfg, tc.table)
-			if tc.wantKept {
-				require.Equal(t, &start, cfg.IntervalStart)
-				require.Equal(t, &end, cfg.IntervalEnd)
-				return
-			}
-			require.Nil(t, cfg.IntervalStart)
-			require.Nil(t, cfg.IntervalEnd)
+			gotStart, gotEnd := resolveInterval(cfg, tc.table)
+			require.Equal(t, tc.wantStart, gotStart)
+			require.Equal(t, tc.wantEnd, gotEnd)
 		})
 	}
 }

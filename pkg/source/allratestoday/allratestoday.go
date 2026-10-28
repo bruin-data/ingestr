@@ -125,20 +125,22 @@ func (s *Source) GetTable(ctx context.Context, req source.TableRequest) (source.
 
 	strategy := config.StrategyReplace
 	var incrementalKey, partitionBy string
+	var ignoresInterval bool
 	if tableName == "central_bank_rates" {
 		strategy = config.StrategyDeleteInsert
 		incrementalKey = "date"
 		partitionBy = "date"
+		// The API has no date filter, so the run interval is ignored.
+		ignoresInterval = true
 	}
 
 	return &source.DynamicSourceTable{
-		TableName:           tableName,
-		TablePrimaryKeys:    primaryKeys,
-		TableIncrementalKey: incrementalKey,
-		TableStrategy:       strategy,
-		TablePartitionBy:    partitionBy,
-		// The open endpoints only serve the latest table, so delete the data's dates, not the run interval.
-		TableIgnoresInterval: tableName == "central_bank_rates",
+		TableName:            tableName,
+		TablePrimaryKeys:     primaryKeys,
+		TableIncrementalKey:  incrementalKey,
+		TableStrategy:        strategy,
+		TablePartitionBy:     partitionBy,
+		TableIgnoresInterval: ignoresInterval,
 		KnownSchema:          false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			return tableSchema, nil

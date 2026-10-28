@@ -367,9 +367,8 @@ type SnapshotResetEmitter interface {
 	EmitsSnapshotResets() bool
 }
 
-// LatestSnapshotTable is implemented by tables that always return the source's latest
-// snapshot, so the run interval must not bound delete+insert; the data's own range does.
-type LatestSnapshotTable interface {
+// IntervalIgnoringTable is implemented by tables that ignore --interval-start/--interval-end.
+type IntervalIgnoringTable interface {
 	IgnoresInterval() bool
 }
 

@@ -149,5 +149,5 @@ func TestGetTable_Strategies(t *testing.T) {
 	assert.Equal(t, config.StrategyDeleteInsert, rates.Strategy())
 	assert.Equal(t, "date", rates.IncrementalKey())
 	assert.Equal(t, "date", rates.(source.PartitionedTable).PartitionBy())
-	assert.True(t, rates.(source.LatestSnapshotTable).IgnoresInterval())
+	assert.True(t, rates.(source.IntervalIgnoringTable).IgnoresInterval())
 }
