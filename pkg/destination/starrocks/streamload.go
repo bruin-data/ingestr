@@ -118,12 +118,23 @@ func (s *streamLoader) load(ctx context.Context, db, table, label string, body [
 	return nil
 }
 
-func (s *streamLoader) put(ctx context.Context, url, label, columns string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+func (s *streamLoader) newRequest(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
 	}
+	if strings.HasPrefix(s.endpoint, "https://") && req.URL.Scheme != "https" {
+		return nil, fmt.Errorf("stream load with http_scheme=https refuses non-HTTPS URL %q", url)
+	}
 	req.SetBasicAuth(s.user, s.password)
+	return req, nil
+}
+
+func (s *streamLoader) put(ctx context.Context, url, label, columns string, body []byte) (*http.Response, error) {
+	req, err := s.newRequest(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Expect", "100-continue")
 	req.Header.Set("format", "json")
@@ -166,11 +177,10 @@ func (s *streamLoader) errorLog(ctx context.Context, errorURL, loadedVia string)
 func (s *streamLoader) fetchErrorLog(ctx context.Context, url string) string {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := s.newRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ""
 	}
-	req.SetBasicAuth(s.user, s.password)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return ""

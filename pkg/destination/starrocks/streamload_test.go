@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -163,6 +164,23 @@ func TestStreamLoadRedirectPreservesPayloadAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestStreamLoadHTTPSRejectsPlaintextRedirect(t *testing.T) {
+	var requests atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		require.NoError(t, json.NewEncoder(w).Encode(streamLoadResponse{Status: "Success", NumberLoadedRows: 1, NumberTotalRows: 1}))
+	}))
+	defer backend.Close()
+	frontend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, backend.URL, http.StatusTemporaryRedirect)
+	}))
+	defer frontend.Close()
+	loader := newTestStreamLoader(t, frontend)
+	err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "id")
+	require.ErrorContains(t, err, "refuses non-HTTPS URL")
+	require.Zero(t, requests.Load())
+}
+
 func TestStarRocksBooleanSchemaRoundTrip(t *testing.T) {
 	for _, tc := range []struct {
 		data, column string
@@ -243,6 +261,55 @@ func TestStreamLoadFailureIncludesErrorLogFromReachableHost(t *testing.T) {
 			loader := newTestStreamLoader(t, server)
 			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "")
 			require.ErrorContains(t, err, "too many filtered rows: Error: Value length is beyond the capacity. column=v; second line")
+		})
+	}
+}
+
+func TestStreamLoadHTTPSOnlyFetchesSecureErrorLogFallback(t *testing.T) {
+	for _, https := range []bool{false, true} {
+		t.Run(strconv.FormatBool(https), func(t *testing.T) {
+			newServer := httptest.NewServer
+			if https {
+				newServer = httptest.NewTLSServer
+			}
+			var fallbackRequests atomic.Int32
+			backend := newServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fallbackRequests.Add(1)
+				require.Equal(t, http.MethodGet, r.Method)
+				require.Equal(t, "/api/_load_error_log", r.URL.Path)
+				require.Equal(t, "file=x", r.URL.RawQuery)
+				user, password, ok := r.BasicAuth()
+				require.True(t, ok)
+				require.Equal(t, "user", user)
+				require.Equal(t, "pass", password)
+				_, err := io.WriteString(w, "invalid value")
+				require.NoError(t, err)
+			}))
+			defer backend.Close()
+			errorURL := backend.URL + "/api/_load_error_log?file=x"
+			var rewrittenRequests atomic.Int32
+			frontend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					rewrittenRequests.Add(1)
+					require.NotNil(t, r.TLS)
+					require.Equal(t, "/api/_load_error_log", r.URL.Path)
+					require.Equal(t, "file=x", r.URL.RawQuery)
+					http.NotFound(w, r)
+					return
+				}
+				require.NoError(t, json.NewEncoder(w).Encode(streamLoadResponse{Status: "Fail", Message: "too many filtered rows", ErrorURL: errorURL}))
+			}))
+			defer frontend.Close()
+			loader := newTestStreamLoader(t, frontend)
+			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "id")
+			require.EqualValues(t, 1, rewrittenRequests.Load())
+			if https {
+				require.EqualValues(t, 1, fallbackRequests.Load())
+				require.ErrorContains(t, err, "too many filtered rows: invalid value")
+			} else {
+				require.Zero(t, fallbackRequests.Load())
+				require.EqualError(t, err, "stream load failed (Fail): too many filtered rows (details: "+errorURL+")")
+			}
 		})
 	}
 }

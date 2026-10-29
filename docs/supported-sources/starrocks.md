@@ -134,7 +134,7 @@ ingestr ingest \
 Destination URI parameters:
 
 - `http_port` (optional): the FE HTTP or HTTPS port used for Stream Load. Defaults to `8030` for either scheme.
-- `http_scheme` (optional): `http` (default) or `https` for Stream Load. HTTPS verifies the server certificate using the system trust store.
+- `http_scheme` (optional): `http` (default) or `https` for Stream Load. HTTPS verifies the server certificate using the system trust store and prevents plaintext requests to redirect or error-log targets.
 - `replication_num` (optional): the replica count for created tables. If omitted, the cluster default is used; set it to `1` for single-backend clusters.
 - `ssl` (optional): same TLS handling as the source. Applies only to the query-port connection; it does not change the Stream Load scheme or certificate verification.
 
