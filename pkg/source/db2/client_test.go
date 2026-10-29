@@ -213,7 +213,7 @@ func TestPackSECCHKReturnsEncryptionError(t *testing.T) {
 }
 
 func TestPackSECCHKPadsUSRIDToTenBytesForSubstitutePasswordAuth(t *testing.T) {
-	client := &db2Client{database: padDatabaseName("SIGLPAR"), user: "user", password: "pass"}
+	client := &db2Client{database: padDatabaseName("TESTRDB"), user: "user", password: "pass"}
 
 	packet, err := client.packSECCHK(secmecEUSRIDPWD, nil, []byte("01234567890123456789"))
 	require.NoError(t, err)
@@ -224,7 +224,7 @@ func TestPackSECCHKPadsUSRIDToTenBytesForSubstitutePasswordAuth(t *testing.T) {
 }
 
 func TestPackSECCHKPadsUSRIDForPlainTextAuthToo(t *testing.T) {
-	client := &db2Client{database: padDatabaseName("SIGLPAR"), user: "ab", password: "pass"}
+	client := &db2Client{database: padDatabaseName("TESTRDB"), user: "ab", password: "pass"}
 
 	packet, err := client.packSECCHK(secmecUserPassword, nil, nil)
 	require.NoError(t, err)
@@ -288,7 +288,7 @@ func TestHandshakeChoosesSECMEC8FromMenuReply(t *testing.T) {
 	drdaServerSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
 	client := &db2Client{
 		conn:           clientConn,
-		database:       padDatabaseName("SIGLPAR"),
+		database:       padDatabaseName("TESTRDB"),
 		user:           "user",
 		password:       "pass",
 		timeout:        time.Second,
@@ -377,7 +377,7 @@ func TestHandshakeSendsSubstituteCredentialForSECMEC8(t *testing.T) {
 	drdaServerSeed := []byte{9, 10, 11, 12, 13, 14, 15, 16}
 	client := &db2Client{
 		conn:           clientConn,
-		database:       padDatabaseName("SIGLPAR"),
+		database:       padDatabaseName("TESTRDB"),
 		user:           "user",
 		password:       "pass",
 		timeout:        time.Second,
@@ -462,7 +462,7 @@ func TestHandshakeFailsWhenSECCHKRMReportsAuthenticationFailure(t *testing.T) {
 
 	client := &db2Client{
 		conn:           clientConn,
-		database:       padDatabaseName("SIGLPAR"),
+		database:       padDatabaseName("TESTRDB"),
 		user:           "user",
 		password:       "pass",
 		timeout:        time.Second,
@@ -741,7 +741,7 @@ func TestPackACCRDBUsesSQLPRDIDOnOtherPlatforms(t *testing.T) {
 }
 
 func TestPackPKGNAMCSNUsesQSQCLIPKGCOnIBMi(t *testing.T) {
-	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
+	client := &db2Client{database: padDatabaseName("TESTRDB"), platform: db2PlatformIBMi}
 
 	packet, err := client.packPKGNAMCSN(db2PackageSectionQuery)
 
@@ -787,7 +787,7 @@ func TestPackPKGNAMCSNFallsBackToDatabaseWhenRDBNameUnresolved(t *testing.T) {
 }
 
 func TestPackPKGNAMCSNKeepsNonQuerySectionsUnchangedOnIBMi(t *testing.T) {
-	client := &db2Client{database: padDatabaseName("SIGLPAR"), platform: db2PlatformIBMi}
+	client := &db2Client{database: padDatabaseName("TESTRDB"), platform: db2PlatformIBMi}
 
 	packet, err := client.packPKGNAMCSN(db2PackageSectionSet)
 
@@ -1051,7 +1051,7 @@ func TestHandshakeRenegotiatesACCSECWhenDowngrading(t *testing.T) {
 
 	client := &db2Client{
 		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
+		database: padDatabaseName("TESTRDB"),
 		user:     "user",
 		password: "pass",
 		timeout:  time.Second,
@@ -1124,7 +1124,7 @@ func TestHandshakeDetectsIBMiFromSecmecDowngradeWhenPRDIDMissing(t *testing.T) {
 
 	client := &db2Client{
 		conn:           clientConn,
-		database:       padDatabaseName("SIGLPAR"),
+		database:       padDatabaseName("TESTRDB"),
 		user:           "user",
 		password:       "pass",
 		timeout:        time.Second,
@@ -1215,7 +1215,7 @@ func TestHandshakeFailsLoudlyWhenACCRDBRMNeverArrives(t *testing.T) {
 
 	client := &db2Client{
 		conn:           clientConn,
-		database:       padDatabaseName("SIGLPAR"),
+		database:       padDatabaseName("TESTRDB"),
 		user:           "user",
 		password:       "pass",
 		timeout:        time.Second,
@@ -1520,7 +1520,7 @@ func TestStreamSkipsDSCSQLSTTWhenPrepareReturnsSQLDARD(t *testing.T) {
 
 	client := &db2Client{
 		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
+		database: padDatabaseName("TESTRDB"),
 		timeout:  time.Second,
 	}
 
@@ -1586,7 +1586,7 @@ func TestStreamSendsPrepareAndOpenAsSeparateRoundTrips(t *testing.T) {
 
 	client := &db2Client{
 		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
+		database: padDatabaseName("TESTRDB"),
 		timeout:  time.Second,
 	}
 
@@ -1636,7 +1636,7 @@ func TestStreamSendsDSCSQLSTTForCustomQueriesWhenPrepareOmitsSQLDARD(t *testing.
 
 	client := &db2Client{
 		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
+		database: padDatabaseName("TESTRDB"),
 		timeout:  time.Second,
 	}
 
@@ -1689,7 +1689,7 @@ func TestPackDSCSQLSTTDoesNotSendRTNSQLDA(t *testing.T) {
 	// purpose is already "return a SQLDARD for this statement". Reported
 	// on issue #3: every DSCSQLSTT sent by this client got back a
 	// PRMNSPRM ("parameter not supported") reply instead of a SQLDARD.
-	client := &db2Client{database: padDatabaseName("SIGLPAR")}
+	client := &db2Client{database: padDatabaseName("TESTRDB")}
 
 	body, err := client.packDSCSQLSTT()
 
@@ -1711,7 +1711,7 @@ func TestStreamSurfacesPRMNSPRMFromDSCSQLSTT(t *testing.T) {
 
 	client := &db2Client{
 		conn:     clientConn,
-		database: padDatabaseName("SIGLPAR"),
+		database: padDatabaseName("TESTRDB"),
 		timeout:  time.Second,
 	}
 

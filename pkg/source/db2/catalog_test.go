@@ -14,10 +14,10 @@ func TestDb2ColumnsQueryUsesSyscatByDefault(t *testing.T) {
 }
 
 func TestDb2ColumnsQueryUsesIBMiCatalog(t *testing.T) {
-	query := db2ColumnsQuery(db2PlatformIBMi, "GSTDTA", "ARCUST")
+	query := db2ColumnsQuery(db2PlatformIBMi, "MYSCHEMA", "MYTABLE")
 	require.Contains(t, query, "QSYS2.SYSCOLUMNS")
-	require.Contains(t, query, "TABLE_SCHEMA = 'GSTDTA'")
-	require.Contains(t, query, "TABLE_NAME = 'ARCUST'")
+	require.Contains(t, query, "TABLE_SCHEMA = 'MYSCHEMA'")
+	require.Contains(t, query, "TABLE_NAME = 'MYTABLE'")
 	require.NotContains(t, query, "SYSCAT")
 }
 
@@ -28,7 +28,7 @@ func TestDb2PrimaryKeysQueryUsesSyscatByDefault(t *testing.T) {
 }
 
 func TestDb2PrimaryKeysQueryUsesIBMiCatalog(t *testing.T) {
-	query := db2PrimaryKeysQuery(db2PlatformIBMi, "GSTDTA", "ARCUST")
+	query := db2PrimaryKeysQuery(db2PlatformIBMi, "MYSCHEMA", "MYTABLE")
 	require.Contains(t, query, "QSYS2.SYSKEYCST")
 	require.Contains(t, query, "QSYS2.SYSCST")
 	require.Contains(t, query, "'PRIMARY KEY'")
