@@ -957,13 +957,12 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 				return err
 			}
 		}
-		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
-			return err
-		}
 		if bootstrap {
-			if err := cdcStateManager.AdoptBaseline(ctx, baselinePositions); err != nil {
+			if err := cdcStateManager.BeginBaseline(ctx, baselinePositions); err != nil {
 				return err
 			}
+		} else if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
+			return err
 		}
 	}
 
@@ -1870,13 +1869,12 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				return err
 			}
 		}
-		if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
-			return err
-		}
 		if bootstrap {
-			if err := cdcStateManager.AdoptBaseline(ctx, cdcResumeLSNs); err != nil {
+			if err := cdcStateManager.BeginBaseline(ctx, cdcResumeLSNs); err != nil {
 				return err
 			}
+		} else if err := cdcStateManager.BeginRun(ctx, p.config.FullRefresh); err != nil {
+			return err
 		}
 	}
 

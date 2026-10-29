@@ -1403,7 +1403,7 @@ func (m *CDCStateManager) load(ctx context.Context) error {
 	m.entries = append(m.entries[:0], entries...)
 	m.invalidateGenerationIndex()
 	for _, entry := range entries {
-		if entry.StateKind == cdcStateKindNeverSnapshot {
+		if entry.StateKind == cdcStateKindNeverSnapshot || entry.StateKind == cdcStateKindBaseline {
 			m.neverSnapshot = true
 		}
 		if entry.Generation > m.generation {

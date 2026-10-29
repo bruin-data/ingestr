@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
 	"github.com/bruin-data/ingestr/pkg/source/postgres_cdc"
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -2557,7 +2559,57 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 						t.Fatal("stream did not stop")
 					}
 				}
-				run(cfg, "inserted")
+				stateDest := postgresdest.NewPostgresDestination()
+				require.NoError(t, stateDest.Connect(ctx, connString))
+				stateManager, err := strategy.NewCDCStateManager(stateDest, "bootstrap-failure-injection", "", "")
+				require.NoError(t, err)
+				require.NoError(t, stateManager.BeginRun(ctx, false))
+				require.NoError(t, stateDest.Close(ctx))
+				_, err = pool.Exec(ctx, `
+					CREATE FUNCTION landing.reject_baseline() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN
+						IF NEW.state_kind = 'snapshot' AND NEW.state_status = 'complete' THEN
+							RAISE EXCEPTION 'injected baseline certification failure';
+						END IF;
+						RETURN NEW;
+					END $$;
+					CREATE TRIGGER reject_baseline BEFORE INSERT ON _bruin_staging.cdc_state
+					FOR EACH ROW EXECUTE FUNCTION landing.reject_baseline();
+				`)
+				require.NoError(t, err)
+				for range 2 {
+					interrupted := cfg
+					require.ErrorContains(t, pipeline.New(&interrupted).Run(ctx), "injected baseline certification failure")
+				}
+				changedBoundary := cfg
+				changedBoundary.CDCStartLSN = "0/1"
+				require.ErrorContains(t, pipeline.New(&changedBoundary).Run(ctx), "cannot change the boundary")
+				_, err = pool.Exec(ctx, `
+					CREATE OR REPLACE FUNCTION landing.reject_baseline() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN
+						IF NEW.state_kind = 'external_baseline' AND NEW.state_status = 'complete' THEN
+							RAISE EXCEPTION 'injected baseline completion failure';
+						END IF;
+						RETURN NEW;
+					END $$;
+				`)
+				require.NoError(t, err)
+				withoutFlags := cfg
+				withoutFlags.CDCSnapshotMode, withoutFlags.CDCStartLSN = "", ""
+				require.ErrorContains(t, pipeline.New(&withoutFlags).Run(ctx), "injected baseline completion failure")
+				var unchanged bool
+				require.NoError(t, pool.QueryRow(ctx, `SELECT count(*)=3 AND bool_and(_cdc_lsn IS NULL) AND bool_or(id=2 AND name='before') FROM landing.orders`).Scan(&unchanged))
+				require.True(t, unchanged, "unfinished bootstrap must not apply WAL or rewrite the external baseline")
+				var confirmedLSN string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name='external_slot'`).Scan(&confirmedLSN))
+				require.Equal(t, startLSN, confirmedLSN)
+				_, err = pool.Exec(ctx, `DROP FUNCTION landing.reject_baseline() CASCADE`)
+				require.NoError(t, err)
+				bootstrapRetry := cfg
+				if streaming {
+					bootstrapRetry.CDCSnapshotMode, bootstrapRetry.CDCStartLSN = "", ""
+				}
+				run(bootstrapRetry, "inserted")
 				var rows int
 				var untouched, updated, deleted bool
 				require.NoError(t, pool.QueryRow(ctx, `SELECT count(*), bool_or(id=1 AND name='untouched' AND _cdc_lsn IS NULL), bool_or(id=2 AND name='after' AND _cdc_deleted=false), bool_or(id=3 AND _cdc_deleted=true) FROM landing.orders`).Scan(&rows, &untouched, &updated, &deleted))

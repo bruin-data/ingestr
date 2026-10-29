@@ -25,7 +25,7 @@ func (p *Pipeline) resolveCDCSnapshotMode(ctx context.Context, manager *strategy
 }
 
 // prepareCDCNoSnapshot validates all targets before any are adopted or mutated.
-// It fills missing resume positions only for a completely uninitialized connector.
+// It fills missing resume positions for fresh or interrupted external bootstraps.
 func (p *Pipeline) prepareCDCNoSnapshot(ctx context.Context, manager *strategy.CDCStateManager, tables []source.SourceTableInfo, destinations, positions map[string]string, writeStrategy config.IncrementalStrategy) (bool, error) {
 	if p.config.CDCSnapshotMode != "never" {
 		return false, nil
@@ -36,8 +36,16 @@ func (p *Pipeline) prepareCDCNoSnapshot(ctx context.Context, manager *strategy.C
 	if aware, ok := p.dest.(destination.CDCMergeAware); !ok || !aware.SupportsCDCMerge() {
 		return false, fmt.Errorf("CDC snapshot mode never requires a destination with CDC-aware merge")
 	}
-	bootstrap := p.config.CDCStartLSN != ""
-	if bootstrap {
+	overrides, err := schemaevolution.ParseColumnOverrides(p.config.Columns)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse column overrides: %w", err)
+	}
+	pending, err := manager.PendingBaseline(ctx, p.config.CDCStartLSN)
+	if err != nil {
+		return false, err
+	}
+	bootstrap := p.config.CDCStartLSN != "" || len(pending) > 0
+	if bootstrap && len(pending) == 0 {
 		empty, err := manager.StateEmpty(ctx)
 		if err != nil {
 			return false, err
@@ -52,6 +60,9 @@ func (p *Pipeline) prepareCDCNoSnapshot(ctx context.Context, manager *strategy.C
 		}
 		if bootstrap {
 			positions[table.Name] = p.config.CDCStartLSN
+			if len(pending) > 0 {
+				positions[table.Name] = pending[table.Name]
+			}
 		}
 		if positions[table.Name] == "" {
 			return false, fmt.Errorf("CDC snapshot mode never: no valid baseline for %s; a fresh connector requires --cdc-start-lsn and externally loaded data", table.Name)
@@ -64,7 +75,7 @@ func (p *Pipeline) prepareCDCNoSnapshot(ctx context.Context, manager *strategy.C
 		if existing == nil {
 			return false, fmt.Errorf("CDC snapshot mode never requires preloaded destination table %s", destTable)
 		}
-		opts := &schemaevolution.CompareOptions{PrimaryKeys: table.PrimaryKeys}
+		opts := &schemaevolution.CompareOptions{Overrides: overrides, PrimaryKeys: table.PrimaryKeys}
 		if normalizer, ok := p.dest.(destination.SchemaEvolutionColumnNormalizer); ok {
 			opts.NormalizeColumn = normalizer.NormalizeSchemaEvolutionColumn
 		}
