@@ -83,11 +83,12 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 // mergeStagingInto merges the staging table into the target table by primary
 // key. A non-empty incrementalKey makes the per-PK dedup keep the row with the
 // highest value of that key (latest wins) instead of an arbitrary one.
-func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string) error {
-	return dest.MergeTable(ctx, mergeStagingOptions(dest, stagingTable, targetTable, primaryKeys, tableSchema, incrementalKey, incrementalPredicate, expectedIncarnation))
+// hardDelete removes CDC-deleted rows instead of keeping tombstones.
+func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string, hardDelete bool) error {
+	return dest.MergeTable(ctx, mergeStagingOptions(dest, stagingTable, targetTable, primaryKeys, tableSchema, incrementalKey, incrementalPredicate, expectedIncarnation, hardDelete))
 }
 
-func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string) destination.MergeOptions {
+func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string, hardDelete bool) destination.MergeOptions {
 	return destination.MergeOptions{
 		StagingTable:           stagingTable,
 		TargetTable:            targetTable,
@@ -97,6 +98,7 @@ func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable
 		IncrementalPredicate:   incrementalPredicate,
 		Schema:                 tableSchema,
 		CDCExpectedIncarnation: expectedIncarnation,
+		CDCHardDelete:          hardDelete && hasCDCColumns(tableSchema),
 	}
 }
 
@@ -324,7 +326,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate, expectedIncarnation); err != nil {
+	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate, expectedIncarnation, job.Config.HardDeletesCDC()); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -567,7 +569,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				}
 			}
 			merges = append(merges, destination.CDCAtomicTableMerge{
-				Options:  mergeStagingOptions(job.Destination, stagingTable, job.GetDestTableName(tableInfo.Name), tableInfo.PrimaryKeys, tableInfo.Schema, "", "", expectedIncarnation),
+				Options:  mergeStagingOptions(job.Destination, stagingTable, job.GetDestTableName(tableInfo.Name), tableInfo.PrimaryKeys, tableInfo.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC()),
 				Truncate: writeResult.TruncatedTables[tableInfo.Name],
 			})
 		}
@@ -635,7 +637,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				mergeErrChan <- err
 				return
 			}
-			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", "", expectedIncarnation); err != nil {
+			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC()); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return
 			}

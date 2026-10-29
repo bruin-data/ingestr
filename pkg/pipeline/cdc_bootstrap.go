@@ -71,7 +71,11 @@ func (p *Pipeline) prepareCDCNoSnapshot(ctx context.Context, manager *strategy.C
 		if normalizer, ok := p.dest.(destination.SchemaEvolutionSourceColumnNormalizer); ok {
 			opts.NormalizeSourceColumn = normalizer.NormalizeSchemaEvolutionSourceColumn
 		}
-		comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(table.Schema), existing, opts)
+		compareSource, err := destination.WithoutGeneratedColumns(ctx, p.dest, destTable, table.Schema)
+		if err != nil {
+			return false, fmt.Errorf("failed to get generated columns for CDC baseline %s: %w", destTable, err)
+		}
+		comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(compareSource), existing, opts)
 		if err != nil {
 			return false, fmt.Errorf("incompatible CDC baseline %s: %w", destTable, err)
 		}

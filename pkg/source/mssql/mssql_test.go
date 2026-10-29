@@ -72,6 +72,18 @@ func TestURIToConnString(t *testing.T) {
 			absentQuery: []string{"driver"},
 		},
 		{
+			name:         "odbc yes trust server certificate becomes a go boolean",
+			uri:          "mssql://sa:pass@localhost/testdb?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes",
+			wantDriver:   sqlServerDriverName,
+			wantHost:     "localhost:1433",
+			wantUser:     "sa",
+			wantPassword: "pass",
+			wantQuery: map[string]string{
+				"database":               "testdb",
+				"TrustServerCertificate": "true",
+			},
+		},
+		{
 			name:         "azure sql auth uses azuresql driver and encryption",
 			uri:          "azuresql://app_user:s3cr3t@myserver.database.windows.net/appdb",
 			wantDriver:   azureSQLDriverName,

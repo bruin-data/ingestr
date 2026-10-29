@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -293,4 +294,57 @@ func TestMySQLDestinationCDCInternalAliasesDoNotCollide(t *testing.T) {
 		require.True(t, deleted, "id %d deleted", id)
 		require.Equal(t, "2026-01-03", synced, "id %d synced timestamp", id)
 	}
+}
+
+func TestMySQLDestinationCDCMergeHardDelete(t *testing.T) {
+	if mysqlDest.uri == "" {
+		t.Skip("shared mysql destination container not available")
+	}
+
+	ctx := t.Context()
+	targetTable := "cdc_hard_target_" + uniqueSuffix()
+	stagingTable := "cdc_hard_staging_" + uniqueSuffix()
+	dest := mysqldest.NewMySQLDestination()
+	require.NoError(t, dest.Connect(ctx, mysqlDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := sql.Open("mysql", mysqlDSN(mysqlDest.uri))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`, `%s`", stagingTable, targetTable))
+	})
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (id BIGINT PRIMARY KEY, payload VARCHAR(255), _cdc_lsn VARCHAR(64), _cdc_deleted BOOLEAN, _cdc_synced_at DATETIME(6))`, targetTable)))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s (id BIGINT, payload VARCHAR(255), _cdc_lsn VARCHAR(64), _cdc_deleted BOOLEAN, _cdc_synced_at DATETIME(6), _cdc_unchanged_cols JSON)`, stagingTable)))
+
+	runCDCHardDeleteScenario(t, ctx, cdcHardDeleteHarness{
+		dest:         dest,
+		targetTable:  targetTable,
+		stagingTable: stagingTable,
+		dialect: cdcHardDeleteDialect{
+			boolean: func(v bool) string {
+				if v {
+					return "1"
+				}
+				return "0"
+			},
+			timestamp: func(v string) string { return "'" + v + "'" },
+			unchanged: func(cols []string) string {
+				quoted := make([]string, len(cols))
+				for i, col := range cols {
+					quoted[i] = "'" + col + "'"
+				}
+				return "JSON_ARRAY(" + strings.Join(quoted, ", ") + ")"
+			},
+		},
+		insert: func(t *testing.T, table, values string) {
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", table, values)))
+		},
+		truncate: func(t *testing.T, table string) {
+			require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+table))
+		},
+		readRows: func(t *testing.T) map[int64]cdcHardDeleteRow {
+			return readCDCHardDeleteRows(t, db, fmt.Sprintf(`SELECT id, COALESCE(payload, ''), COALESCE(_cdc_lsn, ''), _cdc_deleted FROM %s`, targetTable))
+		},
+		predicate: "target.`id` > 100",
+	})
 }

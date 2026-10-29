@@ -135,6 +135,12 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INGESTR_CDC_START_LSN"),
 			},
 			&cli.StringFlag{
+				Name:    "cdc-delete-behavior",
+				Usage:   "How CDC merges apply source deletes: soft (keep the row with _cdc_deleted=true), hard (delete the row from the destination)",
+				Value:   string(config.CDCDeleteSoft),
+				Sources: cli.EnvVars("CDC_DELETE_BEHAVIOR", "INGESTR_CDC_DELETE_BEHAVIOR"),
+			},
+			&cli.StringFlag{
 				Name:    "progress",
 				Usage:   "The progress display type (interactive, log, json)",
 				Value:   "interactive",
@@ -377,6 +383,7 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.CDCTableNaming = config.TableNaming(c.String("cdc-table-naming"))
 	cfg.CDCSnapshotMode = c.String("cdc-snapshot-mode")
 	cfg.CDCStartLSN = c.String("cdc-start-lsn")
+	cfg.CDCDeleteBehavior = config.CDCDeleteBehavior(c.String("cdc-delete-behavior"))
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
 	switch mb := int64(c.Int("batch-size")); {

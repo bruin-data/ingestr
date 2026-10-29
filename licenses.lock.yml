@@ -436,11 +436,6 @@ dependencies:
       licenses:
         - Apache-2.0
       status: allowed
-    - module: github.com/aws/aws-sdk-go-v2/feature/s3/manager
-      version: v1.20.12
-      licenses:
-        - Apache-2.0
-      status: allowed
     - module: github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager
       version: v0.4.9
       licenses:
@@ -1460,8 +1455,8 @@ dependencies:
       licenses:
         - MIT
       status: allowed
-    - module: github.com/snowflakedb/gosnowflake
-      version: v1.19.0
+    - module: github.com/snowflakedb/gosnowflake/v2
+      version: v2.2.0
       licenses:
         - Apache-2.0
       status: allowed
@@ -2000,7 +1995,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: vitess.io/vitess
-      version: v0.23.3
+      version: v0.23.8
       licenses:
         - Apache-2.0
         - BSD-2-Clause

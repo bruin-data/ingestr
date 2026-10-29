@@ -12,6 +12,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
 )
 
 type CDCReader struct {
@@ -193,17 +194,15 @@ func resumeMetadataChanged(expectedIncarnation, expectedFingerprint, currentInca
 
 func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) error {
 	for {
-		barrierNonce := ""
-		var sqlBarrierLSN pglogrepl.LSN
+		var barrier batchBarrier
 		if !opts.Streaming {
 			var err error
-			barrierNonce, sqlBarrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
+			barrier, err = r.source.beginBatchBarrier(ctx)
 			if err != nil {
 				return err
 			}
-			config.Debug("[CDC] Batch mode: emitted logical-decoding barrier; SQL returned %s", sqlBarrierLSN)
 		}
-		err := r.runStream(ctx, startLSN, slotName, barrierNonce, sqlBarrierLSN, results, opts, snapshotBoundary)
+		err := r.runStream(ctx, startLSN, slotName, barrier, results, opts, snapshotBoundary)
 		var schemaErr *SchemaChangedError
 		var reincarnationErr *TableReincarnatedError
 		if err == nil || !opts.Streaming || !errors.As(err, &schemaErr) && !errors.As(err, &reincarnationErr) {
@@ -231,14 +230,14 @@ func (r *CDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, s
 
 // runStream runs one replication stream until it terminates: a batch run caught
 // up, the context was cancelled, or the replicator failed.
-func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, barrierNonce string, sqlBarrierLSN pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
+func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotName string, barrier batchBarrier, results chan<- source.RecordBatchResult, opts source.ReadOptions, snapshotBoundary bool) (retErr error) {
 	config.Debug("[CDC] Starting streaming from LSN: %s", startLSN)
 
 	// Use the slot created during snapshot
 	cdcConfigWithSlot := r.cdcConfig
 	cdcConfigWithSlot.SlotName = slotName
 
-	repl, err := NewReplicator(r.source, r.tableName, r.tableSchema, cdcConfigWithSlot, startLSN, opts.Streaming, barrierNonce)
+	repl, err := NewReplicator(r.source, r.tableName, r.tableSchema, cdcConfigWithSlot, startLSN, opts.Streaming, barrier)
 	if err != nil {
 		return fmt.Errorf("failed to create replicator: %w", err)
 	}
@@ -267,7 +266,9 @@ func (r *CDCReader) runStream(ctx context.Context, startLSN pglogrepl.LSN, slotN
 		if decodedBarrierLSN == 0 {
 			return fmt.Errorf("batch barrier was reached without a decoded replication LSN")
 		}
-		warnIfBarrierLSNsDiverge(sqlBarrierLSN, decodedBarrierLSN)
+		if barrier.nonce != "" {
+			warnIfBarrierLSNsDiverge(barrier.sqlLSN, decodedBarrierLSN)
+		}
 		// Keep the walsender alive while the destination drains the results.
 		r.source.checkpointBatchBarrier(ctx, decodedBarrierLSN, startLSN, slotName)
 	}
@@ -287,6 +288,21 @@ func (r *CDCReader) rebuildForTableChange(ctx context.Context, slotName string, 
 	if schemaErr == nil {
 		if err := r.source.reconcilePublication(ctx); err != nil {
 			return 0, fmt.Errorf("failed to reconcile publication after table recreation: %w", err)
+		}
+		if r.source.standby {
+			if err := r.source.validateTablePublished(ctx, r.tableName); err != nil {
+				schemaName, tableName := parseTableName(r.tableName)
+				var covered bool
+				if qerr := r.source.queryPool.QueryRow(ctx, `
+					SELECT p.puballtables OR EXISTS (
+						SELECT 1 FROM pg_publication_tables
+						WHERE pubname = p.pubname AND schemaname = $2 AND tablename = $3
+					)
+					FROM pg_publication p WHERE p.pubname = $1`, r.source.cdcConfig.Publication, schemaName, tableName).Scan(&covered); qerr != nil || covered {
+					return 0, fmt.Errorf("table %s was recreated and can no longer be streamed: %w", r.tableName, err)
+				}
+				return 0, fmt.Errorf("table %s was recreated and is no longer published; add it back on the primary with ALTER PUBLICATION %s ADD TABLE %s: %w", r.tableName, pgx.Identifier{r.source.cdcConfig.Publication}.Sanitize(), pgTableRef{schema: schemaName, name: tableName}.quoted(), err)
+			}
 		}
 	}
 	tableSchema, err := r.source.getTableSchema(ctx, r.tableName)
@@ -345,9 +361,7 @@ func (r *CDCReader) resnapshotTable(ctx context.Context, slotName string, table 
 		return 0, err
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	created, err := pglogrepl.CreateReplicationSlot(ctx, conn, backfillSlotName(slotName), "pgoutput", pglogrepl.CreateReplicationSlotOptions{
-		Temporary: true, SnapshotAction: "EXPORT_SNAPSHOT", Mode: pglogrepl.LogicalReplication,
-	})
+	created, err := r.source.createLogicalSlot(ctx, conn, backfillSlotName(slotName), true)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create schema backfill slot: %w", err)
 	}
@@ -449,6 +463,7 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 	// actually advanced (instead of every 100ms idle tick).
 	var lastIdleToken pglogrepl.LSN
 	lastHeartbeat := time.Now()
+	lastBusyToken := time.Now()
 
 	for {
 		select {
@@ -490,6 +505,12 @@ func streamLoop(ctx context.Context, repl batchReplicator, batchSize int, accum 
 		// A steady trickle of changes never looks idle; bound how long rows wait.
 		if streaming && hadActivity && maxAge > 0 {
 			if err := accum.flushStaleContext(ctx, results, token, maxAge, time.Now()); err != nil {
+				return err
+			}
+		}
+		if streaming && hadActivity {
+			lastIdleToken, err = maybeEmitBusyCommitToken(ctx, repl, accum, results, lastIdleToken, &lastBusyToken)
+			if err != nil {
 				return err
 			}
 		}

@@ -93,6 +93,28 @@ my-org-bucket/
     └── records.parquet
 ```
 
+### Setting the bucket and prefix in the URI
+
+You can also set the bucket and an optional prefix in the destination URI. A `--dest-table` without a `/`, such as `public.users`, is then written under them:
+
+```sh
+ingestr ingest \
+    --source-uri 'duckdb:///records.db' \
+    --source-table 'public.users' \
+    --dest-uri 'gs://my-org-bucket/exports?credentials_file=/path/to/service_account.json' \
+    --dest-table 'public.users'
+```
+
+Result:
+```
+my-org-bucket/
+└── exports
+    └── public.users
+        └── <load_id>.<file_id>.parquet
+```
+
+A `--dest-table` with a `/`, such as `my-org-bucket/records` or `other-bucket/records`, is still read as `<bucket>/<path>`, and the URI's bucket and prefix are not used. To write into a nested folder of the URI's bucket, add the folder to the URI's prefix.
+
 ### Available Layout Placeholders
 
 The following placeholders can be used in the `layout` parameter:
@@ -108,6 +130,10 @@ Example layouts:
 - `{load_id}.{file_id}.{ext}` - Default layout
 - `{table_name}/{load_id}.{file_id}.{ext}` - Organized by table name
 - `{table_name}.{ext}` - Single file per table
+
+### Replace strategy
+
+`replace` removes every parquet file in the destination path whose name matches the `layout` once the new files are written, including files another pipeline wrote to the same path with the same layout. Give each pipeline its own destination path. Files that don't match the layout are kept. If the load fails, the previous files stay. Files written directly into the root of a bucket are never removed. `replace` needs permission to list and delete files (`storage.objects.list` and `storage.objects.delete`); use `append` to keep existing files.
 
 ## Supported File Formats
 `gs` source only supports loading files in the following formats:

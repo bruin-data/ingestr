@@ -71,6 +71,18 @@ const (
 	TableNamingTable TableNaming = "table"
 )
 
+// CDCDeleteBehavior selects how a CDC merge applies source deletes to the
+// destination table.
+type CDCDeleteBehavior string
+
+const (
+	// CDCDeleteSoft keeps deleted rows as tombstones with _cdc_deleted = true.
+	// Default.
+	CDCDeleteSoft CDCDeleteBehavior = "soft"
+	// CDCDeleteHard removes deleted rows from the destination table.
+	CDCDeleteHard CDCDeleteBehavior = "hard"
+)
+
 type IngestConfig struct {
 	SourceURI   string
 	DestURI     string
@@ -109,14 +121,15 @@ type IngestConfig struct {
 	PartitionBy string
 	ClusterBy   []string
 
-	FullRefresh    bool
-	RefreshID      string
-	SchemaContract string      // Schema contract mode: evolve, freeze, discard_row, discard_value
-	SchemaNaming   string      // Schema naming convention: direct, snake_case, auto
-	CDCTableNaming TableNaming // Multi-table CDC destination naming: schema_table, table
-	Yes            bool
-	Progress       ProgressMode
-	Debug          bool
+	FullRefresh       bool
+	RefreshID         string
+	SchemaContract    string            // Schema contract mode: evolve, freeze, discard_row, discard_value
+	SchemaNaming      string            // Schema naming convention: direct, snake_case, auto
+	CDCTableNaming    TableNaming       // Multi-table CDC destination naming: schema_table, table
+	CDCDeleteBehavior CDCDeleteBehavior // How CDC merges apply source deletes: soft, hard
+	Yes               bool
+	Progress          ProgressMode
+	Debug             bool
 
 	PageSize                        int
 	MaxBatchBytes                   int64
@@ -200,6 +213,7 @@ func DefaultConfig() *IngestConfig {
 		SchemaContract:      "evolve",
 		SchemaNaming:        "",
 		CDCTableNaming:      TableNamingSchemaTable,
+		CDCDeleteBehavior:   CDCDeleteSoft,
 		Progress:            ProgressInteractive,
 		PageSize:            25000,
 		MaxBatchBytes:       512 << 20, // 512 MiB
@@ -243,6 +257,9 @@ func (c *IngestConfig) Validate() error {
 		return err
 	}
 	if err := c.ValidateCDCSnapshotMode(); err != nil {
+		return err
+	}
+	if err := c.validateCDCDeleteBehavior(); err != nil {
 		return err
 	}
 	if err := c.validateExtractPartitioning(); err != nil {
@@ -441,6 +458,38 @@ func (c *IngestConfig) validateCDCTableNaming() error {
 		return &ValidationError{
 			Field:   "cdc-table-naming",
 			Message: fmt.Sprintf("invalid value %q (must be %q or %q)", c.CDCTableNaming, TableNamingSchemaTable, TableNamingTable),
+		}
+	}
+}
+
+// HardDeletesCDC reports whether CDC merges remove deleted rows instead of
+// keeping tombstones.
+func (c *IngestConfig) HardDeletesCDC() bool {
+	return c.CDCDeleteBehavior == CDCDeleteHard
+}
+
+func (c *IngestConfig) validateCDCDeleteBehavior() error {
+	switch c.CDCDeleteBehavior {
+	case "", CDCDeleteSoft:
+		return nil
+	case CDCDeleteHard:
+		if !c.IsCDCSource() && !c.IsChangeTrackingSource() {
+			return &ValidationError{
+				Field:   "cdc-delete-behavior",
+				Message: fmt.Sprintf("%q applies to CDC and Change Tracking sources only", CDCDeleteHard),
+			}
+		}
+		if c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge && (!c.FullRefresh || c.Stream) {
+			return &ValidationError{
+				Field:   "cdc-delete-behavior",
+				Message: fmt.Sprintf("%q requires the %q incremental strategy or a non-streaming full refresh", CDCDeleteHard, StrategyMerge),
+			}
+		}
+		return nil
+	default:
+		return &ValidationError{
+			Field:   "cdc-delete-behavior",
+			Message: fmt.Sprintf("invalid value %q (must be %q or %q)", c.CDCDeleteBehavior, CDCDeleteSoft, CDCDeleteHard),
 		}
 	}
 }

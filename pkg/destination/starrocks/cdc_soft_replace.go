@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 )
 
@@ -39,6 +40,14 @@ func (d *StarRocksDestination) RetireCDCRowsBefore(ctx context.Context, opts des
 	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.ExpectedIncarnation); err != nil {
 		return err
 	}
+	if opts.HardDelete {
+		query := buildCDCHardRetireSQL(d.tableRef(opts.Table), opts)
+		if err := d.deleteVisible(ctx, opts.Table, query); err != nil {
+			config.LogFailedQuery(query, err)
+			return fmt.Errorf("delete StarRocks CDC rows before %s: %w", opts.Boundary, err)
+		}
+		return d.checkCDCIncarnation(ctx, opts.Table, opts.ExpectedIncarnation)
+	}
 	tableSchema, err := d.GetTableSchema(ctx, opts.Table)
 	if err != nil {
 		return err
@@ -54,6 +63,13 @@ func (d *StarRocksDestination) RetireCDCRowsBefore(ctx context.Context, opts des
 		return fmt.Errorf("retire StarRocks CDC rows before %s: %w", opts.Boundary, err)
 	}
 	return d.checkCDCIncarnation(ctx, opts.Table, opts.ExpectedIncarnation)
+}
+
+// buildCDCHardRetireSQL deletes every row the snapshot did not rewrite,
+// including tombstones left by earlier soft-delete runs.
+func buildCDCHardRetireSQL(target string, opts destination.CDCRetireOptions) string {
+	lsn := quoteColumn(destination.CDCLSNColumn)
+	return fmt.Sprintf("DELETE FROM %s WHERE %s IS NULL OR %s < %s", target, lsn, lsn, sqlString(opts.Boundary))
 }
 
 func buildCDCRetireSQL(target string, columns []string, opts destination.CDCRetireOptions) (string, error) {

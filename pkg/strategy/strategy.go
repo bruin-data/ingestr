@@ -109,15 +109,17 @@ type WriteStrategy interface {
 // MultiTableIngestionJob represents an ingestion job for multiple tables.
 // Used by CDC sources that emit data from multiple tables concurrently.
 type MultiTableIngestionJob struct {
-	Config          *config.IngestConfig
-	Source          source.MultiTableSource
-	Destination     destination.Destination
-	Tables          []source.SourceTableInfo
-	TableDestNames  map[string]string // source table → dest table mapping
-	Tracker         progress.Tracker
-	CDCResumeLSNs   map[string]string                         // Per-table CDC resume LSNs: source table → max LSN already processed
-	EvolutionPlans  map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
-	CDCStateManager *CDCStateManager
+	Config         *config.IngestConfig
+	Source         source.MultiTableSource
+	Destination    destination.Destination
+	Tables         []source.SourceTableInfo
+	TableDestNames map[string]string // source table → dest table mapping
+	Tracker        progress.Tracker
+	CDCResumeLSNs  map[string]string // Per-table CDC resume LSNs: source table → max LSN already processed
+	// CDCSnapshotResumes lists interrupted snapshots streaming can continue.
+	CDCSnapshotResumes map[string]source.CDCSnapshotProgress
+	EvolutionPlans     map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
+	CDCStateManager    *CDCStateManager
 
 	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
 	WhitespaceTrimmer *transformer.WhitespaceTrimmer
@@ -200,7 +202,11 @@ func evolveDestinationTableIfIncarnation(
 	if limiter, ok := dest.(destination.DecimalPrecisionLimiter); ok {
 		compareOptions.MaxDecimalPrecision = limiter.MaxDecimalPrecision()
 	}
-	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
+	compareSource, err := destination.WithoutGeneratedColumns(ctx, dest, destTable, sourceSchema)
+	if err != nil {
+		return "", fmt.Errorf("failed to get generated columns: %w", err)
+	}
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(compareSource), destSchema, compareOptions)
 	if err != nil {
 		return "", fmt.Errorf("failed to compare schemas: %w", err)
 	}

@@ -32,11 +32,12 @@ const syntheticSortKeyColumn = "__ingestr_sort_key"
 // the MySQL protocol (FE query port); row data is loaded via the Stream Load
 // HTTP API (FE http port).
 type StarRocksDestination struct {
-	db             *sql.DB
-	loader         *streamLoader
-	database       string
-	replicationNum string // empty => use the cluster default
-	labelCounter   int64
+	db                 *sql.DB
+	loader             *streamLoader
+	database           string
+	replicationNum     string // empty => use the cluster default
+	labelCounter       int64
+	legacyLoadMetadata atomic.Bool
 
 	swapMu sync.Mutex
 	// preparedSwaps maps cross-database staging tables to the copies that
@@ -124,6 +125,7 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	}
 
 	d.db = db
+	d.legacyLoadMetadata.Store(false)
 	d.loader = newStreamLoader(host, httpPort, user, password)
 	d.loader.waitForPublish = d.waitForPublish
 	config.Debug("[STARROCKS] Connected (database: %s, http_port: %d)", d.database, httpPort)

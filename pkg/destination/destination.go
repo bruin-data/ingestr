@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -106,7 +107,11 @@ type MergeOptions struct {
 	// CDCExpectedIncarnation fences a managed CDC merge to the physical target
 	// that was bound before the source read began.
 	CDCExpectedIncarnation string
-	Parallelism            int
+	// CDCHardDelete removes rows whose latest change is a delete instead of
+	// keeping them as _cdc_deleted tombstones. Only set for destinations that
+	// implement CDCHardDeleteCapable.
+	CDCHardDelete bool
+	Parallelism   int
 }
 
 type CDCAtomicTableMerge struct {
@@ -281,6 +286,29 @@ type SchemaEvolutionColumnNormalizer interface {
 // against an existing destination column before comparing their types.
 type SchemaEvolutionSourceColumnNormalizer interface {
 	NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column
+}
+
+// GeneratedColumnsProvider lists columns the destination computes itself, so
+// schema evolution neither adds nor writes them.
+type GeneratedColumnsProvider interface {
+	GeneratedColumns(ctx context.Context, table string) ([]string, error)
+}
+
+// WithoutGeneratedColumns drops source columns that the destination table generates.
+func WithoutGeneratedColumns(ctx context.Context, dest Destination, table string, s *schema.TableSchema) (*schema.TableSchema, error) {
+	provider, ok := dest.(GeneratedColumnsProvider)
+	if !ok || s == nil {
+		return s, nil
+	}
+	names, err := provider.GeneratedColumns(ctx, table)
+	if err != nil || len(names) == 0 {
+		return s, err
+	}
+	filtered := *s
+	filtered.Columns = slices.DeleteFunc(slices.Clone(s.Columns), func(c schema.Column) bool {
+		return slices.Contains(names, c.Name)
+	})
+	return &filtered, nil
 }
 
 // DecimalPrecisionLimiter reports the widest decimal precision a destination can store,
@@ -588,6 +616,18 @@ type CDCMergeAware interface {
 	SupportsCDCMerge() bool
 }
 
+// CDCHardDeleteCapable advertises that the CDC merge honors
+// MergeOptions.CDCHardDelete, and CDCRetireOptions.HardDelete when the
+// destination also soft-replaces snapshots.
+type CDCHardDeleteCapable interface {
+	SupportsCDCHardDelete() bool
+}
+
+func SupportsCDCHardDelete(dest Destination) bool {
+	capable, ok := dest.(CDCHardDeleteCapable)
+	return ok && capable.SupportsCDCHardDelete()
+}
+
 // AtomicCommitWriter is an optional interface for destinations that can make a
 // write atomically visible after the write phase completes.
 type AtomicCommitWriter interface {
@@ -623,6 +663,13 @@ func DefaultMultiTableName(destSchema, sourceTable string) string {
 		return sourceTable
 	}
 	return destSchema + "." + strings.ReplaceAll(sourceTable, ".", "_")
+}
+
+// ReplaceFinalizer is an optional interface for destinations that write a replace
+// directly into the target and complete it, such as by removing the previous data,
+// only once the strategy knows every row was written.
+type ReplaceFinalizer interface {
+	FinalizeReplace(ctx context.Context, table string) error
 }
 
 // ExactRowCountWaiter is an optional interface for destinations that can

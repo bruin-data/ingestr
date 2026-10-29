@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -31,6 +32,13 @@ type Snapshot struct {
 	cdcConfig   CDCConfig
 	slotName    string
 	typeMap     *pgtype.Map
+	// progressKeys makes the snapshot read in key order and follow every batch
+	// with a copy of progress naming its last key, so an interrupted snapshot
+	// can resume after its last durable key. resumeAfter holds that key's text
+	// values when this snapshot continues an earlier one.
+	progressKeys []string
+	progress     source.CDCSnapshotProgress
+	resumeAfter  []string
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -111,19 +119,8 @@ func (s *Snapshot) Execute(ctx context.Context, results chan<- source.RecordBatc
 
 	config.Debug("[CDC] Creating persistent replication slot: %s", s.slotName)
 
-	// Create PERSISTENT replication slot and get the snapshot name
-	// SnapshotAction must be "EXPORT_SNAPSHOT" to get a snapshot we can use with SET TRANSACTION SNAPSHOT
-	result, err := pglogrepl.CreateReplicationSlot(
-		ctx,
-		s.source.replConn,
-		s.slotName,
-		"pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{
-			Temporary:      false, // Persistent slot for incremental CDC
-			SnapshotAction: "EXPORT_SNAPSHOT",
-			Mode:           pglogrepl.LogicalReplication,
-		},
-	)
+	// Create a persistent slot whose exported snapshot SET TRANSACTION SNAPSHOT can use
+	result, err := s.source.createLogicalSlot(ctx, s.source.replConn, s.slotName, false)
 	if err != nil {
 		return 0, "", fmt.Errorf("failed to create replication slot: %w", err)
 	}
@@ -251,6 +248,14 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTableName(s.tableName))
+	var args []any
+	if len(s.progressKeys) > 0 {
+		keyTypes, err := snapshotKeyTypes(ctx, tx, s.tableName, s.progressKeys)
+		if err != nil {
+			return err
+		}
+		query, args = keyedSnapshotQuery(colNames, quoteTableName(s.tableName), s.progressKeys, keyTypes, s.resumeAfter)
+	}
 	config.Debug("[CDC] Snapshot query: %s", query)
 
 	// A replacement snapshot can run the same SELECT text after DDL changed a
@@ -261,7 +266,11 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		return fmt.Errorf("failed to describe snapshot query: %w", err)
 	}
 	s.typeMap = tx.Conn().TypeMap()
-	rows, err := tx.Query(ctx, query, pgx.QueryExecModeDescribeExec, postgres.TextResultFormats(s.typeMap, description.Fields, sourceColumns, snapshotTextColumn))
+	formats := postgres.TextResultFormats(s.typeMap, description.Fields, sourceColumns, snapshotTextColumn)
+	for i := len(sourceColumns); i < len(formats); i++ {
+		formats[i] = pgx.TextFormatCode
+	}
+	rows, err := tx.Query(ctx, query, append([]any{pgx.QueryExecModeDescribeExec, formats}, args...)...)
 	if err != nil {
 		return fmt.Errorf("failed to query: %w", err)
 	}
@@ -269,8 +278,13 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 
 	if opts.CDCSnapshotReplace {
 		// A snapshot is a complete replacement boundary. Consumers that opt in
-		// discard target rows left by an interrupted snapshot or a lost slot.
-		if err := sendResult(ctx, results, source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)}); err != nil {
+		// discard target rows left by an interrupted snapshot or a lost slot;
+		// a resumed snapshot instead keeps the rows its earlier run made durable.
+		marker := source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)}
+		if s.resumeAfter != nil {
+			marker.CDCSnapshotPosition, marker.CDCSnapshotResumed = s.progress.Boundary, true
+		}
+		if err := sendResult(ctx, results, marker); err != nil {
 			return err
 		}
 	}
@@ -290,7 +304,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 	var totalRows int64
 
 	for {
-		record, count, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, batchSize, opts.MaxBatchBytes, lsnStr, syncedAt)
+		record, count, lastKey, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, len(s.progressKeys), batchSize, opts.MaxBatchBytes, lsnStr, syncedAt)
 		if err != nil {
 			return fmt.Errorf("failed to convert rows to batch: %w", err)
 		}
@@ -306,13 +320,28 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		if err := sendResult(ctx, results, source.RecordBatchResult{Batch: record}); err != nil {
 			return err
 		}
+		if lastKey != nil {
+			key, err := json.Marshal(lastKey)
+			if err != nil {
+				return fmt.Errorf("failed to encode snapshot progress key: %w", err)
+			}
+			progress := s.progress
+			progress.Key = string(key)
+			token := source.CDCStateCommitToken{SnapshotProgress: map[string]source.CDCSnapshotProgress{s.tableName: progress}}
+			if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: token}); err != nil {
+				return err
+			}
+		}
 	}
 
 	config.Debug("[CDC] Snapshot completed: %d rows in %d batches", totalRows, batchNum)
 	return nil
 }
 
-func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, batchSize int, maxBatchBytes int64, lsn string, syncedAt time.Time) (arrow.RecordBatch, int64, error) {
+// rowsToBatch converts up to batchSize rows. The last keyColumns values of
+// each row are the text-cast keys of a key-ordered snapshot; lastKey returns
+// those of the final row converted.
+func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, keyColumns, batchSize int, maxBatchBytes int64, lsn string, syncedAt time.Time) (arrow.RecordBatch, int64, []string, error) {
 	mem := memory.NewGoAllocator()
 
 	// Create builders for all columns including CDC columns
@@ -323,21 +352,22 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 
 	var rowCount int64
 	var accBytes int64
+	var lastKey []string
 	typeMap := s.typeMap
 	if typeMap == nil {
 		typeMap = pgtype.NewMap()
 	}
 	for rows.Next() {
 		raw, fields := rows.RawValues(), rows.FieldDescriptions()
-		if len(raw) != len(columns) || len(fields) != len(columns) {
+		if len(raw) != len(columns)+keyColumns || len(fields) != len(columns)+keyColumns {
 			for _, b := range builders {
 				b.Release()
 			}
-			return nil, 0, fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), len(columns))
+			return nil, 0, nil, fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), len(columns)+keyColumns)
 		}
 
 		// Append source column values
-		for i, buf := range raw {
+		for i, buf := range raw[:len(columns)] {
 			val, err := snapshotValue(typeMap, fields[i], buf, columns[i])
 			var converted any
 			if err == nil {
@@ -347,7 +377,7 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 				for _, b := range builders {
 					b.Release()
 				}
-				return nil, 0, fmt.Errorf("failed to convert snapshot column %q: %w", columns[i].Name, err)
+				return nil, 0, nil, fmt.Errorf("failed to convert snapshot column %q: %w", columns[i].Name, err)
 			}
 			arrowconv.AppendValue(builders[i], converted)
 			if maxBatchBytes > 0 {
@@ -359,6 +389,19 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 		builders[len(columns)+1].(*array.BooleanBuilder).Append(false)
 		builders[len(columns)+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
 		builders[len(columns)+3].(*array.StringBuilder).Append("[]")
+
+		if keyColumns > 0 {
+			lastKey = make([]string, keyColumns)
+			for i, buf := range raw[len(columns):] {
+				if buf == nil {
+					for _, b := range builders {
+						b.Release()
+					}
+					return nil, 0, nil, fmt.Errorf("snapshot key column %d is NULL", i)
+				}
+				lastKey[i] = string(buf)
+			}
+		}
 
 		rowCount++
 
@@ -375,16 +418,16 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 			b.Release()
 		}
 		if err := rows.Err(); err != nil {
-			return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+			return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
 		}
-		return nil, 0, nil
+		return nil, 0, nil, nil
 	}
 
 	if err := rows.Err(); err != nil {
 		for _, b := range builders {
 			b.Release()
 		}
-		return nil, 0, fmt.Errorf("error iterating rows: %w", err)
+		return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
 	arrays := make([]arrow.Array, len(builders))
@@ -398,7 +441,7 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 		arr.Release()
 	}
 
-	return record, rowCount, nil
+	return record, rowCount, lastKey, nil
 }
 
 // String-like columns and all arrays are read as PostgreSQL text and decoded
@@ -502,4 +545,61 @@ func numericToBigInt(num pgtype.Numeric, targetScale int) *big.Int {
 	}
 
 	return result
+}
+
+// snapshotKeyTypes returns the declared types of a table's key columns, used
+// to cast resume keys back from their text form.
+func snapshotKeyTypes(ctx context.Context, tx pgx.Tx, table string, keys []string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+		FROM pg_attribute a WHERE a.attrelid = $1::regclass AND a.attname = ANY($2) AND a.attnum > 0 AND NOT a.attisdropped`,
+		quoteTableName(table), keys)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key column types of %s: %w", table, err)
+	}
+	defer rows.Close()
+	byName := make(map[string]string, len(keys))
+	for rows.Next() {
+		var name, typ string
+		if err := rows.Scan(&name, &typ); err != nil {
+			return nil, err
+		}
+		byName[name] = typ
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	types := make([]string, len(keys))
+	for i, key := range keys {
+		typ, ok := byName[key]
+		if !ok {
+			return nil, fmt.Errorf("key column %q of %s not found", key, table)
+		}
+		types[i] = typ
+	}
+	return types, nil
+}
+
+// keyedSnapshotQuery reads a table in key order, appending each key cast to
+// text. With resumeAfter it starts after that key, compared as a row in the
+// key columns' own types so the order matches ORDER BY. Keys are qualified by
+// a table alias: the text casts would otherwise make the names ambiguous.
+func keyedSnapshotQuery(columns []string, table string, keys, keyTypes, resumeAfter []string) (string, []any) {
+	const alias = "__ingestr_snapshot"
+	quotedKeys := make([]string, len(keys))
+	keyText := make([]string, len(keys))
+	for i, key := range keys {
+		quotedKeys[i] = alias + "." + quoteIdentifier(key)
+		keyText[i] = fmt.Sprintf("%s::text AS %s", quotedKeys[i], quoteIdentifier(fmt.Sprintf("__ingestr_key_%d", i)))
+	}
+	query := fmt.Sprintf("SELECT %s, %s FROM %s AS %s", strings.Join(columns, ", "), strings.Join(keyText, ", "), table, alias)
+	var args []any
+	if resumeAfter != nil {
+		params := make([]string, len(keys))
+		for i := range keys {
+			params[i] = fmt.Sprintf("$%d::text::%s", i+1, keyTypes[i])
+			args = append(args, resumeAfter[i])
+		}
+		query += fmt.Sprintf(" WHERE (%s) > (%s)", strings.Join(quotedKeys, ", "), strings.Join(params, ", "))
+	}
+	return query + " ORDER BY " + strings.Join(quotedKeys, ", "), args
 }

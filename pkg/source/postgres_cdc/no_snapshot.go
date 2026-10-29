@@ -36,10 +36,14 @@ func (s *PostgresCDCSource) validateNoSnapshotSlot(ctx context.Context, start pg
 	}
 	var usable bool
 	var confirmed, restart, current string
+	currentLSNExpr := "pg_current_wal_lsn()"
+	if s.standby {
+		currentLSNExpr = "pg_last_wal_replay_lsn()"
+	}
 	err := s.queryPool.QueryRow(ctx, `
 		SELECT slot_type = 'logical' AND plugin = 'pgoutput' AND database = current_database()
 		       AND NOT active AND NOT temporary AND COALESCE(to_jsonb(s)->>'wal_status', '') != 'lost',
-		       COALESCE(confirmed_flush_lsn::text, ''), COALESCE(restart_lsn::text, ''), pg_current_wal_lsn()::text
+		       COALESCE(confirmed_flush_lsn::text, ''), COALESCE(restart_lsn::text, ''), `+currentLSNExpr+`::text
 		FROM pg_replication_slots s WHERE slot_name = $1`, s.cdcConfig.SlotName).Scan(&usable, &confirmed, &restart, &current)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("CDC snapshot mode never: replication slot %q is missing; refusing to snapshot", s.cdcConfig.SlotName)

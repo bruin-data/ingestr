@@ -158,6 +158,12 @@ type RecordBatchResult struct {
 	// SnapshotPositions names the table. It is greater than any position
 	// previously emitted for that table.
 	CDCSnapshotPosition string
+	// CDCSnapshotResumed marks a replacement marker that continues a snapshot
+	// an earlier run started at CDCSnapshotPosition: rows it already made
+	// durable stay in place, the snapshot resumes after them stamped with a
+	// newer position, and the completion token still names
+	// CDCSnapshotPosition.
+	CDCSnapshotResumed bool
 
 	// CommitToken is an opaque, cumulative position marker for streaming mode.
 	// Committing a token via StreamCommitter acknowledges everything emitted up
@@ -221,6 +227,21 @@ type CDCStateCommitToken struct {
 	SnapshotPositions    map[string]string
 	SnapshotIncarnations map[string]string
 	SnapshotSchemas      map[string]string
+	// SnapshotProgress marks how far an in-progress, key-ordered snapshot is
+	// included in all preceding results, so a later run can resume it.
+	SnapshotProgress map[string]CDCSnapshotProgress
+}
+
+// CDCSnapshotProgress locates a resumable key-ordered snapshot. Boundary is
+// the source position the snapshot replaces the table at; every row whose key
+// sorts at or below Key is durable. Key is a JSON array of the key columns'
+// text values. Incarnation and SchemaFingerprint identify the table shape the
+// snapshot reads, so a later run resumes only an unchanged table.
+type CDCSnapshotProgress struct {
+	Boundary          string
+	Key               string
+	Incarnation       string
+	SchemaFingerprint string
 }
 
 // CDCStateProvider exposes the state produced by a completed batch CDC read.
@@ -352,6 +373,11 @@ type SnapshotResetEmitter interface {
 	EmitsSnapshotResets() bool
 }
 
+// IntervalIgnoringTable is implemented by tables that ignore --interval-start/--interval-end.
+type IntervalIgnoringTable interface {
+	IgnoresInterval() bool
+}
+
 // PartitionedTable is an optional interface that a SourceTable can implement
 // to declare a partition key for the destination table.
 type PartitionedTable interface {
@@ -379,6 +405,8 @@ type MultiTableReadOptions struct {
 	CDCResumeLSNs               map[string]string // Per-table CDC resume LSNs: table name → max LSN already processed
 	CDCResumeIncarnations       map[string]string
 	CDCResumeSchemaFingerprints map[string]string
+	// CDCSnapshotResumes lists tables whose interrupted snapshot can resume.
+	CDCSnapshotResumes map[string]CDCSnapshotProgress
 }
 
 // StreamingSource is an optional capability for sources that support

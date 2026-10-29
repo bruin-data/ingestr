@@ -200,6 +200,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "Allium", link: "/supported-sources/allium.md" },
+              { text: "AllRatesToday", link: "/supported-sources/allratestoday.md" },
               { text: "Amazon Kinesis", link: "/supported-sources/kinesis.md" },
               { text: "Amplitude", link: "/supported-sources/amplitude.md" },
               { text: "Anthropic", link: "/supported-sources/anthropic.md" },

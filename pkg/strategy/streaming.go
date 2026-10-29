@@ -191,6 +191,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		CDCResumeLSNs:               job.CDCResumeLSNs,
 		CDCResumeIncarnations:       resumeIncarnations,
 		CDCResumeSchemaFingerprints: resumeSchemas,
+		CDCSnapshotResumes:          job.CDCSnapshotResumes,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to read from multi-table source: %w", err)
@@ -668,6 +669,9 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 	if !ok {
 		return fmt.Errorf("source requested truncate for unknown table %q", res.TableName)
 	}
+	if res.CDCSnapshotResumed {
+		return l.resumeSnapshotReplacement(ctx, res, st)
+	}
 	stateTable := ""
 	expectedIncarnation := ""
 	if l.opts.StateManager != nil {
@@ -737,6 +741,35 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 	if stateTable != "" && res.CDCWALTruncate {
 		l.pendingTruncates[stateTable] = st.incarnation
 	}
+	l.buffer(res)
+	return nil
+}
+
+// resumeSnapshotReplacement continues a replacement snapshot that an earlier
+// run started at res.CDCSnapshotPosition and made durable up to a key. Those
+// rows stay: the target is not emptied, and a destination that replaces
+// snapshots in place retires the rows below the original boundary that the
+// completed snapshot did not rewrite.
+func (l *flushLoop) resumeSnapshotReplacement(ctx context.Context, res source.RecordBatchResult, st *streamTableState) error {
+	stateTable := l.stateSourceTable(res.TableName)
+	if l.opts.StateManager == nil || stateTable == "" || !st.isCDC || st.stagingTable == "" || len(st.primaryKeys) == 0 {
+		return fmt.Errorf("source resumed the snapshot of %q, which needs a keyed CDC merge with destination-managed state", res.TableName)
+	}
+	if err := l.opts.StateManager.ResumeSnapshot(ctx, stateTable, st.destTable, st.incarnation); err != nil {
+		return fmt.Errorf("failed to resume CDC snapshot state for %s: %w", stateTable, err)
+	}
+	if err := l.opts.StateManager.BindDestinationIncarnation(ctx, stateTable, st.destTable); err != nil {
+		return fmt.Errorf("failed to bind CDC destination before resuming the snapshot of %s: %w", stateTable, err)
+	}
+	if err := connectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	st.softReplace = nil
+	if _, ok := destination.SupportsCDCSnapshotSoftReplace(l.dest); ok {
+		st.softReplace = &pendingSoftReplace{sourceTable: stateTable, boundary: res.CDCSnapshotPosition}
+	}
+	st.snapshotBoundaryInvalidated = false
+	output.Statusf("[STREAM] %s | Resuming the snapshot of %s at %s\n", time.Now().Format("15:04:05"), st.destTable, res.CDCSnapshotPosition)
 	l.buffer(res)
 	return nil
 }
@@ -830,6 +863,7 @@ func (l *flushLoop) retireSoftReplacedRows(ctx context.Context) error {
 			Boundary:            pending.boundary,
 			SyncedAt:            time.Now().UTC(),
 			ExpectedIncarnation: expectedIncarnation,
+			HardDelete:          l.hardDeletesCDC(),
 		}); err != nil {
 			return fmt.Errorf("streaming flush: failed to retire rows missing from the %s snapshot: %w", pending.sourceTable, err)
 		}
@@ -839,6 +873,10 @@ func (l *flushLoop) retireSoftReplacedRows(ctx context.Context) error {
 		st.softReplace = nil
 	}
 	return nil
+}
+
+func (l *flushLoop) hardDeletesCDC() bool {
+	return l.cfg != nil && l.cfg.HardDeletesCDC()
 }
 
 func (l *flushLoop) stateSourceTable(recordTable string) string {
@@ -1020,6 +1058,12 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 					l.pendingState.SnapshotPositions[table] = position
 				}
 			}
+			for table, progress := range token.SnapshotProgress {
+				if l.pendingState.SnapshotProgress == nil {
+					l.pendingState.SnapshotProgress = make(map[string]source.CDCSnapshotProgress)
+				}
+				l.pendingState.SnapshotProgress[table] = progress
+			}
 			if token.Position != "" && len(l.pendingTruncates) > 0 {
 				if l.pendingState.SnapshotPositions == nil {
 					l.pendingState.SnapshotPositions = make(map[string]string)
@@ -1180,7 +1224,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 					return err
 				}
 			}
-			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation); err != nil {
+			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation, l.hardDeletesCDC()); err != nil {
 				return fmt.Errorf("streaming flush: failed to merge table %s: %w", displayName, err)
 			}
 			if err := connectorLeaseLoss(ctx); err != nil {

@@ -205,6 +205,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 	managedDestinationCDC := managedPostgresCDC || managedMySQLCDC || managedMSSQLCDC || managedChangeTracking
+	if err := validateCDCDeleteBehavior(p.config, dest, managedDestinationCDC); err != nil {
+		return err
+	}
 	if p.config.Stream && p.config.FullRefresh && !managedDestinationCDC {
 		return fmt.Errorf("--full-refresh --stream requires a PostgreSQL, MySQL, or SQL Server change source and destination-managed CDC state")
 	}
@@ -451,6 +454,9 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	preFetchConfig.IncrementalKey = resolveIncrementalKey(p.config, src, table)
 	preFetchConfig.PrimaryKeys = resolvePrimaryKeys(p.config, table)
 	preFetchConfig.PartitionBy = resolvePartitionBy(p.config, table)
+	if err := validateCDCDeleteStrategy(p.config, preFetchStrategy, preFetchConfig.PrimaryKeys); err != nil {
+		return err
+	}
 	if err := validateExtractPartitionStrategy(p.config, preFetchStrategy, dest); err != nil {
 		return err
 	}
@@ -797,8 +803,8 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 				preStagedData.Close()
 				preStagedData = nil
 			}
-			bufferTarget := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
-			bufferedRecords, err = inferBuffer.Reader(ctx, bufferTarget)
+			bufferTarget, jsonText := p.buildBufferReaderTarget(originalSourceSchema, destSchema)
+			bufferedRecords, err = inferBuffer.Reader(ctx, bufferTarget, jsonText)
 			if err != nil {
 				return fmt.Errorf("failed to open buffer reader: %w", err)
 			}
@@ -819,6 +825,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.RunID = runID
 	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
 	resolvedConfig.WriteNulls = config.ResolveWriteNulls(resolvedConfig.ReverseETLDestination, resolvedConfig.WriteNullsSet, resolvedConfig.WriteNulls)
+	resolvedConfig.IntervalStart, resolvedConfig.IntervalEnd = resolveInterval(&resolvedConfig, table)
 
 	applyPartitionNaming(&resolvedConfig, originalSourceSchema, tableSchema, namingConv)
 	if err := validatePartitionBy(&resolvedConfig, p.config.PartitionBy, tableSchema); err != nil {
@@ -880,6 +887,10 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		runIDTransformer = transformer.NewRunID(runIDColumnForSchema(ingestSchema), runID)
 	}
 
+	schemaAligner := transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget()
+	if table.HasKnownSchema() || p.config.NoInference {
+		schemaAligner.EnableJSONText()
+	}
 	job := &strategy.IngestionJob{
 		Config:                 &resolvedConfig,
 		Table:                  table,
@@ -898,7 +909,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		WhitespaceTrimmer:      whitespaceTrimmer,
 		LoadTimestamp:          loadTimestampTransformer,
 		RunID:                  runIDTransformer,
-		SchemaAligner:          transformer.NewSafeTypeCaster(ingestSchema.ToArrowSchema()).EnableRetarget(),
+		SchemaAligner:          schemaAligner,
 		EvolutionPlan:          evolutionPlan,
 		CDCStateManager:        cdcStateManager,
 	}
@@ -1127,7 +1138,7 @@ func (p *Pipeline) buildSourceSchemaCaster(sourceSchema *schema.TableSchema) *tr
 		fields[i] = arrowField(col.Name, col, col.Nullable)
 	}
 
-	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil))
+	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil)).EnableJSONText()
 }
 
 // buildTypeCaster creates a TypeCaster when column type overrides differ from the source types.
@@ -1168,7 +1179,7 @@ func (p *Pipeline) buildTypeCaster(sourceSchema, destSchema *schema.TableSchema)
 		return nil
 	}
 
-	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil))
+	return transformer.NewTypeCaster(arrow.NewSchema(fields, nil)).EnableJSONText()
 }
 
 func (p *Pipeline) createTracker(ctx context.Context) (progress.Tracker, error) {
@@ -1401,10 +1412,28 @@ func (p *Pipeline) inferSchemaFromData(
 // buildBufferReaderTarget builds the Arrow schema for buffer.Reader:
 // dest order, source names (for buffer file match), dest types (for staging
 // match). Ingestr/SCD2 metadata cols are skipped and dest-only cols get null-fill.
-func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.TableSchema) *arrow.Schema {
+// The returned predicate names the source columns whose string values the
+// replay keeps as JSON text: dest json columns hinted json by --columns, or
+// that inference typed string, so the json type came from the existing table
+// rather than from a mixed-type merge.
+func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.TableSchema) (*arrow.Schema, func(string) bool) {
 	var renameMap map[string]string
 	if p.columnRenamer != nil && p.columnRenamer.HasRenames() {
 		renameMap = p.columnRenamer.Mapping()
+	}
+
+	inferredString := make(map[string]bool)
+	if p.rawInferredSchema != nil {
+		for _, c := range p.rawInferredSchema.Columns {
+			inferredString[strings.ToLower(c.Name)] = c.DataType == schema.TypeString
+		}
+	}
+	jsonText := make(map[string]bool)
+	var overrides schemaevolution.ColumnOverrides
+	schemaNaming := ""
+	if p.config != nil {
+		overrides, _ = schemaevolution.ParseColumnOverrides(p.config.Columns)
+		schemaNaming = p.config.SchemaNaming
 	}
 
 	srcByDestName := make(map[string][]schema.Column, len(sourceSchema.Columns))
@@ -1427,13 +1456,17 @@ func (p *Pipeline) buildBufferReaderTarget(sourceSchema, destSchema *schema.Tabl
 				m := sc
 				m.DataType, m.Precision, m.Scale, m.ArrayType = dc.DataType, dc.Precision, dc.Scale, dc.ArrayType
 				fields = append(fields, arrowField(sc.Name, m, m.Nullable || dc.Nullable)) // add columns using dest types but source names
+				ov, hinted := overrides.GetForColumn(sc.Name, schemaNaming)
+				if dc.DataType == schema.TypeJSON && (inferredString[strings.ToLower(sc.Name)] || hinted && ov.DataType == schema.TypeJSON) {
+					jsonText[sc.Name] = true
+				}
 			}
 			continue
 		}
 		fields = append(fields, arrowField(dc.Name, dc, true)) // add soft deleted columns using dest names
 	}
 
-	return arrow.NewSchema(fields, nil)
+	return arrow.NewSchema(fields, nil), func(col string) bool { return jsonText[col] }
 }
 
 func arrowField(name string, col schema.Column, nullable bool) arrow.Field {
@@ -1608,6 +1641,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	if p.config.FullRefresh && !p.config.Stream {
 		resolvedStrategy = config.StrategyReplace
 	}
+	for _, table := range tables {
+		if err := validateCDCDeleteStrategy(p.config, resolvedStrategy, table.PrimaryKeys); err != nil {
+			return fmt.Errorf("table %q: %w", table.Name, err)
+		}
+	}
 
 	if shouldWarnCDCStrategy(p.config, resolvedStrategy) {
 		output.Warnf("Warning: change data source is using %q strategy instead of %q; delete and update operations may not be properly reflected in the destination\n", resolvedStrategy, config.StrategyMerge)
@@ -1680,6 +1718,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 
 	// For CDC sources, query per-table max LSNs for resume
 	var cdcResumeLSNs map[string]string
+	var cdcSnapshotResumes map[string]source.CDCSnapshotProgress
 	if cdcStateManager != nil && !p.config.FullRefresh {
 		cdcResumeLSNs = make(map[string]string)
 		stateEmpty, err := cdcStateManager.StateEmpty(ctx)
@@ -1701,6 +1740,19 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				cdcResumeLSNs[table.Name] = resumeLSN
 				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
 			} else {
+				if p.config.Stream && resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
+					resume, ok, err := cdcStateManager.SnapshotResume(ctx, table.Name)
+					if err != nil {
+						return err
+					}
+					if ok {
+						if cdcSnapshotResumes == nil {
+							cdcSnapshotResumes = make(map[string]source.CDCSnapshotProgress)
+						}
+						cdcSnapshotResumes[table.Name] = resume
+						config.Debug("[PIPELINE] Interrupted snapshot of %s can resume after key %s", table.Name, resume.Key)
+					}
+				}
 				if stateEmpty {
 					if err := rejectUnprovenLegacyCDCTarget(ctx, p.dest, table.Name, tableDestNames[table.Name]); err != nil {
 						return err
@@ -1782,21 +1834,29 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	}
 
 	job := &strategy.MultiTableIngestionJob{
-		Config:            &resolvedConfig,
-		Source:            src,
-		Destination:       p.dest,
-		Tables:            tables,
-		TableDestNames:    tableDestNames,
-		Tracker:           tracker,
-		CDCResumeLSNs:     cdcResumeLSNs,
-		EvolutionPlans:    evolutionPlans,
-		CDCStateManager:   cdcStateManager,
-		WhitespaceTrimmer: whitespaceTrimmer,
-		LoadTimestamp:     loadTimestampTransformer,
-		RunID:             runIDTransformer,
-		ColumnRenamers:    columnRenamers,
+		Config:             &resolvedConfig,
+		Source:             src,
+		Destination:        p.dest,
+		Tables:             tables,
+		TableDestNames:     tableDestNames,
+		Tracker:            tracker,
+		CDCResumeLSNs:      cdcResumeLSNs,
+		CDCSnapshotResumes: cdcSnapshotResumes,
+		EvolutionPlans:     evolutionPlans,
+		CDCStateManager:    cdcStateManager,
+		WhitespaceTrimmer:  whitespaceTrimmer,
+		LoadTimestamp:      loadTimestampTransformer,
+		RunID:              runIDTransformer,
+		ColumnRenamers:     columnRenamers,
 		NormalizeTableInfo: func(ctx context.Context, table source.SourceTableInfo, destTable string) (source.SourceTableInfo, *transformer.ColumnRenamer, error) {
-			return p.normalizeMultiTableInfo(ctx, table, destTable)
+			normalized, renamer, err := p.normalizeMultiTableInfo(ctx, table, destTable)
+			if err != nil {
+				return source.SourceTableInfo{}, nil, err
+			}
+			if err := validateCDCDeleteStrategy(&resolvedConfig, resolvedStrategy, normalized.PrimaryKeys); err != nil {
+				return source.SourceTableInfo{}, nil, err
+			}
+			return normalized, renamer, nil
 		},
 	}
 	if cdcStateManager != nil {
@@ -1967,7 +2027,11 @@ func (p *Pipeline) evolveSchemaIfNeeded(ctx context.Context, destTable string, s
 	if limiter, ok := p.dest.(destination.DecimalPrecisionLimiter); ok {
 		opts.MaxDecimalPrecision = limiter.MaxDecimalPrecision()
 	}
-	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), comparisonDestSchema, opts)
+	compareSource, err := destination.WithoutGeneratedColumns(ctx, p.dest, destTable, sourceSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get generated columns: %w", err)
+	}
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(compareSource), comparisonDestSchema, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compare schemas: %w", err)
 	}
@@ -2816,6 +2880,16 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	return s
 }
 
+func resolveInterval(cfg *config.IngestConfig, table source.SourceTable) (*time.Time, *time.Time) {
+	if it, ok := table.(source.IntervalIgnoringTable); ok && it.IgnoresInterval() {
+		if cfg.IntervalStart != nil || cfg.IntervalEnd != nil {
+			config.Debug("[PIPELINE] Table %s ignores --interval-start/--interval-end", table.Name())
+		}
+		return nil, nil
+	}
+	return cfg.IntervalStart, cfg.IntervalEnd
+}
+
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {
 	if src.HandlesIncrementality() {
 		return table.IncrementalKey()
@@ -3476,6 +3550,39 @@ func validateIncrementalPredicate(cfg *config.IngestConfig, dest destination.Des
 		return fmt.Errorf("destination scheme %q does not support --incremental-predicate", dest.GetScheme())
 	}
 	return nil
+}
+
+// validateCDCDeleteBehavior admits hard deletes only where the merge can apply
+// them and the resume position lives in destination-managed state. Sources that
+// resume from MAX(_cdc_lsn) over the target rows would lose the position of
+// every change whose row a hard delete removed.
+func validateCDCDeleteBehavior(cfg *config.IngestConfig, dest destination.Destination, managedDestinationCDC bool) error {
+	if !cfg.HardDeletesCDC() {
+		return nil
+	}
+	if !destination.SupportsCDCHardDelete(dest) {
+		return fmt.Errorf("--cdc-delete-behavior=%s is not supported by destination scheme %q", config.CDCDeleteHard, dest.GetScheme())
+	}
+	if !managedDestinationCDC {
+		return fmt.Errorf("--cdc-delete-behavior=%s requires destination-managed CDC state (PostgreSQL, MySQL/MariaDB, or SQL Server CDC, or SQL Server Change Tracking started with --stream --full-refresh); this run resumes from the destination rows that hard deletes remove", config.CDCDeleteHard)
+	}
+	return nil
+}
+
+func validateCDCDeleteStrategy(cfg *config.IngestConfig, resolvedStrategy config.IncrementalStrategy, primaryKeys []string) error {
+	if !cfg.HardDeletesCDC() || resolvedStrategy == config.StrategyMerge {
+		return nil
+	}
+	if cfg.FullRefresh && !cfg.Stream && resolvedStrategy == config.StrategyReplace {
+		return nil
+	}
+	if resolvedStrategy == config.StrategyAppend && len(primaryKeys) == 0 {
+		return nil
+	}
+	return &config.ValidationError{
+		Field:   "cdc-delete-behavior",
+		Message: fmt.Sprintf("%q requires the %q incremental strategy for keyed tables or a non-streaming full refresh, but the resolved strategy is %q", config.CDCDeleteHard, config.StrategyMerge, resolvedStrategy),
+	}
 }
 
 func validateChangeTrackingDestination(dest destination.Destination) error {

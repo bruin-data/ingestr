@@ -21,14 +21,15 @@ type RunJobRequest struct {
 	PartitionBy string `json:"partitionBy"`
 	ClusterBy   string `json:"clusterBy"`
 
-	FullRefresh      bool   `json:"fullRefresh"`
-	SchemaContract   string `json:"schemaContract"`
-	SchemaNaming     string `json:"schemaNaming"`
-	CDCTableNaming   string `json:"cdcTableNaming"`
-	Progress         string `json:"progress"`
-	PageSize         int    `json:"pageSize"`
-	LoaderFileSize   int    `json:"loaderFileSize"`
-	LoaderFileFormat string `json:"loaderFileFormat"`
+	FullRefresh       bool   `json:"fullRefresh"`
+	SchemaContract    string `json:"schemaContract"`
+	SchemaNaming      string `json:"schemaNaming"`
+	CDCTableNaming    string `json:"cdcTableNaming"`
+	CDCDeleteBehavior string `json:"cdcDeleteBehavior"`
+	Progress          string `json:"progress"`
+	PageSize          int    `json:"pageSize"`
+	LoaderFileSize    int    `json:"loaderFileSize"`
+	LoaderFileFormat  string `json:"loaderFileFormat"`
 
 	ExtractParallelism       int      `json:"extractParallelism"`
 	ExtractPartitionBy       string   `json:"extractPartitionBy"`
@@ -94,6 +95,7 @@ func (r RunJobRequest) IngestArgs() []string {
 	appendString("schema-contract", r.SchemaContract)
 	appendString("schema-naming", r.SchemaNaming)
 	appendString("cdc-table-naming", r.CDCTableNaming)
+	appendString("cdc-delete-behavior", r.CDCDeleteBehavior)
 	appendString("progress", r.Progress)
 	appendInt("page-size", r.PageSize)
 	appendInt("loader-file-size", r.LoaderFileSize)

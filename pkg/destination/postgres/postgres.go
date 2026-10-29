@@ -1021,6 +1021,11 @@ func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opt
 			`latest_active AS (SELECT DISTINCT ON (%s) %s FROM %s WHERE "_cdc_deleted" = false ORDER BY %s)`,
 			pkList, selectCols, quotedStagingTable, orderBy,
 		)
+		if opts.CDCHardDelete {
+			// Rows whose latest change is a delete are removed below, so only
+			// rows whose latest change is live need their image upserted.
+			latestActive = `latest_active AS (SELECT * FROM latest_all WHERE "_cdc_deleted" = false)`
+		}
 		latestAll := fmt.Sprintf(
 			`latest_all AS (SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s)`,
 			pkList, selectCols, quotedStagingTable, orderBy,
@@ -1057,8 +1062,8 @@ func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opt
 			INSERT INTO %s (%s)
 			SELECT %s FROM latest_active la
 			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-			latestActive,
 			latestAll,
+			latestActive,
 			quotedTargetTable,
 			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
 			onTargetCondition,
@@ -1074,6 +1079,22 @@ func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opt
 		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
 			config.LogFailedQuery(upsertSQL, err)
 			return fmt.Errorf("failed to upsert non-deleted records: %w", err)
+		}
+
+		if opts.CDCHardDelete {
+			deleteSQL := fmt.Sprintf(
+				`WITH %s DELETE FROM %s AS target USING latest_all AS latest WHERE %s AND latest."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR latest."_cdc_lsn" >= target."_cdc_lsn")`,
+				latestAll,
+				quotedTargetTable,
+				destination.MergeJoinCondition(buildJoinCondition(opts.PrimaryKeys, "target", "latest"), opts.IncrementalPredicate),
+			)
+			config.Debug("[MERGE] Executing CDC hard delete: %s", deleteSQL)
+			if _, err := tx.Exec(ctx, deleteSQL); err != nil {
+				config.LogFailedQuery(deleteSQL, err)
+				return fmt.Errorf("failed to delete CDC-deleted records: %w", err)
+			}
+			config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+			return nil
 		}
 
 		// Step 2: Mark deletes only when the latest change is a delete
@@ -1825,6 +1846,20 @@ func (d *PostgresDestination) SupportsCDCMerge() bool {
 	return true
 }
 
+func (d *PostgresDestination) SupportsCDCHardDelete() bool { return true }
+
+func (d *PostgresDestination) GeneratedColumns(ctx context.Context, table string) ([]string, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := d.pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND is_generated = 'ALWAYS'`, schemaName, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query generated columns: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
@@ -1840,7 +1875,7 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 		LEFT JOIN pg_catalog.pg_namespace AS nsp ON nsp.nspname = c.table_schema
 		LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = nsp.oid AND rel.relname = c.table_name
 		LEFT JOIN pg_catalog.pg_attribute AS attr ON attr.attrelid = rel.oid AND attr.attname = c.column_name
-		WHERE c.table_schema = $1 AND c.table_name = $2
+		WHERE c.table_schema = $1 AND c.table_name = $2 AND COALESCE(c.is_generated, 'NEVER') <> 'ALWAYS'
 		ORDER BY c.ordinal_position`
 
 	rows, err := d.pool.Query(ctx, query, schemaName, tableName)

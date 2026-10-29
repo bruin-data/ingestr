@@ -100,6 +100,7 @@ def ingest(
     schema_contract: Optional[str] = None,
     schema_naming: Optional[str] = None,
     cdc_table_naming: Optional[str] = None,
+    cdc_delete_behavior: Optional[str] = None,
     progress: Optional[str] = None,
     page_size: Optional[int] = None,
     loader_file_size: Optional[int] = None,
@@ -143,6 +144,7 @@ def ingest(
         schema_contract=schema_contract,
         schema_naming=schema_naming,
         cdc_table_naming=cdc_table_naming,
+        cdc_delete_behavior=cdc_delete_behavior,
         progress=progress,
         page_size=page_size,
         loader_file_size=loader_file_size,
@@ -185,6 +187,7 @@ def build_ingest_args(
     schema_contract: Optional[str] = None,
     schema_naming: Optional[str] = None,
     cdc_table_naming: Optional[str] = None,
+    cdc_delete_behavior: Optional[str] = None,
     progress: Optional[str] = None,
     page_size: Optional[int] = None,
     loader_file_size: Optional[int] = None,
@@ -230,6 +233,7 @@ def build_ingest_args(
     _append_option(args, "schema-contract", schema_contract)
     _append_option(args, "schema-naming", schema_naming)
     _append_option(args, "cdc-table-naming", cdc_table_naming)
+    _append_option(args, "cdc-delete-behavior", cdc_delete_behavior)
     _append_option(args, "progress", progress)
     _append_option(args, "page-size", page_size)
     _append_option(args, "loader-file-size", loader_file_size)

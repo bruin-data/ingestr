@@ -148,6 +148,42 @@ func TestBuildMergeSQL(t *testing.T) {
 		assert.Contains(t, sql, `WHEN MATCHED AND (`+predicate+`) AND (target."_CDC_LSN" IS NULL`)
 	})
 
+	t.Run("cdc_hard_delete", func(t *testing.T) {
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		soft := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
+		assert.Equal(t, soft, buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil, "", false))
+
+		sql := buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil, "", true)
+
+		assert.Contains(t, sql, `ORDER BY "_CDC_LSN" DESC, "_CDC_DELETED" DESC`)
+		assert.Contains(t, sql, "WHEN MATCHED AND source.\"_CDC_DELETED\" = true AND (target.\"_CDC_LSN\" IS NULL OR source.\"_CDC_LSN\" >= target.\"_CDC_LSN\") THEN\n  DELETE\n")
+		assert.Contains(t, sql, `WHEN MATCHED AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" > target."_CDC_LSN" OR (source."_CDC_LSN" = target."_CDC_LSN" AND source."_CDC_DELETED" = true AND COALESCE(target."_CDC_DELETED", false) = false)) AND source."_CDC_DELETED" = false THEN`)
+		assert.Contains(t, sql, `target."NAME" = source."NAME"`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED AND source.\"_CDC_DELETED\" = false THEN\n")
+		assert.NotContains(t, sql, `target."_CDC_DELETED" = true`)
+		assert.NotContains(t, sql, "WHEN NOT MATCHED THEN")
+		assert.Less(t, strings.Index(sql, "DELETE\n"), strings.Index(sql, "UPDATE SET"))
+	})
+
+	t.Run("cdc_hard_delete_incremental_predicate", func(t *testing.T) {
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		predicate := `target."ID" > 100`
+		sql := buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil, predicate, true)
+
+		assert.Contains(t, sql, "ON target.\"ID\" = source.\"ID\"\n")
+		assert.Contains(t, sql, `WHEN MATCHED AND (`+predicate+`) AND source."_CDC_DELETED" = true AND (target."_CDC_LSN" IS NULL OR source."_CDC_LSN" >= target."_CDC_LSN") THEN`)
+		assert.Contains(t, sql, `WHEN MATCHED AND (`+predicate+`) AND (target."_CDC_LSN" IS NULL`)
+	})
+
+	t.Run("cdc_hard_delete_only_pk_and_metadata", func(t *testing.T) {
+		columns := []string{"ID", "_CDC_LSN", "_CDC_DELETED", "_CDC_SYNCED_AT"}
+		sql := buildMergeSQLWithOptions("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"ID"}, columns, "", nil, "", true)
+
+		assert.Contains(t, sql, "  DELETE\n")
+		assert.Contains(t, sql, `target."_CDC_LSN" = source."_CDC_LSN"`)
+		assert.Contains(t, sql, "WHEN NOT MATCHED AND source.\"_CDC_DELETED\" = false THEN\n")
+	})
+
 	t.Run("non_cdc_internal_alias_collision", func(t *testing.T) {
 		columns := []string{"id", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_2"}
 		sql := buildMergeSQL("staging_schema.staging_tbl", "target_schema.target_tbl", []string{"id"}, columns, "", nil)
@@ -298,15 +334,105 @@ func TestImplicitTableStageName(t *testing.T) {
 }
 
 func TestBuildCopyIntoSQLUsesParquetLogicalTypes(t *testing.T) {
-	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil)
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil, nil)
 	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
 	assert.Equal(t, want, got)
 }
 
 func TestBuildCopyIntoSQLWithFilesList(t *testing.T) {
-	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet", "batch_1_1.parquet"})
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet", "batch_1_1.parquet"}, nil)
 	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILES = ('batch_0_1.parquet', 'batch_1_1.parquet') FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
 	assert.Equal(t, want, got)
+}
+
+// A parquet string lands in a VARIANT column verbatim (TYPEOF = VARCHAR), so a
+// table with a JSON column is loaded through a transform that parses it.
+func TestBuildCopyIntoSQLParsesJSONColumns(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "ID", DataType: schema.TypeInt64},
+		{Name: "RAW", DataType: schema.TypeBinary},
+		{Name: "data", DataType: schema.TypeJSON},
+	}
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", []string{"batch_0_1.parquet"}, columns)
+	want := `COPY INTO "PUBLIC"."EVENTS" ("ID", "RAW", "data") FROM (SELECT GET_IGNORE_CASE($1, 'ID')::BIGINT, GET_IGNORE_CASE($1, 'RAW')::BINARY, PARSE_JSON(GET_IGNORE_CASE($1, 'data')::STRING) FROM @"PUBLIC".%"EVENTS"/123456789/) FILES = ('batch_0_1.parquet') FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE BINARY_AS_TEXT = FALSE) PURGE = TRUE`
+	assert.Equal(t, want, got)
+}
+
+func TestBuildCopyIntoSQLEscapesColumnNameLiterals(t *testing.T) {
+	columns := []schema.Column{
+		{Name: `back\slash`, DataType: schema.TypeString},
+		{Name: "it's", DataType: schema.TypeJSON},
+	}
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil, columns)
+	assert.Contains(t, got, `GET_IGNORE_CASE($1, 'back\\slash')::VARCHAR`)
+	assert.Contains(t, got, `PARSE_JSON(GET_IGNORE_CASE($1, 'it''s')::STRING)`)
+}
+
+func TestBuildCopyIntoSQLWithoutJSONColumnsMatchesByName(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString},
+	}
+	got := buildCopyIntoSQL(`"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", nil, columns)
+	want := `COPY INTO "PUBLIC"."EVENTS" FROM @"PUBLIC".%"EVENTS"/123456789/ FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE`
+	assert.Equal(t, want, got)
+}
+
+// The transform COPY names columns explicitly, so it only names the ones the
+// table has; MATCH_BY_COLUMN_NAME tolerated the same drift by ignoring them.
+func TestColumnsInTable(t *testing.T) {
+	columns := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "extra", DataType: schema.TypeJSON},
+		{Name: "data", DataType: schema.TypeJSON},
+		{Name: "name", DataType: schema.TypeString},
+	}
+	got := columnsInTable(columns, []string{"ID", "data", "NAME", "OTHER"})
+	assert.Equal(t, []schema.Column{
+		{Name: "ID", DataType: schema.TypeInt64},
+		{Name: "data", DataType: schema.TypeJSON},
+		{Name: "NAME", DataType: schema.TypeString},
+	}, got)
+}
+
+func TestWriteParallelParsesJSONColumnsInCopy(t *testing.T) {
+	t.Setenv("INGESTR_SNOWFLAKE_FILE_SIZE_MB", "0")
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("DESCRIBE TABLE").WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("ID").AddRow("DATA"))
+	mock.ExpectExec("PUT file://batch_").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`COPY INTO "PUBLIC"\."EVENTS" \("ID", "DATA"\) FROM \(SELECT GET_IGNORE_CASE\(\$1, 'ID'\)::BIGINT, PARSE_JSON\(GET_IGNORE_CASE\(\$1, 'DATA'\)::STRING\) FROM @"PUBLIC"\.%"EVENTS"/\d+/\) FILE_FORMAT`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "data", Type: schema.JSONArrowType, Nullable: true},
+	}, nil)
+	builder := array.NewRecordBuilder(mem, arrowSchema)
+	builder.Field(0).(*array.Int64Builder).Append(1)
+	builder.Field(1).(*array.ExtensionBuilder).Builder.(*array.StringBuilder).Append(`{"a":1}`)
+	record := builder.NewRecordBatch()
+	builder.Release()
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: record}
+	close(records)
+
+	dest := &SnowflakeDestination{db: db}
+	require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table: "public.events",
+		Schema: &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "data", DataType: schema.TypeJSON},
+			{Name: "not_in_table", DataType: schema.TypeJSON},
+		}},
+		Parallelism: 1,
+	}))
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestCopyFilesInBatchesCapsFilesClause(t *testing.T) {
@@ -328,7 +454,7 @@ func TestCopyFilesInBatchesCapsFilesClause(t *testing.T) {
 	}
 
 	dest := &SnowflakeDestination{db: db}
-	copied, err := dest.copyFilesInBatches(t.Context(), `"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", files)
+	copied, err := dest.copyFilesInBatches(t.Context(), `"PUBLIC"."EVENTS"`, `"PUBLIC".%"EVENTS"`, "123456789", files, nil)
 	require.NoError(t, err)
 	assert.Equal(t, len(files), copied)
 	require.NoError(t, mock.ExpectationsWereMet())

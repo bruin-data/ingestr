@@ -988,6 +988,65 @@ func TestRunMultiTableStreamingPostgresCDCDoesNotExitOnEmptyInitialTableSet(t *t
 	require.ErrorContains(t, err, "ReadAll must not run", "streaming CDC must reach ReadAll so a table appearing after the first GetTables call can be announced")
 }
 
+type lateTableSource struct {
+	staticMultiTableSource
+	table source.SourceTableInfo
+}
+
+func (s *lateTableSource) ReadAll(context.Context, source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{TableName: s.table.Name, TableInfo: &s.table}
+	close(records)
+	return records, nil
+}
+
+type lateTableClaimCountingDestination struct {
+	emptyInitialManagedDestination
+	claimCalls int
+}
+
+func (d *lateTableClaimCountingDestination) ClaimCDCTarget(context.Context, string, destination.CDCTargetClaim) error {
+	d.claimCalls++
+	return nil
+}
+
+func TestRunMultiTableRejectsHardDeleteAppendForLateKeyedTable(t *testing.T) {
+	for _, schemaOnlyKey := range []bool{false, true} {
+		t.Run(fmt.Sprintf("schema_only_key=%t", schemaOnlyKey), func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://source/db"
+			cfg.Stream = true
+			cfg.FullRefresh = true
+			cfg.IncrementalStrategy = config.StrategyAppend
+			cfg.CDCDeleteBehavior = config.CDCDeleteHard
+			cfg.SchemaNaming = "snake_case"
+			cfg.NoLoadTimestamp = true
+			cfg.NoRunID = true
+			cfg.Progress = config.ProgressLog
+			cfg.FlushInterval = time.Hour
+			cfg.FlushRecords = 1
+			dest := &lateTableClaimCountingDestination{}
+			p := &Pipeline{config: cfg, dest: dest, cdcConnectorID: "connector"}
+			table := source.SourceTableInfo{
+				Name: "public.late_events",
+				Schema: &schema.TableSchema{
+					Columns: []schema.Column{{Name: "eventId", DataType: schema.TypeInt64}},
+				},
+			}
+			if schemaOnlyKey {
+				table.Schema.PrimaryKeys = []string{"eventId"}
+			} else {
+				table.PrimaryKeys = []string{"eventId"}
+			}
+
+			err := p.runMultiTable(t.Context(), &lateTableSource{table: table})
+			require.ErrorContains(t, err, "failed to normalize table public.late_events")
+			require.ErrorContains(t, err, `cdc-delete-behavior "hard" requires the "merge" incremental strategy`)
+			require.Zero(t, dest.claimCalls, "hard-delete strategy must be checked before claiming a newly discovered keyed table")
+		})
+	}
+}
+
 func TestMultiTableDestinationNamesChecksDestinationOverrideCollisions(t *testing.T) {
 	tables := []source.SourceTableInfo{{Name: "public.orders"}, {Name: "sales.orders"}}
 
@@ -1490,6 +1549,79 @@ func TestValidateMySQLCDCMutationFencing(t *testing.T) {
 	require.NoError(t, validateMySQLCDCMutationFencing(&mockMySQLCDCFencedDestination{}, false))
 	require.NoError(t, validateMySQLCDCMutationFencing(postgresdest.NewPostgresDestination(), true),
 		"the PostgreSQL destination must satisfy every MySQL CDC fencing capability, including atomic multi-table merge")
+}
+
+type mockCDCHardDeleteDestination struct {
+	mockDestination
+	supported bool
+}
+
+func (d *mockCDCHardDeleteDestination) SupportsCDCHardDelete() bool { return d.supported }
+
+func TestValidateCDCDeleteBehavior(t *testing.T) {
+	hard := &config.IngestConfig{CDCDeleteBehavior: config.CDCDeleteHard}
+	soft := &config.IngestConfig{CDCDeleteBehavior: config.CDCDeleteSoft}
+	capable := &mockCDCHardDeleteDestination{mockDestination: mockDestination{scheme: "mock"}, supported: true}
+
+	require.NoError(t, validateCDCDeleteBehavior(soft, &mockDestination{scheme: "mock"}, false))
+	require.NoError(t, validateCDCDeleteBehavior(hard, capable, true))
+	require.ErrorContains(t, validateCDCDeleteBehavior(hard, &mockDestination{scheme: "mock"}, true), `not supported by destination scheme "mock"`)
+	require.ErrorContains(t, validateCDCDeleteBehavior(hard, &mockCDCHardDeleteDestination{mockDestination: mockDestination{scheme: "mock"}}, true), "not supported")
+	require.ErrorContains(t, validateCDCDeleteBehavior(hard, capable, false), "requires destination-managed CDC state")
+}
+
+func TestValidateCDCDeleteStrategyAfterResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		strategy              config.IncrementalStrategy
+		explicit              bool
+		primaryKeys           []string
+		fullRefresh           bool
+		stream                bool
+		softDeletes           bool
+		handlesIncrementality bool
+		tableStrategy         config.IncrementalStrategy
+		wantStrategy          config.IncrementalStrategy
+		wantErr               bool
+	}{
+		{name: "programmatic append with keys", strategy: config.StrategyAppend, primaryKeys: []string{"id"}, wantStrategy: config.StrategyAppend, wantErr: true},
+		{name: "explicit append with keys", strategy: config.StrategyAppend, explicit: true, primaryKeys: []string{"id"}, wantStrategy: config.StrategyAppend, wantErr: true},
+		{name: "default replace resolves to merge", strategy: config.StrategyReplace, primaryKeys: []string{"id"}, wantStrategy: config.StrategyMerge},
+		{name: "empty strategy resolves to merge", primaryKeys: []string{"id"}, wantStrategy: config.StrategyMerge},
+		{name: "keyless default resolves to append", strategy: config.StrategyReplace, wantStrategy: config.StrategyAppend},
+		{name: "keyless streaming refresh resolves to append", fullRefresh: true, stream: true, wantStrategy: config.StrategyAppend},
+		{name: "streaming refresh resolves to merge", primaryKeys: []string{"id"}, fullRefresh: true, stream: true, wantStrategy: config.StrategyMerge},
+		{name: "batch refresh resolves to replace", primaryKeys: []string{"id"}, fullRefresh: true, wantStrategy: config.StrategyReplace},
+		{name: "explicit merge batch refresh resolves to replace", strategy: config.StrategyMerge, explicit: true, primaryKeys: []string{"id"}, fullRefresh: true, wantStrategy: config.StrategyReplace},
+		{name: "keyless batch refresh resolves to replace", fullRefresh: true, wantStrategy: config.StrategyReplace},
+		{name: "streaming refresh rejects keyed append", strategy: config.StrategyAppend, primaryKeys: []string{"id"}, fullRefresh: true, stream: true, wantStrategy: config.StrategyAppend, wantErr: true},
+		{name: "soft deletes allow append with keys", strategy: config.StrategyAppend, primaryKeys: []string{"id"}, softDeletes: true, wantStrategy: config.StrategyAppend},
+		{name: "source resolves to append with keys", strategy: config.StrategyMerge, primaryKeys: []string{"id"}, handlesIncrementality: true, tableStrategy: config.StrategyAppend, wantStrategy: config.StrategyAppend, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.IngestConfig{
+				SourceURI:                   "postgres+cdc://localhost/db",
+				CDCDeleteBehavior:           config.CDCDeleteHard,
+				IncrementalStrategy:         tc.strategy,
+				IncrementalStrategyExplicit: tc.explicit,
+				FullRefresh:                 tc.fullRefresh,
+				Stream:                      tc.stream,
+			}
+			if tc.softDeletes {
+				cfg.CDCDeleteBehavior = config.CDCDeleteSoft
+			}
+			table := &mockSourceTable{pks: tc.primaryKeys, strategy: tc.tableStrategy}
+			src := &incrementalitySource{handlesIncrementality: tc.handlesIncrementality}
+			resolvedStrategy := resolveStrategy(cfg, src, table)
+			require.Equal(t, tc.wantStrategy, resolvedStrategy)
+			err := validateCDCDeleteStrategy(cfg, resolvedStrategy, resolvePrimaryKeys(cfg, table))
+			if tc.wantErr {
+				require.ErrorContains(t, err, `cdc-delete-behavior "hard" requires the "merge" incremental strategy`)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestValidateChangeTrackingDestinationRequiresResumeProvider(t *testing.T) {
@@ -3097,7 +3229,7 @@ func TestBuildBufferReaderTarget_NoDriftIdenticalOrder(t *testing.T) {
 		tcol("age", schema.TypeInt32),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "age"})
 	if got.Field(0).Type.ID() != arrow.PrimitiveTypes.Int64.ID() {
@@ -3127,7 +3259,7 @@ func TestBuildBufferReaderTarget_SourceOnlyColumnIsDropped(t *testing.T) {
 		tcol("name", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3337,7 +3469,7 @@ func TestBuildBufferReaderTarget_OrderFollowsDest(t *testing.T) {
 		tcol("age", schema.TypeInt32),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "age"})
 }
@@ -3359,7 +3491,7 @@ func TestBuildBufferReaderTarget_SkipsIngestrMetadataColumn(t *testing.T) {
 		tcol("_dlt_load_id", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3378,7 +3510,7 @@ func TestBuildBufferReaderTarget_SkipsLoadTimestampColumn(t *testing.T) {
 		tcol("_ingestr_loaded_at", schema.TypeTimestampTZ),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3420,7 +3552,7 @@ func TestBuildBufferReaderTarget_SkipsRunIDColumn(t *testing.T) {
 		tcol("_ingestr_run_id", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -3466,7 +3598,7 @@ func TestBuildBufferReaderTarget_IncludesSoftRemovedColumn(t *testing.T) {
 		tcol("email", schema.TypeString), // soft-removed from source
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name", "email"})
 	if !got.Field(2).Nullable {
@@ -3489,7 +3621,7 @@ func TestBuildBufferReaderTarget_UsesDestTypes(t *testing.T) {
 		tcol("created_at", schema.TypeString), // dest: STRING
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	if got.Field(1).Name != "created_at" {
 		t.Errorf("field 1 name = %q, want created_at", got.Field(1).Name)
@@ -3520,7 +3652,7 @@ func TestBuildBufferReaderTarget_HonorsRenamer(t *testing.T) {
 		tcol("created_at", schema.TypeString), // wider dest type
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"userId", "createdAt"})
 	if got.Field(1).Type.ID() != arrow.BinaryTypes.String.ID() {
@@ -3548,7 +3680,7 @@ func TestBuildBufferReaderTarget_KeepsAliasesForCanonicalDuplicate(t *testing.T)
 		tcol("user_id", schema.TypeInt64),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"_id", "userId", "user_id", "UserID"})
 }
@@ -3758,7 +3890,7 @@ func TestBuildBufferReaderTarget_EvolveScenario(t *testing.T) {
 		tcol("email", schema.TypeString), // added by Compare.ChangeAddColumn
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"age", "id", "name", "score", "email"})
 }
@@ -3776,7 +3908,7 @@ func TestBuildBufferReaderTarget_CaseInsensitiveMatch(t *testing.T) {
 		tcol("NAME", schema.TypeString),
 	)
 
-	got := p.buildBufferReaderTarget(src, dest)
+	got, _ := p.buildBufferReaderTarget(src, dest)
 
 	assertColumns(t, "fields", arrowFieldNames(got), []string{"id", "name"})
 }
@@ -4392,4 +4524,51 @@ func TestStreamingRefreshPreservesCDCStrategyRestrictions(t *testing.T) {
 	cfg.Stream, cfg.FullRefresh = true, true
 	cfg.IncrementalStrategy = config.StrategyAppend
 	require.NoError(t, validateManagedChangeConfig(cfg), "PostgreSQL keyless streams retain append support")
+}
+
+// A dest json column keeps JSON text on replay only when inference typed the
+// source column string (json came from --columns or the existing table); a
+// column inference itself merged to json keeps quoting its string batches.
+func TestBuildBufferReaderTarget_JSONTextOnlyForInferredStrings(t *testing.T) {
+	p := &Pipeline{rawInferredSchema: tschema("t", tcol("payload", schema.TypeString), tcol("doc", schema.TypeJSON))}
+	src := tschema("t", tcol("payload", schema.TypeJSON), tcol("doc", schema.TypeJSON))
+	dest := tschema("t", tcol("payload", schema.TypeJSON), tcol("doc", schema.TypeJSON))
+
+	got, jsonText := p.buildBufferReaderTarget(src, dest)
+
+	assertColumns(t, "fields", arrowFieldNames(got), []string{"payload", "doc"})
+	if !jsonText("payload") {
+		t.Error("payload: inferred string hinted to json should keep JSON text")
+	}
+	if jsonText("doc") {
+		t.Error("doc: inference-merged json should keep quoting")
+	}
+
+	p.config = &config.IngestConfig{Columns: "doc:json"}
+	_, jsonText = p.buildBufferReaderTarget(src, dest)
+	if !jsonText("doc") {
+		t.Error("doc: inference-merged json hinted by --columns should keep JSON text")
+	}
+}
+
+func TestResolveInterval(t *testing.T) {
+	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	cfg := &config.IngestConfig{IntervalStart: &start, IntervalEnd: &end}
+	for _, tc := range []struct {
+		name      string
+		table     source.SourceTable
+		wantStart *time.Time
+		wantEnd   *time.Time
+	}{
+		{name: "interval-ignoring table has no interval", table: &source.DynamicSourceTable{TableName: "rates", TableIgnoresInterval: true}},
+		{name: "regular table keeps interval", table: &source.DynamicSourceTable{TableName: "rates"}, wantStart: &start, wantEnd: &end},
+		{name: "table without the interface keeps interval", table: &mockSourceTable{}, wantStart: &start, wantEnd: &end},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotStart, gotEnd := resolveInterval(cfg, tc.table)
+			require.Equal(t, tc.wantStart, gotStart)
+			require.Equal(t, tc.wantEnd, gotEnd)
+		})
+	}
 }

@@ -6,11 +6,13 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 )
 
 func (d *StarRocksDestination) SupportsCDCMerge() bool         { return true }
 func (d *StarRocksDestination) SupportsCDCUnchangedCols() bool { return true }
+func (d *StarRocksDestination) SupportsCDCHardDelete() bool    { return true }
 
 func (d *StarRocksDestination) mergeCDC(ctx context.Context, opts destination.MergeOptions) error {
 	if opts.IncrementalPredicate != "" {
@@ -25,11 +27,46 @@ func (d *StarRocksDestination) mergeCDC(ctx context.Context, opts destination.Me
 	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
 		return err
 	}
-	if err := d.insertVisible(ctx, opts.TargetTable, d.buildCDCMergeSQL(opts)); err != nil {
+	if err := d.insertVisibleWithHint(ctx, opts.TargetTable, cdcMergeHint, d.buildCDCMergeSQL(opts)); err != nil {
 		return fmt.Errorf("merge StarRocks CDC changes: %w", err)
+	}
+	if opts.CDCHardDelete {
+		query := d.buildCDCHardDeleteSQL(opts)
+		if err := d.deleteVisible(ctx, opts.TargetTable, query); err != nil {
+			config.LogFailedQuery(query, err)
+			return fmt.Errorf("delete StarRocks CDC-deleted rows: %w", err)
+		}
 	}
 	return d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
 }
+
+// buildCDCHardDeleteSQL removes the tombstones the preceding merge published
+// for this batch's deletes. StarRocks has no multi-statement DML transactions
+// and INSERT cannot delete, so the merge first publishes upserts and tombstones
+// together; a crash before this DELETE leaves only tombstones, which the
+// replayed batch removes. A tombstone matches when the batch holds a delete at
+// its exact position: tombstones the merge just wrote and older ones the batch
+// re-deletes, never newer ones a stale batch could not have produced.
+func (d *StarRocksDestination) buildCDCHardDeleteSQL(opts destination.MergeOptions) string {
+	// StarRocks DELETE takes no target alias; columns are qualified by the
+	// bare table name instead.
+	_, name := d.tableParts(opts.TargetTable)
+	t := quoteColumn(name)
+	lsn, deleted := quoteColumn(destination.CDCLSNColumn), quoteColumn(destination.CDCDeletedColumn)
+	conditions := make([]string, 0, len(opts.PrimaryKeys)+3)
+	for _, key := range opts.PrimaryKeys {
+		conditions = append(conditions, t+"."+quoteColumn(key)+" = s."+quoteColumn(key))
+	}
+	conditions = append(conditions, t+"."+deleted+" = TRUE", "s."+deleted+" = TRUE", "s."+lsn+" = "+t+"."+lsn)
+	return fmt.Sprintf("DELETE FROM %s USING %s s WHERE %s",
+		d.tableRef(opts.TargetTable), d.tableRef(opts.StagingTable), strings.Join(conditions, " AND "))
+}
+
+// cdcMergeHint makes StarRocks materialize each CTE of the CDC merge once. The
+// cost model otherwise inlines them, re-evaluating the history (and the full
+// target scans inside it) for every payload column, so a merge cost about 27
+// target scans and grew with table size rather than batch size.
+const cdcMergeHint = "/*+ SET_VAR(cbo_cte_reuse=true, cbo_cte_reuse_rate=0) */"
 
 func sqlString(value string) string {
 	return "'" + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), "'", "''") + "'"

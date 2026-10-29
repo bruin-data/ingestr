@@ -158,3 +158,11 @@ func TestBuildSelectQueryFormatsTimestampIncrementalKeyPredicateWithoutTimezone(
 		t.Fatalf("query = %q, want %q", query, want)
 	}
 }
+
+func TestBuildSelectQueryWithExpressionsAliasesColumns(t *testing.T) {
+	query := BuildSelectQueryWithExpressions("t", []schema.Column{{Name: "id"}, {Name: "iv"}},
+		map[string]string{"iv": `CAST("iv" AS VARCHAR)`}, source.ReadOptions{}, DefaultQuoteIdentifier)
+	if want := `SELECT "id", CAST("iv" AS VARCHAR) AS "iv" FROM t`; query != want {
+		t.Fatalf("query = %q, want %q", query, want)
+	}
+}

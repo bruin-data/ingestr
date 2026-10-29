@@ -121,7 +121,8 @@ func (b *FileBuffer) writeBatchToFile(batch arrow.RecordBatch, path string) erro
 }
 
 // Reader returns a channel that replays all buffered batches, cast to the target schema.
-func (b *FileBuffer) Reader(ctx context.Context, targetSchema *arrow.Schema) (<-chan source.RecordBatchResult, error) {
+// jsonText names the target columns whose string values are kept as JSON text (see CastOptions).
+func (b *FileBuffer) Reader(ctx context.Context, targetSchema *arrow.Schema, jsonText func(string) bool) (<-chan source.RecordBatchResult, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -143,7 +144,7 @@ func (b *FileBuffer) Reader(ctx context.Context, targetSchema *arrow.Schema) (<-
 		defer close(out)
 
 		for _, batchPath := range batchFiles {
-			record, err := b.readAndCastBatch(batchPath, targetSchema)
+			record, err := b.readAndCastBatch(batchPath, targetSchema, jsonText)
 			if err != nil {
 				out <- source.RecordBatchResult{Err: fmt.Errorf("failed to read batch %s: %w", batchPath, err)}
 				return
@@ -161,7 +162,7 @@ func (b *FileBuffer) Reader(ctx context.Context, targetSchema *arrow.Schema) (<-
 	return out, nil
 }
 
-func (b *FileBuffer) readAndCastBatch(path string, targetSchema *arrow.Schema) (arrow.RecordBatch, error) {
+func (b *FileBuffer) readAndCastBatch(path string, targetSchema *arrow.Schema, jsonText func(string) bool) (arrow.RecordBatch, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open batch file: %w", err)
@@ -188,13 +189,28 @@ func (b *FileBuffer) readAndCastBatch(path string, targetSchema *arrow.Schema) (
 		return record, nil
 	}
 
-	return CastRecordToSchema(record, targetSchema, true)
+	return CastRecordToSchemaWithOptions(record, targetSchema, CastOptions{Safe: true, JSONText: jsonText})
 }
 
 // CastRecordToSchema creates a new record with the target schema, casting columns as needed.
 // When safe is false, lossy conversions (e.g. decimal → int64) are allowed to match
 // the behavior of user-specified column type overrides.
 func CastRecordToSchema(record arrow.RecordBatch, targetSchema *arrow.Schema, safe bool) (arrow.RecordBatch, error) {
+	return CastRecordToSchemaWithOptions(record, targetSchema, CastOptions{Safe: safe})
+}
+
+// CastOptions tunes CastRecordToSchemaWithOptions. Safe rejects lossy
+// conversions. JSONText reports, per target column, whether a string value
+// cast to the JSON type is kept verbatim when it is valid JSON, which is what
+// a column typed json by --columns or by the destination holds; nil or false
+// quotes it into a JSON string scalar, which an inference merge of mixed-type
+// fields relies on.
+type CastOptions struct {
+	Safe     bool
+	JSONText func(column string) bool
+}
+
+func CastRecordToSchemaWithOptions(record arrow.RecordBatch, targetSchema *arrow.Schema, opts CastOptions) (arrow.RecordBatch, error) {
 	mem := memory.DefaultAllocator
 	numRows := record.NumRows()
 
@@ -225,7 +241,13 @@ func CastRecordToSchema(record arrow.RecordBatch, targetSchema *arrow.Schema, sa
 			continue
 		}
 
-		casted, err := castArrayToType(context.Background(), existingCol, field.Type, safe)
+		var casted arrow.Array
+		var err error
+		if opts.JSONText != nil && opts.JSONText(field.Name) && isJSONType(field.Type) && (isStringArray(existingCol) || isUnknownType(existingCol.DataType())) {
+			casted = castJSONTextToJSON(existingCol, field.Type.(arrow.ExtensionType))
+		} else {
+			casted, err = castArrayToType(context.Background(), existingCol, field.Type, opts.Safe)
+		}
 		if err != nil {
 			for j := 0; j < i; j++ {
 				cols[j].Release()
@@ -504,25 +526,66 @@ func castUnknownArrayToJSON(ext array.ExtensionArray, target arrow.DataType) (ar
 			builder.AppendNull()
 			continue
 		}
-
-		// Unknown storage is already JSON text; pass it through unless it came
-		// from a non-JSON fallback, in which case quote it as a JSON string.
-		if json.Valid([]byte(raw)) {
-			builder.Append(raw)
-			continue
-		}
-
-		jsonBytes, err := json.Marshal(raw)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode unknown value as JSON: %w", err)
-		}
-		builder.Append(string(jsonBytes))
+		// Unknown storage is already JSON text unless it came from a non-JSON fallback.
+		appendJSONText(builder, raw)
 	}
 
 	storageArr := builder.NewArray()
 	defer storageArr.Release()
 
 	return array.NewExtensionArrayWithStorage(extType, storageArr), nil
+}
+
+// appendJSONText passes JSON text through and quotes anything else as a JSON string.
+func appendJSONText(builder *array.StringBuilder, raw string) {
+	if json.Valid([]byte(raw)) {
+		builder.Append(raw)
+		return
+	}
+	quoted, _ := json.Marshal(raw)
+	builder.Append(string(quoted))
+}
+
+func isStringArray(arr arrow.Array) bool {
+	switch arr.DataType().ID() {
+	case arrow.STRING, arrow.LARGE_STRING, arrow.STRING_VIEW:
+		return true
+	}
+	return false
+}
+
+// castJSONTextToJSON keeps string values as JSON text. Unknown storage holds
+// each value JSON-encoded, so a string value is unwrapped first. JSON null
+// text marks an absent value and becomes SQL NULL rather than a null scalar.
+func castJSONTextToJSON(arr arrow.Array, target arrow.ExtensionType) arrow.Array {
+	unknown := isUnknownType(arr.DataType())
+	if ext, ok := arr.(array.ExtensionArray); ok {
+		arr = ext.Storage()
+	}
+	builder := array.NewStringBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+	for i := 0; i < arr.Len(); i++ {
+		if arr.IsNull(i) {
+			builder.AppendNull()
+			continue
+		}
+		raw := arr.ValueStr(i)
+		if unknown {
+			if v, err := schemainfer.DecodeUnknownValue(raw); err == nil {
+				if s, ok := v.(string); ok {
+					raw = s
+				}
+			}
+		}
+		if strings.TrimSpace(raw) == "null" {
+			builder.AppendNull()
+			continue
+		}
+		appendJSONText(builder, raw)
+	}
+	storage := builder.NewArray()
+	defer storage.Release()
+	return array.NewExtensionArrayWithStorage(target, storage)
 }
 
 func castArrayToJSON(arr arrow.Array, target arrow.DataType) (arrow.Array, error) {

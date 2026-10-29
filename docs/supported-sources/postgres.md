@@ -92,6 +92,20 @@ Publications must publish `insert`, `update`, `delete`, and `truncate`. ingestr 
 
 Stored generated columns require PostgreSQL 18 or newer and a publication with `publish_generated_columns = stored`. ingestr enables this option on publications it manages. For a custom publication, run `ALTER PUBLICATION publication_name SET (publish_generated_columns = stored)` yourself. Earlier PostgreSQL versions and virtual generated columns are rejected before the snapshot because their values cannot be kept current through logical replication. See [PostgreSQL's generated-column replication documentation](https://www.postgresql.org/docs/18/logical-replication-gencols.html).
 
+### Reading from a standby
+
+On PostgreSQL 16 or newer, `postgres+cdc` can read from a hot standby (read replica) instead of the primary, which keeps the snapshot and decoding work off the primary. ingestr detects the standby itself; the URI is the same.
+
+Requirements:
+- `wal_level=logical` on both the primary and the standby.
+- `hot_standby_feedback=on` on the standby, which should stream from the primary through a physical replication slot (`primary_slot_name`). Without these, the primary can vacuum away catalog rows the standby's logical slot still needs, and PostgreSQL invalidates the slot. ingestr then reports the invalidation and asks for a `--full-refresh`.
+- The publication must already exist. A standby cannot run DDL, so create it on the primary, from where it replicates. When `publication=` is omitted, ingestr prints the `CREATE PUBLICATION ingestr_publication ...` statement to run there. It warns about eligible tables the publication does not include instead of adding them, and leaves them out of the run until you add them on the primary. A table dropped and recreated on the primary leaves a `FOR TABLE` publication; a single-table `--stream` run then fails with the `ALTER PUBLICATION ... ADD TABLE` statement to run, a single-table batch run fails because the table is not in the publication, and a multi-table `--stream` run pauses that table until it is added back, then re-snapshots it. With the managed publication, the stream also warns with the statement to run.
+
+Behavior that differs from the primary:
+- Creating a replication slot on a standby waits until the primary logs a running-transactions record. An active primary does this every 15 seconds; an idle one does not, and slot creation waits until it does. ingestr warns when this takes longer than 20 seconds. Run `SELECT pg_log_standby_snapshot();` on the primary to unblock it.
+- A run without `--stream` stops at the standby's replay position when the run started, rather than at a marker written to the WAL, because a standby cannot write WAL.
+- Slots created on a standby keep working after that standby is promoted.
+
 ### Tutorial
 
 For a step-by-step walkthrough — from enabling logical replication to streaming live inserts, updates, and deletes into DuckDB — see [Replicate PostgreSQL to DuckDB with CDC](/tutorials/cdc-postgres-duckdb.md).
