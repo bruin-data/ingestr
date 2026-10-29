@@ -99,6 +99,9 @@ func truncateSlotName(name string) string {
 
 // Execute runs the snapshot and returns the LSN and slot name for the replicator to use
 func (s *Snapshot) Execute(ctx context.Context, results chan<- source.RecordBatchResult, opts source.ReadOptions) (pglogrepl.LSN, string, error) {
+	if err := s.source.requireSnapshotAllowed(); err != nil {
+		return 0, "", err
+	}
 	// Check if slot already exists (from a previous failed run)
 	existingLSN, exists, err := checkSlotExists(ctx, s.source.queryPool, s.slotName)
 	if err != nil {

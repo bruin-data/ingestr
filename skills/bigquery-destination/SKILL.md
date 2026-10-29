@@ -167,7 +167,7 @@ The function name only carries the granularity: `partitionByClause` (CTAS swap, 
 ## 10. Merge Strategy (`MergeTable`)
 
 - **Streaming full refresh:** `--full-refresh --stream` retains merge/append after rebuilding selected tables through the existing snapshot truncate boundaries. `--refresh-id` stores an independent operation record in destination CDC metadata and fences resume to the refresh generation or later; completed snapshots survive retries. It does not use the batch swap/repartition path.
-- **CDC snapshot safety:** batch merges durably invalidate the prior snapshot epoch before truncating any target for a replacement snapshot or source truncate. Interrupted replacements cannot resume from an older completion marker, even when their partial reload has an LSN at or below the prior checkpoint. The destination incarnation stays pinned through invalidation and final checkpoint persistence.
+- **CDC snapshot safety:** batch merges durably invalidate the prior snapshot epoch before truncating any target for a replacement snapshot or source truncate. Exception: PostgreSQL `--cdc-snapshot-mode never` only permits replayable WAL truncates, so batch and streaming merges retain the last certified checkpoint until the truncate and subsequent writes are durable. A restart replays the truncate and following changes from retained WAL. Ordinary replacement snapshots still invalidate their epoch and cannot resume from an older completion marker, even when their partial reload has an LSN at or below the prior checkpoint. The destination incarnation stays pinned through target mutation and final checkpoint persistence.
 - Runs a MERGE statement:
   ```sql
   MERGE target AS t

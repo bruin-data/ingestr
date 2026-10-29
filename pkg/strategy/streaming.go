@@ -679,7 +679,11 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 		if stateTable == "" {
 			return fmt.Errorf("cannot resolve source table for CDC truncate")
 		}
-		if res.CDCWALTruncate || !st.snapshotBoundaryInvalidated {
+		invalidate := !st.snapshotBoundaryInvalidated
+		if res.CDCWALTruncate {
+			invalidate = !l.opts.StateManager.neverSnapshot
+		}
+		if invalidate {
 			if err := l.opts.StateManager.InvalidateSnapshot(ctx, stateTable, st.destTable, st.incarnation); err != nil {
 				return fmt.Errorf("failed to invalidate CDC state before source truncate for %s: %w", stateTable, err)
 			}

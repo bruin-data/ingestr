@@ -73,10 +73,18 @@ func TestStandbyBatchAndStreamResumeExactly(t *testing.T) {
 	}
 	positions := make(map[string]string)
 	for _, table := range tables {
-		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, "")
+		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, "", false)
 		require.Len(t, values, 10, "%s snapshot", table.name)
 		positions[table.name] = position
 	}
+	t.Run("snapshot-free slot validation", func(t *testing.T) {
+		src := connectStandbySource(t, ctx, standbyURI, "standby_items")
+		defer func() { _ = src.Close(context.Background()) }()
+		require.NoError(t, src.ConfigureNoSnapshot(ctx, map[string]string{
+			"public.items": mustParseLSN(t, positions["public.items"]).String(),
+		}))
+		require.ErrorContains(t, src.validateNoSnapshotSlot(ctx, ^pglogrepl.LSN(0)), "cannot honor LSN FFFFFFFF/FFFFFFFF")
+	})
 
 	for i := 11; i <= 15; i++ {
 		for _, table := range tables {
@@ -87,7 +95,7 @@ func TestStandbyBatchAndStreamResumeExactly(t *testing.T) {
 	}
 	waitForStandbyReplay(t, ctx, primary, standbyURI)
 	for _, table := range tables {
-		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, positions[table.name])
+		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, positions[table.name], table.name == "public.items")
 		require.Len(t, values, 5, "%s resumed batch must emit exactly the new rows", table.name)
 		require.Greater(t, mustParseLSN(t, position), mustParseLSN(t, positions[table.name]))
 		positions[table.name] = position
@@ -97,7 +105,7 @@ func TestStandbyBatchAndStreamResumeExactly(t *testing.T) {
 	writeUnpublished(t, ctx, primary, 200)
 	waitForStandbyReplay(t, ctx, primary, standbyURI)
 	for _, table := range tables {
-		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, positions[table.name])
+		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, positions[table.name], table.name == "public.items")
 		require.Empty(t, values, "%s keepalive-only batch", table.name)
 		require.Greater(t, mustParseLSN(t, position), mustParseLSN(t, positions[table.name]), "%s keepalive-only batch must advance", table.name)
 		positions[table.name] = position
@@ -109,7 +117,7 @@ func TestStandbyBatchAndStreamResumeExactly(t *testing.T) {
 	}
 	waitForStandbyReplay(t, ctx, primary, standbyURI)
 	for _, table := range tables {
-		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, positions[table.name])
+		values, position := runStandbyBatch(t, ctx, standbyURI, table.name, table.column, table.slot, positions[table.name], table.name == "public.items")
 		require.Len(t, values, 1, "%s batch after keepalive-only progress", table.name)
 		positions[table.name] = position
 	}
@@ -233,10 +241,15 @@ func connectStandbySource(t *testing.T, ctx context.Context, uri, slot string) *
 	return src
 }
 
-func runStandbyBatch(t *testing.T, ctx context.Context, uri, tableName, column, slot, resume string) ([]string, string) {
+func runStandbyBatch(t *testing.T, ctx context.Context, uri, tableName, column, slot, resume string, neverSnapshot bool) ([]string, string) {
 	t.Helper()
 	src := connectStandbySource(t, ctx, uri, slot)
 	defer func() { _ = src.Close(context.Background()) }()
+	if neverSnapshot {
+		require.NoError(t, src.ConfigureNoSnapshot(ctx, map[string]string{
+			tableName: mustParseLSN(t, resume).String(),
+		}))
+	}
 	table, err := src.GetTable(ctx, source.TableRequest{Name: tableName})
 	require.NoError(t, err)
 	tableSchema, err := table.GetSchema(ctx)

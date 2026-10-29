@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc" // Register ADBC driver
 	"github.com/bruin-data/ingestr/pkg/source/postgres_cdc"
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -578,9 +580,8 @@ func TestPostgresCDC_Snapshot(t *testing.T) {
 	destConnString, err := destContainer.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
 
-	// Convert source URI to CDC format - sourceConnString is already postgres://user:pass@host:port/db?sslmode=disable
-	// We need to change scheme and add publication param
-	cdcSourceURI := "postgres+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
+	// The alias must retain default snapshot behavior when both snapshot flags are omitted.
+	cdcSourceURI := "postgresql+cdc://" + sourceConnString[len("postgres://"):] + "&publication=test_pub&mode=batch"
 
 	// Run the CDC pipeline
 	cfg := &config.IngestConfig{
@@ -2477,4 +2478,238 @@ func TestPostgresCDC_SingleTableRenamedColumns_SQLite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 	requireRenamedCDCOrders(t, dest, "orders", map[int64]namingSourceRow{2: {"bob-upd", "Paris"}, 3: {"cem", "Rome"}}, []int64{1})
+}
+
+func TestPostgresCDC_ExternalBaseline(t *testing.T) {
+	for _, multi := range []bool{false, true} {
+		for _, streaming := range []bool{false, true} {
+			t.Run(fmt.Sprintf("multi=%t/stream=%t", multi, streaming), func(t *testing.T) {
+				t.Parallel()
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				container, connString := setupPostgresCDCContainer(t, ctx)
+				defer func() { _ = container.Terminate(context.Background()) }()
+				pool, err := pgxpool.New(ctx, connString)
+				require.NoError(t, err)
+				defer pool.Close()
+				_, err = pool.Exec(ctx, `
+					CREATE SCHEMA landing;
+					CREATE TABLE public.orders (id INTEGER PRIMARY KEY, name TEXT);
+					INSERT INTO public.orders VALUES (1, 'untouched'), (2, 'before'), (3, 'deleted');
+					CREATE TABLE public.products (id INTEGER PRIMARY KEY, name TEXT);
+					INSERT INTO public.products VALUES (10, 'product');
+					CREATE TABLE landing.orders (LIKE public.orders INCLUDING ALL);
+					INSERT INTO landing.orders SELECT * FROM public.orders;
+					CREATE TABLE landing.products (LIKE public.products INCLUDING ALL);
+					INSERT INTO landing.products SELECT * FROM public.products;
+					CREATE PUBLICATION external_pub FOR TABLE public.orders, public.products;
+				`)
+				require.NoError(t, err)
+				var startLSN string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT lsn::text FROM pg_create_logical_replication_slot('external_slot', 'pgoutput')`).Scan(&startLSN))
+				_, err = pool.Exec(ctx, `UPDATE public.orders SET name = 'after' WHERE id = 2; DELETE FROM public.orders WHERE id = 3; INSERT INTO public.orders VALUES (4, 'inserted');`)
+				require.NoError(t, err)
+				cfg := config.IngestConfig{
+					SourceURI: "postgres+cdc://" + strings.TrimPrefix(connString, "postgres://") + "&publication=external_pub&slot=external_slot&dest_schema=landing",
+					DestURI:   connString, SourceTable: "public.orders", DestTable: "landing.orders",
+					IncrementalStrategy: config.StrategyMerge, SchemaContract: "evolve", SchemaNaming: "direct",
+					CDCSnapshotMode: "never", CDCStartLSN: startLSN,
+					NoLoadTimestamp: true, NoRunID: true, Yes: true,
+					Stream: streaming, FlushInterval: 100 * time.Millisecond, FlushRecords: 1,
+				}
+				if multi {
+					cfg.SourceTable, cfg.DestTable = "", ""
+					cfg.SourceTables = []string{"public.orders", "public.products"}
+					cfg.CDCTableNaming = config.TableNamingTable
+				}
+				tooOld := cfg
+				tooOld.CDCStartLSN = "0/1"
+				require.ErrorContains(t, pipeline.New(&tooOld).Run(ctx), "cannot honor LSN")
+				future := cfg
+				future.CDCStartLSN = "FFFFFFFF/FFFFFFFF"
+				require.ErrorContains(t, pipeline.New(&future).Run(ctx), "cannot honor LSN")
+				if !multi {
+					missingTarget := cfg
+					missingTarget.DestTable = "landing.missing"
+					require.ErrorContains(t, pipeline.New(&missingTarget).Run(ctx), "requires preloaded destination table")
+				}
+
+				run := func(runCfg config.IngestConfig, wantName string) {
+					t.Helper()
+					if !runCfg.Stream {
+						require.NoError(t, pipeline.New(&runCfg).Run(ctx))
+						return
+					}
+					streamCtx, stop := context.WithCancel(ctx)
+					defer stop()
+					done := make(chan error, 1)
+					go func() { done <- pipeline.New(&runCfg).Run(streamCtx) }()
+					require.Eventually(t, func() bool {
+						var ready bool
+						err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM landing.orders WHERE id=4 AND name=$1 AND _cdc_lsn IS NOT NULL) AND EXISTS(SELECT 1 FROM landing.orders WHERE id=3 AND _cdc_deleted=true)`, wantName).Scan(&ready)
+						return err == nil && ready
+					}, 30*time.Second, 100*time.Millisecond)
+					stop()
+					select {
+					case err := <-done:
+						if err != nil {
+							require.ErrorIs(t, err, context.Canceled)
+						}
+					case <-time.After(10 * time.Second):
+						t.Fatal("stream did not stop")
+					}
+				}
+				stateDest := postgresdest.NewPostgresDestination()
+				require.NoError(t, stateDest.Connect(ctx, connString))
+				stateManager, err := strategy.NewCDCStateManager(stateDest, "bootstrap-failure-injection", "", "")
+				require.NoError(t, err)
+				require.NoError(t, stateManager.BeginRun(ctx, false))
+				require.NoError(t, stateDest.Close(ctx))
+				_, err = pool.Exec(ctx, `
+					CREATE FUNCTION landing.reject_baseline() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN
+						IF NEW.state_kind = 'snapshot' AND NEW.state_status = 'complete' THEN
+							RAISE EXCEPTION 'injected baseline certification failure';
+						END IF;
+						RETURN NEW;
+					END $$;
+					CREATE TRIGGER reject_baseline BEFORE INSERT ON _bruin_staging.cdc_state
+					FOR EACH ROW EXECUTE FUNCTION landing.reject_baseline();
+				`)
+				require.NoError(t, err)
+				for range 2 {
+					interrupted := cfg
+					require.ErrorContains(t, pipeline.New(&interrupted).Run(ctx), "injected baseline certification failure")
+				}
+				changedBoundary := cfg
+				changedBoundary.CDCStartLSN = "0/1"
+				require.ErrorContains(t, pipeline.New(&changedBoundary).Run(ctx), "cannot change the boundary")
+				_, err = pool.Exec(ctx, `
+					CREATE OR REPLACE FUNCTION landing.reject_baseline() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN
+						IF NEW.state_kind = 'external_baseline' AND NEW.state_status = 'complete' THEN
+							RAISE EXCEPTION 'injected baseline completion failure';
+						END IF;
+						RETURN NEW;
+					END $$;
+				`)
+				require.NoError(t, err)
+				withoutFlags := cfg
+				withoutFlags.CDCSnapshotMode, withoutFlags.CDCStartLSN = "", ""
+				require.ErrorContains(t, pipeline.New(&withoutFlags).Run(ctx), "injected baseline completion failure")
+				var unchanged bool
+				require.NoError(t, pool.QueryRow(ctx, `SELECT count(*)=3 AND bool_and(_cdc_lsn IS NULL) AND bool_or(id=2 AND name='before') FROM landing.orders`).Scan(&unchanged))
+				require.True(t, unchanged, "unfinished bootstrap must not apply WAL or rewrite the external baseline")
+				var confirmedLSN string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name='external_slot'`).Scan(&confirmedLSN))
+				require.Equal(t, startLSN, confirmedLSN)
+				_, err = pool.Exec(ctx, `DROP FUNCTION landing.reject_baseline() CASCADE`)
+				require.NoError(t, err)
+				bootstrapRetry := cfg
+				if streaming {
+					bootstrapRetry.CDCSnapshotMode, bootstrapRetry.CDCStartLSN = "", ""
+				}
+				run(bootstrapRetry, "inserted")
+				var rows int
+				var untouched, updated, deleted bool
+				require.NoError(t, pool.QueryRow(ctx, `SELECT count(*), bool_or(id=1 AND name='untouched' AND _cdc_lsn IS NULL), bool_or(id=2 AND name='after' AND _cdc_deleted=false), bool_or(id=3 AND _cdc_deleted=true) FROM landing.orders`).Scan(&rows, &untouched, &updated, &deleted))
+				require.Equal(t, 4, rows)
+				require.True(t, untouched, "baseline rows must not be snapshotted or rewritten")
+				require.True(t, updated)
+				require.True(t, deleted)
+				if multi {
+					var untouchedProduct bool
+					require.NoError(t, pool.QueryRow(ctx, `SELECT name='product' AND _cdc_lsn IS NULL FROM landing.products WHERE id=10`).Scan(&untouchedProduct))
+					require.True(t, untouchedProduct)
+				}
+				repeatedBootstrap := cfg
+				require.ErrorContains(t, pipeline.New(&repeatedBootstrap).Run(ctx), "cannot reset existing CDC state")
+				cfg.CDCSnapshotMode, cfg.CDCStartLSN = "", ""
+				_, err = pool.Exec(ctx, `UPDATE public.orders SET name='resumed' WHERE id=4`)
+				require.NoError(t, err)
+				run(cfg, "resumed")
+				var resumed string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT name FROM landing.orders WHERE id=4`).Scan(&resumed))
+				require.Equal(t, "resumed", resumed)
+				refresh := cfg
+				refresh.FullRefresh, refresh.Stream = true, false
+				require.ErrorContains(t, pipeline.New(&refresh).Run(ctx), "cannot be combined with CDC snapshot mode never")
+
+				// Fail after applying a WAL truncate but before its checkpoint is durable.
+				_, err = pool.Exec(ctx, `
+					CREATE FUNCTION landing.reject_order() RETURNS trigger LANGUAGE plpgsql AS $$
+					BEGIN RAISE EXCEPTION 'injected WAL truncate failure'; END $$;
+					CREATE TRIGGER reject_order BEFORE INSERT OR UPDATE ON landing.orders
+					FOR EACH ROW WHEN (NEW.id = 8) EXECUTE FUNCTION landing.reject_order();
+					TRUNCATE public.orders;
+					INSERT INTO public.orders VALUES (7, 'replayed first'), (8, 'replayed last');
+				`)
+				require.NoError(t, err)
+				interrupted := cfg
+				require.ErrorContains(t, pipeline.New(&interrupted).Run(ctx), "injected WAL truncate failure")
+				if streaming {
+					require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM landing.orders`).Scan(&rows))
+					require.Zero(t, rows, "the truncate must commit before the injected merge failure")
+				}
+				_, err = pool.Exec(ctx, `DROP FUNCTION landing.reject_order() CASCADE`)
+				require.NoError(t, err)
+				retry := cfg
+				retry.Stream = false
+				require.NoError(t, pipeline.New(&retry).Run(ctx))
+				var replayedIDs []int32
+				var replayedNames []string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT array_agg(id ORDER BY id), array_agg(name ORDER BY id) FROM landing.orders`).Scan(&replayedIDs, &replayedNames))
+				require.Equal(t, []int32{7, 8}, replayedIDs)
+				require.Equal(t, []string{"replayed first", "replayed last"}, replayedNames)
+
+				// A real WAL TRUNCATE still replicates; it is not a snapshot fallback.
+				_, err = pool.Exec(ctx, `TRUNCATE public.orders; INSERT INTO public.orders VALUES (5, 'after truncate')`)
+				require.NoError(t, err)
+				cfg.Stream = false
+				truncateRun := cfg
+				require.NoError(t, pipeline.New(&truncateRun).Run(ctx))
+				require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM landing.orders`).Scan(&rows))
+				require.Equal(t, 1, rows)
+
+				if streaming {
+					liveSchemaChange := cfg
+					liveSchemaChange.Stream = true
+					streamCtx, stop := context.WithCancel(ctx)
+					defer stop()
+					done := make(chan error, 1)
+					go func() { done <- pipeline.New(&liveSchemaChange).Run(streamCtx) }()
+					require.Eventually(t, func() bool {
+						var active bool
+						return pool.QueryRow(ctx, `SELECT active FROM pg_replication_slots WHERE slot_name='external_slot'`).Scan(&active) == nil && active
+					}, 15*time.Second, 100*time.Millisecond)
+					_, err = pool.Exec(ctx, `ALTER TABLE public.orders ADD COLUMN extra TEXT; INSERT INTO public.orders VALUES (6, 'new shape', 'extra')`)
+					require.NoError(t, err)
+					select {
+					case err := <-done:
+						require.ErrorContains(t, err, "prohibits snapshot or backfill")
+					case <-time.After(15 * time.Second):
+						t.Fatal("schema change did not stop the stream")
+					}
+					require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM landing.orders`).Scan(&rows))
+					require.Equal(t, 1, rows, "schema-change recovery must not snapshot new rows")
+					return
+				}
+
+				_, err = pool.Exec(ctx, `SELECT pg_drop_replication_slot('external_slot')`)
+				require.NoError(t, err)
+				missingSlot := cfg
+				require.ErrorContains(t, pipeline.New(&missingSlot).Run(ctx), "replication slot \"external_slot\" is missing")
+				_, err = pool.Exec(ctx, `SELECT pg_create_logical_replication_slot('external_slot', 'pgoutput')`)
+				require.NoError(t, err)
+				recreatedSlot := cfg
+				require.ErrorContains(t, pipeline.New(&recreatedSlot).Run(ctx), "cannot honor LSN")
+				_, err = pool.Exec(ctx, `ALTER TABLE public.orders ADD COLUMN extra TEXT`)
+				require.NoError(t, err)
+				changedSchema := cfg
+				require.ErrorContains(t, pipeline.New(&changedSchema).Run(ctx), "no valid baseline")
+				require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM landing.orders WHERE id=5 AND name='after truncate'`).Scan(&rows))
+				require.Equal(t, 1, rows, "failed recovery must preserve the destination")
+			})
+		}
+	}
 }

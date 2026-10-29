@@ -71,7 +71,11 @@ func (s *PostgresCDCSource) explainSlotFailure(ctx context.Context, slotName str
 			hint = "; to keep standby slots valid, " + feedbackHint + ", and " + walLevelHint
 		}
 	}
-	return fmt.Errorf("replication slot %q was invalidated by PostgreSQL (%s) and can no longer stream changes; rerun with --full-refresh to rebuild the destination from a new snapshot%s: %w", slotName, *reason, hint, err)
+	recovery := "rerun with --full-refresh to rebuild the destination from a new snapshot"
+	if s.neverSnapshot {
+		recovery = "CDC snapshot mode never prohibits snapshot recovery; restore a valid checkpoint and slot, or establish a new external baseline"
+	}
+	return fmt.Errorf("replication slot %q was invalidated by PostgreSQL (%s) and can no longer stream changes; %s%s: %w", slotName, *reason, recovery, hint, err)
 }
 
 // checkManagedPublicationOnStandby stands in for reconciling the managed

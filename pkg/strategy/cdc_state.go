@@ -25,13 +25,14 @@ import (
 )
 
 const (
-	cdcStateVersion         = "2"
-	cdcStateTableName       = "cdc_state"
-	cdcTargetTableName      = "cdc_targets"
-	cdcStateKindCheckpoint  = "checkpoint"
-	cdcStateKindSnapshot    = "snapshot"
-	cdcStateKindDestination = "destination"
-	cdcStateKindRun         = "run"
+	cdcStateVersion           = "2"
+	cdcStateTableName         = "cdc_state"
+	cdcTargetTableName        = "cdc_targets"
+	cdcStateKindCheckpoint    = "checkpoint"
+	cdcStateKindSnapshot      = "snapshot"
+	cdcStateKindDestination   = "destination"
+	cdcStateKindRun           = "run"
+	cdcStateKindNeverSnapshot = "never_snapshot"
 	// cdcStateKindSnapshotProgress records how far a key-ordered snapshot got.
 	// Its position is JSON (cdcSnapshotProgressState), which the position
 	// decoders reject, so only the snapshot-progress code reads or prunes it.
@@ -111,6 +112,7 @@ type CDCStateManager struct {
 	targetPrepared       bool
 	loaded               bool
 	started              bool
+	neverSnapshot        bool
 	generation           int64
 	runID                string
 	runEventID           string
@@ -953,9 +955,16 @@ func (m *CDCStateManager) resumeFromCompletedGeneration(ctx context.Context, sou
 	if !tracked || !latest.resuming || latest.snapshotEpoch > 0 {
 		return "", nil
 	}
-	destinationPosition, proven, err := m.destinationCDCPosition(ctx, sourceTable)
-	if err != nil || !proven {
-		return "", err
+	// Without snapshots, keyed replay can safely repeat partially committed
+	// merges, including a baseline whose untouched rows still have NULL LSNs.
+	var destinationPosition string
+	if !m.neverSnapshot {
+		var proven bool
+		var err error
+		destinationPosition, proven, err = m.destinationCDCPosition(ctx, sourceTable)
+		if err != nil || !proven {
+			return "", err
+		}
 	}
 	for _, generation := range m.generationsDescending() {
 		if generation >= m.generation {
@@ -980,7 +989,7 @@ func (m *CDCStateManager) resumeFromCompletedGeneration(ctx context.Context, sou
 		case cdcResumeAccepted:
 			// The interrupted run merged changes this certificate cannot
 			// account for, so the target it describes is gone.
-			if compareCDCPositions(destinationPosition, certificate.position) > 0 {
+			if !m.neverSnapshot && compareCDCPositions(destinationPosition, certificate.position) > 0 {
 				return "", nil
 			}
 			return m.acceptResumeCertificate(sourceTable, certificate), nil
@@ -1058,6 +1067,40 @@ func (m *CDCStateManager) StateEmpty(ctx context.Context) (bool, error) {
 	return len(m.entries) == 0, nil
 }
 
+// ResolveSnapshotMode makes the no-snapshot policy sticky across generations.
+func (m *CDCStateManager) ResolveSnapshotMode(ctx context.Context, requested string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.load(ctx); err != nil {
+		return "", err
+	}
+	if m.neverSnapshot && requested == "auto" {
+		return "", fmt.Errorf("this CDC connector has a durable never-snapshot policy; automatic snapshots cannot be enabled")
+	}
+	m.neverSnapshot = m.neverSnapshot || requested == "never"
+	if m.neverSnapshot {
+		return "never", nil
+	}
+	return "auto", nil
+}
+
+// AdoptBaseline certifies an explicitly supplied external snapshot boundary.
+// The caller has validated and prepared the existing keyed targets, without
+// replacing their data. No WAL may be acknowledged before this succeeds.
+func (m *CDCStateManager) AdoptBaseline(ctx context.Context, positions map[string]string) error {
+	if err := m.Persist(ctx, source.CDCStateCommitToken{SnapshotPositions: positions}); err != nil {
+		return err
+	}
+	for table := range positions {
+		if position, err := m.ResumePositionForKeyedMerge(ctx, table); err != nil {
+			return err
+		} else if position == "" {
+			return fmt.Errorf("failed to certify external CDC baseline for %s", table)
+		}
+	}
+	return nil
+}
+
 // BeginRun starts a new CDC state generation for registered tables.
 func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error {
 	m.mu.Lock()
@@ -1074,6 +1117,9 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
+	}
+	if fullRefresh && m.neverSnapshot {
+		return fmt.Errorf("full refresh is prohibited by this CDC connector's never-snapshot policy")
 	}
 	if fullRefresh {
 		m.knownComplete = make(map[string]string)
@@ -1098,7 +1144,11 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := m.writeStateEvents(ctx, []cdcStateWriteEvent{runEvent}); err != nil {
+	runEvents := []cdcStateWriteEvent{runEvent}
+	if m.neverSnapshot {
+		runEvents = append(runEvents, m.newStateWriteEvent("", "", cdcStateKindNeverSnapshot, m.generation, destination.CDCStateStatusComplete, zeroCDCPosition))
+	}
+	if err := m.writeStateEvents(ctx, runEvents); err != nil {
 		return err
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -1353,6 +1403,9 @@ func (m *CDCStateManager) load(ctx context.Context) error {
 	m.entries = append(m.entries[:0], entries...)
 	m.invalidateGenerationIndex()
 	for _, entry := range entries {
+		if entry.StateKind == cdcStateKindNeverSnapshot || entry.StateKind == cdcStateKindBaseline {
+			m.neverSnapshot = true
+		}
 		if entry.Generation > m.generation {
 			m.generation = entry.Generation
 		}
@@ -1707,6 +1760,13 @@ func (m *CDCStateManager) supersededEventIDs() []string {
 	}
 	stale := make([]string, 0, len(m.entries)-len(keepIDs))
 	for _, entry := range m.entries {
+		// Keep policy evidence even if a failed run only persisted its run marker.
+		if entry.StateKind == cdcStateKindNeverSnapshot {
+			key := cdcStateKey{runID: m.runID, kind: cdcStateKindNeverSnapshot}
+			if _, exists := keep[key]; !exists {
+				continue
+			}
+		}
 		if _, ok := retained[entry.Generation]; ok {
 			continue
 		}

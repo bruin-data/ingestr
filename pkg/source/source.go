@@ -250,6 +250,12 @@ type CDCStateProvider interface {
 	CDCState() CDCStateCommitToken
 }
 
+// CDCNoSnapshotSource validates retained WAL at each table's resume boundary
+// and disables every initial, recovery, and backfill snapshot for the run.
+type CDCNoSnapshotSource interface {
+	ConfigureNoSnapshot(ctx context.Context, positions map[string]string) error
+}
+
 // TableIncarnationProvider exposes an opaque source-native identity that
 // changes when a same-name table is dropped and recreated.
 type TableIncarnationProvider interface {

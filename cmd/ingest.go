@@ -125,6 +125,16 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("CDC_TABLE_NAMING", "INGESTR_CDC_TABLE_NAMING"),
 			},
 			&cli.StringFlag{
+				Name:    "cdc-snapshot-mode",
+				Usage:   "PostgreSQL CDC snapshot policy: auto (default, allows snapshots and backfills as needed) or never; omitted inherits the saved policy",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_MODE"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-start-lsn",
+				Usage:   "Bootstrap preloaded PostgreSQL CDC targets at this LSN (requires --cdc-snapshot-mode never; first run only)",
+				Sources: cli.EnvVars("INGESTR_CDC_START_LSN"),
+			},
+			&cli.StringFlag{
 				Name:    "cdc-delete-behavior",
 				Usage:   "How CDC merges apply source deletes: soft (keep the row with _cdc_deleted=true), hard (delete the row from the destination)",
 				Value:   string(config.CDCDeleteSoft),
@@ -371,6 +381,8 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.SchemaContract = c.String("schema-contract")
 	cfg.SchemaNaming = c.String("schema-naming")
 	cfg.CDCTableNaming = config.TableNaming(c.String("cdc-table-naming"))
+	cfg.CDCSnapshotMode = c.String("cdc-snapshot-mode")
+	cfg.CDCStartLSN = c.String("cdc-start-lsn")
 	cfg.CDCDeleteBehavior = config.CDCDeleteBehavior(c.String("cdc-delete-behavior"))
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
