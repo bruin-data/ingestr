@@ -6,24 +6,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // streamLoader loads JSON batches into StarRocks via the Stream Load HTTP API.
 type streamLoader struct {
-	endpoint       string // host:httpPort of the FE
+	endpoint       string // scheme://host:httpPort of the FE
 	user           string
 	password       string
 	client         *http.Client
 	waitForPublish func(context.Context, string, int64) error
 }
 
-func newStreamLoader(host string, httpPort int, user, password string) *streamLoader {
+func newStreamLoader(host string, httpPort int, user, password, httpScheme string) (*streamLoader, error) {
+	scheme := strings.ToLower(strings.TrimSpace(httpScheme))
+	switch scheme {
+	case "":
+		scheme = "http"
+	case "http", "https":
+	default:
+		return nil, fmt.Errorf("invalid StarRocks http_scheme %q: use http or https", httpScheme)
+	}
+	endpoint := neturl.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(httpPort))}
 	return &streamLoader{
-		endpoint: fmt.Sprintf("%s:%d", host, httpPort),
+		endpoint: endpoint.String(),
 		user:     user,
 		password: password,
 		// Don't auto-follow redirects: the FE redirects to a BE and Go would drop
@@ -34,7 +45,7 @@ func newStreamLoader(host string, httpPort int, user, password string) *streamLo
 				return http.ErrUseLastResponse
 			},
 		},
-	}
+	}, nil
 }
 
 type streamLoadResponse struct {
@@ -51,7 +62,7 @@ type streamLoadResponse struct {
 // load streams a JSON-array body into db.table, following the FE -> BE redirect
 // manually so the Authorization header and body survive the hop.
 func (s *streamLoader) load(ctx context.Context, db, table, label string, body []byte, columns string) error {
-	url := fmt.Sprintf("http://%s/api/%s/%s/_stream_load", s.endpoint, neturl.PathEscape(db), neturl.PathEscape(table))
+	url := fmt.Sprintf("%s/api/%s/%s/_stream_load", s.endpoint, neturl.PathEscape(db), neturl.PathEscape(table))
 
 	resp, err := s.put(ctx, url, label, columns, body)
 	if err != nil {
@@ -138,7 +149,8 @@ func isRedirect(code int) bool {
 func (s *streamLoader) errorLog(ctx context.Context, errorURL, loadedVia string) string {
 	candidates := []string{errorURL}
 	if logURL, err := neturl.Parse(errorURL); err == nil {
-		if via, err := neturl.Parse(loadedVia); err == nil && via.Host != "" && via.Host != logURL.Host {
+		if via, err := neturl.Parse(loadedVia); err == nil && via.Host != "" && (via.Host != logURL.Host || via.Scheme != logURL.Scheme) {
+			logURL.Scheme = via.Scheme
 			logURL.Host = via.Host
 			candidates = []string{logURL.String(), errorURL}
 		}

@@ -121,7 +121,7 @@ You can read the result of an arbitrary SQL query instead of a table. See [Custo
 ## Using StarRocks as a destination
 StarRocks can also be a destination. ingestr creates the table (a duplicate-key table, or a primary-key table when a primary key is given) and loads rows through StarRocks' [Stream Load](https://docs.starrocks.io/docs/loading/StreamLoad/) HTTP API.
 
-Stream Load uses the FE HTTP port (default `8030`), which is separate from the query port (`9030`). Set it with the `http_port` query parameter if it differs:
+Stream Load uses HTTP by default on the FE HTTP port (`8030`), which is separate from the query port (`9030`). Set the port with the `http_port` query parameter if it differs:
 
 ```bash
 ingestr ingest \
@@ -132,9 +132,17 @@ ingestr ingest \
 ```
 
 Destination URI parameters:
-- `http_port` (optional): the FE HTTP port used for Stream Load. Defaults to `8030`.
+
+- `http_port` (optional): the FE HTTP or HTTPS port used for Stream Load. Defaults to `8030` for either scheme.
+- `http_scheme` (optional): `http` (default) or `https` for Stream Load. HTTPS verifies the server certificate using the system trust store.
 - `replication_num` (optional): the replica count for created tables. If omitted, the cluster default is used; set it to `1` for single-backend clusters.
-- `ssl` (optional): same TLS handling as the source (applies to the query-port connection).
+- `ssl` (optional): same TLS handling as the source. Applies only to the query-port connection; it does not change the Stream Load scheme or certificate verification.
+
+For an HTTPS-only CelerData Stream Load endpoint on port `443`, use:
+
+```text
+starrocks://user:pass@<celerdata-host>:9030/analytics?ssl=true&http_scheme=https&http_port=443
+```
 
 ### Supported write dispositions
 - `replace` — atomically replaces the target table, including its schema and keys. A failed load leaves the existing table intact.
@@ -179,9 +187,9 @@ An in-place re-snapshot that is interrupted resumes after its last durable key o
 
 With `--cdc-delete-behavior hard`, deleted rows are removed instead of kept as tombstones. Each flush first publishes its upserts and tombstones in one load, then deletes the tombstones it wrote with a `DELETE ... USING` on the staging table, and waits for that delete to become query-visible before the flush advances the CDC position. Readers filtering on `NOT _cdc_deleted` never see a deleted row; other readers may briefly see the tombstone between the two statements, and a run killed between them leaves tombstones that the replayed flush removes. A streaming re-snapshot deletes the rows the snapshot did not contain instead of marking them. See [Deletes](/getting-started/cdc.md#deletes).
 
-CDC state is stored in `_bruin_staging.cdc_state`, with ownership metadata in `_bruin_staging.cdc_targets` and one `cdc_claim_*` view per target. The append-only state log uses a Duplicate Key table so long connector/event identifiers do not exceed StarRocks' primary-key size limit. Claim views prevent two different connectors from owning the same target. The connector identity includes the source, the destination host, port, and database, and the table selection; changing `http_port`, `replication_num`, or `ssl` keeps the same connector. The destination user needs permissions to create databases, tables, and views, inspect table metadata and load transactions, and select, insert, alter, delete, truncate, and drop the managed tables. Preserve the state tables and claim views across runs. Staging tables left in `_bruin_staging` by a run that was killed are dropped by the next run of the same connector.
+CDC state is stored in `_bruin_staging.cdc_state`, with ownership metadata in `_bruin_staging.cdc_targets` and one `cdc_claim_*` view per target. The append-only state log uses a Duplicate Key table so long connector/event identifiers do not exceed StarRocks' primary-key size limit. Claim views prevent two different connectors from owning the same target. The connector identity includes the source, the destination host, port, and database, and the table selection; changing `http_port`, `http_scheme`, `replication_num`, or `ssl` keeps the same connector. The destination user needs permissions to create databases, tables, and views, inspect table metadata and load transactions, and select, insert, alter, delete, truncate, and drop the managed tables. Preserve the state tables and claim views across runs. Staging tables left in `_bruin_staging` by a run that was killed are dropped by the next run of the same connector.
 
-Stream Load rejects filtered or unselected rows. Batches whose JSON body would exceed StarRocks' 100 MB Stream Load limit are split automatically. Stream Loads, CDC merges, and cross-database replacement copies wait for committed loads to become query-visible before advancing. The client must be able to reach the backend HTTP address returned by the FE redirect. For a single-container Docker lab, expose the BE's `8040` port and use that mapped port as `http_port`, with the mapped FE `9030` port for SQL.
+Stream Load rejects filtered or unselected rows. Batches whose JSON body would exceed StarRocks' 100 MB Stream Load limit are split automatically. Stream Loads, CDC merges, and cross-database replacement copies wait for committed loads to become query-visible before advancing. The client must be able to reach the backend HTTP or HTTPS address returned by the FE redirect. For a single-container Docker lab, expose the BE's `8040` port and use that mapped port as `http_port`, with the mapped FE `9030` port for SQL.
 
 StarRocks versions with older load metadata, including 3.3.5 and earlier, use `SHOW PROC` to find INSERT transactions. This requires the system `OPERATE` privilege. These servers expose a limited history of recent transactions; ingestion stops if the transaction cannot be found or its visibility cannot be verified. StarRocks 3.3.6 and newer provide the load metadata used for direct transaction lookup.
 

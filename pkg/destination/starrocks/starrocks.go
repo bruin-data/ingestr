@@ -96,6 +96,10 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	if err != nil {
 		return err
 	}
+	loader, err := newStreamLoader(host, httpPort, user, password, query.Get("http_scheme"))
+	if err != nil {
+		return err
+	}
 
 	dsn := ""
 	if user != "" {
@@ -126,9 +130,9 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 
 	d.db = db
 	d.legacyLoadMetadata.Store(false)
-	d.loader = newStreamLoader(host, httpPort, user, password)
+	d.loader = loader
 	d.loader.waitForPublish = d.waitForPublish
-	config.Debug("[STARROCKS] Connected (database: %s, http_port: %d)", d.database, httpPort)
+	config.Debug("[STARROCKS] Connected (database: %s, stream_load: %s)", d.database, loader.endpoint)
 	return nil
 }
 

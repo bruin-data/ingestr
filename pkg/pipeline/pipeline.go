@@ -3183,7 +3183,7 @@ func canonicalCDCStateURI(rawURI string) string {
 	// StarRocks connection settings do not identify the destination; fixing a
 	// wrong load port must not orphan the connector's existing claims.
 	if strings.EqualFold(parsed.Scheme, "starrocks") {
-		for _, key := range []string{"http_port", "replication_num", "ssl"} {
+		for _, key := range []string{"http_port", "http_scheme", "replication_num", "ssl"} {
 			query.Del(key)
 		}
 	}
