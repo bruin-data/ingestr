@@ -509,6 +509,7 @@ func parseStarRocksURI(uri string) (dsn, catalog, database string, err error) {
 	// Drop destination-only params so a connection shared with the StarRocks
 	// destination doesn't leak them into the go-sql-driver DSN.
 	query.Del("http_port")
+	query.Del("http_scheme")
 	query.Del("replication_num")
 
 	dsn = ""
