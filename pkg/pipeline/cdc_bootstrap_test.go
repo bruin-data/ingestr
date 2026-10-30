@@ -152,7 +152,7 @@ func TestPrepareCDCNoSnapshotRepeatedBoundaryCannotResetState(t *testing.T) {
 			newManager := func() *strategy.CDCStateManager {
 				manager, err := strategy.NewCDCStateManager(dest, "connector", "raw.orders", "")
 				require.NoError(t, err)
-				require.NoError(t, manager.RegisterTableState(t.Context(), "public.orders", "raw.orders", "source", "schema"))
+				require.NoError(t, manager.RegisterTableState(t.Context(), "public.orders", "raw.orders", "12345", "schema"))
 				return manager
 			}
 			manager := newManager()
