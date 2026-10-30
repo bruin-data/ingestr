@@ -2546,7 +2546,9 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 					go func() { done <- pipeline.New(&runCfg).Run(streamCtx) }()
 					require.Eventually(t, func() bool {
 						var ready bool
-						err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM landing.orders WHERE id=4 AND name=$1 AND _cdc_lsn IS NOT NULL) AND EXISTS(SELECT 1 FROM landing.orders WHERE id=3 AND _cdc_deleted=true)`, wantName).Scan(&ready)
+						err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM landing.orders WHERE id=4 AND name=$1 AND _cdc_lsn IS NOT NULL)
+							AND EXISTS(SELECT 1 FROM landing.orders WHERE id=3 AND _cdc_deleted=true)
+							AND EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name='external_slot' AND confirmed_flush_lsn > $2::pg_lsn)`, wantName, startLSN).Scan(&ready)
 						return err == nil && ready
 					}, 30*time.Second, 100*time.Millisecond)
 					stop()
@@ -2610,6 +2612,9 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 					bootstrapRetry.CDCSnapshotMode, bootstrapRetry.CDCStartLSN = "", ""
 				}
 				run(bootstrapRetry, "inserted")
+				var advanced bool
+				require.NoError(t, pool.QueryRow(ctx, `SELECT confirmed_flush_lsn > $1::pg_lsn FROM pg_replication_slots WHERE slot_name='external_slot'`, startLSN).Scan(&advanced))
+				require.True(t, advanced, "the slot must advance beyond the baseline before testing a restart")
 				var rows int
 				var untouched, updated, deleted bool
 				require.NoError(t, pool.QueryRow(ctx, `SELECT count(*), bool_or(id=1 AND name='untouched' AND _cdc_lsn IS NULL), bool_or(id=2 AND name='after' AND _cdc_deleted=false), bool_or(id=3 AND _cdc_deleted=true) FROM landing.orders`).Scan(&rows, &untouched, &updated, &deleted))
@@ -2622,15 +2627,25 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 					require.NoError(t, pool.QueryRow(ctx, `SELECT name='product' AND _cdc_lsn IS NULL FROM landing.products WHERE id=10`).Scan(&untouchedProduct))
 					require.True(t, untouchedProduct)
 				}
-				repeatedBootstrap := cfg
-				require.ErrorContains(t, pipeline.New(&repeatedBootstrap).Run(ctx), "cannot reset existing CDC state")
+				require.ErrorContains(t, pipeline.New(&changedBoundary).Run(ctx), "cannot change the boundary")
+				for _, keepStartLSN := range []bool{true, false} {
+					resumeCfg := cfg
+					if !keepStartLSN {
+						resumeCfg.CDCSnapshotMode, resumeCfg.CDCStartLSN = "", ""
+					}
+					wantName := fmt.Sprintf("resumed-with-lsn=%t", keepStartLSN)
+					_, err = pool.Exec(ctx, `UPDATE public.orders SET name=$1 WHERE id=4`, wantName)
+					require.NoError(t, err)
+					run(resumeCfg, wantName)
+					var resumed string
+					require.NoError(t, pool.QueryRow(ctx, `SELECT name FROM landing.orders WHERE id=4`).Scan(&resumed))
+					require.Equal(t, wantName, resumed)
+					require.NoError(t, pool.QueryRow(ctx, `SELECT count(*), bool_or(id=1 AND name='untouched' AND _cdc_lsn IS NULL), bool_or(id=3 AND _cdc_deleted=true) FROM landing.orders`).Scan(&rows, &untouched, &deleted))
+					require.Equal(t, 4, rows)
+					require.True(t, untouched, "resuming must preserve untouched external baseline rows")
+					require.True(t, deleted, "resuming must preserve replicated deletions")
+				}
 				cfg.CDCSnapshotMode, cfg.CDCStartLSN = "", ""
-				_, err = pool.Exec(ctx, `UPDATE public.orders SET name='resumed' WHERE id=4`)
-				require.NoError(t, err)
-				run(cfg, "resumed")
-				var resumed string
-				require.NoError(t, pool.QueryRow(ctx, `SELECT name FROM landing.orders WHERE id=4`).Scan(&resumed))
-				require.Equal(t, "resumed", resumed)
 				refresh := cfg
 				refresh.FullRefresh, refresh.Stream = true, false
 				require.ErrorContains(t, pipeline.New(&refresh).Run(ctx), "cannot be combined with CDC snapshot mode never")

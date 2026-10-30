@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -53,6 +54,10 @@ func TestCDCStateExternalBaselineRetriesInterruptedWrites(t *testing.T) {
 			restarted := externalBaselineManager(t, dest, tables)
 			pending, err := restarted.PendingBaseline(t.Context(), "1/20")
 			require.NoError(t, err)
+			resolved, completed, err := restarted.ResolveBaseline(t.Context(), "1/20")
+			require.NoError(t, err)
+			require.False(t, completed)
+			require.Equal(t, pending, resolved)
 			if tc.failWrite == 1 {
 				require.Empty(t, pending)
 				empty, err := restarted.StateEmpty(t.Context())
@@ -72,12 +77,12 @@ func TestCDCStateExternalBaselineRetriesInterruptedWrites(t *testing.T) {
 			bindExternalBaseline(t, restarted, tables)
 			require.NoError(t, restarted.BeginBaseline(t.Context(), positions))
 
-			completed := externalBaselineManager(t, dest, tables)
-			pending, err = completed.PendingBaseline(t.Context(), testExternalBaselinePosition)
+			finished := externalBaselineManager(t, dest, tables)
+			pending, err = finished.PendingBaseline(t.Context(), testExternalBaselinePosition)
 			require.NoError(t, err)
 			require.Empty(t, pending)
-			require.Equal(t, testExternalBaselinePosition, mustKeyedResumePosition(t, completed, "public.orders"))
-			require.ErrorContains(t, completed.BeginBaseline(t.Context(), positions), "cannot reset existing CDC state")
+			require.Equal(t, testExternalBaselinePosition, mustKeyedResumePosition(t, finished, "public.orders"))
+			require.ErrorContains(t, finished.BeginBaseline(t.Context(), positions), "cannot reset existing CDC state")
 		})
 	}
 }
@@ -255,5 +260,114 @@ func TestCDCStateExternalBaselinePendingAndCompletedMarkersSurvivePruning(t *tes
 	require.NoError(t, err)
 	require.Empty(t, pending)
 	require.Equal(t, testExternalBaselinePosition, mustKeyedResumePosition(t, manager, "public.orders"))
+	pending, completed, err := manager.ResolveBaseline(t.Context(), testExternalBaselinePosition)
+	require.NoError(t, err)
+	require.True(t, completed)
+	require.Empty(t, pending)
 	require.ErrorContains(t, manager.BeginBaseline(t.Context(), positions), "cannot reset existing CDC state")
+}
+
+func TestCDCStateCompletedBaselineResolvesToLatestCheckpoint(t *testing.T) {
+	dest := newCDCStateDestination()
+	tables := map[string]string{"public.orders": "raw.orders", "public.items": "raw.items"}
+	manager := externalBaselineManager(t, dest, tables)
+	_, err := manager.ResolveSnapshotMode(t.Context(), "never")
+	require.NoError(t, err)
+	bindExternalBaseline(t, manager, tables)
+	require.NoError(t, manager.BeginBaseline(t.Context(), map[string]string{
+		"public.orders": testExternalBaselinePosition,
+		"public.items":  testExternalBaselinePosition,
+	}))
+	const checkpoint = "00000001/00000040"
+	require.NoError(t, manager.Persist(t.Context(), source.CDCStateCommitToken{Position: checkpoint}))
+	for _, boundary := range []string{testExternalBaselinePosition, "1/20"} {
+		t.Run(boundary, func(t *testing.T) {
+			restarted := externalBaselineManager(t, dest, tables)
+			writes := dest.cdcWrites
+			pending, completed, err := restarted.ResolveBaseline(t.Context(), boundary)
+			require.NoError(t, err)
+			require.True(t, completed)
+			require.Empty(t, pending)
+			for table := range tables {
+				require.Equal(t, checkpoint, mustKeyedResumePosition(t, restarted, table))
+			}
+			require.Equal(t, writes, dest.cdcWrites, "resolving a completed baseline must not rewrite state")
+		})
+	}
+}
+
+func TestCDCStateCompletedBaselineRejectsChangedOrInvalidManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		boundary string
+		manifest string
+		conflict bool
+		want     string
+	}{
+		{name: "changed boundary", boundary: "1/21", want: "cannot change the boundary"},
+		{name: "invalid requested boundary", boundary: "invalid", want: "nonzero PostgreSQL LSN"},
+		{name: "malformed manifest", manifest: "{", want: "invalid external CDC baseline manifest"},
+		{name: "empty manifest", manifest: "{}", want: "no tables"},
+		{name: "null manifest", manifest: "null", want: "no tables"},
+		{name: "missing position", manifest: `{"public.orders":{}}`, want: "invalid external CDC baseline position"},
+		{name: "zero position", manifest: `{"public.orders":{"position":"0/0"}}`, want: "invalid external CDC baseline position"},
+		{name: "mixed table boundaries", manifest: `{"public.orders":{"position":"1/20"},"public.items":{"position":"1/21"}}`, want: "cannot change the boundary"},
+		{name: "conflicting manifests", conflict: true, want: "conflicting external CDC baseline manifests"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := newCDCStateDestination()
+			tables := map[string]string{"public.orders": "raw.orders"}
+			manager := externalBaselineManager(t, dest, tables)
+			_, err := manager.ResolveSnapshotMode(t.Context(), "never")
+			require.NoError(t, err)
+			bindExternalBaseline(t, manager, tables)
+			require.NoError(t, manager.BeginBaseline(t.Context(), map[string]string{"public.orders": testExternalBaselinePosition}))
+			for i := range manager.entries {
+				entry := &manager.entries[i]
+				if entry.StateKind != cdcStateKindBaseline {
+					continue
+				}
+				if tc.manifest != "" {
+					entry.Position = tc.manifest
+				}
+				if tc.conflict && entry.Status == destination.CDCStateStatusComplete {
+					entry.Position = strings.ReplaceAll(entry.Position, testExternalBaselinePosition, "1/21")
+				}
+			}
+			boundary := tc.boundary
+			if boundary == "" {
+				boundary = testExternalBaselinePosition
+			}
+			pending, completed, err := manager.ResolveBaseline(t.Context(), boundary)
+			require.ErrorContains(t, err, tc.want)
+			require.False(t, completed)
+			require.Empty(t, pending)
+		})
+	}
+}
+
+func TestCDCStateCompletedBaselineUsesCurrentSchemaCertificates(t *testing.T) {
+	dest := newCDCStateDestination()
+	tables := map[string]string{"public.orders": "raw.orders"}
+	manager := externalBaselineManager(t, dest, tables)
+	_, err := manager.ResolveSnapshotMode(t.Context(), "never")
+	require.NoError(t, err)
+	bindExternalBaseline(t, manager, tables)
+	require.NoError(t, manager.BeginBaseline(t.Context(), map[string]string{"public.orders": testExternalBaselinePosition}))
+
+	const evolvedSchema = "compatible-schema"
+	const checkpoint = "00000001/00000040"
+	require.NoError(t, manager.RegisterTableState(t.Context(), "public.orders", "raw.orders", "source:public.orders", evolvedSchema))
+	require.NoError(t, manager.Persist(t.Context(), source.CDCStateCommitToken{
+		Position:          checkpoint,
+		SnapshotPositions: map[string]string{"public.orders": checkpoint},
+		SnapshotSchemas:   map[string]string{"public.orders": evolvedSchema},
+	}))
+	restarted := externalBaselineManager(t, dest, tables)
+	require.NoError(t, restarted.RegisterTableState(t.Context(), "public.orders", "raw.orders", "source:public.orders", evolvedSchema))
+	pending, completed, err := restarted.ResolveBaseline(t.Context(), testExternalBaselinePosition)
+	require.NoError(t, err)
+	require.True(t, completed)
+	require.Empty(t, pending)
+	require.Equal(t, checkpoint, mustKeyedResumePosition(t, restarted, "public.orders"))
 }

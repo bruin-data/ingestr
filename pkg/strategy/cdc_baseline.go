@@ -22,6 +22,60 @@ type cdcBaselineTable struct {
 	DestinationIncarnation string `json:"destination_incarnation"`
 }
 
+// ResolveBaseline distinguishes an unfinished adoption from a completed one.
+// A matching completed boundary is only a resume hint: callers must use their
+// validated managed checkpoints, never the original baseline positions.
+func (m *CDCStateManager) ResolveBaseline(ctx context.Context, requestedLSN string) (pending map[string]string, completed bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending, err = m.pendingBaseline(ctx, requestedLSN)
+	if err != nil || len(pending) > 0 || requestedLSN == "" {
+		return pending, false, err
+	}
+	var manifest string
+	for _, entry := range m.entries {
+		if entry.StateKind != cdcStateKindBaseline {
+			continue
+		}
+		if entry.Status == destination.CDCStateStatusComplete {
+			if completed && manifest != entry.Position {
+				return nil, false, fmt.Errorf("conflicting external CDC baseline manifests")
+			}
+			manifest, completed = entry.Position, true
+		}
+	}
+	if !completed {
+		return nil, false, nil
+	}
+	for _, entry := range m.entries {
+		if entry.StateKind == cdcStateKindBaseline && (entry.Position != manifest ||
+			entry.Status != cdcStateStatusInProgress && entry.Status != destination.CDCStateStatusComplete) {
+			return nil, false, fmt.Errorf("conflicting external CDC baseline manifests")
+		}
+	}
+	var tables map[string]cdcBaselineTable
+	if err := json.Unmarshal([]byte(manifest), &tables); err != nil {
+		return nil, false, fmt.Errorf("invalid external CDC baseline manifest: %w", err)
+	}
+	if len(tables) == 0 {
+		return nil, false, fmt.Errorf("invalid external CDC baseline manifest: no tables")
+	}
+	requested, err := pglogrepl.ParseLSN(requestedLSN)
+	if err != nil || requested == 0 {
+		return nil, false, fmt.Errorf("--cdc-start-lsn must be a nonzero PostgreSQL LSN")
+	}
+	for table, baseline := range tables {
+		lsn, err := pglogrepl.ParseLSN(baseline.Position)
+		if table == "" || err != nil || lsn == 0 {
+			return nil, false, fmt.Errorf("invalid external CDC baseline position for %s", table)
+		}
+		if requested != lsn {
+			return nil, false, fmt.Errorf("--cdc-start-lsn cannot change the boundary of a completed external CDC bootstrap; omit it to resume")
+		}
+	}
+	return nil, true, nil
+}
+
 // PendingBaseline returns the original boundaries only for an unfinished
 // bootstrap whose source tables and preloaded targets still match its manifest.
 func (m *CDCStateManager) PendingBaseline(ctx context.Context, requestedLSN string) (map[string]string, error) {

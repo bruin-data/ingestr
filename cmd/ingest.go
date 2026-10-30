@@ -131,7 +131,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "cdc-start-lsn",
-				Usage:   "Bootstrap preloaded PostgreSQL CDC targets at this LSN (requires --cdc-snapshot-mode never; first run only)",
+				Usage:   "Bootstrap preloaded PostgreSQL CDC targets at this LSN; repeating the same boundary resumes managed checkpoints (requires --cdc-snapshot-mode never)",
 				Sources: cli.EnvVars("INGESTR_CDC_START_LSN"),
 			},
 			&cli.StringFlag{
