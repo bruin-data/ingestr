@@ -94,18 +94,19 @@ type cdcStateWriteEvent struct {
 // destination table. Generations invalidate older completions, while run IDs
 // prevent concurrent processes from completing each other's generation.
 type CDCStateManager struct {
-	dest           destination.Destination
-	reader         destination.CDCStateReader
-	fenceReader    destination.CDCStateFenceReader
-	pruner         destination.CDCStatePruner
-	targetClaimer  destination.CDCTargetClaimer
-	incarnation    destination.CDCTargetIncarnationProvider
-	initializer    destination.CDCTargetIncarnationInitializer
-	pruneBatchSize int
-	refresh        *cdcRefresh
-	connectorID    string
-	stateTable     string
-	targetTable    string
+	dest               destination.Destination
+	reader             destination.CDCStateReader
+	fenceReader        destination.CDCStateFenceReader
+	pruner             destination.CDCStatePruner
+	targetClaimer      destination.CDCTargetClaimer
+	incarnation        destination.CDCTargetIncarnationProvider
+	initializer        destination.CDCTargetIncarnationInitializer
+	pruneBatchSize     int
+	refresh            *cdcRefresh
+	connectorID        string
+	stateTable         string
+	targetTable        string
+	chunkTableIdentity string
 
 	mu                   sync.Mutex
 	prepared             bool
@@ -676,6 +677,9 @@ func (m *CDCStateManager) claimTarget(ctx context.Context, sourceTable, destTabl
 }
 
 func (m *CDCStateManager) validateTarget(ctx context.Context, destTable string) error {
+	if err := m.validateChunkTableTarget(ctx, destTable); err != nil {
+		return err
+	}
 	if validator, ok := m.dest.(destination.ManagedCDCTargetValidator); ok {
 		if err := validator.ValidateManagedCDCTarget(ctx, destTable); err != nil {
 			return fmt.Errorf("CDC destination table %q failed managed-state validation: %w", destTable, err)
@@ -776,7 +780,7 @@ func (m *CDCStateManager) prepareTargetTable(ctx context.Context) error {
 		ConnectorID: cdcManagementConnectorID,
 		SourceTable: cdcManagementSourceTable,
 	}
-	for _, table := range []string{m.stateTable, m.targetTable} {
+	for _, table := range []string{m.stateTable, m.targetTable, m.chunkTableName()} {
 		managementClaim.DestinationTable = table
 		if err := m.targetClaimer.ClaimCDCTarget(ctx, m.targetTable, managementClaim); err != nil {
 			return fmt.Errorf("failed to reserve managed CDC table %q: %w", table, err)

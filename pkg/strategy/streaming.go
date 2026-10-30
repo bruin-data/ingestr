@@ -58,6 +58,21 @@ func NewStreamingExecutor(opts StreamingOptions) *StreamingExecutor {
 }
 
 func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) error {
+	chunked, err := e.chunkedSnapshotOptions(job.Config, job.Destination)
+	if err != nil {
+		return err
+	}
+	if chunked != nil {
+		tableSchema, keys := job.SourceSchema, job.Config.PrimaryKeys
+		if tableSchema == nil {
+			tableSchema = job.Schema
+		} else {
+			keys = tableSchema.PrimaryKeys
+		}
+		if err := ValidateCDCChunkedSnapshotTable(job.Config.SourceTable, tableSchema, keys); err != nil {
+			return err
+		}
+	}
 	if err := job.ApplyEvolution(ctx); err != nil {
 		return fmt.Errorf("failed to apply schema evolution: %w", err)
 	}
@@ -97,6 +112,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		CDCLegacySlotSuffix:        job.Config.CDCLegacySlotSuffix,
 		CDCManagedState:            e.opts.StateManager != nil,
 		CDCSnapshotReplace:         st.isCDC && supportsCDCSnapshotReplace(job.Destination),
+		CDCChunkedSnapshot:         chunked,
 		FullRefresh:                job.Config.FullRefresh,
 		Streaming:                  true,
 		FlushInterval:              job.Config.FlushInterval,
@@ -129,6 +145,17 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 
 // ExecuteMultiTable runs the streaming loop over a multi-table source (CDC).
 func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTableIngestionJob) error {
+	chunked, err := e.chunkedSnapshotOptions(job.Config, job.Destination)
+	if err != nil {
+		return err
+	}
+	if chunked != nil {
+		for _, table := range job.Tables {
+			if err := ValidateCDCChunkedSnapshotTable(table.Name, table.Schema, table.PrimaryKeys); err != nil {
+				return err
+			}
+		}
+	}
 	anyTableHasCDC := false
 	for _, ti := range job.Tables {
 		if hasCDCColumns(ti.Schema) {
@@ -182,6 +209,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
 			CDCManagedState:     e.opts.StateManager != nil,
 			CDCSnapshotReplace:  (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
+			CDCChunkedSnapshot:  chunked,
 			FullRefresh:         job.Config.FullRefresh,
 			Streaming:           true,
 			FlushInterval:       job.Config.FlushInterval,
@@ -610,6 +638,9 @@ func (l *flushLoop) processResult(ctx context.Context, res source.RecordBatchRes
 	}
 	if err := l.handleResult(ctx, res); err != nil {
 		return err
+	}
+	if res.CDCFlush {
+		return l.flush(ctx)
 	}
 	if token, ok := res.CommitToken.(source.CDCStateCommitToken); ok && len(token.SnapshotPositions) > 0 && (l.buffered > 0 || l.tokenDirty) {
 		return l.flush(ctx)

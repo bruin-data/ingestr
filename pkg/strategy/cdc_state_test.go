@@ -704,7 +704,7 @@ func TestCDCStateValidationFailureDoesNotClaimTarget(t *testing.T) {
 }
 
 func TestCDCTargetClaimsRejectCanonicalManagementTableAliases(t *testing.T) {
-	for _, target := range []string{"_BRUIN_STAGING.CDC_STATE", "_BRUIN_STAGING.CDC_TARGETS"} {
+	for _, target := range []string{"_BRUIN_STAGING.CDC_STATE", "_BRUIN_STAGING.CDC_TARGETS", "_BRUIN_STAGING.CDC_SNAPSHOT_WAL"} {
 		t.Run(target, func(t *testing.T) {
 			dest := &caseCanonicalCDCStateDestination{cdcStateDestination: newCDCStateDestination()}
 			manager, err := NewCDCStateManager(dest, "connector-a", "raw.orders", "")

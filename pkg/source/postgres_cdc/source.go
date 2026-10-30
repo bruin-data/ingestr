@@ -577,6 +577,20 @@ func (s *PostgresCDCSource) CommitStream(ctx context.Context, token any) error {
 			return nil
 		}
 	}
+	if commit, ok := token.(*chunkedCommit); ok {
+		if s.pos == nil {
+			return fmt.Errorf("postgres cdc: stream position not initialized")
+		}
+		if err := commit.persist(ctx); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		s.pos.Commit(commit.state.Applied)
+		commit.ack.Do(func() { close(commit.done) })
+		return nil
+	}
 	lsn, ok := token.(pglogrepl.LSN)
 	if !ok {
 		return fmt.Errorf("postgres cdc: unexpected commit token type %T", token)

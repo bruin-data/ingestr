@@ -134,6 +134,35 @@ func IngestCommand() *cli.Command {
 				Usage:   "Bootstrap preloaded PostgreSQL CDC targets at this LSN; repeating the same boundary resumes managed checkpoints (requires --cdc-snapshot-mode never)",
 				Sources: cli.EnvVars("INGESTR_CDC_START_LSN"),
 			},
+			&cli.BoolFlag{
+				Name:    "cdc-snapshot-chunked",
+				Usage:   "Read PostgreSQL CDC snapshots in resumable chunks using short transactions",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNKED"),
+			},
+			&cli.IntFlag{
+				Name:    "cdc-snapshot-chunk-size",
+				Usage:   "Maximum rows per PostgreSQL CDC snapshot chunk",
+				Value:   config.DefaultCDCSnapshotChunkSize,
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNK_SIZE"),
+			},
+			&cli.DurationFlag{
+				Name:    "cdc-snapshot-chunk-timeout",
+				Usage:   "Maximum duration of each PostgreSQL CDC snapshot chunk read",
+				Value:   config.DefaultCDCSnapshotChunkTimeout,
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-wal-staging",
+				Usage:   "Pending changes during chunked snapshots: inmemory (retain source WAL) or destination (managed staging table)",
+				Value:   "inmemory",
+				Sources: cli.EnvVars("INGESTR_CDC_WAL_STAGING"),
+			},
+			&cli.IntFlag{
+				Name:    "cdc-wal-buffer-bytes",
+				Usage:   "Memory budget in bytes for pending changes during chunked snapshots",
+				Value:   config.DefaultCDCWALBufferBytes,
+				Sources: cli.EnvVars("INGESTR_CDC_WAL_BUFFER_BYTES"),
+			},
 			&cli.StringFlag{
 				Name:    "cdc-delete-behavior",
 				Usage:   "How CDC merges apply source deletes: soft (keep the row with _cdc_deleted=true), hard (delete the row from the destination)",
@@ -383,6 +412,22 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.CDCTableNaming = config.TableNaming(c.String("cdc-table-naming"))
 	cfg.CDCSnapshotMode = c.String("cdc-snapshot-mode")
 	cfg.CDCStartLSN = c.String("cdc-start-lsn")
+	cfg.CDCChunkedSnapshot = c.Bool("cdc-snapshot-chunked")
+	cfg.CDCSnapshotChunkSize = int(c.Int("cdc-snapshot-chunk-size"))
+	cfg.CDCSnapshotChunkTimeout = c.Duration("cdc-snapshot-chunk-timeout")
+	cfg.CDCWALStaging = c.String("cdc-wal-staging")
+	cfg.CDCWALBufferBytes = c.Int("cdc-wal-buffer-bytes")
+	if cfg.CDCChunkedSnapshot {
+		if cfg.CDCSnapshotChunkSize <= 0 {
+			return &config.ValidationError{Field: "cdc-snapshot-chunk-size", Message: "must be positive"}
+		}
+		if cfg.CDCSnapshotChunkTimeout <= 0 {
+			return &config.ValidationError{Field: "cdc-snapshot-chunk-timeout", Message: "must be positive"}
+		}
+		if cfg.CDCWALBufferBytes <= 0 {
+			return &config.ValidationError{Field: "cdc-wal-buffer-bytes", Message: "must be positive"}
+		}
+	}
 	cfg.CDCDeleteBehavior = config.CDCDeleteBehavior(c.String("cdc-delete-behavior"))
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
@@ -420,6 +465,14 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.Stream = c.Bool("stream")
 	cfg.FlushInterval = c.Duration("flush-interval")
 	cfg.FlushRecords = int(c.Int("flush-records"))
+	if cfg.CDCChunkedSnapshot && cfg.Stream {
+		if cfg.FlushInterval <= 0 {
+			return &config.ValidationError{Field: "flush-interval", Message: "must be positive"}
+		}
+		if cfg.FlushRecords <= 0 {
+			return &config.ValidationError{Field: "flush-records", Message: "must be positive"}
+		}
+	}
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")

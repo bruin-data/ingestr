@@ -404,6 +404,85 @@ func TestIngestConfigStream(t *testing.T) {
 	}
 }
 
+func clearCDCChunkedSnapshotEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"INGESTR_CDC_SNAPSHOT_CHUNKED", "INGESTR_CDC_SNAPSHOT_CHUNK_SIZE",
+		"INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "INGESTR_CDC_WAL_STAGING",
+		"INGESTR_CDC_WAL_BUFFER_BYTES", "INGESTR_CDC_SNAPSHOT_MODE", "INGESTR_CDC_START_LSN",
+	} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "disabled"},
+		{name: "enabled", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}},
+		{name: "wrong source", args: []string{"--cdc-snapshot-chunked"}, wantErr: "only supported for postgres+cdc"},
+		{name: "unknown staging", args: []string{"--cdc-wal-staging=disk"}, wantErr: "must be inmemory or destination"},
+		{name: "zero size", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-size=0"}, wantErr: "cdc-snapshot-chunk-size"},
+		{name: "zero timeout", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-timeout=0s"}, wantErr: "cdc-snapshot-chunk-timeout"},
+		{name: "zero buffer", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-wal-buffer-bytes=0"}, wantErr: "cdc-wal-buffer-bytes"},
+		{name: "zero streaming interval", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--stream", "--flush-interval=0s"}, wantErr: "flush-interval"},
+		{name: "zero streaming records", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--stream", "--flush-records=0"}, wantErr: "flush-records"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseIngestConfig(t, tt.args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CDCChunkedSnapshot != (tt.name == "enabled") ||
+				cfg.CDCSnapshotChunkSize != config.DefaultCDCSnapshotChunkSize ||
+				cfg.CDCSnapshotChunkTimeout != config.DefaultCDCSnapshotChunkTimeout ||
+				cfg.CDCWALBufferBytes != config.DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
+				t.Fatalf("chunked snapshot config = (%v, %d, %s, %d, %q)", cfg.CDCChunkedSnapshot, cfg.CDCSnapshotChunkSize, cfg.CDCSnapshotChunkTimeout, cfg.CDCWALBufferBytes, cfg.CDCWALStaging)
+			}
+		})
+	}
+}
+
+func TestIngestConfigCDCChunkedSnapshotOptions(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, env := range []bool{false, true} {
+		t.Run(map[bool]string{false: "flags", true: "environment"}[env], func(t *testing.T) {
+			args := []string{"--source-uri=postgresql+cdc://localhost/db"}
+			if env {
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNKED", "true")
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_SIZE", "123")
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "1250ms")
+				t.Setenv("INGESTR_CDC_WAL_STAGING", "destination")
+				t.Setenv("INGESTR_CDC_WAL_BUFFER_BYTES", "4294967296")
+			} else {
+				args = append(args, "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-size=123", "--cdc-snapshot-chunk-timeout=1250ms", "--cdc-wal-staging=destination", "--cdc-wal-buffer-bytes=4294967296")
+			}
+			cfg, err := parseIngestConfig(t, args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotChunkSize != 123 || cfg.CDCSnapshotChunkTimeout != 1250*time.Millisecond || cfg.CDCWALStaging != "destination" || cfg.CDCWALBufferBytes != 1<<32 {
+				t.Fatalf("chunked snapshot config = (%v, %d, %s, %q, %d)", cfg.CDCChunkedSnapshot, cfg.CDCSnapshotChunkSize, cfg.CDCSnapshotChunkTimeout, cfg.CDCWALStaging, cfg.CDCWALBufferBytes)
+			}
+		})
+	}
+}
+
 func TestParseDateTime(t *testing.T) {
 	for _, tt := range []struct {
 		input string
