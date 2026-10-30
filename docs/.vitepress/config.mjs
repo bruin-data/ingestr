@@ -276,6 +276,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Polymarket", link: "/supported-sources/polymarket.md" },
               { text: "PostHog", link: "/supported-sources/posthog.md" },
               { text: "Primer", link: "/supported-sources/primer.md" },
+              { text: "Privatus Analytics", link: "/supported-sources/privatus.md" },
               { text: "Plus Vibe AI", link: "/supported-sources/plusvibeai.md" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks.md" },
               { text: "Recurly", link: "/supported-sources/recurly.md" },

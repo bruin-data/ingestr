@@ -398,6 +398,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("polymarket", "Polymarket", []string{"polymarket"}, true, false),
 		genericURIConnector("posthog", "PostHog", []string{"posthog"}, true, false),
 		genericURIConnector("primer", "Primer", []string{"primer"}, true, false),
+		genericURIConnector("privatus", "Privatus Analytics", []string{"privatus"}, true, false),
 		genericURIConnector("pulsar", "Apache Pulsar", []string{"pulsar", "pulsar+ssl"}, true, false),
 		genericURIConnector("pubsub", "Pub/Sub", []string{"pubsub"}, true, false),
 		genericURIConnector("quickbooks", "QuickBooks", []string{"quickbooks"}, true, false),
