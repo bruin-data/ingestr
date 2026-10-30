@@ -115,7 +115,7 @@ func TestBuildDeleteInsertSQLUsesAtomicBlock(t *testing.T) {
 	}
 	wantInsert := "INSERT INTO `main`.`analytics`.`orders` (`id`, `name`, `updated_at`) " +
 		"SELECT `id`, `name`, `updated_at` FROM (SELECT `id`, `name`, `updated_at`, " +
-		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `updated_at` DESC) AS __bruin_dedup_rn " +
+		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY CASE WHEN `updated_at` IS NULL THEN 1 ELSE 0 END ASC, `updated_at` DESC) AS __bruin_dedup_rn " +
 		"FROM `main`.`ingestr_staging`.`orders_di`) AS _numbered WHERE __bruin_dedup_rn = 1"
 	if insertSQL != wantInsert {
 		t.Fatalf("insertSQL = %q, want %q", insertSQL, wantInsert)

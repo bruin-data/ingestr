@@ -504,7 +504,7 @@ func (d *OracleDestination) MergeTable(ctx context.Context, opts destination.Mer
 	if isCDC {
 		dedupOrderBy = destination.CDCLatestOverallOrderBy(quoteColumn)
 	} else if opts.IncrementalKey != "" {
-		dedupOrderBy = quoteColumn(opts.IncrementalKey) + " DESC"
+		dedupOrderBy = quoteColumn(opts.IncrementalKey) + " DESC NULLS LAST"
 	}
 	dedupSource := func(where string) string {
 		return oracleDedupSource(columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), dedupOrderBy, where, "source")
@@ -719,7 +719,7 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 		"INSERT INTO %s (%s) %s",
 		quoteTable(opts.TargetTable),
 		colList,
-		oracleDedupSelect(opts.Columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), quoteColumn(opts.IncrementalKey)+" DESC"),
+		oracleDedupSelect(opts.Columns, opts.PrimaryKeys, quoteTable(opts.StagingTable), quoteColumn(opts.IncrementalKey)+" DESC NULLS LAST"),
 	)
 	config.Debug("[DELETE+INSERT] Executing INSERT: %s", insertSQL)
 	if _, err := tx.ExecContext(ctx, insertSQL); err != nil {
