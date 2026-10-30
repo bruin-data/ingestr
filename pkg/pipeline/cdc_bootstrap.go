@@ -40,11 +40,11 @@ func (p *Pipeline) prepareCDCNoSnapshot(ctx context.Context, manager *strategy.C
 	if err != nil {
 		return false, fmt.Errorf("failed to parse column overrides: %w", err)
 	}
-	pending, err := manager.PendingBaseline(ctx, p.config.CDCStartLSN)
+	pending, completed, err := manager.ResolveBaseline(ctx, p.config.CDCStartLSN)
 	if err != nil {
 		return false, err
 	}
-	bootstrap := p.config.CDCStartLSN != "" || len(pending) > 0
+	bootstrap := p.config.CDCStartLSN != "" && !completed || len(pending) > 0
 	if bootstrap && len(pending) == 0 {
 		empty, err := manager.StateEmpty(ctx)
 		if err != nil {
