@@ -42,7 +42,7 @@ Without `--source-table`, CDC runs in multi-table mode and replicates every tabl
 
 Listing tables does not narrow the publication — `ingestr_publication` is shared by every managed run against the database — so PostgreSQL still sends the other tables' changes and ingestr discards them. Supply your own `publication=` to control what the WAL carries. A subset also gets its own replication slot and CDC state, so changing the list starts a fresh snapshot; see [Multi-table CDC](/getting-started/cdc#multi-table-cdc).
 
-CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. With the default snapshot reader, a table becomes resumable only after its complete snapshot marker is durable, so an interrupted snapshot is safely replaced on restart. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
+CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. With the default snapshot reader, an interrupted first bootstrap without a saved stream position restarts its incomplete table snapshots. The multi-table reader can resume an incomplete keyed snapshot when the stream already has a saved position. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
 
 ### Large initial snapshots
 
@@ -82,7 +82,7 @@ Chunked snapshots use keyed `merge`. Omit `--incremental-strategy` or set it to 
 Requirements and recovery:
 
 - PostgreSQL 14 or newer is required (16 or newer when reading from a standby).
-- Every selected table needs non-null keys backed by a unique B-tree index matching the key order. Composite keys are supported.
+- Every selected table needs non-null keys backed by a unique B-tree index matching the key order, using default operator classes and each key column's collation. Partial and expression indexes are not supported. Composite keys are supported.
 - Tables with text, binary, JSON, array, decimal, or unknown column types require `REPLICA IDENTITY FULL` so CDC can supply complete values before a row's baseline has been copied. Set it before bootstrapping, for example `ALTER TABLE public.orders REPLICA IDENTITY FULL`.
 - The source needs one spare replication slot and replication connection for each temporary chunk snapshot.
 - The destination must support CDC-aware keyed merges, table truncation, and managed CDC state. Chunked snapshots use checkpointed merges even for finite full-refresh runs; they do not use the replacement table swap or repartition path.
@@ -124,6 +124,8 @@ Tables created on the source after CDC has been set up are picked up automatical
 
 - **Without `--stream`**: the next run detects tables that have no state in the destination, snapshots their existing rows through a temporary replication slot (the main slot's position is untouched), and then streams their changes alongside the other tables.
 - **With `--stream`**: the running stream re-checks the source every `discover_interval`. When a new eligible table appears, the stream exits before changing destination data and reports that a restart is required. On restart, the table is included in the normal snapshot-and-stream path while the replication slot retains intervening WAL.
+
+With `--cdc-snapshot-chunked`, the saved checkpoint fixes the selected table set. Adding tables requires `--full-refresh` to establish a new snapshot; an ordinary restart rejects the changed table set.
 
 With a user-managed publication (`publication=` supplied), ingestr never alters the publication: a new table is picked up after you run `ALTER PUBLICATION ... ADD TABLE` yourself (or immediately, if the publication was created `FOR ALL TABLES`).
 
