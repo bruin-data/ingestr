@@ -78,7 +78,7 @@ func (a *attachedCatalog) writeViaMemoryStage(ctx context.Context, d *DuckDBDest
 
 	memOpts := opts
 	memOpts.Table = "main." + memName // schema-qualified only: no ADBC catalog option
-	if err := d.Write(ctx, records, memOpts); err != nil {
+	if err := d.writeViaADBCIngest(ctx, records, memOpts); err != nil {
 		_ = restore()
 		return fmt.Errorf("%s: load in-memory stage: %w", a.name, err)
 	}
