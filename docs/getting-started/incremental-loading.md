@@ -230,7 +230,8 @@ Here's how the delete+insert strategy works:
   - The start and end bounds are resolved independently.
   - Each bound can be supplied explicitly with `--interval-start` or `--interval-end`.
   - Any omitted bound is inferred from the minimum or maximum `incremental_key` value found in the staging table.
-  - If either bound is omitted and cannot be inferred from staged rows, ingestr skips the delete and insert.
+  - If no rows are staged and either bound is omitted, ingestr skips the delete and insert. With both explicit bounds, an empty input still deletes the specified interval.
+  - Nonempty input must contain a supported, consistently typed incremental key in every batch. Missing or unsupported keys, incompatible key types across batches, and NULL keys fail the run before destination rows are deleted or inserted; staging is retained for inspection, subject to the destination's staging expiration policy.
 - The existing rows in the destination table whose `incremental_key` is between the interval start and end are deleted.
 - The staged rows are inserted into the destination table.
 
@@ -258,6 +259,7 @@ COMMIT;
 Some destinations send the bounds as query parameters instead of literal values. For example, SQL Server-style logs may show `@p1` and `@p2`; these are the interval start and interval end values bound by ingestr at execution time.
 
 A few important notes about the `delete+insert` strategy: 
+- NULL incremental keys are rejected, even when explicit bounds are supplied. NULL does not belong to a range, so inserting NULL-key rows would accumulate them on repeated runs. Filter them out or replace them with a meaningful non-NULL key in the source query. Existing destination rows with NULL keys are outside the replacement interval and remain untouched.
 - it does not guarantee the order of the rows in the destination table, as it will delete and insert the rows in the destination table.
 - it does not deduplicate by `incremental_key`, which means you may have multiple rows with the same `incremental_key` in the destination table.
 - `primary_key` deduplication is destination-specific. Some destinations collapse duplicate staged rows during the insert or overwrite step and keep the latest row per primary key by `incremental_key`; others insert every staged row.

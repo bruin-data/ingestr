@@ -311,7 +311,7 @@ func TestDeleteInsertStrategy_Execute_RejectsUnsupportedDestinationBeforeStaging
 	}
 }
 
-func TestDeleteInsertStrategy_Execute_SkipsWhenNoIntervalDetected(t *testing.T) {
+func TestDeleteInsertStrategy_Execute_RejectsMissingIncrementalKey(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
 	job.Config.IncrementalKey = "id"
@@ -320,8 +320,8 @@ func TestDeleteInsertStrategy_Execute_SkipsWhenNoIntervalDetected(t *testing.T) 
 	src.readCh = mustClosedRecords(source.RecordBatchResult{Batch: rec})
 
 	strat := &DeleteInsertStrategy{}
-	if err := strat.Execute(context.Background(), job); err != nil {
-		t.Fatalf("Execute returned error: %v", err)
+	if err := strat.Execute(context.Background(), job); err == nil || !strings.Contains(err.Error(), "incremental key") {
+		t.Fatalf("expected missing incremental key error, got %v", err)
 	}
 
 	if len(dest.prepareCalls) != 2 {
@@ -336,8 +336,8 @@ func TestDeleteInsertStrategy_Execute_SkipsWhenNoIntervalDetected(t *testing.T) 
 		t.Fatalf("expected DeleteInsertTable not to be called, got %+v", dest.diCalls)
 	}
 
-	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != staging {
-		t.Fatalf("expected DropTable(%q), got %v", staging, dest.dropCalls)
+	if len(dest.dropCalls) != 0 {
+		t.Fatalf("failed staging must be retained, got drops %v", dest.dropCalls)
 	}
 }
 
