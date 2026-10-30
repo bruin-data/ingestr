@@ -42,7 +42,52 @@ Without `--source-table`, CDC runs in multi-table mode and replicates every tabl
 
 Listing tables does not narrow the publication — `ingestr_publication` is shared by every managed run against the database — so PostgreSQL still sends the other tables' changes and ingestr discards them. Supply your own `publication=` to control what the WAL carries. A subset also gets its own replication slot and CDC state, so changing the list starts a fresh snapshot; see [Multi-table CDC](/getting-started/cdc#multi-table-cdc).
 
-CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. A table becomes resumable only after its complete snapshot marker is durable, so an interrupted snapshot is safely replaced on restart. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
+CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. With the default snapshot reader, an interrupted first bootstrap without a saved stream position restarts its incomplete table snapshots. The multi-table reader can resume an incomplete keyed snapshot when the stream already has a saved position. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
+
+### Large initial snapshots
+
+Enable `--cdc-snapshot-chunked` to read PostgreSQL CDC snapshots in bounded chunks, each in a separate transaction. This is opt-in; omitting the flag preserves the default snapshot reader. The chunk reader releases its source transaction before waiting for destination writes, limiting the snapshot horizon held by a slow load.
+
+After each chunk, ingestr catches up the selected tables' change stream, merges the resulting rows, and saves a durable chunk checkpoint. Changes to already copied rows and rows outside the current chunk are included. An interrupted first bootstrap can resume from its completed chunks. Single-table and multi-table selections are supported; omit `--stream` to catch up and exit, or include it to continue processing changes.
+
+```bash
+ingestr ingest \
+  --source-uri 'postgres+cdc://user:password@host/database?publication=my_pub' \
+  --source-table public.orders \
+  --dest-uri 'postgres://user:password@destination/warehouse' \
+  --dest-table public.orders \
+  --cdc-snapshot-chunked \
+  --cdc-snapshot-chunk-size 10000 \
+  --cdc-snapshot-chunk-timeout 30s \
+  --cdc-wal-staging inmemory \
+  --cdc-wal-buffer-bytes 67108864 \
+  --stream
+```
+
+Choose where pending logical changes are staged:
+
+| `--cdc-wal-staging` | Pending events | Recovery storage |
+|---|---|---|
+| `inmemory` (default) | Bounded process memory | PostgreSQL retains the source WAL needed to replay changes after a restart. |
+| `destination` | A managed staging table in the destination | Pending logical changes and recovery state persist in the destination. |
+
+Both modes save chunk cursors and recovery metadata in the destination's managed `cdc_snapshot_wal` table. The `destination` option also stores pending logical replication events there, not PostgreSQL WAL segment files. Keep the managed staging namespace alongside the connector's CDC state across restarts. The journal is part of recovery state and must not be deleted while a snapshot is in progress.
+
+Chunking bounds source transaction duration; it does not by itself bound source WAL retention. In memory mode, changes that are not yet recoverable from the destination keep the replication slot's safe position from advancing. Destination staging adds write and storage costs in exchange for durable pending events. A table remains incomplete while its initial snapshot and required catch-up are in progress.
+
+The chunk size, timeout, and pending-event memory budget must be positive. They default to `10000` rows, `30s`, and `67108864` bytes (64 MiB). The memory budget is a buffering threshold, not a bound on total process memory: a decoded change group, individual row, and snapshot buffers add overhead. The timeout includes temporary replication-slot creation; an expired chunk fails safely and can be retried on the next run. Chunked snapshots cannot be combined with `--cdc-snapshot-mode never` or `--cdc-start-lsn`. Environment variables are `INGESTR_CDC_SNAPSHOT_CHUNKED`, `INGESTR_CDC_SNAPSHOT_CHUNK_SIZE`, `INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT`, `INGESTR_CDC_WAL_STAGING`, and `INGESTR_CDC_WAL_BUFFER_BYTES`.
+
+Chunked snapshots use keyed `merge`. Omit `--incremental-strategy` or set it to `merge`; explicit non-merge strategies are rejected. They read complete selected tables and reject `--sql-limit`, `--sql-exclude-columns`, `--incremental-key`, `--incremental-predicate`, interval bounds, and `--extract-partition-by`.
+
+Requirements and recovery:
+
+- PostgreSQL 14 or newer is required (16 or newer when reading from a standby).
+- Every selected table needs non-null keys backed by a unique B-tree index matching the key order, using default operator classes and each key column's collation. Partial and expression indexes are not supported. Composite keys are supported.
+- Tables with text, binary, JSON, array, decimal, or unknown column types require `REPLICA IDENTITY FULL` so CDC can supply complete values before a row's baseline has been copied. Set it before bootstrapping, for example `ALTER TABLE public.orders REPLICA IDENTITY FULL`.
+- The source needs one spare replication slot and replication connection for each temporary chunk snapshot.
+- The destination must support CDC-aware keyed merges, table truncation, and managed CDC state. Chunked snapshots use checkpointed merges even for finite full-refresh runs; they do not use the replacement table swap or repartition path.
+- Keep the slot, table selection, staging namespace, and WAL staging mode stable across restarts. Changed source metadata, table selection, or replaced destinations stop the run rather than reusing incompatible progress. Establish a new snapshot with `--full-refresh` when those identities or settings change.
+- Schema changes and source `TRUNCATE` during an unfinished bootstrap stop the run. Restart with `--full-refresh` to establish a new baseline. After the bootstrap finishes, ordinary CDC truncate handling applies.
 
 ### CDC without snapshots
 
@@ -79,6 +124,8 @@ Tables created on the source after CDC has been set up are picked up automatical
 
 - **Without `--stream`**: the next run detects tables that have no state in the destination, snapshots their existing rows through a temporary replication slot (the main slot's position is untouched), and then streams their changes alongside the other tables.
 - **With `--stream`**: the running stream re-checks the source every `discover_interval`. When a new eligible table appears, the stream exits before changing destination data and reports that a restart is required. On restart, the table is included in the normal snapshot-and-stream path while the replication slot retains intervening WAL.
+
+With `--cdc-snapshot-chunked`, the saved checkpoint fixes the selected table set. Adding tables requires `--full-refresh` to establish a new snapshot; an ordinary restart rejects the changed table set.
 
 With a user-managed publication (`publication=` supplied), ingestr never alters the publication: a new table is picked up after you run `ALTER PUBLICATION ... ADD TABLE` yourself (or immediately, if the publication was created `FOR ALL TABLES`).
 

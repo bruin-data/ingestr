@@ -162,6 +162,11 @@ type IngestConfig struct {
 	KeepStaging    bool // testing only: skip final DropTable so tests can inspect staging
 
 	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to auto
+	CDCChunkedSnapshot         bool
+	CDCSnapshotChunkSize       int
+	CDCSnapshotChunkTimeout    time.Duration
+	CDCWALStaging              string // inmemory or destination
+	CDCWALBufferBytes          int64
 	CDCStartLSN                string // Bootstrap boundary for externally loaded PostgreSQL CDC targets
 	CDCResumeLSN               string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCResumeIncarnation       string
@@ -186,6 +191,12 @@ type IngestConfig struct {
 // DestinationParallelism.
 const DefaultExtractParallelism = 5
 
+const (
+	DefaultCDCSnapshotChunkSize    = 10000
+	DefaultCDCSnapshotChunkTimeout = 30 * time.Second
+	DefaultCDCWALBufferBytes       = int64(64 << 20)
+)
+
 const defaultPostgresWriteParallelism = 8
 
 func (c *IngestConfig) EffectiveDestinationParallelism() int {
@@ -209,18 +220,22 @@ func isPostgresURI(uri string) bool {
 
 func DefaultConfig() *IngestConfig {
 	return &IngestConfig{
-		IncrementalStrategy: StrategyReplace,
-		SchemaContract:      "evolve",
-		SchemaNaming:        "",
-		CDCTableNaming:      TableNamingSchemaTable,
-		CDCDeleteBehavior:   CDCDeleteSoft,
-		Progress:            ProgressInteractive,
-		PageSize:            25000,
-		MaxBatchBytes:       512 << 20, // 512 MiB
-		LoaderFileSize:      25000,
-		ExtractParallelism:  5,
-		FlushInterval:       30 * time.Second,
-		FlushRecords:        50000,
+		IncrementalStrategy:     StrategyReplace,
+		SchemaContract:          "evolve",
+		SchemaNaming:            "",
+		CDCTableNaming:          TableNamingSchemaTable,
+		CDCDeleteBehavior:       CDCDeleteSoft,
+		CDCSnapshotChunkSize:    DefaultCDCSnapshotChunkSize,
+		CDCSnapshotChunkTimeout: DefaultCDCSnapshotChunkTimeout,
+		CDCWALStaging:           "inmemory",
+		CDCWALBufferBytes:       DefaultCDCWALBufferBytes,
+		Progress:                ProgressInteractive,
+		PageSize:                25000,
+		MaxBatchBytes:           512 << 20, // 512 MiB
+		LoaderFileSize:          25000,
+		ExtractParallelism:      5,
+		FlushInterval:           30 * time.Second,
+		FlushRecords:            50000,
 	}
 }
 
@@ -311,6 +326,9 @@ func (c *IngestConfig) Validate() error {
 
 // ValidateCDCSnapshotMode also runs after loading the destination's saved policy.
 func (c *IngestConfig) ValidateCDCSnapshotMode() error {
+	if err := c.validateCDCChunkedSnapshot(); err != nil {
+		return err
+	}
 	if c.CDCSnapshotMode == "" && c.CDCStartLSN == "" {
 		return nil
 	}
@@ -345,6 +363,87 @@ func (c *IngestConfig) ValidateCDCSnapshotMode() error {
 	if c.IncrementalStrategy != "" && c.IncrementalStrategy != StrategyMerge &&
 		(c.IncrementalStrategy != StrategyReplace || c.IncrementalStrategyExplicit) {
 		return &ValidationError{Field: "incremental-strategy", Message: "CDC snapshot mode never requires merge"}
+	}
+	return nil
+}
+
+// ApplyCDCChunkedSnapshotDefaults fills options omitted by programmatic callers.
+func (c *IngestConfig) ApplyCDCChunkedSnapshotDefaults() {
+	if !c.CDCChunkedSnapshot {
+		return
+	}
+	if c.CDCSnapshotChunkSize == 0 {
+		c.CDCSnapshotChunkSize = DefaultCDCSnapshotChunkSize
+	}
+	if c.CDCSnapshotChunkTimeout == 0 {
+		c.CDCSnapshotChunkTimeout = DefaultCDCSnapshotChunkTimeout
+	}
+	if c.CDCWALStaging == "" {
+		c.CDCWALStaging = "inmemory"
+	}
+	if c.CDCWALBufferBytes == 0 {
+		c.CDCWALBufferBytes = DefaultCDCWALBufferBytes
+	}
+	if c.FlushInterval == 0 {
+		c.FlushInterval = 30 * time.Second
+	}
+	if c.FlushRecords == 0 {
+		c.FlushRecords = 50000
+	}
+}
+
+func (c *IngestConfig) validateCDCChunkedSnapshot() error {
+	if c.CDCWALStaging != "" && c.CDCWALStaging != "inmemory" && c.CDCWALStaging != "destination" {
+		return &ValidationError{Field: "cdc-wal-staging", Message: "must be inmemory or destination"}
+	}
+	if !c.CDCChunkedSnapshot {
+		return nil
+	}
+	c.ApplyCDCChunkedSnapshotDefaults()
+	u, err := url.Parse(c.SourceURI)
+	if err != nil || (u.Scheme != "postgres+cdc" && u.Scheme != "postgresql+cdc") {
+		return &ValidationError{Field: "cdc-snapshot-chunked", Message: "is only supported for postgres+cdc sources"}
+	}
+	if c.CDCSnapshotMode == "never" {
+		return &ValidationError{Field: "cdc-snapshot-chunked", Message: "cannot be combined with CDC snapshot mode never"}
+	}
+	if c.CDCStartLSN != "" {
+		return &ValidationError{Field: "cdc-snapshot-chunked", Message: "cannot be combined with --cdc-start-lsn"}
+	}
+	if c.IncrementalStrategy != "" && c.IncrementalStrategy != StrategyMerge &&
+		(c.IncrementalStrategy != StrategyReplace || c.IncrementalStrategyExplicit) {
+		return &ValidationError{Field: "incremental-strategy", Message: "chunked CDC snapshots require merge"}
+	}
+	for _, option := range []struct {
+		field string
+		set   bool
+	}{
+		{"sql-limit", c.SQLLimit != 0},
+		{"sql-exclude-columns", len(c.SQLExcludeColumns) != 0},
+		{"incremental-key", c.IncrementalKey != ""},
+		{"incremental-predicate", strings.TrimSpace(c.IncrementalPredicate) != ""},
+		{"interval-start", c.IntervalStart != nil},
+		{"interval-end", c.IntervalEnd != nil},
+		{"extract-partition-by", c.ExtractPartitionBy != ""},
+	} {
+		if option.set {
+			return &ValidationError{Field: option.field, Message: "cannot be combined with chunked CDC snapshots"}
+		}
+	}
+	if c.CDCSnapshotChunkSize <= 0 {
+		return &ValidationError{Field: "cdc-snapshot-chunk-size", Message: "must be positive"}
+	}
+	if c.CDCSnapshotChunkTimeout <= 0 {
+		return &ValidationError{Field: "cdc-snapshot-chunk-timeout", Message: "must be positive"}
+	}
+	if c.CDCWALBufferBytes <= 0 {
+		return &ValidationError{Field: "cdc-wal-buffer-bytes", Message: "must be positive"}
+	}
+	if c.FlushInterval <= 0 {
+		return &ValidationError{Field: "flush-interval", Message: "must be positive"}
+	}
+	if c.FlushRecords <= 0 {
+		return &ValidationError{Field: "flush-records", Message: "must be positive"}
 	}
 	return nil
 }
