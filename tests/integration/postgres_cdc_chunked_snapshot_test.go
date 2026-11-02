@@ -319,6 +319,7 @@ func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 
 func TestPostgresCDC_ChunkedSnapshotRejectsReplacedDestination(t *testing.T) {
 	f := newChunkedCDCFixture(t, "destination", false)
+	f.cfg.CDCSnapshotExecution = "parallel"
 	gate := f.gate(t)
 	cancel, done := f.start(t)
 	awaitChunkedSnapshotGate(t, gate, done)
