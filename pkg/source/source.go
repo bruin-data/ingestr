@@ -122,8 +122,9 @@ type ReadOptions struct {
 	CDCSlotSuffix                   string              // Optional: suffix for auto-generated replication slot names (dest-aware)
 	CDCLegacySlotSuffix             string              // Optional: prior auto-slot suffix used only for upgrade resume
 	CDCManagedState                 bool                // Consumer persists CDCStateCommitTokens independently of destination rows
-	CDCSnapshotReplace              bool                // Consumer can apply a full-snapshot replacement boundary
-	CDCStableDataBatches            bool                // Consumer requires source-stable CDC data-write identities
+	CDCChunkedSnapshot              *CDCChunkedSnapshotOptions
+	CDCSnapshotReplace              bool // Consumer can apply a full-snapshot replacement boundary
+	CDCStableDataBatches            bool // Consumer requires source-stable CDC data-write identities
 	FullRefresh                     bool
 	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
 	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
@@ -146,6 +147,7 @@ func RecordBatchBufferSize(opts ReadOptions, defaultSize int) int {
 type DurableID string
 
 type RecordBatchResult struct {
+	CDCFlush  bool // Flush preceding data and acknowledge its commit token before reading further.
 	Batch     arrow.RecordBatch
 	Err       error
 	TableName string // Source table name for multi-table sources (empty for single-table)

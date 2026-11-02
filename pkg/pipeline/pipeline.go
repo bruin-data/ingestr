@@ -128,7 +128,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		postgresCDCIdentity = identity
 	}
 	if validator, ok := src.(source.ConnectorPreflightValidator); ok {
-		if err := validator.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{Streaming: p.config.Stream}); err != nil {
+		if err := validator.ValidateConnectorPreflight(ctx, source.ConnectorPreflightOptions{Streaming: usesStreamingExecutor(p.config)}); err != nil {
 			return fmt.Errorf("source connector preflight failed: %w", err)
 		}
 	}
@@ -145,7 +145,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
-	if p.config.Stream {
+	if usesStreamingExecutor(p.config) {
 		ss, ok := src.(source.StreamingSource)
 		if !ok || !ss.SupportsStreaming() {
 			return fmt.Errorf("--stream is not supported by this source; streaming requires a change source (postgres+cdc, mysql+cdc/mariadb+cdc, vitess+cdc, ps_mysql+cdc, mssql+cdc, mssql+ct, mongodb+cdc) or a message broker source")
@@ -172,6 +172,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			retErr = errors.Join(retErr, fmt.Errorf("failed to close destination: %w", err))
 		}
 	}()
+	if p.config.CDCChunkedSnapshot {
+		if err := strategy.ValidateCDCChunkedSnapshotDestination(dest); err != nil {
+			return err
+		}
+	}
 
 	if err := validateReverseETLColumnOverrides(dest, p.config.Columns); err != nil {
 		return err
@@ -420,7 +425,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		IncrementalKey: p.config.IncrementalKey,
 		PrimaryKeys:    p.config.PrimaryKeys,
 		Strategy:       p.config.IncrementalStrategy,
-		Streaming:      p.config.Stream,
+		Streaming:      usesStreamingExecutor(p.config),
 		StrategySet:    p.config.IncrementalStrategyExplicit,
 		FullRefresh:    p.config.FullRefresh,
 	})
@@ -662,6 +667,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	// Excluded columns should be removed from the effective schema before destination
 	// preparation, even for known-schema sources where read-time filtering alone is not enough.
 	tableSchema = p.applyExcludedColumnsToSchema(tableSchema, namingConv)
+	if err := p.validateCDCChunkedSnapshotSource(ctx, src, []source.SourceTableInfo{{
+		Name: p.config.SourceTable, Schema: tableSchema, PrimaryKeys: tableSchema.PrimaryKeys,
+	}}); err != nil {
+		return err
+	}
 
 	// Preserve the original source column names before naming convention renames them.
 	// The source needs original names for its SELECT queries; the ColumnRenamer
@@ -966,7 +976,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
-	if p.config.Stream {
+	if usesStreamingExecutor(p.config) {
 		committer, _ := src.(source.StreamCommitter)
 		legacyFinalizer, _ := src.(source.CDCLegacySlotFinalizer)
 		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
@@ -1555,6 +1565,14 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	if err != nil {
 		return fmt.Errorf("failed to get tables from multi-table source: %w", err)
 	}
+	if p.config.CDCChunkedSnapshot {
+		if err := strategy.ValidateCDCChunkedSnapshotDestination(p.dest); err != nil {
+			return err
+		}
+	}
+	if err := p.validateCDCChunkedSnapshotSource(ctx, src, tables); err != nil {
+		return err
+	}
 
 	if len(tables) == 0 {
 		config.Debug("[PIPELINE] Multi-table source returned no tables")
@@ -1628,18 +1646,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		return fmt.Errorf("incremental-predicate is not supported in multi-table mode")
 	}
 
-	resolvedStrategy := p.config.IncrementalStrategy
-	if p.config.Stream && resolvedStrategy == "" {
-		if ss, ok := src.(source.StreamingSource); ok {
-			resolvedStrategy = ss.DefaultStreamingStrategy()
-		}
-	}
-	if isCDCSource(p.config.SourceURI) && (!p.config.FullRefresh || p.config.Stream) && (resolvedStrategy == "" || resolvedStrategy == config.StrategyReplace) {
-		resolvedStrategy = config.StrategyMerge
-	}
-	if p.config.FullRefresh && !p.config.Stream {
-		resolvedStrategy = config.StrategyReplace
-	}
+	resolvedStrategy := resolveMultiTableStrategy(p.config, src)
 	for _, table := range tables {
 		if err := validateCDCDeleteStrategy(p.config, resolvedStrategy, table.PrimaryKeys); err != nil {
 			return fmt.Errorf("table %q: %w", table.Name, err)
@@ -1878,7 +1885,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 		}
 	}
 
-	if p.config.Stream {
+	if usesStreamingExecutor(p.config) {
 		committer, _ := src.(source.StreamCommitter)
 		legacyFinalizer, _ := src.(source.CDCLegacySlotFinalizer)
 		exec := strategy.NewStreamingExecutor(strategy.StreamingOptions{
@@ -2853,6 +2860,9 @@ func shouldWarnCDCStrategy(cfg *config.IngestConfig, resolvedStrategy config.Inc
 }
 
 func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.SourceTable) config.IncrementalStrategy {
+	if cfg.CDCChunkedSnapshot {
+		return config.StrategyMerge
+	}
 	var s config.IncrementalStrategy
 	if src.HandlesIncrementality() {
 		s = table.Strategy()
@@ -3452,6 +3462,11 @@ func validateReverseETLOverrideColumns(columnsSpec string, sourceSchema *schema.
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {
+	if cfg.CDCChunkedSnapshot {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+	}
 	if err := cfg.ValidateCDCSnapshotMode(); err != nil {
 		return err
 	}
