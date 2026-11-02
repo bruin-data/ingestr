@@ -48,7 +48,7 @@ CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` own
 
 Enable `--cdc-snapshot-chunked` to read PostgreSQL CDC snapshots in bounded chunks, each in a separate transaction. This is opt-in; omitting the flag preserves the default snapshot reader. The chunk reader releases its source transaction before waiting for destination writes, limiting the snapshot horizon held by a slow load.
 
-Chunked snapshots use `--cdc-snapshot-cursor key` by default. On PostgreSQL 14 or newer, set `--cdc-snapshot-cursor heap` to scan physical `ctid` ranges, which can be faster for random primary keys and toasted rows. It is safe to enable heap mode for a table that has not started, including during a resumed multi-table bootstrap. A table already part-way through a key cursor keeps using key order. Environment variable: `INGESTR_CDC_SNAPSHOT_CURSOR`.
+Chunked snapshots use `--cdc-snapshot-cursor key` by default. On PostgreSQL 14 or newer, set `--cdc-snapshot-cursor heap` to scan physical `ctid` ranges, which can be faster for random primary keys and toasted rows. Heap mode requires one physical heap, so partitioned and inheritance parent tables are not supported. It is safe to enable heap mode for a table that has not started, including during a resumed multi-table bootstrap. A table already part-way through a key cursor keeps using key order. Environment variable: `INGESTR_CDC_SNAPSHOT_CURSOR`.
 
 Choose the execution order with `--cdc-snapshot-execution`:
 

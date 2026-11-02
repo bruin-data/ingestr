@@ -89,6 +89,12 @@ func loadChunkState(ctx context.Context, store source.CDCChunkStore) (*chunkBoot
 		if table.Cursor != "" && table.Cursor != "key" && table.Cursor != "heap" {
 			return nil, fmt.Errorf("invalid snapshot cursor for %s", name)
 		}
+		if table.After != nil && table.Upper == nil {
+			return nil, fmt.Errorf("snapshot cursor for %s has no upper bound", name)
+		}
+		if table.Cursor == "heap" && (table.After != nil && len(table.After) != 1 || table.Upper != nil && len(table.Upper) != 1) {
+			return nil, fmt.Errorf("invalid heap snapshot bounds for %s", name)
+		}
 		if boundary, err := pglogrepl.ParseLSN(table.Boundary); err != nil || boundary == 0 {
 			return nil, fmt.Errorf("invalid chunked snapshot boundary for %s", name)
 		}

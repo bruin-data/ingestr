@@ -44,6 +44,11 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if err := s.validateChunkedTable(ctx, table); err != nil {
 		return chunk, err
 	}
+	if cursor == "heap" {
+		if err := s.validateHeapCursorTable(ctx, table.Name); err != nil {
+			return chunk, err
+		}
+	}
 	defer func() {
 		if retErr != nil && chunk.Batch != nil {
 			chunk.Batch.Release()
@@ -114,17 +119,14 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	}
 	var query string
 	var args []any
-	keyColumns := len(table.PrimaryKeys)
-	if cursor == "heap" {
-		query, args = snapshotHeapChunkQuery(columnNames, quoteTableName(table.Name), after, chunk.UpperKey, size)
-		keyColumns = 1
-	} else {
-		keyTypes, err := snapshotKeyTypes(ctx, tx, table.Name, table.PrimaryKeys)
+	var keyTypes []string
+	if cursor != "heap" {
+		keyTypes, err = snapshotKeyTypes(ctx, tx, table.Name, table.PrimaryKeys)
 		if err != nil {
 			return chunk, err
 		}
-		query, args = snapshotChunkQuery(columnNames, quoteTableName(table.Name), table.PrimaryKeys, keyTypes, after, chunk.UpperKey, size)
 	}
+	query, args, keyColumns := snapshotChunkQueryForCursor(cursor, columnNames, quoteTableName(table.Name), table.PrimaryKeys, keyTypes, after, chunk.UpperKey, size)
 	description, err := tx.Conn().PgConn().Prepare(ctx, "", query, nil)
 	if err != nil {
 		return chunk, fmt.Errorf("failed to describe snapshot chunk query: %w", err)
@@ -201,6 +203,15 @@ func snapshotChunkQuery(columns []string, table string, keys, keyTypes, after, u
 	return query + order + fmt.Sprintf(" LIMIT $%d", len(args)), args
 }
 
+func snapshotChunkQueryForCursor(cursor string, columns []string, table string, keys, keyTypes, after, upper []string, size int) (string, []any, int) {
+	if cursor == "heap" {
+		query, args := snapshotHeapChunkQuery(columns, table, after, upper, size)
+		return query, args, 1
+	}
+	query, args := snapshotChunkQuery(columns, table, keys, keyTypes, after, upper, size)
+	return query, args, len(keys)
+}
+
 func snapshotHeapChunkQuery(columns []string, table string, after, upper []string, size int) (string, []any) {
 	query := fmt.Sprintf(
 		`SELECT %s, __ingestr_snapshot.ctid::text AS "__ingestr_key_0" FROM %s AS __ingestr_snapshot WHERE `,
@@ -249,6 +260,30 @@ func snapshotHeapUpper(ctx context.Context, tx pgx.Tx, table string) ([]string, 
 
 func snapshotHeapUpperQuery(table string) string {
 	return fmt.Sprintf("SELECT ctid::text FROM %s ORDER BY ctid DESC LIMIT 1", quoteTableName(table))
+}
+
+func (s *PostgresCDCSource) validateHeapCursorTable(ctx context.Context, table string) error {
+	schemaName, tableName := parseTableName(table)
+	var relationKind string
+	var hasChildren bool
+	err := s.queryPool.QueryRow(ctx, `
+		SELECT c.relkind::text, EXISTS (
+			SELECT 1 FROM pg_inherits WHERE inhparent = c.oid
+		)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2`, schemaName, tableName).Scan(&relationKind, &hasChildren)
+	if err != nil {
+		return fmt.Errorf("failed to validate heap cursor table %s: %w", table, err)
+	}
+	return validateHeapCursorRelation(table, relationKind, hasChildren)
+}
+
+func validateHeapCursorRelation(table, relationKind string, hasChildren bool) error {
+	if relationKind != "r" || hasChildren {
+		return fmt.Errorf("heap cursor snapshot of %s requires one physical heap; partitioned and inheritance parent tables are not supported", table)
+	}
+	return nil
 }
 
 func (s *PostgresCDCSource) validateChunkedTable(ctx context.Context, table source.SourceTableInfo) error {

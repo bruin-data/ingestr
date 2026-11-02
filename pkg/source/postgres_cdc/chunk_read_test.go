@@ -46,6 +46,30 @@ func TestSnapshotHeapChunkQueryOmitsFirstLowerBound(t *testing.T) {
 	require.Equal(t, []any{"(99,7)", 25}, args)
 }
 
+func TestSnapshotCursorSelectionControlsChunkOrder(t *testing.T) {
+	started := &chunkTableState{After: []string{"5"}, Upper: []string{"100"}}
+	cursor := snapshotCursor(started, "heap")
+	query, _, keyColumns := snapshotChunkQueryForCursor(
+		cursor, []string{`"id"`}, `"public"."items"`, []string{"id"}, []string{"bigint"},
+		started.After, started.Upper, 25,
+	)
+	require.Equal(t, "key", cursor)
+	require.Contains(t, query, `ORDER BY __ingestr_snapshot."id"`)
+	require.NotContains(t, query, "ctid")
+	require.Equal(t, 1, keyColumns)
+
+	fresh := &chunkTableState{}
+	cursor = snapshotCursor(fresh, "heap")
+	query, _, keyColumns = snapshotChunkQueryForCursor(
+		cursor, []string{`"id"`}, `"public"."new_items"`, []string{"id"}, nil,
+		fresh.After, []string{"(9,9)"}, 25,
+	)
+	require.Equal(t, "heap", cursor)
+	require.Contains(t, query, "ctid")
+	require.NotContains(t, query, "ORDER BY")
+	require.Equal(t, 1, keyColumns)
+}
+
 func TestSnapshotHeapUpperQueryDoesNotReadToastedColumns(t *testing.T) {
 	query := snapshotHeapUpperQuery("public.items")
 	require.Equal(t, `SELECT ctid::text FROM "public"."items" ORDER BY ctid DESC LIMIT 1`, query)
@@ -68,6 +92,12 @@ func TestSnapshotHeapChunkBoundsRequireOneCTID(t *testing.T) {
 	require.NoError(t, validateSnapshotChunkCursor("heap", []string{"id"}, []string{"(1,2)"}, []string{"(9,9)"}))
 	require.Error(t, validateSnapshotChunkCursor("heap", []string{"id"}, []string{}, nil))
 	require.Error(t, validateSnapshotChunkCursor("heap", []string{"id"}, []string{"(1,2)", "(1,3)"}, nil))
+}
+
+func TestValidateHeapCursorRelationRequiresOnePhysicalHeap(t *testing.T) {
+	require.NoError(t, validateHeapCursorRelation("public.items", "r", false))
+	require.ErrorContains(t, validateHeapCursorRelation("public.items", "p", true), "partitioned")
+	require.ErrorContains(t, validateHeapCursorRelation("public.items", "r", true), "inheritance")
 }
 
 func TestValidateChunkedKeys(t *testing.T) {

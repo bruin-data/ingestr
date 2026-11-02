@@ -76,6 +76,7 @@ func TestSnapshotCursorIsChosenPerTable(t *testing.T) {
 	require.Equal(t, "key", snapshotCursor(&chunkTableState{}, "key"))
 	require.Equal(t, "heap", snapshotCursor(&chunkTableState{}, "heap"))
 	require.Equal(t, "key", snapshotCursor(&chunkTableState{After: []string{"5"}}, "heap"))
+	require.Equal(t, "key", snapshotCursor(&chunkTableState{After: []string{"(1,2)"}}, "heap"))
 	require.Equal(t, "heap", snapshotCursor(&chunkTableState{Cursor: "heap"}, "key"))
 	require.Equal(t, "key", snapshotCursor(&chunkTableState{Cursor: "key"}, "heap"))
 }
@@ -104,6 +105,20 @@ func TestChunkStateLoadsLegacyKeyCursorAndExplicitHeapCursor(t *testing.T) {
 	require.Empty(t, loaded.Tables["public.items"].Cursor)
 	require.Equal(t, "key", snapshotCursor(loaded.Tables["public.items"], "heap"))
 	require.Equal(t, "heap", snapshotCursor(loaded.Tables["public.heap_items"], "key"))
+}
+
+func TestChunkStateRejectsResumableCursorWithoutUpperBound(t *testing.T) {
+	store := newChunkTestStore()
+	state := chunkTestState(store.identity)
+	state.Tables["public.items"] = &chunkTableState{
+		Cursor: "heap", Boundary: FormatLSN(10), Initialized: true, After: []string{"(1,2)"},
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, store.Save(t.Context(), chunkStateKey, data))
+
+	_, err = loadChunkState(t.Context(), store)
+	require.ErrorContains(t, err, "no upper bound")
 }
 
 func TestChunkedCommitPersistsBeforeAcknowledgingWAL(t *testing.T) {

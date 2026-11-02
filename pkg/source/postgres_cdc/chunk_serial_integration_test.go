@@ -257,6 +257,75 @@ func TestSerialChunkedSnapshotResumesAndCatchesUp(t *testing.T) {
 	require.True(t, confirmed, "finite catchup must confirm its durable checkpoint before returning")
 }
 
+func TestSerialHeapSnapshotResumeCommitsEachStaticRowOnce(t *testing.T) {
+	f := newSerialSnapshotFixture(t)
+	f.opts.CDCChunkedSnapshot.Cursor = "heap"
+	counts := make(map[int64]int)
+
+	first, table := f.open(t)
+	readCtx, stopRead := context.WithCancel(f.ctx)
+	results, err := table.Read(readCtx, f.opts)
+	require.NoError(t, err)
+	var pending []int64
+	var committedFirstChunk bool
+	for result := range results {
+		require.NoError(t, result.Err)
+		if result.Batch != nil {
+			ids := result.Batch.Column(result.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+			pending = append(pending, ids.Int64Values()...)
+			result.Batch.Release()
+		}
+		if !result.CDCFlush {
+			continue
+		}
+		token := result.CommitToken.(source.CDCStateCommitToken)
+		state := token.SourceCommitToken.(*chunkedCommit).state
+		require.NoError(t, first.CommitStream(f.ctx, result.CommitToken))
+		for _, id := range pending {
+			counts[id]++
+		}
+		pending = nil
+		if state.Tables[serialSnapshotTable].After != nil {
+			require.Equal(t, "heap", state.Tables[serialSnapshotTable].Cursor)
+			stopRead()
+			committedFirstChunk = true
+			break
+		}
+	}
+	require.True(t, committedFirstChunk)
+	for result := range results {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	require.NoError(t, first.Close(f.ctx))
+
+	second, table := f.open(t)
+	results, err = table.Read(f.ctx, f.opts)
+	require.NoError(t, err)
+	pending = nil
+	for result := range results {
+		require.NoError(t, result.Err)
+		if result.Batch != nil {
+			ids := result.Batch.Column(result.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+			pending = append(pending, ids.Int64Values()...)
+			result.Batch.Release()
+		}
+		if !result.CDCFlush {
+			continue
+		}
+		require.NoError(t, second.CommitStream(f.ctx, result.CommitToken))
+		for _, id := range pending {
+			counts[id]++
+		}
+		pending = nil
+	}
+	require.Empty(t, pending)
+	for id := int64(1); id <= 9; id++ {
+		require.Equal(t, 1, counts[id], "row %d was not committed exactly once", id)
+	}
+}
+
 func TestSerialChunkedSnapshotResumesCopiedTablesBeforeCertification(t *testing.T) {
 	f := newSerialSnapshotFixture(t)
 	first, table := f.open(t)

@@ -386,29 +386,6 @@ func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 	}
 }
 
-func TestPostgresCDC_HeapSnapshotResumesStaticTableWithoutRecopy(t *testing.T) {
-	f := newChunkedCDCFixture(t, "inmemory", false)
-	f.cfg.CDCSnapshotExecution = "parallel"
-	f.cfg.CDCSnapshotCursor = "heap"
-	gate := f.gate(t)
-	cancel, done := f.start(t)
-	awaitChunkedSnapshotGate(t, gate, done)
-	var firstPosition string
-	require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT _cdc_lsn FROM public.items WHERE id = 1").Scan(&firstPosition))
-	cancel()
-	_ = awaitChunkedSnapshotRun(t, done)
-	close(gate.release)
-
-	require.NoError(t, pipeline.New(f.cfg).Run(f.ctx))
-	var resumedPosition string
-	require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT _cdc_lsn FROM public.items WHERE id = 1").Scan(&resumedPosition))
-	require.Equal(t, firstPosition, resumedPosition)
-	var total, distinct int
-	require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT count(*), count(DISTINCT id) FROM public.items").Scan(&total, &distinct))
-	require.Equal(t, 12, total)
-	require.Equal(t, total, distinct)
-}
-
 func TestPostgresCDC_ChunkedSnapshotRejectsReplacedDestination(t *testing.T) {
 	f := newChunkedCDCFixture(t, "destination", false)
 	f.cfg.CDCSnapshotExecution = "parallel"
