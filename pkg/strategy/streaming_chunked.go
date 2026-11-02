@@ -63,12 +63,20 @@ func (e *StreamingExecutor) chunkedSnapshotOptions(cfg *config.IngestConfig, des
 	if e.opts.FlushRecords == 0 {
 		e.opts.FlushRecords = int64(cfg.FlushRecords)
 	}
+	var refreshID string
+	e.opts.StateManager.mu.Lock()
+	if refresh := e.opts.StateManager.refresh; refresh != nil && !refresh.complete {
+		refreshID = refresh.ID
+	}
+	e.opts.StateManager.mu.Unlock()
 	return &source.CDCChunkedSnapshotOptions{
+		Execution:      cfg.CDCSnapshotExecution,
 		ChunkSize:      cfg.CDCSnapshotChunkSize,
 		ChunkTimeout:   cfg.CDCSnapshotChunkTimeout,
 		WALStaging:     cfg.CDCWALStaging,
 		WALBufferBytes: cfg.CDCWALBufferBytes,
 		Continuous:     cfg.Stream,
+		RefreshID:      refreshID,
 		Store:          e.opts.StateManager.ChunkStore(),
 	}, nil
 }

@@ -163,6 +163,7 @@ type IngestConfig struct {
 
 	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to auto
 	CDCChunkedSnapshot         bool
+	CDCSnapshotExecution       string // parallel or serial
 	CDCSnapshotChunkSize       int
 	CDCSnapshotChunkTimeout    time.Duration
 	CDCWALStaging              string // inmemory or destination
@@ -225,6 +226,7 @@ func DefaultConfig() *IngestConfig {
 		SchemaNaming:            "",
 		CDCTableNaming:          TableNamingSchemaTable,
 		CDCDeleteBehavior:       CDCDeleteSoft,
+		CDCSnapshotExecution:    "parallel",
 		CDCSnapshotChunkSize:    DefaultCDCSnapshotChunkSize,
 		CDCSnapshotChunkTimeout: DefaultCDCSnapshotChunkTimeout,
 		CDCWALStaging:           "inmemory",
@@ -372,6 +374,9 @@ func (c *IngestConfig) ApplyCDCChunkedSnapshotDefaults() {
 	if !c.CDCChunkedSnapshot {
 		return
 	}
+	if c.CDCSnapshotExecution == "" {
+		c.CDCSnapshotExecution = "parallel"
+	}
 	if c.CDCSnapshotChunkSize == 0 {
 		c.CDCSnapshotChunkSize = DefaultCDCSnapshotChunkSize
 	}
@@ -393,6 +398,9 @@ func (c *IngestConfig) ApplyCDCChunkedSnapshotDefaults() {
 }
 
 func (c *IngestConfig) validateCDCChunkedSnapshot() error {
+	if c.CDCSnapshotExecution != "" && c.CDCSnapshotExecution != "parallel" && c.CDCSnapshotExecution != "serial" {
+		return &ValidationError{Field: "cdc-snapshot-execution", Message: "must be parallel or serial"}
+	}
 	if c.CDCWALStaging != "" && c.CDCWALStaging != "inmemory" && c.CDCWALStaging != "destination" {
 		return &ValidationError{Field: "cdc-wal-staging", Message: "must be inmemory or destination"}
 	}
@@ -400,6 +408,9 @@ func (c *IngestConfig) validateCDCChunkedSnapshot() error {
 		return nil
 	}
 	c.ApplyCDCChunkedSnapshotDefaults()
+	if c.CDCSnapshotExecution == "serial" && c.CDCWALStaging == "destination" {
+		return &ValidationError{Field: "cdc-wal-staging", Message: "destination staging requires --cdc-snapshot-execution parallel; serial execution retains pending changes in source WAL"}
+	}
 	u, err := url.Parse(c.SourceURI)
 	if err != nil || (u.Scheme != "postgres+cdc" && u.Scheme != "postgresql+cdc") {
 		return &ValidationError{Field: "cdc-snapshot-chunked", Message: "is only supported for postgres+cdc sources"}

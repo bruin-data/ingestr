@@ -48,7 +48,14 @@ CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` own
 
 Enable `--cdc-snapshot-chunked` to read PostgreSQL CDC snapshots in bounded chunks, each in a separate transaction. This is opt-in; omitting the flag preserves the default snapshot reader. The chunk reader releases its source transaction before waiting for destination writes, limiting the snapshot horizon held by a slow load.
 
-After each chunk, ingestr catches up the selected tables' change stream, merges the resulting rows, and saves a durable chunk checkpoint. Changes to already copied rows and rows outside the current chunk are included. An interrupted first bootstrap can resume from its completed chunks. Single-table and multi-table selections are supported; omit `--stream` to catch up and exit, or include it to continue processing changes.
+Choose the execution order with `--cdc-snapshot-execution`:
+
+| Execution | Copying and change processing | Pending changes |
+|---|---|---|
+| `parallel` (default) | Decode changes while copying chunks; catch up the selected tables' change stream after each chunk. | Stage decoded events in memory or in the destination. |
+| `serial` | Copy every selected table in chunks, then decode and apply changes from retained WAL. | Keep WAL in the PostgreSQL replication slot throughout the copy. No concurrent decoder runs during copying. |
+
+Both execution modes save durable chunk checkpoints, so an interrupted first bootstrap can resume from completed chunks. Catch-up includes changes to already copied rows and rows outside the current chunk. Single-table and multi-table selections are supported; omit `--stream` to catch up and exit, or include it to continue processing changes. Serial execution simplifies the copy phase, but the source must have enough space to retain all WAL needed from the initial boundary until copying and catch-up finish.
 
 ```bash
 ingestr ingest \
@@ -57,6 +64,7 @@ ingestr ingest \
   --dest-uri 'postgres://user:password@destination/warehouse' \
   --dest-table public.orders \
   --cdc-snapshot-chunked \
+  --cdc-snapshot-execution parallel \
   --cdc-snapshot-chunk-size 10000 \
   --cdc-snapshot-chunk-timeout 30s \
   --cdc-wal-staging inmemory \
@@ -64,18 +72,20 @@ ingestr ingest \
   --stream
 ```
 
-Choose where pending logical changes are staged:
+For parallel execution, choose where pending logical changes are staged:
 
 | `--cdc-wal-staging` | Pending events | Recovery storage |
 |---|---|---|
 | `inmemory` (default) | Bounded process memory | PostgreSQL retains the source WAL needed to replay changes after a restart. |
 | `destination` | A managed staging table in the destination | Pending logical changes and recovery state persist in the destination. |
 
-Both modes save chunk cursors and recovery metadata in the destination's managed `cdc_snapshot_wal` table. The `destination` option also stores pending logical replication events there, not PostgreSQL WAL segment files. Keep the managed staging namespace alongside the connector's CDC state across restarts. The journal is part of recovery state and must not be deleted while a snapshot is in progress.
+To use serial execution, set `--cdc-snapshot-execution serial` and keep `--cdc-wal-staging inmemory`. Serial execution does not accumulate decoded events during copying: the source retains the WAL instead. Combining serial execution with destination staging is rejected.
 
-Chunking bounds source transaction duration; it does not by itself bound source WAL retention. In memory mode, changes that are not yet recoverable from the destination keep the replication slot's safe position from advancing. Destination staging adds write and storage costs in exchange for durable pending events. A table remains incomplete while its initial snapshot and required catch-up are in progress.
+All execution and staging choices save chunk cursors and recovery metadata in the destination's managed `cdc_snapshot_wal` table. Parallel execution with `destination` staging also stores pending logical replication events there, not PostgreSQL WAL segment files. Keep the managed staging namespace alongside the connector's CDC state across restarts. The journal is part of recovery state and must not be deleted while a snapshot is in progress.
 
-The chunk size, timeout, and pending-event memory budget must be positive. They default to `10000` rows, `30s`, and `67108864` bytes (64 MiB). The memory budget is a buffering threshold, not a bound on total process memory: a decoded change group, individual row, and snapshot buffers add overhead. The timeout includes temporary replication-slot creation; an expired chunk fails safely and can be retried on the next run. Chunked snapshots cannot be combined with `--cdc-snapshot-mode never` or `--cdc-start-lsn`. Environment variables are `INGESTR_CDC_SNAPSHOT_CHUNKED`, `INGESTR_CDC_SNAPSHOT_CHUNK_SIZE`, `INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT`, `INGESTR_CDC_WAL_STAGING`, and `INGESTR_CDC_WAL_BUFFER_BYTES`.
+Chunking bounds source transaction duration; it does not by itself bound source WAL retention. With parallel execution and memory staging, changes that are not yet recoverable from the destination keep the replication slot's safe position from advancing. Destination staging adds write and storage costs in exchange for durable pending events. Serial execution retains the initial WAL boundary until all tables have been copied, then advances through catch-up. A table remains incomplete while its initial snapshot and required catch-up are in progress.
+
+The chunk size, timeout, and pending-event memory budget must be positive. They default to `10000` rows, `30s`, and `67108864` bytes (64 MiB). The memory budget is a buffering threshold, not a bound on total process memory: a decoded change group, individual row, and snapshot buffers add overhead. It does not limit the source WAL retained by serial execution. The timeout includes temporary replication-slot creation; an expired chunk fails safely and can be retried on the next run. Chunked snapshots cannot be combined with `--cdc-snapshot-mode never` or `--cdc-start-lsn`. Environment variables are `INGESTR_CDC_SNAPSHOT_CHUNKED`, `INGESTR_CDC_SNAPSHOT_EXECUTION`, `INGESTR_CDC_SNAPSHOT_CHUNK_SIZE`, `INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT`, `INGESTR_CDC_WAL_STAGING`, and `INGESTR_CDC_WAL_BUFFER_BYTES`.
 
 Chunked snapshots use keyed `merge`. Omit `--incremental-strategy` or set it to `merge`; explicit non-merge strategies are rejected. They read complete selected tables and reject `--sql-limit`, `--sql-exclude-columns`, `--incremental-key`, `--incremental-predicate`, interval bounds, and `--extract-partition-by`.
 
@@ -86,7 +96,7 @@ Requirements and recovery:
 - Tables with text, binary, JSON, array, decimal, or unknown column types require `REPLICA IDENTITY FULL` so CDC can supply complete values before a row's baseline has been copied. Set it before bootstrapping, for example `ALTER TABLE public.orders REPLICA IDENTITY FULL`.
 - The source needs one spare replication slot and replication connection for each temporary chunk snapshot.
 - The destination must support CDC-aware keyed merges, table truncation, and managed CDC state. Chunked snapshots use checkpointed merges even for finite full-refresh runs; they do not use the replacement table swap or repartition path.
-- Keep the slot, table selection, staging namespace, and WAL staging mode stable across restarts. Changed source metadata, table selection, or replaced destinations stop the run rather than reusing incompatible progress. Establish a new snapshot with `--full-refresh` when those identities or settings change.
+- Keep the slot, table selection, staging namespace, execution mode, and WAL staging mode stable across restarts. Changed source metadata, table selection, or replaced destinations stop the run rather than reusing incompatible progress. Establish a new snapshot with `--full-refresh` when those identities or settings change.
 - Schema changes and source `TRUNCATE` during an unfinished bootstrap stop the run. Restart with `--full-refresh` to establish a new baseline. After the bootstrap finishes, ordinary CDC truncate handling applies.
 
 ### CDC without snapshots

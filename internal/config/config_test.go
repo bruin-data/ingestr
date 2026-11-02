@@ -788,6 +788,13 @@ func TestIngestConfigValidateCDCChunkedSnapshot(t *testing.T) {
 	}{
 		{name: "inmemory", change: func(c *IngestConfig) {}},
 		{name: "destination", change: func(c *IngestConfig) { c.CDCWALStaging = "destination" }},
+		{name: "serial", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "serial" }},
+		{name: "serial destination", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "serial"; c.CDCWALStaging = "destination" }, wantErr: "destination staging requires --cdc-snapshot-execution parallel"},
+		{name: "disabled serial destination", change: func(c *IngestConfig) {
+			c.CDCChunkedSnapshot, c.CDCSnapshotExecution, c.CDCWALStaging = false, "serial", "destination"
+		}},
+		{name: "unknown execution", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "concurrent" }, wantErr: "cdc-snapshot-execution must be parallel or serial"},
+		{name: "unknown execution while disabled", change: func(c *IngestConfig) { c.CDCChunkedSnapshot = false; c.CDCSnapshotExecution = "concurrent" }, wantErr: "cdc-snapshot-execution must be parallel or serial"},
 		{name: "alias", change: func(c *IngestConfig) { c.SourceURI = "postgresql+cdc://localhost/db" }},
 		{name: "multi table", change: func(c *IngestConfig) { c.SourceTable = ""; c.SourceTables = []string{"public.a", "public.b"} }},
 		{name: "wrong source", change: func(c *IngestConfig) { c.SourceURI = "mysql+cdc://localhost/db" }, wantErr: "only supported for postgres+cdc"},
@@ -842,6 +849,9 @@ func TestCDCChunkedSnapshotProgrammaticDefaults(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	if cfg.CDCSnapshotExecution != "parallel" {
+		t.Fatalf("chunked snapshot execution = %q, want parallel", cfg.CDCSnapshotExecution)
+	}
 	if cfg.CDCSnapshotChunkSize != DefaultCDCSnapshotChunkSize ||
 		cfg.CDCSnapshotChunkTimeout != DefaultCDCSnapshotChunkTimeout ||
 		cfg.CDCWALBufferBytes != DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
@@ -861,9 +871,12 @@ func TestCDCChunkedSnapshotDisabledByDefault(t *testing.T) {
 	if DefaultConfig().CDCChunkedSnapshot {
 		t.Fatal("chunked snapshots must be opt in")
 	}
+	if DefaultConfig().CDCSnapshotExecution != "parallel" {
+		t.Fatal("chunked snapshot execution must default to parallel")
+	}
 	cfg := &IngestConfig{}
 	cfg.ApplyCDCChunkedSnapshotDefaults()
-	if cfg.CDCSnapshotChunkSize != 0 || cfg.CDCSnapshotChunkTimeout != 0 || cfg.CDCWALBufferBytes != 0 || cfg.CDCWALStaging != "" {
+	if cfg.CDCSnapshotExecution != "" || cfg.CDCSnapshotChunkSize != 0 || cfg.CDCSnapshotChunkTimeout != 0 || cfg.CDCWALBufferBytes != 0 || cfg.CDCWALStaging != "" {
 		t.Fatal("chunked snapshot defaults changed a disabled configuration")
 	}
 }

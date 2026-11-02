@@ -95,6 +95,14 @@ type chunkedCDCFixture struct {
 	cfg *config.IngestConfig
 }
 
+func chunkedSnapshotModes() []struct{ execution, staging string } {
+	return []struct{ execution, staging string }{
+		{execution: "parallel", staging: "inmemory"},
+		{execution: "parallel", staging: "destination"},
+		{execution: "serial", staging: "inmemory"},
+	}
+}
+
 func newChunkedCDCFixture(t *testing.T, staging string, multi bool) *chunkedCDCFixture {
 	t.Helper()
 	if testing.Short() {
@@ -215,10 +223,11 @@ func (f *chunkedCDCFixture) assertSlotCheckpoint(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotFinite(t *testing.T) {
-	for _, staging := range []string{"inmemory", "destination"} {
+	for _, mode := range chunkedSnapshotModes() {
 		for _, multi := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/multi=%t", staging, multi), func(t *testing.T) {
-				f := newChunkedCDCFixture(t, staging, multi)
+			t.Run(fmt.Sprintf("%s/%s/multi=%t", mode.execution, mode.staging, multi), func(t *testing.T) {
+				f := newChunkedCDCFixture(t, mode.staging, multi)
+				f.cfg.CDCSnapshotExecution = mode.execution
 				require.NoError(t, pipeline.New(f.cfg).Run(f.ctx))
 				f.assertRows(t, "public.items", "id, amount, md5(payload)", "id")
 				f.assertSlotCheckpoint(t)
@@ -239,9 +248,10 @@ func TestPostgresCDC_ChunkedSnapshotFinite(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
-	for _, staging := range []string{"inmemory", "destination"} {
-		t.Run(staging, func(t *testing.T) {
-			f := newChunkedCDCFixture(t, staging, false)
+	for _, mode := range chunkedSnapshotModes() {
+		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
+			f := newChunkedCDCFixture(t, mode.staging, false)
+			f.cfg.CDCSnapshotExecution = mode.execution
 			f.cfg.Stream = true
 			f.cfg.IncrementalStrategy = config.StrategyMerge
 			gate := f.gate(t)
@@ -281,9 +291,10 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
-	for _, staging := range []string{"inmemory", "destination"} {
-		t.Run(staging, func(t *testing.T) {
-			f := newChunkedCDCFixture(t, staging, false)
+	for _, mode := range chunkedSnapshotModes() {
+		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
+			f := newChunkedCDCFixture(t, mode.staging, false)
+			f.cfg.CDCSnapshotExecution = mode.execution
 			gate := f.gate(t)
 			cancel, done := f.start(t)
 			awaitChunkedSnapshotGate(t, gate, done)

@@ -408,6 +408,7 @@ func clearCDCChunkedSnapshotEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"INGESTR_CDC_SNAPSHOT_CHUNKED", "INGESTR_CDC_SNAPSHOT_CHUNK_SIZE",
+		"INGESTR_CDC_SNAPSHOT_EXECUTION",
 		"INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "INGESTR_CDC_WAL_STAGING",
 		"INGESTR_CDC_WAL_BUFFER_BYTES", "INGESTR_CDC_SNAPSHOT_MODE", "INGESTR_CDC_START_LSN",
 	} {
@@ -448,6 +449,7 @@ func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cfg.CDCChunkedSnapshot != (tt.name == "enabled") ||
+				cfg.CDCSnapshotExecution != "parallel" ||
 				cfg.CDCSnapshotChunkSize != config.DefaultCDCSnapshotChunkSize ||
 				cfg.CDCSnapshotChunkTimeout != config.DefaultCDCSnapshotChunkTimeout ||
 				cfg.CDCWALBufferBytes != config.DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
@@ -478,6 +480,46 @@ func TestIngestConfigCDCChunkedSnapshotOptions(t *testing.T) {
 			}
 			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotChunkSize != 123 || cfg.CDCSnapshotChunkTimeout != 1250*time.Millisecond || cfg.CDCWALStaging != "destination" || cfg.CDCWALBufferBytes != 1<<32 {
 				t.Fatalf("chunked snapshot config = (%v, %d, %s, %q, %d)", cfg.CDCChunkedSnapshot, cfg.CDCSnapshotChunkSize, cfg.CDCSnapshotChunkTimeout, cfg.CDCWALStaging, cfg.CDCWALBufferBytes)
+			}
+		})
+	}
+}
+
+func TestIngestConfigCDCChunkedSnapshotExecution(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		env     string
+		want    string
+		wantErr string
+	}{
+		{name: "parallel flag", args: []string{"--cdc-snapshot-execution=parallel"}, want: "parallel"},
+		{name: "serial flag", args: []string{"--cdc-snapshot-execution=serial"}, want: "serial"},
+		{name: "serial environment", env: "serial", want: "serial"},
+		{name: "flag overrides environment", args: []string{"--cdc-snapshot-execution=parallel"}, env: "serial", want: "parallel"},
+		{name: "unknown flag", args: []string{"--cdc-snapshot-execution=concurrent"}, wantErr: "must be parallel or serial"},
+		{name: "unknown environment", env: "concurrent", wantErr: "must be parallel or serial"},
+		{name: "serial destination", args: []string{"--cdc-snapshot-execution=serial", "--cdc-wal-staging=destination"}, wantErr: "destination staging requires --cdc-snapshot-execution parallel"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("INGESTR_CDC_SNAPSHOT_EXECUTION", tt.env)
+			}
+			args := append([]string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}, tt.args...)
+			cfg, err := parseIngestConfig(t, args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotExecution != tt.want {
+				t.Fatalf("chunked snapshot execution = %q, want %q (enabled = %v)", cfg.CDCSnapshotExecution, tt.want, cfg.CDCChunkedSnapshot)
 			}
 		})
 	}

@@ -20,29 +20,47 @@ type chunkTableState struct {
 	After       []string `json:"after,omitempty"`
 	Upper       []string `json:"upper,omitempty"`
 	Boundary    string   `json:"boundary"`
+	ReplayFrom  string   `json:"replay_from,omitempty"`
 	Initialized bool     `json:"initialized"`
 	Done        bool     `json:"done"`
 }
 
 type chunkBootstrapState struct {
-	Version       int                         `json:"version"`
-	Epoch         string                      `json:"epoch"`
-	Identity      string                      `json:"identity"`
-	Slot          string                      `json:"slot"`
-	Mode          string                      `json:"mode"`
-	Applied       pglogrepl.LSN               `json:"applied"`
-	Consumed      uint64                      `json:"consumed"`
-	Tables        map[string]*chunkTableState `json:"tables"`
-	RetiredEpochs []chunkRetiredEpoch         `json:"retired_epochs,omitempty"`
+	Version          int                         `json:"version"`
+	Epoch            string                      `json:"epoch"`
+	Identity         string                      `json:"identity"`
+	Slot             string                      `json:"slot"`
+	Mode             string                      `json:"mode"`
+	Execution        string                      `json:"execution,omitempty"`
+	RefreshID        string                      `json:"refresh_id,omitempty"`
+	SnapshotComplete bool                        `json:"snapshot_complete,omitempty"`
+	Applied          pglogrepl.LSN               `json:"applied"`
+	Consumed         uint64                      `json:"consumed"`
+	Tables           map[string]*chunkTableState `json:"tables"`
+	RetiredEpochs    []chunkRetiredEpoch         `json:"retired_epochs,omitempty"`
 }
 
 func (s *chunkBootstrapState) complete() bool {
 	for _, table := range s.Tables {
-		if !table.Done {
+		if table == nil || !table.Done {
 			return false
 		}
 	}
 	return len(s.Tables) > 0
+}
+
+func (s *chunkBootstrapState) bootstrapComplete() bool {
+	return s.complete() && (s.Execution != "serial" || s.SnapshotComplete)
+}
+
+func (s *chunkBootstrapState) replayPositions() map[string]string {
+	positions := make(map[string]string)
+	for name, table := range s.Tables {
+		if table.ReplayFrom != "" {
+			positions[name] = table.ReplayFrom
+		}
+	}
+	return positions
 }
 
 func loadChunkState(ctx context.Context, store source.CDCChunkStore) (*chunkBootstrapState, error) {
@@ -57,12 +75,23 @@ func loadChunkState(ctx context.Context, store source.CDCChunkStore) (*chunkBoot
 	if state.Version != 1 || state.Epoch == "" || state.Slot == "" || state.Applied == 0 || len(state.Tables) == 0 {
 		return nil, fmt.Errorf("invalid chunked snapshot checkpoint")
 	}
+	if state.Execution != "" && state.Execution != "parallel" && state.Execution != "serial" {
+		return nil, fmt.Errorf("invalid chunked snapshot execution mode")
+	}
+	if state.Execution == "serial" && (state.Mode != "inmemory" || state.SnapshotComplete && !state.complete()) {
+		return nil, fmt.Errorf("invalid serial snapshot checkpoint")
+	}
 	for name, table := range state.Tables {
 		if name == "" || table == nil {
 			return nil, fmt.Errorf("invalid chunked snapshot table checkpoint")
 		}
 		if boundary, err := pglogrepl.ParseLSN(table.Boundary); err != nil || boundary == 0 {
 			return nil, fmt.Errorf("invalid chunked snapshot boundary for %s", name)
+		}
+		if table.ReplayFrom != "" {
+			if position, err := parseStoredPostgresLSN(table.ReplayFrom); err != nil || position == 0 || !table.Done || table.Initialized {
+				return nil, fmt.Errorf("invalid snapshot replay boundary for %s", name)
+			}
 		}
 	}
 	return &state, nil

@@ -64,7 +64,9 @@ func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.Sou
 		return nil, fmt.Errorf("chunked snapshots require destination-managed CDC merge and chunk acknowledgements")
 	}
 	if options.ChunkSize <= 0 || options.ChunkTimeout <= 0 || options.WALBufferBytes <= 0 ||
-		(options.WALStaging != "inmemory" && options.WALStaging != "destination") {
+		(options.WALStaging != "inmemory" && options.WALStaging != "destination") ||
+		(options.Execution != "" && options.Execution != "parallel" && options.Execution != "serial") ||
+		(options.Execution == "serial" && options.WALStaging == "destination") {
 		return nil, fmt.Errorf("invalid chunked snapshot options")
 	}
 	if len(tables) == 0 {
@@ -130,18 +132,25 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 		// and the independent bootstrap checkpoint. Replay from the latter.
 		resumes = nil
 	}
+	serial := r.options.Execution == "serial"
+	if serial {
+		resumes = r.state.replayPositions()
+	}
 	r.repl, err = NewMultiTableReplicator(r.source, r.tables, cfg, start, &chunkResumeFilter{positions: resumes}, true, batchBarrier{})
 	if err != nil {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, r.repl.Close(ctx)) }()
-	if err := r.repl.Start(ctx); err != nil {
-		return err
+	if !serial {
+		if err := r.repl.Start(ctx); err != nil {
+			return err
+		}
 	}
 
 	for _, table := range r.tables {
 		state := r.state.Tables[table.Name]
-		if state.Done {
+		resumeSerial := serial && !r.state.SnapshotComplete && state.Initialized
+		if state.Done && !resumeSerial {
 			continue
 		}
 		marker := source.RecordBatchResult{TableName: table.Name, Truncate: true}
@@ -169,15 +178,42 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 	}
 	for _, table := range r.tables {
 		for !r.state.Tables[table.Name].Done {
-			if err := r.copyChunk(ctx, table); err != nil {
+			var err error
+			if serial {
+				err = r.copySerialChunk(ctx, table)
+			} else {
+				err = r.copyChunk(ctx, table)
+			}
+			if err != nil {
 				return err
 			}
+		}
+	}
+	if serial {
+		if err := r.source.ValidateCDCChunkedSnapshot(ctx, r.tables); err != nil {
+			return err
+		}
+		if err := r.validateSlot(ctx, start); err != nil {
+			return err
+		}
+		if err := r.repl.Start(ctx); err != nil {
+			return err
 		}
 	}
 	if err := r.catchUp(ctx); err != nil {
 		return err
 	}
-	if err := r.checkpoint(ctx, safeCommitLSN(r.repl, r.accum), nil); err != nil {
+	var snapshots map[string]string
+	if serial && !r.state.SnapshotComplete {
+		snapshots = make(map[string]string)
+		for name, table := range r.state.Tables {
+			if table.Initialized {
+				snapshots[name] = table.Boundary
+			}
+		}
+		r.state.SnapshotComplete = true
+	}
+	if err := r.checkpoint(ctx, safeCommitLSN(r.repl, r.accum), snapshots); err != nil {
 		return err
 	}
 	if !r.options.Continuous {
@@ -188,109 +224,6 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 		return r.source.FinalizeBatch(ctx)
 	}
 	return r.stream(ctx)
-}
-
-func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[string]string) (pglogrepl.LSN, bool, error) {
-	identity, err := r.options.Store.Identity(ctx)
-	if err != nil {
-		return 0, false, err
-	}
-	state, err := loadChunkState(ctx, r.options.Store)
-	if err != nil {
-		return 0, false, err
-	}
-	var retired []chunkRetiredEpoch
-	if r.opts.FullRefresh {
-		retired = chunkEpochsToRetire(state)
-		state = nil
-		clear(resumes)
-	}
-	if state != nil && state.Identity != identity {
-		return 0, false, fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
-	}
-	fresh := state == nil
-	if fresh {
-		epoch, err := newChunkEpoch()
-		if err != nil {
-			return 0, false, err
-		}
-		state = &chunkBootstrapState{Version: 1, Epoch: epoch, Identity: identity, Slot: slot, Mode: r.options.WALStaging, Tables: make(map[string]*chunkTableState), RetiredEpochs: retired}
-		for _, table := range r.tables {
-			if position := resumes[table.Name]; position != "" {
-				lsn, err := parseStoredPostgresLSN(position)
-				if err != nil {
-					return 0, false, err
-				}
-				if state.Applied == 0 || lsn < state.Applied {
-					state.Applied = lsn
-				}
-			}
-		}
-		if state.Applied == 0 {
-			if _, exists, err := checkSlotExists(ctx, r.source.queryPool, slot); err != nil {
-				return 0, false, err
-			} else if exists {
-				if _, err := r.source.queryPool.Exec(ctx, "SELECT pg_drop_replication_slot($1)", slot); err != nil {
-					return 0, false, fmt.Errorf("failed to reset chunked snapshot slot: %w", err)
-				}
-			}
-			created, err := r.source.createLogicalSlot(ctx, r.source.replConn, slot, false)
-			if err != nil {
-				return 0, false, err
-			}
-			state.Applied, err = pglogrepl.ParseLSN(created.ConsistentPoint)
-			if err != nil {
-				return 0, false, err
-			}
-		}
-		for _, table := range r.tables {
-			state.Tables[table.Name] = &chunkTableState{Boundary: FormatLSN(state.Applied), Done: resumes[table.Name] != ""}
-		}
-	} else {
-		if state.Slot != slot || state.Mode != r.options.WALStaging {
-			return 0, false, fmt.Errorf("chunked snapshot slot or WAL staging mode changed; keep the original configuration or use --full-refresh")
-		}
-		if len(state.Tables) != len(r.tables) {
-			return 0, false, fmt.Errorf("chunked snapshot table selection changed")
-		}
-		for _, table := range r.tables {
-			if state.Tables[table.Name] == nil {
-				return 0, false, fmt.Errorf("chunked snapshot has no checkpoint for %s", table.Name)
-			}
-		}
-	}
-	r.state = state
-	start := state.Applied
-	if r.options.WALStaging == "destination" {
-		r.journal = &chunkJournal{store: r.options.Store, epoch: state.Epoch}
-		if err := r.journal.load(ctx, state.Consumed); err != nil {
-			return 0, false, err
-		}
-		start = max(start, r.journal.manifest.Captured)
-	}
-	if err := r.validateSlot(ctx, start); err != nil {
-		return 0, false, err
-	}
-	return start, fresh, nil
-}
-
-func (r *chunkReader) validateSlot(ctx context.Context, start pglogrepl.LSN) error {
-	var restart, confirmed *string
-	var plugin string
-	var sameDatabase, temporary bool
-	if err := r.source.queryPool.QueryRow(ctx, `SELECT restart_lsn::text, confirmed_flush_lsn::text, plugin, database = current_database(), temporary FROM pg_replication_slots WHERE slot_name = $1`, r.state.Slot).Scan(&restart, &confirmed, &plugin, &sameDatabase, &temporary); err != nil {
-		return fmt.Errorf("chunked snapshot replication slot is unavailable; retained WAL is required: %w", err)
-	}
-	if plugin != "pgoutput" || restart == nil || confirmed == nil || !sameDatabase || temporary {
-		return fmt.Errorf("chunked snapshot requires a valid persistent pgoutput slot")
-	}
-	for _, raw := range []*string{restart, confirmed} {
-		position, err := pglogrepl.ParseLSN(*raw)
-		if err != nil || position > start {
-			return fmt.Errorf("replication slot no longer retains the chunked snapshot resume boundary %s", start)
-		}
-	}
-	return nil
 }
 
 func (r *chunkReader) emit(ctx context.Context, result source.RecordBatchResult) error {
@@ -386,12 +319,12 @@ func (r *chunkReader) copyChunk(ctx context.Context, table source.SourceTableInf
 func (r *chunkReader) checkChanges(groups []DecodedChanges) error {
 	for _, group := range groups {
 		for _, change := range group.Changes {
-			if change.Operation == "TRUNCATE" && !r.state.complete() {
+			if change.Operation == "TRUNCATE" && !r.state.bootstrapComplete() {
 				return fmt.Errorf("table %s was truncated during bootstrap; restart with --full-refresh", group.TableName)
 			}
 			if change.Operation == "UPDATE" {
 				for i := range change.Values {
-					if columnIsUnchanged(change, i) && resolveColumnValueBase(change, i) == nil && !r.state.complete() {
+					if columnIsUnchanged(change, i) && resolveColumnValueBase(change, i) == nil && !r.state.bootstrapComplete() {
 						return fmt.Errorf("update of %s has an incomplete row image during bootstrap; configure REPLICA IDENTITY FULL and restart with --full-refresh", group.TableName)
 					}
 				}
@@ -499,6 +432,7 @@ func (r *chunkReader) catchUp(ctx context.Context) error {
 	}
 	r.repl.barrierNonce, r.repl.barrierTarget = barrier.nonce, barrier.target
 	r.repl.barrierSeen, r.repl.barrierLSN = false, 0
+	lastCheckpoint, pendingRows := time.Now(), 0
 	for {
 		groups, _, err := r.repl.NextChanges(ctx)
 		if err != nil {
@@ -508,6 +442,22 @@ func (r *chunkReader) catchUp(ctx context.Context) error {
 			return err
 		}
 		if !r.repl.BarrierReached() {
+			if r.options.Execution == "serial" {
+				for _, group := range groups {
+					pendingRows += len(group.Changes)
+				}
+				if pendingRows >= r.options.ChunkSize || time.Since(lastCheckpoint) >= streamingMaxAge(r.opts) {
+					if err := r.flushAll(ctx); err != nil {
+						return err
+					}
+					if position := safeCommitLSN(r.repl, r.accum); position > r.state.Applied {
+						if err := r.checkpoint(ctx, position, nil); err != nil {
+							return err
+						}
+					}
+					lastCheckpoint, pendingRows = time.Now(), 0
+				}
+			}
 			continue
 		}
 		if err := r.flushAll(ctx); err != nil {

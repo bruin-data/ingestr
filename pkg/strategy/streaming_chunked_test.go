@@ -65,6 +65,7 @@ func TestStreamingChunkedOptionsPreserveFiniteModeAndSourceNames(t *testing.T) {
 				require.True(t, read.Streaming)
 				require.True(t, read.FullRefresh)
 				require.NotNil(t, read.CDCChunkedSnapshot)
+				require.Equal(t, "parallel", read.CDCChunkedSnapshot.Execution)
 				require.Equal(t, continuous, read.CDCChunkedSnapshot.Continuous)
 				require.Equal(t, 17, read.CDCChunkedSnapshot.ChunkSize)
 				require.Equal(t, 2*time.Second, read.CDCChunkedSnapshot.ChunkTimeout)
@@ -178,4 +179,40 @@ func TestStreamingChunkedRequiresManagedAcknowledgments(t *testing.T) {
 	options, err := NewStreamingExecutor(StreamingOptions{}).chunkedSnapshotOptions(cfg, &fakeDestination{})
 	require.NoError(t, err)
 	require.Nil(t, options)
+}
+
+func TestStreamingChunkedExecutionAndRefreshOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		execution string
+		refresh   *cdcRefresh
+		wantID    string
+	}{
+		{name: "default"},
+		{name: "serial", execution: "serial"},
+		{name: "active refresh", execution: "serial", refresh: &cdcRefresh{ID: "active-refresh"}, wantID: "active-refresh"},
+		{name: "completed refresh", execution: "parallel", refresh: &cdcRefresh{ID: "completed-refresh", complete: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := &chunkedAdapterDestination{newCDCStateDestination()}
+			manager, err := NewCDCStateManager(dest, "chunk-options", "raw.orders", "")
+			require.NoError(t, err)
+			manager.refresh = tt.refresh
+			cfg := &config.IngestConfig{
+				CDCChunkedSnapshot:   true,
+				CDCSnapshotExecution: tt.execution,
+				RefreshID:            "historical-config-refresh",
+			}
+			executor := NewStreamingExecutor(StreamingOptions{Strategy: config.StrategyMerge, StateManager: manager, Committer: &fakeCommitter{}})
+			options, err := executor.chunkedSnapshotOptions(cfg, dest)
+			require.NoError(t, err)
+			wantExecution := tt.execution
+			if wantExecution == "" {
+				wantExecution = "parallel"
+			}
+			require.Equal(t, wantExecution, options.Execution)
+			require.Equal(t, tt.wantID, options.RefreshID)
+			require.Equal(t, "inmemory", options.WALStaging)
+		})
+	}
 }

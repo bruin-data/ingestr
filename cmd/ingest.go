@@ -145,6 +145,12 @@ func IngestCommand() *cli.Command {
 				Value:   config.DefaultCDCSnapshotChunkSize,
 				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNK_SIZE"),
 			},
+			&cli.StringFlag{
+				Name:    "cdc-snapshot-execution",
+				Usage:   "Chunked PostgreSQL CDC snapshots: parallel (decode changes while copying) or serial (copy all tables before decoding changes)",
+				Value:   "parallel",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_EXECUTION"),
+			},
 			&cli.DurationFlag{
 				Name:    "cdc-snapshot-chunk-timeout",
 				Usage:   "Maximum duration of each PostgreSQL CDC snapshot chunk read",
@@ -153,7 +159,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "cdc-wal-staging",
-				Usage:   "Pending changes during chunked snapshots: inmemory (retain source WAL) or destination (managed staging table)",
+				Usage:   "Pending changes during parallel chunked snapshots: inmemory (retain source WAL) or destination (managed staging table); serial requires inmemory and retains source WAL",
 				Value:   "inmemory",
 				Sources: cli.EnvVars("INGESTR_CDC_WAL_STAGING"),
 			},
@@ -413,6 +419,7 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.CDCSnapshotMode = c.String("cdc-snapshot-mode")
 	cfg.CDCStartLSN = c.String("cdc-start-lsn")
 	cfg.CDCChunkedSnapshot = c.Bool("cdc-snapshot-chunked")
+	cfg.CDCSnapshotExecution = c.String("cdc-snapshot-execution")
 	cfg.CDCSnapshotChunkSize = int(c.Int("cdc-snapshot-chunk-size"))
 	cfg.CDCSnapshotChunkTimeout = c.Duration("cdc-snapshot-chunk-timeout")
 	cfg.CDCWALStaging = c.String("cdc-wal-staging")
