@@ -20,10 +20,10 @@ func PinSingleConnection(db *sql.DB) {
 
 // RunAttachStatements executes bootstrap statements in order, stopping at the
 // first failure. onErr may return a friendlier error for a failed statement.
-func RunAttachStatements(db *sql.DB, tag string, stmts []string, onErr func(stmt string, err error) error) error {
+func RunAttachStatements(ctx context.Context, db *sql.DB, tag string, stmts []string, onErr func(stmt string, err error) error) error {
 	for _, stmt := range stmts {
 		config.Debug("[%s] %s", tag, RedactSecret(stmt))
-		if err := execStmt(db, stmt); err != nil {
+		if err := execStmt(ctx, db, stmt); err != nil {
 			if onErr != nil {
 				return onErr(stmt, err)
 			}
@@ -48,8 +48,8 @@ func isSecretStatement(sql string) bool {
 	return strings.HasPrefix(strings.TrimSpace(sql), "CREATE OR REPLACE SECRET")
 }
 
-func execStmt(db *sql.DB, stmt string) error {
-	rows, err := db.QueryContext(context.Background(), stmt)
+func execStmt(ctx context.Context, db *sql.DB, stmt string) error {
+	rows, err := db.QueryContext(ctx, stmt)
 	if err != nil {
 		return err
 	}

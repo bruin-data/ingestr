@@ -2,7 +2,7 @@
 
 DuckDB is an in-memory database designed to be fast and reliable.
 
-ingestr supports DuckDB as both a source and a destination, and also supports reading from / writing to **DuckLake** lakehouse tables backed by DuckDB.
+ingestr supports DuckDB as both a source and a destination, and also supports reading from / writing to **DuckLake** lakehouse tables backed by DuckDB and remote DuckDB servers over **Quack**.
 
 ## URI format
 The URI format for DuckDB is as follows:
@@ -15,6 +15,33 @@ URI parameters:
 - `database-file`: the path to the DuckDB database file
 
 The same URI structure can be used both for sources and destinations.
+
+---
+
+## Remote DuckDB server (Quack)
+
+ingestr can read from and write to a remote DuckDB server started with [Quack](https://duckdb.org/quack/), DuckDB's client-server protocol:
+
+```plaintext
+duckdb://:<token>@<host>[:<port>]?quack=true
+```
+
+URI parameters:
+- `token`: the server's authentication token, after a colon. URL-encode special characters, e.g. `@` as `%40`.
+- `host`: the host the server listens on
+- `port` (optional): the server port, defaults to `9494`
+- `quack`: set to `true` to connect to a Quack server
+- `disable_ssl` (optional): `true` for a server that doesn't use HTTPS. Only `localhost` connects over plain HTTP by default.
+
+```bash
+ingestr ingest \
+  --source-uri "postgresql://user:pass@localhost:5432/db" \
+  --source-table "public.users" \
+  --dest-uri "duckdb://:my_token@localhost:9494?quack=true" \
+  --dest-table "main.users"
+```
+
+Quack requires DuckDB 2.0 or newer, and the server must run the same DuckDB release as ingestr's DuckDB driver. Install a matching driver with `dbc install duckdb=<server version>`.
 
 ---
 

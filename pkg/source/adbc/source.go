@@ -64,6 +64,13 @@ func (s *ADBCSource) Connect(ctx context.Context, uri string) error {
 		return fmt.Errorf("failed to ping %s: %w", s.dialect.Name(), err)
 	}
 
+	if initializer, ok := s.dialect.(ConnectionInitializer); ok {
+		if err := initializer.InitConnection(ctx, db); err != nil {
+			_ = db.Close()
+			return err
+		}
+	}
+
 	s.db = db
 	s.uri = uri
 
