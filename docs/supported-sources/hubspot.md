@@ -214,7 +214,7 @@ ingestr ingest \
 
 ## Incremental Loading
 
-CRM object tables, including [custom objects](#custom-objects), load incrementally on `hs_lastmodifieddate` (`lastmodifieddate` for `contacts`) and are merged on `hs_object_id`. Use `--interval-start` and `--interval-end` to fetch only the records created or updated in that window. Without `--interval-start`, all records are loaded.
+CRM object tables, including [custom objects](#custom-objects), load incrementally on `hs_lastmodifieddate` (`lastmodifieddate` for `contacts`) and are merged on `hs_object_id`. Use `--interval-start` and `--interval-end` to fetch only the records created or updated in that window. Without `--interval-start`, all records are loaded. Built-in tables also include every archived (deleted) record on each run, marked with `_archived_at`, regardless of the window.
 
 ## Custom Objects
 
