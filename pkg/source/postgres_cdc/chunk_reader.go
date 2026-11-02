@@ -66,7 +66,7 @@ func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.Sou
 	if options.ChunkSize <= 0 || options.ChunkTimeout <= 0 || options.WALBufferBytes <= 0 ||
 		(options.WALStaging != "inmemory" && options.WALStaging != "destination") ||
 		(options.Execution != "" && options.Execution != "parallel" && options.Execution != "serial") ||
-		(options.Execution == "serial" && options.WALStaging == "destination") {
+		(chunkExecution(options.Execution) == "serial" && options.WALStaging == "destination") {
 		return nil, fmt.Errorf("invalid chunked snapshot options")
 	}
 	if len(tables) == 0 {
@@ -132,7 +132,7 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 		// and the independent bootstrap checkpoint. Replay from the latter.
 		resumes = nil
 	}
-	serial := r.options.Execution == "serial"
+	serial := chunkExecution(r.options.Execution) == "serial"
 	if serial {
 		resumes = r.state.replayPositions()
 	}
@@ -442,7 +442,7 @@ func (r *chunkReader) catchUp(ctx context.Context) error {
 			return err
 		}
 		if !r.repl.BarrierReached() {
-			if r.options.Execution == "serial" {
+			if chunkExecution(r.options.Execution) == "serial" {
 				for _, group := range groups {
 					pendingRows += len(group.Changes)
 				}

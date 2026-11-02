@@ -176,10 +176,11 @@ func TestChunkInitializeRejectsChangedExecutionBeforeSlotAccess(t *testing.T) {
 	require.NoError(t, err)
 	store.values[chunkStateKey] = data
 	reader := chunkRefreshTestReader(store, "", false)
-	reader.options.Execution, reader.options.WALStaging = "serial", "inmemory"
+	reader.options.Execution, reader.options.WALStaging = "", "inmemory"
 	_, _, err = reader.initialize(t.Context(), "slot", nil)
 	require.ErrorContains(t, err, "execution")
-	require.Equal(t, "parallel", chunkExecution(previous.Execution))
+	require.Equal(t, "serial", chunkExecution(reader.options.Execution))
+	require.Equal(t, "parallel", checkpointExecution(previous.Execution))
 }
 
 func TestChunkInitializeRejectsSerialDestinationStaging(t *testing.T) {

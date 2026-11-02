@@ -147,8 +147,8 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "cdc-snapshot-execution",
-				Usage:   "Chunked PostgreSQL CDC snapshots: parallel (decode changes while copying) or serial (copy all tables before decoding changes)",
-				Value:   "parallel",
+				Usage:   "Chunked PostgreSQL CDC snapshots: serial (copy all tables before decoding changes) or parallel (decode changes while copying)",
+				Value:   config.DefaultCDCSnapshotExecution,
 				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_EXECUTION"),
 			},
 			&cli.DurationFlag{

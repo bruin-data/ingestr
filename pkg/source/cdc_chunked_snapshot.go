@@ -12,7 +12,7 @@ type CDCChunkedSnapshotValidator interface {
 // CDCChunkedSnapshotOptions enables short, resumable PostgreSQL snapshot reads.
 // The consumer must make each CDCFlush boundary durable before acknowledging it.
 type CDCChunkedSnapshotOptions struct {
-	Execution      string
+	Execution      string // Defaults to serial.
 	ChunkSize      int
 	ChunkTimeout   time.Duration
 	WALStaging     string

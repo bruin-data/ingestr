@@ -449,7 +449,7 @@ func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cfg.CDCChunkedSnapshot != (tt.name == "enabled") ||
-				cfg.CDCSnapshotExecution != "parallel" ||
+				cfg.CDCSnapshotExecution != "serial" ||
 				cfg.CDCSnapshotChunkSize != config.DefaultCDCSnapshotChunkSize ||
 				cfg.CDCSnapshotChunkTimeout != config.DefaultCDCSnapshotChunkTimeout ||
 				cfg.CDCWALBufferBytes != config.DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
@@ -467,12 +467,13 @@ func TestIngestConfigCDCChunkedSnapshotOptions(t *testing.T) {
 			args := []string{"--source-uri=postgresql+cdc://localhost/db"}
 			if env {
 				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNKED", "true")
+				t.Setenv("INGESTR_CDC_SNAPSHOT_EXECUTION", "parallel")
 				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_SIZE", "123")
 				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "1250ms")
 				t.Setenv("INGESTR_CDC_WAL_STAGING", "destination")
 				t.Setenv("INGESTR_CDC_WAL_BUFFER_BYTES", "4294967296")
 			} else {
-				args = append(args, "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-size=123", "--cdc-snapshot-chunk-timeout=1250ms", "--cdc-wal-staging=destination", "--cdc-wal-buffer-bytes=4294967296")
+				args = append(args, "--cdc-snapshot-chunked", "--cdc-snapshot-execution=parallel", "--cdc-snapshot-chunk-size=123", "--cdc-snapshot-chunk-timeout=1250ms", "--cdc-wal-staging=destination", "--cdc-wal-buffer-bytes=4294967296")
 			}
 			cfg, err := parseIngestConfig(t, args...)
 			if err != nil {
@@ -497,7 +498,7 @@ func TestIngestConfigCDCChunkedSnapshotExecution(t *testing.T) {
 	}{
 		{name: "parallel flag", args: []string{"--cdc-snapshot-execution=parallel"}, want: "parallel"},
 		{name: "serial flag", args: []string{"--cdc-snapshot-execution=serial"}, want: "serial"},
-		{name: "serial environment", env: "serial", want: "serial"},
+		{name: "parallel environment", env: "parallel", want: "parallel"},
 		{name: "flag overrides environment", args: []string{"--cdc-snapshot-execution=parallel"}, env: "serial", want: "parallel"},
 		{name: "unknown flag", args: []string{"--cdc-snapshot-execution=concurrent"}, wantErr: "must be parallel or serial"},
 		{name: "unknown environment", env: "concurrent", wantErr: "must be parallel or serial"},

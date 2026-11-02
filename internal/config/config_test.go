@@ -787,8 +787,8 @@ func TestIngestConfigValidateCDCChunkedSnapshot(t *testing.T) {
 		wantErr string
 	}{
 		{name: "inmemory", change: func(c *IngestConfig) {}},
-		{name: "destination", change: func(c *IngestConfig) { c.CDCWALStaging = "destination" }},
-		{name: "serial", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "serial" }},
+		{name: "destination", change: func(c *IngestConfig) { c.CDCSnapshotExecution, c.CDCWALStaging = "parallel", "destination" }},
+		{name: "parallel", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "parallel" }},
 		{name: "serial destination", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "serial"; c.CDCWALStaging = "destination" }, wantErr: "destination staging requires --cdc-snapshot-execution parallel"},
 		{name: "disabled serial destination", change: func(c *IngestConfig) {
 			c.CDCChunkedSnapshot, c.CDCSnapshotExecution, c.CDCWALStaging = false, "serial", "destination"
@@ -849,8 +849,8 @@ func TestCDCChunkedSnapshotProgrammaticDefaults(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CDCSnapshotExecution != "parallel" {
-		t.Fatalf("chunked snapshot execution = %q, want parallel", cfg.CDCSnapshotExecution)
+	if cfg.CDCSnapshotExecution != "serial" {
+		t.Fatalf("chunked snapshot execution = %q, want serial", cfg.CDCSnapshotExecution)
 	}
 	if cfg.CDCSnapshotChunkSize != DefaultCDCSnapshotChunkSize ||
 		cfg.CDCSnapshotChunkTimeout != DefaultCDCSnapshotChunkTimeout ||
@@ -871,8 +871,8 @@ func TestCDCChunkedSnapshotDisabledByDefault(t *testing.T) {
 	if DefaultConfig().CDCChunkedSnapshot {
 		t.Fatal("chunked snapshots must be opt in")
 	}
-	if DefaultConfig().CDCSnapshotExecution != "parallel" {
-		t.Fatal("chunked snapshot execution must default to parallel")
+	if DefaultConfig().CDCSnapshotExecution != "serial" {
+		t.Fatal("chunked snapshot execution must default to serial")
 	}
 	cfg := &IngestConfig{}
 	cfg.ApplyCDCChunkedSnapshotDefaults()

@@ -42,7 +42,7 @@ func TestChunkedSnapshotRecoversAcknowledgedDestinationJournal(t *testing.T) {
 	opts := source.ReadOptions{
 		PageSize: 3, MaxBatchBytes: 1 << 20, Streaming: true, CDCManagedState: true, CDCSnapshotReplace: true,
 		CDCChunkedSnapshot: &source.CDCChunkedSnapshotOptions{
-			ChunkSize: 3, ChunkTimeout: 90 * time.Second, WALStaging: "destination", WALBufferBytes: 1, Store: store,
+			ChunkSize: 3, ChunkTimeout: 90 * time.Second, Execution: "parallel", WALStaging: "destination", WALBufferBytes: 1, Store: store,
 		},
 	}
 	first := NewPostgresCDCSource()

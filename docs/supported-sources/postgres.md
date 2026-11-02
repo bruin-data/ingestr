@@ -52,8 +52,8 @@ Choose the execution order with `--cdc-snapshot-execution`:
 
 | Execution | Copying and change processing | Pending changes |
 |---|---|---|
-| `parallel` (default) | Decode changes while copying chunks; catch up the selected tables' change stream after each chunk. | Stage decoded events in memory or in the destination. |
-| `serial` | Copy every selected table in chunks, then decode and apply changes from retained WAL. | Keep WAL in the PostgreSQL replication slot throughout the copy. No concurrent decoder runs during copying. |
+| `serial` (default) | Copy every selected table in chunks, then decode and apply changes from retained WAL. | Keep WAL in the PostgreSQL replication slot throughout the copy. No concurrent decoder runs during copying. |
+| `parallel` | Decode changes while copying chunks; catch up the selected tables' change stream after each chunk. | Stage decoded events in memory or in the destination. |
 
 Both execution modes save durable chunk checkpoints, so an interrupted first bootstrap can resume from completed chunks. Catch-up includes changes to already copied rows and rows outside the current chunk. Single-table and multi-table selections are supported; omit `--stream` to catch up and exit, or include it to continue processing changes. Serial execution simplifies the copy phase, but the source must have enough space to retain all WAL needed from the initial boundary until copying and catch-up finish.
 
@@ -64,7 +64,7 @@ ingestr ingest \
   --dest-uri 'postgres://user:password@destination/warehouse' \
   --dest-table public.orders \
   --cdc-snapshot-chunked \
-  --cdc-snapshot-execution parallel \
+  --cdc-snapshot-execution serial \
   --cdc-snapshot-chunk-size 10000 \
   --cdc-snapshot-chunk-timeout 30s \
   --cdc-wal-staging inmemory \
@@ -72,14 +72,14 @@ ingestr ingest \
   --stream
 ```
 
-For parallel execution, choose where pending logical changes are staged:
+The example uses the default serial execution. To decode changes during copying, set `--cdc-snapshot-execution parallel` and choose where pending logical changes are staged:
 
 | `--cdc-wal-staging` | Pending events | Recovery storage |
 |---|---|---|
 | `inmemory` (default) | Bounded process memory | PostgreSQL retains the source WAL needed to replay changes after a restart. |
 | `destination` | A managed staging table in the destination | Pending logical changes and recovery state persist in the destination. |
 
-To use serial execution, set `--cdc-snapshot-execution serial` and keep `--cdc-wal-staging inmemory`. Serial execution does not accumulate decoded events during copying: the source retains the WAL instead. Combining serial execution with destination staging is rejected.
+Serial execution is the default; keep `--cdc-wal-staging inmemory`. It does not accumulate decoded events during copying: the source retains the WAL instead. Destination staging requires both `--cdc-snapshot-execution parallel` and `--cdc-wal-staging destination`; combining it with serial execution is rejected.
 
 All execution and staging choices save chunk cursors and recovery metadata in the destination's managed `cdc_snapshot_wal` table. Parallel execution with `destination` staging also stores pending logical replication events there, not PostgreSQL WAL segment files. Keep the managed staging namespace alongside the connector's CDC state across restarts. The journal is part of recovery state and must not be deleted while a snapshot is in progress.
 

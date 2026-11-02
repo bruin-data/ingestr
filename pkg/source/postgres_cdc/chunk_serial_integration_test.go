@@ -51,7 +51,7 @@ func newSerialSnapshotFixture(t *testing.T) *serialSnapshotFixture {
 		opts: source.ReadOptions{
 			PageSize: 3, MaxBatchBytes: 1 << 20, Streaming: true, CDCManagedState: true, CDCSnapshotReplace: true,
 			CDCChunkedSnapshot: &source.CDCChunkedSnapshotOptions{
-				ChunkSize: 3, ChunkTimeout: 90 * time.Second, Execution: "serial", WALStaging: "inmemory", WALBufferBytes: 1 << 20, Store: store,
+				ChunkSize: 3, ChunkTimeout: 90 * time.Second, WALStaging: "inmemory", WALBufferBytes: 1 << 20, Store: store,
 			},
 		},
 	}

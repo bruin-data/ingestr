@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/jackc/pglogrepl"
 )
 
@@ -91,7 +92,7 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 		}
 		state.SnapshotComplete = execution == "serial" && state.complete()
 	} else {
-		if state.Slot != slot || state.Mode != r.options.WALStaging || chunkExecution(state.Execution) != execution {
+		if state.Slot != slot || state.Mode != r.options.WALStaging || checkpointExecution(state.Execution) != execution {
 			return 0, false, fmt.Errorf("chunked snapshot slot, execution, or WAL staging mode changed; keep the original configuration or use --full-refresh")
 		}
 		if len(state.Tables) != len(r.tables) {
@@ -119,6 +120,14 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 }
 
 func chunkExecution(execution string) string {
+	if execution == "" {
+		return config.DefaultCDCSnapshotExecution
+	}
+	return execution
+}
+
+// Checkpoints without an execution field encode parallel snapshots.
+func checkpointExecution(execution string) string {
 	if execution == "" {
 		return "parallel"
 	}

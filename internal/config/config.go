@@ -193,6 +193,7 @@ type IngestConfig struct {
 const DefaultExtractParallelism = 5
 
 const (
+	DefaultCDCSnapshotExecution    = "serial"
 	DefaultCDCSnapshotChunkSize    = 10000
 	DefaultCDCSnapshotChunkTimeout = 30 * time.Second
 	DefaultCDCWALBufferBytes       = int64(64 << 20)
@@ -226,7 +227,7 @@ func DefaultConfig() *IngestConfig {
 		SchemaNaming:            "",
 		CDCTableNaming:          TableNamingSchemaTable,
 		CDCDeleteBehavior:       CDCDeleteSoft,
-		CDCSnapshotExecution:    "parallel",
+		CDCSnapshotExecution:    DefaultCDCSnapshotExecution,
 		CDCSnapshotChunkSize:    DefaultCDCSnapshotChunkSize,
 		CDCSnapshotChunkTimeout: DefaultCDCSnapshotChunkTimeout,
 		CDCWALStaging:           "inmemory",
@@ -375,7 +376,7 @@ func (c *IngestConfig) ApplyCDCChunkedSnapshotDefaults() {
 		return
 	}
 	if c.CDCSnapshotExecution == "" {
-		c.CDCSnapshotExecution = "parallel"
+		c.CDCSnapshotExecution = DefaultCDCSnapshotExecution
 	}
 	if c.CDCSnapshotChunkSize == 0 {
 		c.CDCSnapshotChunkSize = DefaultCDCSnapshotChunkSize
