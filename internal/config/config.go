@@ -164,6 +164,7 @@ type IngestConfig struct {
 	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to auto
 	CDCChunkedSnapshot         bool
 	CDCSnapshotExecution       string // parallel or serial
+	CDCSnapshotCursor          string // key or heap
 	CDCSnapshotChunkSize       int
 	CDCSnapshotChunkTimeout    time.Duration
 	CDCWALStaging              string // inmemory or destination
@@ -194,6 +195,7 @@ const DefaultExtractParallelism = 5
 
 const (
 	DefaultCDCSnapshotExecution    = "serial"
+	DefaultCDCSnapshotCursor       = "key"
 	DefaultCDCSnapshotChunkSize    = 10000
 	DefaultCDCSnapshotChunkTimeout = 30 * time.Second
 	DefaultCDCWALBufferBytes       = int64(64 << 20)
@@ -228,6 +230,7 @@ func DefaultConfig() *IngestConfig {
 		CDCTableNaming:          TableNamingSchemaTable,
 		CDCDeleteBehavior:       CDCDeleteSoft,
 		CDCSnapshotExecution:    DefaultCDCSnapshotExecution,
+		CDCSnapshotCursor:       DefaultCDCSnapshotCursor,
 		CDCSnapshotChunkSize:    DefaultCDCSnapshotChunkSize,
 		CDCSnapshotChunkTimeout: DefaultCDCSnapshotChunkTimeout,
 		CDCWALStaging:           "inmemory",
@@ -378,6 +381,9 @@ func (c *IngestConfig) ApplyCDCChunkedSnapshotDefaults() {
 	if c.CDCSnapshotExecution == "" {
 		c.CDCSnapshotExecution = DefaultCDCSnapshotExecution
 	}
+	if c.CDCSnapshotCursor == "" {
+		c.CDCSnapshotCursor = DefaultCDCSnapshotCursor
+	}
 	if c.CDCSnapshotChunkSize == 0 {
 		c.CDCSnapshotChunkSize = DefaultCDCSnapshotChunkSize
 	}
@@ -401,6 +407,9 @@ func (c *IngestConfig) ApplyCDCChunkedSnapshotDefaults() {
 func (c *IngestConfig) validateCDCChunkedSnapshot() error {
 	if c.CDCSnapshotExecution != "" && c.CDCSnapshotExecution != "parallel" && c.CDCSnapshotExecution != "serial" {
 		return &ValidationError{Field: "cdc-snapshot-execution", Message: "must be parallel or serial"}
+	}
+	if c.CDCSnapshotCursor != "" && c.CDCSnapshotCursor != "key" && c.CDCSnapshotCursor != "heap" {
+		return &ValidationError{Field: "cdc-snapshot-cursor", Message: "must be key or heap"}
 	}
 	if c.CDCWALStaging != "" && c.CDCWALStaging != "inmemory" && c.CDCWALStaging != "destination" {
 		return &ValidationError{Field: "cdc-wal-staging", Message: "must be inmemory or destination"}

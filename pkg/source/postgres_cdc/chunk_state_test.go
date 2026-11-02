@@ -72,6 +72,40 @@ func TestChunkStateResumesWithoutAnyCompletedTable(t *testing.T) {
 	require.Equal(t, []string{"5"}, loaded.Tables["public.items"].After)
 }
 
+func TestSnapshotCursorIsChosenPerTable(t *testing.T) {
+	require.Equal(t, "key", snapshotCursor(&chunkTableState{}, "key"))
+	require.Equal(t, "heap", snapshotCursor(&chunkTableState{}, "heap"))
+	require.Equal(t, "key", snapshotCursor(&chunkTableState{After: []string{"5"}}, "heap"))
+	require.Equal(t, "heap", snapshotCursor(&chunkTableState{Cursor: "heap"}, "key"))
+	require.Equal(t, "key", snapshotCursor(&chunkTableState{Cursor: "key"}, "heap"))
+}
+
+func TestHeapFlagDoesNotChangeStartedKeyTable(t *testing.T) {
+	tables := map[string]*chunkTableState{
+		"started":  {After: []string{"5"}, Upper: []string{"100"}},
+		"new":      {},
+		"finished": {After: []string{"100"}, Upper: []string{"100"}, Done: true},
+	}
+	require.Equal(t, "key", snapshotCursor(tables["started"], "heap"))
+	require.Equal(t, "heap", snapshotCursor(tables["new"], "heap"))
+	require.True(t, tables["finished"].Done)
+}
+
+func TestChunkStateLoadsLegacyKeyCursorAndExplicitHeapCursor(t *testing.T) {
+	store := newChunkTestStore()
+	state := chunkTestState(store.identity)
+	state.Tables["public.heap_items"] = &chunkTableState{
+		Cursor: "heap", Boundary: FormatLSN(10), Initialized: true, After: []string{"(1,2)"}, Upper: []string{"(9,9)"},
+	}
+	require.NoError(t, (&chunkedCommit{store: store, state: state}).persist(t.Context()))
+
+	loaded, err := loadChunkState(t.Context(), store)
+	require.NoError(t, err)
+	require.Empty(t, loaded.Tables["public.items"].Cursor)
+	require.Equal(t, "key", snapshotCursor(loaded.Tables["public.items"], "heap"))
+	require.Equal(t, "heap", snapshotCursor(loaded.Tables["public.heap_items"], "key"))
+}
+
 func TestChunkedCommitPersistsBeforeAcknowledgingWAL(t *testing.T) {
 	store := newChunkTestStore()
 	src := &PostgresCDCSource{pos: newStreamPosition()}

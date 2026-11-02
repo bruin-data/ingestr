@@ -26,16 +26,19 @@ type snapshotChunk struct {
 	Done     bool
 }
 
-func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.SourceTableInfo, slotName string, after, upper []string, size int, maxBytes int64, timeout time.Duration) (chunk snapshotChunk, retErr error) {
+func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.SourceTableInfo, slotName, cursor string, after, upper []string, size int, maxBytes int64, timeout time.Duration) (chunk snapshotChunk, retErr error) {
 	if size <= 0 || maxBytes < 0 || timeout <= 0 {
 		return chunk, fmt.Errorf("snapshot chunk size and timeout must be positive and byte limit must be nonnegative")
+	}
+	if cursor == "heap" && s.serverVersion < 140000 {
+		return chunk, fmt.Errorf("heap cursor snapshots require PostgreSQL 14 or newer (server reports %d)", s.serverVersion)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := s.requireSnapshotAllowed(); err != nil {
 		return chunk, err
 	}
-	if err := validateSnapshotChunkBounds(table.PrimaryKeys, after, upper); err != nil {
+	if err := validateSnapshotChunkCursor(cursor, table.PrimaryKeys, after, upper); err != nil {
 		return chunk, err
 	}
 	if err := s.validateChunkedTable(ctx, table); err != nil {
@@ -83,13 +86,18 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if _, err := tx.Exec(ctx, "SET TRANSACTION SNAPSHOT '"+strings.ReplaceAll(created.SnapshotName, "'", "''")+"'"); err != nil {
 		return chunk, fmt.Errorf("failed to import snapshot chunk snapshot: %w", err)
 	}
-	keyTypes, err := snapshotKeyTypes(ctx, tx, table.Name, table.PrimaryKeys)
-	if err != nil {
-		return chunk, err
+	if cursor == "heap" {
+		if _, err := tx.Exec(ctx, "SET LOCAL max_parallel_workers_per_gather = 0"); err != nil {
+			return chunk, fmt.Errorf("failed to disable parallel snapshot scans: %w", err)
+		}
 	}
 	chunk.UpperKey = slices.Clone(upper)
 	if upper == nil {
-		chunk.UpperKey, err = snapshotUpperKey(ctx, tx, table)
+		if cursor == "heap" {
+			chunk.UpperKey, err = snapshotHeapUpper(ctx, tx, table.Name)
+		} else {
+			chunk.UpperKey, err = snapshotUpperKey(ctx, tx, table)
+		}
 		if err != nil {
 			return chunk, err
 		}
@@ -104,7 +112,19 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	for i, col := range columns {
 		columnNames[i] = quoteIdentifier(col.Name)
 	}
-	query, args := snapshotChunkQuery(columnNames, quoteTableName(table.Name), table.PrimaryKeys, keyTypes, after, chunk.UpperKey, size)
+	var query string
+	var args []any
+	keyColumns := len(table.PrimaryKeys)
+	if cursor == "heap" {
+		query, args = snapshotHeapChunkQuery(columnNames, quoteTableName(table.Name), after, chunk.UpperKey, size)
+		keyColumns = 1
+	} else {
+		keyTypes, err := snapshotKeyTypes(ctx, tx, table.Name, table.PrimaryKeys)
+		if err != nil {
+			return chunk, err
+		}
+		query, args = snapshotChunkQuery(columnNames, quoteTableName(table.Name), table.PrimaryKeys, keyTypes, after, chunk.UpperKey, size)
+	}
 	description, err := tx.Conn().PgConn().Prepare(ctx, "", query, nil)
 	if err != nil {
 		return chunk, fmt.Errorf("failed to describe snapshot chunk query: %w", err)
@@ -126,12 +146,26 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	defer rows.Close()
 	snapshot := &Snapshot{tableSchema: table.Schema, typeMap: typeMap}
 	var count int64
-	chunk.Batch, count, chunk.LastKey, err = snapshot.rowsToBatch(rows, buildArrowSchema(table.Schema.Columns), columns, len(table.PrimaryKeys), size, maxBytes, FormatLSN(chunk.Boundary), time.Now().UTC())
+	chunk.Batch, count, chunk.LastKey, err = snapshot.rowsToBatch(rows, buildArrowSchema(table.Schema.Columns), columns, keyColumns, size, maxBytes, FormatLSN(chunk.Boundary), time.Now().UTC())
 	if err != nil {
 		return chunk, err
 	}
 	chunk.Done = count == 0 || slices.Equal(chunk.LastKey, chunk.UpperKey)
 	return chunk, nil
+}
+
+func validateSnapshotChunkCursor(cursor string, keys, after, upper []string) error {
+	switch cursor {
+	case "", "key":
+		return validateSnapshotChunkBounds(keys, after, upper)
+	case "heap":
+		if after != nil && len(after) != 1 || upper != nil && len(upper) != 1 {
+			return fmt.Errorf("heap snapshot chunk bounds must contain one ctid")
+		}
+		return nil
+	default:
+		return fmt.Errorf("snapshot cursor must be key or heap")
+	}
 }
 
 func validateSnapshotChunkBounds(keys, after, upper []string) error {
@@ -167,6 +201,22 @@ func snapshotChunkQuery(columns []string, table string, keys, keyTypes, after, u
 	return query + order + fmt.Sprintf(" LIMIT $%d", len(args)), args
 }
 
+func snapshotHeapChunkQuery(columns []string, table string, after, upper []string, size int) (string, []any) {
+	query := fmt.Sprintf(
+		`SELECT %s, __ingestr_snapshot.ctid::text AS "__ingestr_key_0" FROM %s AS __ingestr_snapshot WHERE `,
+		strings.Join(columns, ", "), table,
+	)
+	args := make([]any, 0, 3)
+	if after != nil {
+		query += "__ingestr_snapshot.ctid > $1::tid AND "
+		args = append(args, after[0])
+	}
+	args = append(args, upper[0])
+	query += fmt.Sprintf("__ingestr_snapshot.ctid <= $%d::tid", len(args))
+	args = append(args, size)
+	return query + fmt.Sprintf(" LIMIT $%d", len(args)), args
+}
+
 func snapshotUpperKey(ctx context.Context, tx pgx.Tx, table source.SourceTableInfo) ([]string, error) {
 	keys, order := make([]string, len(table.PrimaryKeys)), make([]string, len(table.PrimaryKeys))
 	for i, key := range table.PrimaryKeys {
@@ -185,6 +235,20 @@ func snapshotUpperKey(ctx context.Context, tx pgx.Tx, table source.SourceTableIn
 		return nil, fmt.Errorf("failed to read snapshot upper key for %s: %w", table.Name, err)
 	}
 	return values, nil
+}
+
+func snapshotHeapUpper(ctx context.Context, tx pgx.Tx, table string) ([]string, error) {
+	var upper string
+	if err := tx.QueryRow(ctx, snapshotHeapUpperQuery(table)).Scan(&upper); errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to read snapshot heap upper bound for %s: %w", table, err)
+	}
+	return []string{upper}, nil
+}
+
+func snapshotHeapUpperQuery(table string) string {
+	return fmt.Sprintf("SELECT ctid::text FROM %s ORDER BY ctid DESC LIMIT 1", quoteTableName(table))
 }
 
 func (s *PostgresCDCSource) validateChunkedTable(ctx context.Context, table source.SourceTableInfo) error {

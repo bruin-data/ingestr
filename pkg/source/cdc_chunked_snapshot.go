@@ -13,6 +13,7 @@ type CDCChunkedSnapshotValidator interface {
 // The consumer must make each CDCFlush boundary durable before acknowledging it.
 type CDCChunkedSnapshotOptions struct {
 	Execution      string // Defaults to serial.
+	Cursor         string // Defaults to key.
 	ChunkSize      int
 	ChunkTimeout   time.Duration
 	WALStaging     string

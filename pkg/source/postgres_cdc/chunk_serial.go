@@ -12,7 +12,8 @@ func (r *chunkReader) copySerialChunk(ctx context.Context, table source.SourceTa
 	if maxBytes <= 0 {
 		maxBytes = r.options.WALBufferBytes
 	}
-	chunk, err := r.source.readSnapshotChunk(ctx, table, r.state.Slot, state.After, state.Upper, r.options.ChunkSize, maxBytes, r.options.ChunkTimeout)
+	cursor := snapshotCursor(state, r.options.Cursor)
+	chunk, err := r.source.readSnapshotChunk(ctx, table, r.state.Slot, cursor, state.After, state.Upper, r.options.ChunkSize, maxBytes, r.options.ChunkTimeout)
 	if err != nil {
 		return err
 	}
@@ -21,6 +22,7 @@ func (r *chunkReader) copySerialChunk(ctx context.Context, table source.SourceTa
 			return err
 		}
 	}
+	state.Cursor = cursor
 	state.Upper = chunk.UpperKey
 	if chunk.LastKey != nil {
 		state.After = chunk.LastKey

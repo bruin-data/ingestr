@@ -66,6 +66,7 @@ func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.Sou
 	if options.ChunkSize <= 0 || options.ChunkTimeout <= 0 || options.WALBufferBytes <= 0 ||
 		(options.WALStaging != "inmemory" && options.WALStaging != "destination") ||
 		(options.Execution != "" && options.Execution != "parallel" && options.Execution != "serial") ||
+		(options.Cursor != "" && options.Cursor != "key" && options.Cursor != "heap") ||
 		(chunkExecution(options.Execution) == "serial" && options.WALStaging == "destination") {
 		return nil, fmt.Errorf("invalid chunked snapshot options")
 	}
@@ -248,7 +249,7 @@ func (r *chunkReader) copyChunk(ctx context.Context, table source.SourceTableInf
 		maxBytes = r.options.WALBufferBytes
 	}
 	go func() {
-		chunk, err := r.source.readSnapshotChunk(readCtx, table, r.state.Slot, state.After, state.Upper, r.options.ChunkSize, maxBytes, r.options.ChunkTimeout)
+		chunk, err := r.source.readSnapshotChunk(readCtx, table, r.state.Slot, snapshotCursor(state, r.options.Cursor), state.After, state.Upper, r.options.ChunkSize, maxBytes, r.options.ChunkTimeout)
 		completed <- chunkReadResult{chunk: chunk, err: err}
 	}()
 	var read chunkReadResult
@@ -304,6 +305,7 @@ func (r *chunkReader) copyChunk(ctx context.Context, table source.SourceTableInf
 	if err := r.catchUp(ctx); err != nil {
 		return err
 	}
+	state.Cursor = snapshotCursor(state, r.options.Cursor)
 	state.Upper = read.chunk.UpperKey
 	if read.chunk.LastKey != nil {
 		state.After = read.chunk.LastKey
@@ -314,6 +316,19 @@ func (r *chunkReader) copyChunk(ctx context.Context, table source.SourceTableInf
 		completedTables = map[string]string{table.Name: state.Boundary}
 	}
 	return r.checkpoint(ctx, safeCommitLSN(r.repl, r.accum), completedTables)
+}
+
+func snapshotCursor(state *chunkTableState, configured string) string {
+	if state.Cursor != "" {
+		return state.Cursor
+	}
+	if state.After != nil {
+		return "key"
+	}
+	if configured == "heap" {
+		return "heap"
+	}
+	return "key"
 }
 
 func (r *chunkReader) checkChanges(groups []DecodedChanges) error {

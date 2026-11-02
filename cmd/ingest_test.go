@@ -408,7 +408,7 @@ func clearCDCChunkedSnapshotEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"INGESTR_CDC_SNAPSHOT_CHUNKED", "INGESTR_CDC_SNAPSHOT_CHUNK_SIZE",
-		"INGESTR_CDC_SNAPSHOT_EXECUTION",
+		"INGESTR_CDC_SNAPSHOT_EXECUTION", "INGESTR_CDC_SNAPSHOT_CURSOR",
 		"INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "INGESTR_CDC_WAL_STAGING",
 		"INGESTR_CDC_WAL_BUFFER_BYTES", "INGESTR_CDC_SNAPSHOT_MODE", "INGESTR_CDC_START_LSN",
 	} {
@@ -431,6 +431,7 @@ func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
 		{name: "enabled", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}},
 		{name: "wrong source", args: []string{"--cdc-snapshot-chunked"}, wantErr: "only supported for postgres+cdc"},
 		{name: "unknown staging", args: []string{"--cdc-wal-staging=disk"}, wantErr: "must be inmemory or destination"},
+		{name: "unknown cursor", args: []string{"--cdc-snapshot-cursor=physical"}, wantErr: "must be key or heap"},
 		{name: "zero size", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-size=0"}, wantErr: "cdc-snapshot-chunk-size"},
 		{name: "zero timeout", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-timeout=0s"}, wantErr: "cdc-snapshot-chunk-timeout"},
 		{name: "zero buffer", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-wal-buffer-bytes=0"}, wantErr: "cdc-wal-buffer-bytes"},
@@ -450,6 +451,7 @@ func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
 			}
 			if cfg.CDCChunkedSnapshot != (tt.name == "enabled") ||
 				cfg.CDCSnapshotExecution != "serial" ||
+				cfg.CDCSnapshotCursor != "key" ||
 				cfg.CDCSnapshotChunkSize != config.DefaultCDCSnapshotChunkSize ||
 				cfg.CDCSnapshotChunkTimeout != config.DefaultCDCSnapshotChunkTimeout ||
 				cfg.CDCWALBufferBytes != config.DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
@@ -468,18 +470,19 @@ func TestIngestConfigCDCChunkedSnapshotOptions(t *testing.T) {
 			if env {
 				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNKED", "true")
 				t.Setenv("INGESTR_CDC_SNAPSHOT_EXECUTION", "parallel")
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CURSOR", "heap")
 				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_SIZE", "123")
 				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "1250ms")
 				t.Setenv("INGESTR_CDC_WAL_STAGING", "destination")
 				t.Setenv("INGESTR_CDC_WAL_BUFFER_BYTES", "4294967296")
 			} else {
-				args = append(args, "--cdc-snapshot-chunked", "--cdc-snapshot-execution=parallel", "--cdc-snapshot-chunk-size=123", "--cdc-snapshot-chunk-timeout=1250ms", "--cdc-wal-staging=destination", "--cdc-wal-buffer-bytes=4294967296")
+				args = append(args, "--cdc-snapshot-chunked", "--cdc-snapshot-execution=parallel", "--cdc-snapshot-cursor=heap", "--cdc-snapshot-chunk-size=123", "--cdc-snapshot-chunk-timeout=1250ms", "--cdc-wal-staging=destination", "--cdc-wal-buffer-bytes=4294967296")
 			}
 			cfg, err := parseIngestConfig(t, args...)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotChunkSize != 123 || cfg.CDCSnapshotChunkTimeout != 1250*time.Millisecond || cfg.CDCWALStaging != "destination" || cfg.CDCWALBufferBytes != 1<<32 {
+			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotCursor != "heap" || cfg.CDCSnapshotChunkSize != 123 || cfg.CDCSnapshotChunkTimeout != 1250*time.Millisecond || cfg.CDCWALStaging != "destination" || cfg.CDCWALBufferBytes != 1<<32 {
 				t.Fatalf("chunked snapshot config = (%v, %d, %s, %q, %d)", cfg.CDCChunkedSnapshot, cfg.CDCSnapshotChunkSize, cfg.CDCSnapshotChunkTimeout, cfg.CDCWALStaging, cfg.CDCWALBufferBytes)
 			}
 		})
@@ -521,6 +524,44 @@ func TestIngestConfigCDCChunkedSnapshotExecution(t *testing.T) {
 			}
 			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotExecution != tt.want {
 				t.Fatalf("chunked snapshot execution = %q, want %q (enabled = %v)", cfg.CDCSnapshotExecution, tt.want, cfg.CDCChunkedSnapshot)
+			}
+		})
+	}
+}
+
+func TestIngestConfigCDCChunkedSnapshotCursor(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		env     string
+		want    string
+		wantErr string
+	}{
+		{name: "heap flag", args: []string{"--cdc-snapshot-cursor=heap"}, want: "heap"},
+		{name: "key default", want: "key"},
+		{name: "heap environment", env: "heap", want: "heap"},
+		{name: "flag overrides environment", args: []string{"--cdc-snapshot-cursor=key"}, env: "heap", want: "key"},
+		{name: "unknown flag", args: []string{"--cdc-snapshot-cursor=physical"}, wantErr: "must be key or heap"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CURSOR", tt.env)
+			}
+			args := append([]string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}, tt.args...)
+			cfg, err := parseIngestConfig(t, args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CDCSnapshotCursor != tt.want {
+				t.Fatalf("chunked snapshot cursor = %q, want %q", cfg.CDCSnapshotCursor, tt.want)
 			}
 		})
 	}

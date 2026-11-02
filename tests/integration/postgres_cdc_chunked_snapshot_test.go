@@ -290,11 +290,80 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 	}
 }
 
+func TestPostgresCDC_HeapSnapshotCatchesUpToastedRowMovedBehindCursor(t *testing.T) {
+	for _, mode := range chunkedSnapshotModes() {
+		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
+			f := newChunkedCDCFixture(t, mode.staging, false)
+			f.cfg.CDCSnapshotExecution = mode.execution
+			f.cfg.CDCSnapshotCursor = "heap"
+			f.cfg.CDCSnapshotChunkSize = 100
+			f.cfg.Stream = true
+			f.cfg.IncrementalStrategy = config.StrategyMerge
+			_, err := f.src.Exec(f.ctx, `
+				TRUNCATE public.items;
+				ALTER TABLE public.items SET (fillfactor = 50);
+				INSERT INTO public.items
+				SELECT g, g * 10, repeat(md5(g::text), 400)
+				FROM generate_series(1, 600) g`)
+			require.NoError(t, err)
+			_, err = f.src.Exec(f.ctx, "VACUUM FULL public.items")
+			require.NoError(t, err)
+
+			var originalCTID, firstBoundaryCTID string
+			require.NoError(t, f.src.QueryRow(f.ctx, "SELECT ctid::text FROM public.items WHERE id = 1").Scan(&originalCTID))
+			require.NoError(t, f.src.QueryRow(f.ctx, "SELECT ctid::text FROM public.items WHERE id = 100").Scan(&firstBoundaryCTID))
+			require.Less(t, ctidBlock(t, originalCTID), ctidBlock(t, firstBoundaryCTID))
+
+			gate := f.gate(t)
+			cancel, done := f.start(t)
+			awaitChunkedSnapshotGate(t, gate, done)
+			var copied int
+			require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT count(*) FROM public.items").Scan(&copied))
+			require.Equal(t, 100, copied)
+
+			_, err = f.src.Exec(f.ctx, "UPDATE public.items SET payload = repeat(md5('final'), 500), amount = 99999 WHERE id = 1")
+			require.NoError(t, err)
+			var movedCTID string
+			require.NoError(t, f.src.QueryRow(f.ctx, "SELECT ctid::text FROM public.items WHERE id = 1").Scan(&movedCTID))
+			require.NotEqual(t, originalCTID, movedCTID)
+			require.Less(t, ctidBlock(t, movedCTID), ctidBlock(t, firstBoundaryCTID), "updated row must move behind the durable heap cursor")
+
+			close(gate.release)
+			const rowQuery = "SELECT amount, md5(payload) FROM public.items WHERE id = 1"
+			var expectedAmount int64
+			var expectedHash string
+			require.NoError(t, f.src.QueryRow(f.ctx, rowQuery).Scan(&expectedAmount, &expectedHash))
+			require.Eventually(t, func() bool {
+				select {
+				case err := <-done:
+					t.Fatalf("stream stopped before heap catch-up: %v", err)
+				default:
+				}
+				var amount int64
+				var hash string
+				return f.dst.QueryRow(f.ctx, rowQuery).Scan(&amount, &hash) == nil &&
+					amount == expectedAmount && hash == expectedHash
+			}, 90*time.Second, 100*time.Millisecond)
+			cancel()
+			_ = awaitChunkedSnapshotRun(t, done)
+		})
+	}
+}
+
+func ctidBlock(t *testing.T, ctid string) int {
+	t.Helper()
+	var block, offset int
+	_, err := fmt.Sscanf(ctid, "(%d,%d)", &block, &offset)
+	require.NoError(t, err)
+	return block
+}
+
 func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 	for _, mode := range chunkedSnapshotModes() {
 		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
 			f := newChunkedCDCFixture(t, mode.staging, false)
 			f.cfg.CDCSnapshotExecution = mode.execution
+			f.cfg.CDCSnapshotCursor = "heap"
 			gate := f.gate(t)
 			cancel, done := f.start(t)
 			awaitChunkedSnapshotGate(t, gate, done)
@@ -315,6 +384,29 @@ func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 			require.Equal(t, firstPosition, resumedPosition, "durable first chunk must not be copied again")
 		})
 	}
+}
+
+func TestPostgresCDC_HeapSnapshotResumesStaticTableWithoutRecopy(t *testing.T) {
+	f := newChunkedCDCFixture(t, "inmemory", false)
+	f.cfg.CDCSnapshotExecution = "parallel"
+	f.cfg.CDCSnapshotCursor = "heap"
+	gate := f.gate(t)
+	cancel, done := f.start(t)
+	awaitChunkedSnapshotGate(t, gate, done)
+	var firstPosition string
+	require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT _cdc_lsn FROM public.items WHERE id = 1").Scan(&firstPosition))
+	cancel()
+	_ = awaitChunkedSnapshotRun(t, done)
+	close(gate.release)
+
+	require.NoError(t, pipeline.New(f.cfg).Run(f.ctx))
+	var resumedPosition string
+	require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT _cdc_lsn FROM public.items WHERE id = 1").Scan(&resumedPosition))
+	require.Equal(t, firstPosition, resumedPosition)
+	var total, distinct int
+	require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT count(*), count(DISTINCT id) FROM public.items").Scan(&total, &distinct))
+	require.Equal(t, 12, total)
+	require.Equal(t, total, distinct)
 }
 
 func TestPostgresCDC_ChunkedSnapshotRejectsReplacedDestination(t *testing.T) {

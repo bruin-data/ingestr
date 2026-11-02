@@ -30,6 +30,28 @@ func TestSnapshotChunkQueryFirstChunkAndUntrustedKey(t *testing.T) {
 	require.Equal(t, []any{upper, 25}, args)
 }
 
+func TestSnapshotHeapChunkQuery(t *testing.T) {
+	query, args := snapshotHeapChunkQuery(
+		[]string{`"id"`, `"toasted_payload"`}, `"public"."items"`,
+		[]string{"(12,3)"}, []string{"(99,7)"}, 200,
+	)
+	require.Equal(t, `SELECT "id", "toasted_payload", __ingestr_snapshot.ctid::text AS "__ingestr_key_0" FROM "public"."items" AS __ingestr_snapshot WHERE __ingestr_snapshot.ctid > $1::tid AND __ingestr_snapshot.ctid <= $2::tid LIMIT $3`, query)
+	require.Equal(t, []any{"(12,3)", "(99,7)", 200}, args)
+	require.NotContains(t, query, "ORDER BY")
+}
+
+func TestSnapshotHeapChunkQueryOmitsFirstLowerBound(t *testing.T) {
+	query, args := snapshotHeapChunkQuery([]string{`"id"`}, `"public"."items"`, nil, []string{"(99,7)"}, 25)
+	require.Equal(t, `SELECT "id", __ingestr_snapshot.ctid::text AS "__ingestr_key_0" FROM "public"."items" AS __ingestr_snapshot WHERE __ingestr_snapshot.ctid <= $1::tid LIMIT $2`, query)
+	require.Equal(t, []any{"(99,7)", 25}, args)
+}
+
+func TestSnapshotHeapUpperQueryDoesNotReadToastedColumns(t *testing.T) {
+	query := snapshotHeapUpperQuery("public.items")
+	require.Equal(t, `SELECT ctid::text FROM "public"."items" ORDER BY ctid DESC LIMIT 1`, query)
+	require.NotContains(t, query, "payload")
+}
+
 func TestSnapshotChunkBoundsRejectIncompleteCompositeCursor(t *testing.T) {
 	keys := []string{"tenant", "id"}
 	require.NoError(t, validateSnapshotChunkBounds(keys, nil, nil))
@@ -39,6 +61,13 @@ func TestSnapshotChunkBoundsRejectIncompleteCompositeCursor(t *testing.T) {
 	require.Error(t, validateSnapshotChunkBounds(keys, nil, []string{"100"}))
 	require.Error(t, validateSnapshotChunkBounds(keys, []string{}, nil))
 	require.Error(t, validateSnapshotChunkBounds(keys, nil, []string{}))
+}
+
+func TestSnapshotHeapChunkBoundsRequireOneCTID(t *testing.T) {
+	require.NoError(t, validateSnapshotChunkCursor("heap", []string{"id"}, nil, nil))
+	require.NoError(t, validateSnapshotChunkCursor("heap", []string{"id"}, []string{"(1,2)"}, []string{"(9,9)"}))
+	require.Error(t, validateSnapshotChunkCursor("heap", []string{"id"}, []string{}, nil))
+	require.Error(t, validateSnapshotChunkCursor("heap", []string{"id"}, []string{"(1,2)", "(1,3)"}, nil))
 }
 
 func TestValidateChunkedKeys(t *testing.T) {
@@ -111,9 +140,17 @@ func TestReadSnapshotChunkRejectsUnboundedReadBeforeConnecting(t *testing.T) {
 		{name: "negative timeout", size: 1, timeout: -time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			chunk, err := src.readSnapshotChunk(context.Background(), source.SourceTableInfo{}, "", nil, nil, tc.size, tc.maxBytes, tc.timeout)
+			chunk, err := src.readSnapshotChunk(context.Background(), source.SourceTableInfo{}, "", "key", nil, nil, tc.size, tc.maxBytes, tc.timeout)
 			require.ErrorContains(t, err, "must be positive")
 			require.Nil(t, chunk.Batch)
 		})
 	}
+}
+
+func TestReadSnapshotHeapChunkRequiresPostgreSQL14BeforeConnecting(t *testing.T) {
+	src := &PostgresCDCSource{serverVersion: 130000}
+	chunk, err := src.readSnapshotChunk(context.Background(), source.SourceTableInfo{}, "", "heap", nil, nil, 1, 0, time.Second)
+	require.ErrorContains(t, err, "PostgreSQL 14 or newer")
+	require.ErrorContains(t, err, "130000")
+	require.Nil(t, chunk.Batch)
 }

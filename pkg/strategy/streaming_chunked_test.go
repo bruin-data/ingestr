@@ -41,6 +41,7 @@ func TestStreamingChunkedOptionsPreserveFiniteModeAndSourceNames(t *testing.T) {
 				cfg.CDCSnapshotChunkTimeout = 2 * time.Second
 				cfg.CDCWALStaging = "destination"
 				cfg.CDCSnapshotExecution = "parallel"
+				cfg.CDCSnapshotCursor = "heap"
 				cfg.CDCWALBufferBytes = 4096
 				cfg.NoLoadTimestamp, cfg.NoRunID = true, true
 				sourceSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "OrderID", DataType: schema.TypeInt64}}, PrimaryKeys: []string{"OrderID"}}
@@ -67,6 +68,7 @@ func TestStreamingChunkedOptionsPreserveFiniteModeAndSourceNames(t *testing.T) {
 				require.True(t, read.FullRefresh)
 				require.NotNil(t, read.CDCChunkedSnapshot)
 				require.Equal(t, "parallel", read.CDCChunkedSnapshot.Execution)
+				require.Equal(t, "heap", read.CDCChunkedSnapshot.Cursor)
 				require.Equal(t, continuous, read.CDCChunkedSnapshot.Continuous)
 				require.Equal(t, 17, read.CDCChunkedSnapshot.ChunkSize)
 				require.Equal(t, 2*time.Second, read.CDCChunkedSnapshot.ChunkTimeout)
@@ -212,6 +214,7 @@ func TestStreamingChunkedExecutionAndRefreshOptions(t *testing.T) {
 				wantExecution = "serial"
 			}
 			require.Equal(t, wantExecution, options.Execution)
+			require.Equal(t, "key", options.Cursor)
 			require.Equal(t, tt.wantID, options.RefreshID)
 			require.Equal(t, "inmemory", options.WALStaging)
 		})

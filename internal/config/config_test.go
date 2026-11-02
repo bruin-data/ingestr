@@ -789,6 +789,8 @@ func TestIngestConfigValidateCDCChunkedSnapshot(t *testing.T) {
 		{name: "inmemory", change: func(c *IngestConfig) {}},
 		{name: "destination", change: func(c *IngestConfig) { c.CDCSnapshotExecution, c.CDCWALStaging = "parallel", "destination" }},
 		{name: "parallel", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "parallel" }},
+		{name: "heap cursor", change: func(c *IngestConfig) { c.CDCSnapshotCursor = "heap" }},
+		{name: "unknown cursor", change: func(c *IngestConfig) { c.CDCSnapshotCursor = "physical" }, wantErr: "cdc-snapshot-cursor must be key or heap"},
 		{name: "serial destination", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "serial"; c.CDCWALStaging = "destination" }, wantErr: "destination staging requires --cdc-snapshot-execution parallel"},
 		{name: "disabled serial destination", change: func(c *IngestConfig) {
 			c.CDCChunkedSnapshot, c.CDCSnapshotExecution, c.CDCWALStaging = false, "serial", "destination"
@@ -852,6 +854,9 @@ func TestCDCChunkedSnapshotProgrammaticDefaults(t *testing.T) {
 	if cfg.CDCSnapshotExecution != "serial" {
 		t.Fatalf("chunked snapshot execution = %q, want serial", cfg.CDCSnapshotExecution)
 	}
+	if cfg.CDCSnapshotCursor != "key" {
+		t.Fatalf("chunked snapshot cursor = %q, want key", cfg.CDCSnapshotCursor)
+	}
 	if cfg.CDCSnapshotChunkSize != DefaultCDCSnapshotChunkSize ||
 		cfg.CDCSnapshotChunkTimeout != DefaultCDCSnapshotChunkTimeout ||
 		cfg.CDCWALBufferBytes != DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
@@ -876,7 +881,7 @@ func TestCDCChunkedSnapshotDisabledByDefault(t *testing.T) {
 	}
 	cfg := &IngestConfig{}
 	cfg.ApplyCDCChunkedSnapshotDefaults()
-	if cfg.CDCSnapshotExecution != "" || cfg.CDCSnapshotChunkSize != 0 || cfg.CDCSnapshotChunkTimeout != 0 || cfg.CDCWALBufferBytes != 0 || cfg.CDCWALStaging != "" {
+	if cfg.CDCSnapshotExecution != "" || cfg.CDCSnapshotCursor != "" || cfg.CDCSnapshotChunkSize != 0 || cfg.CDCSnapshotChunkTimeout != 0 || cfg.CDCWALBufferBytes != 0 || cfg.CDCWALStaging != "" {
 		t.Fatal("chunked snapshot defaults changed a disabled configuration")
 	}
 }

@@ -71,6 +71,7 @@ func (e *StreamingExecutor) chunkedSnapshotOptions(cfg *config.IngestConfig, des
 	e.opts.StateManager.mu.Unlock()
 	return &source.CDCChunkedSnapshotOptions{
 		Execution:      cfg.CDCSnapshotExecution,
+		Cursor:         cfg.CDCSnapshotCursor,
 		ChunkSize:      cfg.CDCSnapshotChunkSize,
 		ChunkTimeout:   cfg.CDCSnapshotChunkTimeout,
 		WALStaging:     cfg.CDCWALStaging,

@@ -19,6 +19,7 @@ const chunkStateKey = "bootstrap"
 type chunkTableState struct {
 	After       []string `json:"after,omitempty"`
 	Upper       []string `json:"upper,omitempty"`
+	Cursor      string   `json:"cursor,omitempty"`
 	Boundary    string   `json:"boundary"`
 	ReplayFrom  string   `json:"replay_from,omitempty"`
 	Initialized bool     `json:"initialized"`
@@ -84,6 +85,9 @@ func loadChunkState(ctx context.Context, store source.CDCChunkStore) (*chunkBoot
 	for name, table := range state.Tables {
 		if name == "" || table == nil {
 			return nil, fmt.Errorf("invalid chunked snapshot table checkpoint")
+		}
+		if table.Cursor != "" && table.Cursor != "key" && table.Cursor != "heap" {
+			return nil, fmt.Errorf("invalid snapshot cursor for %s", name)
 		}
 		if boundary, err := pglogrepl.ParseLSN(table.Boundary); err != nil || boundary == 0 {
 			return nil, fmt.Errorf("invalid chunked snapshot boundary for %s", name)

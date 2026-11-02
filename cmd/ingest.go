@@ -151,6 +151,12 @@ func IngestCommand() *cli.Command {
 				Value:   config.DefaultCDCSnapshotExecution,
 				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_EXECUTION"),
 			},
+			&cli.StringFlag{
+				Name:    "cdc-snapshot-cursor",
+				Usage:   "Chunked PostgreSQL CDC snapshot cursor: key (primary-key order) or heap (physical ctid order)",
+				Value:   config.DefaultCDCSnapshotCursor,
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CURSOR"),
+			},
 			&cli.DurationFlag{
 				Name:    "cdc-snapshot-chunk-timeout",
 				Usage:   "Maximum duration of each PostgreSQL CDC snapshot chunk read",
@@ -420,6 +426,7 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.CDCStartLSN = c.String("cdc-start-lsn")
 	cfg.CDCChunkedSnapshot = c.Bool("cdc-snapshot-chunked")
 	cfg.CDCSnapshotExecution = c.String("cdc-snapshot-execution")
+	cfg.CDCSnapshotCursor = c.String("cdc-snapshot-cursor")
 	cfg.CDCSnapshotChunkSize = int(c.Int("cdc-snapshot-chunk-size"))
 	cfg.CDCSnapshotChunkTimeout = c.Duration("cdc-snapshot-chunk-timeout")
 	cfg.CDCWALStaging = c.String("cdc-wal-staging")
