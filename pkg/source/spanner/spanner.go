@@ -21,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 var silentLogger = log.New(io.Discard, "", 0)
@@ -441,40 +442,47 @@ func (s *SpannerSource) rowsToArrowBatch(iter *spanner.RowIterator, arrowSchema 
 }
 
 func extractColumnValue(row *spanner.Row, idx int, col schema.Column) interface{} {
+	return decodeValue(func(p interface{}) error { return row.Column(idx, p) }, col)
+}
+
+func decodeValue(decode func(interface{}) error, col schema.Column) interface{} {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		var v spanner.NullBool
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.Bool
 	case schema.TypeInt64:
 		var v spanner.NullInt64
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.Int64
 	case schema.TypeFloat32:
 		var v spanner.NullFloat32
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.Float32
 	case schema.TypeFloat64:
 		var v spanner.NullFloat64
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.Float64
 	case schema.TypeString:
-		var v spanner.NullString
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		var v spanner.GenericColumnValue
+		if err := decode(&v); err != nil {
 			return nil
 		}
-		return v.StringVal
+		if s, ok := v.Value.GetKind().(*structpb.Value_StringValue); ok {
+			return s.StringValue
+		}
+		return nil
 	case schema.TypeBinary:
 		var v []byte
-		if err := row.Column(idx, &v); err != nil {
+		if err := decode(&v); err != nil {
 			return nil
 		}
 		if v == nil {
@@ -483,25 +491,25 @@ func extractColumnValue(row *spanner.Row, idx int, col schema.Column) interface{
 		return v
 	case schema.TypeDate:
 		var v spanner.NullDate
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.Date.In(time.UTC)
 	case schema.TypeTimestampTZ, schema.TypeTimestamp:
 		var v spanner.NullTime
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.Time
 	case schema.TypeDecimal:
 		var v spanner.NullNumeric
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.Numeric.FloatString(9)
 	case schema.TypeJSON:
 		var v spanner.NullJSON
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		jsonBytes, err := json.Marshal(v.Value)
@@ -511,76 +519,25 @@ func extractColumnValue(row *spanner.Row, idx int, col schema.Column) interface{
 		return string(jsonBytes)
 	case schema.TypeUUID:
 		var v spanner.NullString
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.StringVal
 	case schema.TypeArray:
-		switch col.ArrayType {
-		case schema.TypeString:
-			var v []spanner.NullString
-			if err := row.Column(idx, &v); err != nil || v == nil {
-				return nil
-			}
-			result := make([]string, 0, len(v))
-			for _, s := range v {
-				if s.Valid {
-					result = append(result, s.StringVal)
-				}
-			}
-			return result
-		case schema.TypeInt64:
-			var v []spanner.NullInt64
-			if err := row.Column(idx, &v); err != nil || v == nil {
-				return nil
-			}
-			result := make([]int64, 0, len(v))
-			for _, n := range v {
-				if n.Valid {
-					result = append(result, n.Int64)
-				}
-			}
-			return result
-		case schema.TypeFloat64:
-			var v []spanner.NullFloat64
-			if err := row.Column(idx, &v); err != nil || v == nil {
-				return nil
-			}
-			result := make([]float64, 0, len(v))
-			for _, n := range v {
-				if n.Valid {
-					result = append(result, n.Float64)
-				}
-			}
-			return result
-		case schema.TypeBoolean:
-			var v []spanner.NullBool
-			if err := row.Column(idx, &v); err != nil || v == nil {
-				return nil
-			}
-			result := make([]bool, 0, len(v))
-			for _, b := range v {
-				if b.Valid {
-					result = append(result, b.Bool)
-				}
-			}
-			return result
-		default:
-			var v []spanner.NullString
-			if err := row.Column(idx, &v); err != nil || v == nil {
-				return nil
-			}
-			result := make([]string, 0, len(v))
-			for _, s := range v {
-				if s.Valid {
-					result = append(result, s.StringVal)
-				}
-			}
-			return result
+		var v spanner.GenericColumnValue
+		if err := decode(&v); err != nil || v.Value.GetListValue() == nil {
+			return nil
 		}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		values := v.Value.GetListValue().GetValues()
+		result := make([]interface{}, len(values))
+		for i, elem := range values {
+			result[i] = decodeValue(spanner.GenericColumnValue{Type: v.Type.GetArrayElementType(), Value: elem}.Decode, elemCol)
+		}
+		return result
 	default:
 		var v spanner.NullString
-		if err := row.Column(idx, &v); err != nil || !v.Valid {
+		if err := decode(&v); err != nil || !v.Valid {
 			return nil
 		}
 		return v.StringVal
