@@ -824,7 +824,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/go-jose/go-jose/v4
-      version: v4.1.4
+      version: v4.1.6
       licenses:
         - Apache-2.0
         - BSD-3-Clause
