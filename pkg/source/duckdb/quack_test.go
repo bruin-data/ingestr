@@ -1,6 +1,7 @@
 package duckdb
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -78,6 +79,18 @@ func TestQuackAttachStatements(t *testing.T) {
 			require.NotContains(t, RedactSecret(stmt), "it''s")
 		}
 	}
+}
+
+func TestQuackAttachErrorOldDriver(t *testing.T) {
+	cfg := &QuackConfig{Host: "localhost", Token: "secret123"}
+	stmt := cfg.AttachStatements()[2]
+
+	err := cfg.AttachError(stmt, errors.New("Invalid Input Error: Secret type 'quack' not found"))
+	require.ErrorContains(t, err, "dbc install duckdb=<server version>")
+	require.NotContains(t, err.Error(), "secret123")
+
+	err = cfg.AttachError(stmt, errors.New("Authentication failed"))
+	require.NotContains(t, err.Error(), "dbc install")
 }
 
 func TestDialectBuildConnectionString_Quack(t *testing.T) {

@@ -107,5 +107,8 @@ func (c *QuackConfig) AttachStatements() []string {
 
 // AttachError keeps the token out of bootstrap errors.
 func (c *QuackConfig) AttachError(stmt string, err error) error {
+	if strings.Contains(err.Error(), "Secret type 'quack' not found") {
+		return fmt.Errorf("quack: the DuckDB driver is too old for Quack; install a 2.0+ driver matching the server with `dbc install duckdb=<server version>`: %w", BootstrapError(RedactSecret(stmt), err))
+	}
 	return fmt.Errorf("quack: %w", BootstrapError(RedactSecret(stmt), err))
 }
