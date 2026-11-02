@@ -214,9 +214,7 @@ ingestr ingest \
 
 ## Incremental Loading
 
-HubSpot supports incremental loading out of the box. On the first run, ingestr performs a full load of all records. On subsequent runs, it uses the `hs_lastmodifieddate` field to fetch only records that have been created or updated since the last successful run.
-
-No additional flags are needed — incremental state is managed automatically by ingestr.
+CRM object tables, including [custom objects](#custom-objects), load incrementally on `hs_lastmodifieddate` (`lastmodifieddate` for `contacts`) and are merged on `hs_object_id`. Use `--interval-start` and `--interval-end` to fetch only the records created or updated in that window. Without `--interval-start`, all records are loaded.
 
 ## Custom Objects
 
@@ -231,6 +229,8 @@ or with associations to other objects:
 ```plaintext
 custom:<custom_object_name>:<associations>
 ```
+
+Custom objects load incrementally the same way as the built-in objects: primary key `hs_object_id`, incremental key `hs_lastmodifieddate`, strategy `merge`. See [Incremental Loading](#incremental-loading).
 
 ### Parameters
 
