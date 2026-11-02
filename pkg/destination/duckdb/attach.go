@@ -38,6 +38,7 @@ func (d *DuckDBDestination) connectAttached(ctx context.Context, name string, st
 	for _, stmt := range stmts {
 		config.Debug("[%s] %s", tag, srcduckdb.RedactSecret(stmt))
 		if err := d.Exec(ctx, stmt); err != nil {
+			config.LogFailedQuery(srcduckdb.RedactSecret(stmt), err)
 			if onErr != nil {
 				return onErr(stmt, err)
 			}
