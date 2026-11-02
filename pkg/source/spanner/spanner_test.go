@@ -2,11 +2,17 @@ package spanner
 
 import (
 	"encoding/base64"
+	"math/big"
 	"testing"
 	"time"
 
+	"cloud.google.com/go/spanner"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -299,4 +305,64 @@ func TestNewSpannerSource(t *testing.T) {
 	require.NotNil(t, s)
 	assert.Nil(t, s.client)
 	assert.Empty(t, s.dbPath)
+}
+
+func TestExtractArrayValue(t *testing.T) {
+	ts := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name     string
+		dbType   string
+		value    interface{}
+		expected string
+	}{
+		{"numeric", "ARRAY<NUMERIC>", []spanner.NullNumeric{{Numeric: *big.NewRat(11702, 1), Valid: true}, {}, {Numeric: *big.NewRat(3, 2), Valid: true}}, `[11702 (null) 1.5]`},
+		{"timestamp", "ARRAY<TIMESTAMP>", []spanner.NullTime{{Time: ts, Valid: true}, {}}, `[1704164645000000 (null)]`},
+		{"json", "ARRAY<JSON>", []spanner.NullJSON{{Value: map[string]int{"a": 1}, Valid: true}, {}}, `(extension<json>)["{\"a\":1}" (null)]`},
+		{"bytes", "ARRAY<BYTES(MAX)>", [][]byte{[]byte("hi"), nil}, `["hi" (null)]`},
+		{"float32", "ARRAY<FLOAT32>", []spanner.NullFloat32{{Float32: 1.5, Valid: true}, {}}, `[1.5 (null)]`},
+		{"int64 keeps nulls", "ARRAY<INT64>", []spanner.NullInt64{{Int64: 1, Valid: true}, {}, {Int64: 3, Valid: true}}, `[1 (null) 3]`},
+		{"string keeps nulls", "ARRAY<STRING(MAX)>", []spanner.NullString{{StringVal: "a", Valid: true}, {}}, `["a" (null)]`},
+		{"null array", "ARRAY<NUMERIC>", []spanner.NullNumeric(nil), `(null)`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dt, precision, scale, elemType := mapSpannerTypeString(tt.dbType)
+			col := schema.Column{Name: "c", DataType: dt, Precision: precision, Scale: scale, ArrayType: elemType, Nullable: true}
+			row, err := spanner.NewRow([]string{"c"}, []interface{}{tt.value})
+			require.NoError(t, err)
+
+			val := extractColumnValue(row, 0, col)
+
+			b := array.NewBuilder(memory.NewGoAllocator(), buildArrowSchema([]schema.Column{col}).Field(0).Type)
+			defer b.Release()
+			arrowconv.AppendValue(b, val)
+			arr := b.NewArray()
+			defer arr.Release()
+
+			if tt.expected == "(null)" {
+				assert.True(t, arr.IsNull(0))
+				return
+			}
+			assert.Equal(t, tt.expected, arr.(*array.List).ListValues().String())
+		})
+	}
+}
+
+func TestExtractStringLikeValues(t *testing.T) {
+	id := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	interval := spanner.Interval{Months: 14, Days: 3, Nanos: big.NewInt(0)}
+	row, err := spanner.NewRow(
+		[]string{"u", "i", "us"},
+		[]interface{}{
+			spanner.NullUUID{UUID: id, Valid: true},
+			spanner.NullInterval{Interval: interval, Valid: true},
+			[]spanner.NullUUID{{UUID: id, Valid: true}, {}},
+		},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, id.String(), extractColumnValue(row, 0, schema.Column{DataType: schema.TypeString}))
+	assert.Equal(t, "P1Y2M3D", extractColumnValue(row, 1, schema.Column{DataType: schema.TypeString}))
+	assert.Equal(t, []interface{}{id.String(), nil}, extractColumnValue(row, 2, schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeString}))
 }
