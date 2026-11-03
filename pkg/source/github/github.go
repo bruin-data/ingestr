@@ -28,6 +28,7 @@ const (
 )
 
 var supportedTables = []string{
+	"commits",
 	"issues",
 	"pull_requests",
 	"repo_events",
@@ -81,6 +82,19 @@ var repoEventFields = []schema.Column{
 	{Name: "payload", DataType: schema.TypeJSON, Nullable: true},
 	{Name: "public", DataType: schema.TypeBoolean, Nullable: true},
 	{Name: "org", DataType: schema.TypeJSON, Nullable: true},
+}
+
+var commitFields = []schema.Column{
+	{Name: "sha", DataType: schema.TypeString, Nullable: false},
+	{Name: "committed_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "node_id", DataType: schema.TypeString, Nullable: true},
+	{Name: "commit", DataType: schema.TypeJSON, Nullable: true},
+	{Name: "url", DataType: schema.TypeString, Nullable: true},
+	{Name: "html_url", DataType: schema.TypeString, Nullable: true},
+	{Name: "comments_url", DataType: schema.TypeString, Nullable: true},
+	{Name: "author", DataType: schema.TypeJSON, Nullable: true},
+	{Name: "committer", DataType: schema.TypeJSON, Nullable: true},
+	{Name: "parents", DataType: schema.TypeJSON, Nullable: true},
 }
 
 var stargazerFields = []schema.Column{
@@ -213,12 +227,16 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 		return nil, err
 	}
 
-	// Default strategy is replace; only repo_events uses merge with incremental loading
+	// Default strategy is replace; repo_events and commits use merge with incremental loading
 	incrementalKey := ""
 	strategy := config.StrategyReplace
 
-	if tableName == "repo_events" {
+	switch tableName {
+	case "repo_events":
 		incrementalKey = "created_at"
+		strategy = config.StrategyMerge
+	case "commits":
+		incrementalKey = "committed_at"
 		strategy = config.StrategyMerge
 	}
 
@@ -242,6 +260,9 @@ func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.Tab
 	var primaryKeys []string
 
 	switch table {
+	case "commits":
+		fields = commitFields
+		primaryKeys = []string{"sha"}
 	case "issues":
 		fields = issueFields
 		primaryKeys = nil
@@ -277,6 +298,8 @@ func (s *GithubSource) read(ctx context.Context, table string, opts source.ReadO
 
 		var err error
 		switch table {
+		case "commits":
+			err = s.readCommits(ctx, opts, results)
 		case "issues":
 			err = s.readIssues(ctx, opts, results)
 		case "pull_requests":
@@ -828,6 +851,95 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 	config.Debug("[GITHUB] Finished reading repo events, total records: %d", totalSent)
 	// No need to print at the end - last iteration already printed the final state
 	return nil
+}
+
+// readCommits lists default-branch commits. GitHub applies since/until to the committer date.
+func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	config.Debug("[GITHUB] Reading commits for %s/%s", s.owner, s.repo)
+
+	params := url.Values{}
+	params.Set("per_page", strconv.Itoa(maxPageSize))
+	if opts.IntervalStart != nil {
+		params.Set("since", opts.IntervalStart.UTC().Format(time.RFC3339))
+	}
+	if opts.IntervalEnd != nil {
+		params.Set("until", opts.IntervalEnd.UTC().Format(time.RFC3339))
+	}
+
+	nextURL := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(s.owner), url.PathEscape(s.repo), params.Encode())
+	totalSent := 0
+
+	for nextURL != "" {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		var commits []map[string]interface{}
+		httpResp, err := s.restClient.R(ctx).
+			SetResult(&commits).
+			Get(nextURL)
+		if err != nil {
+			return fmt.Errorf("failed to fetch commits: %w", err)
+		}
+		if !httpResp.IsSuccess() {
+			return fmt.Errorf("failed to fetch commits with status %d: %s", httpResp.StatusCode(), httpResp.String())
+		}
+		config.Debug("[GITHUB] Got %d commits, requests remaining: %s", len(commits), httpResp.Header().Get("x-ratelimit-remaining"))
+
+		if opts.Limit > 0 && totalSent+len(commits) > opts.Limit {
+			commits = commits[:opts.Limit-totalSent]
+		}
+
+		var batch []map[string]interface{}
+		var batchBytes int64
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, commitFields, opts.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("failed to convert commits to Arrow: %w", err)
+			}
+			results <- source.RecordBatchResult{Batch: record}
+			totalSent += len(batch)
+			batch = nil
+			batchBytes = 0
+			return nil
+		}
+
+		for _, c := range commits {
+			c["committed_at"] = committerDate(c)
+			if opts.MaxBatchBytes > 0 {
+				rowBytes := arrowconv.RowBytes(c)
+				if len(batch) > 0 && batchBytes+rowBytes > opts.MaxBatchBytes {
+					if err := flush(); err != nil {
+						return err
+					}
+				}
+				batchBytes += rowBytes
+			}
+			batch = append(batch, c)
+		}
+		if err := flush(); err != nil {
+			return err
+		}
+
+		if opts.Limit > 0 && totalSent >= opts.Limit {
+			break
+		}
+		nextURL = extractNextPageURL(httpResp.Header().Get("Link"))
+	}
+
+	config.Debug("[GITHUB] Finished reading commits, total records: %d", totalSent)
+	return nil
+}
+
+func committerDate(c map[string]interface{}) interface{} {
+	commit, _ := c["commit"].(map[string]interface{})
+	committer, _ := commit["committer"].(map[string]interface{})
+	return committer["date"]
 }
 
 // extractNextPageURL extracts the next page URL from GitHub's Link header
