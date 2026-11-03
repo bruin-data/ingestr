@@ -70,12 +70,12 @@ func TestSnapshotChunkByteCapBoundsServerExecution(t *testing.T) {
 	require.NoError(t, err)
 	var table source.SourceTableInfo
 	for _, candidate := range tables {
-		if candidate.Name == "public.chunk_width_items" {
+		if candidate.Name == "chunk_width_items" {
 			table = candidate
 			break
 		}
 	}
-	require.Equal(t, "public.chunk_width_items", table.Name)
+	require.Equal(t, "chunk_width_items", table.Name)
 
 	resetCounter := func() {
 		_, err := pool.Exec(ctx, "SELECT pg_stat_reset_single_function_counters('public.count_chunk_row(bigint)'::regprocedure)")
