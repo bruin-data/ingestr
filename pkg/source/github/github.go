@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -883,6 +884,12 @@ func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions,
 		if err != nil {
 			return fmt.Errorf("failed to fetch commits: %w", err)
 		}
+
+		if isEmptyRepository(httpResp) {
+			config.Debug("[GITHUB] %s/%s has no commits yet", s.owner, s.repo)
+			break
+		}
+
 		if !httpResp.IsSuccess() {
 			return fmt.Errorf("failed to fetch commits with status %d: %s", httpResp.StatusCode(), httpResp.String())
 		}
@@ -940,6 +947,12 @@ func committerDate(c map[string]interface{}) interface{} {
 	commit, _ := c["commit"].(map[string]interface{})
 	committer, _ := commit["committer"].(map[string]interface{})
 	return committer["date"]
+}
+
+// isEmptyRepository reports GitHub's answer for a repository with no commits yet:
+// 409 "Git Repository is empty.". The other tables read such a repo as zero rows.
+func isEmptyRepository(resp *ingestrhttp.Response) bool {
+	return resp.StatusCode() == http.StatusConflict && strings.Contains(resp.String(), "Git Repository is empty")
 }
 
 // extractNextPageURL extracts the next page URL from GitHub's Link header

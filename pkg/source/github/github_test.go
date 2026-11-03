@@ -204,3 +204,27 @@ func TestGithubReadCommitsMissingCommitterDate(t *testing.T) {
 		t.Fatalf("committed_at nulls=%d want 2", nulls)
 	}
 }
+
+func TestGithubReadCommitsEmptyRepository(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"Git Repository is empty.","documentation_url":"https://docs.github.com/rest/commits/commits#list-commits","status":"409"}`))
+	}))
+	defer srv.Close()
+
+	s := &GithubSource{
+		owner:      "o",
+		repo:       "r",
+		restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL)),
+	}
+	results := make(chan source.RecordBatchResult, 1)
+	if err := s.readCommits(context.Background(), source.ReadOptions{}, results); err != nil {
+		t.Fatalf("empty repository should read as zero rows, got: %v", err)
+	}
+	close(results)
+
+	if res, ok := <-results; ok {
+		t.Fatalf("expected no batches, got one with %d rows", res.Batch.NumRows())
+	}
+}
