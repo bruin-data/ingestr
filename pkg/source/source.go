@@ -148,6 +148,7 @@ type DurableID string
 
 type RecordBatchResult struct {
 	CDCFlush  bool // Flush preceding data and acknowledge its commit token before reading further.
+	CDCUpload bool // Stream this serial snapshot chunk into staging without merging it yet.
 	Batch     arrow.RecordBatch
 	Err       error
 	TableName string // Source table name for multi-table sources (empty for single-table)

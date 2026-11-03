@@ -492,8 +492,21 @@ type streamTableState struct {
 
 	pending                     []arrow.RecordBatch
 	pendingRows                 int64
+	snapshotUpload              *snapshotStagingUpload
+	stagingDirty                bool
+	stagedRows                  int64
+	stagedBytes                 uint64
 	snapshotBoundaryInvalidated bool
 	softReplace                 *pendingSoftReplace
+}
+
+type snapshotStagingUpload struct {
+	records  chan source.RecordBatchResult
+	finished chan struct{}
+	cancel   context.CancelFunc
+	rows     int64
+	bytes    uint64
+	closed   bool
 }
 
 // pendingSoftReplace is a snapshot replacement applied without emptying the
@@ -534,6 +547,7 @@ type flushLoop struct {
 	// source position completes the new empty-table snapshot boundary.
 	pendingTruncates map[string]string
 	legacyFinalized  bool
+	uploadErrors     chan error
 
 	cycles int64
 }
@@ -545,6 +559,7 @@ func newFlushLoop(dest destination.Destination, cfg *config.IngestConfig, opts S
 		opts:             opts,
 		tables:           tables,
 		pendingTruncates: make(map[string]string),
+		uploadErrors:     make(chan error, 1),
 	}
 }
 
@@ -613,6 +628,9 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 				return err
 			}
 
+		case err := <-l.uploadErrors:
+			return fmt.Errorf("streaming snapshot upload: %w", err)
+
 		case <-ctx.Done():
 			return l.shutdown(ctx, records)
 		}
@@ -636,6 +654,17 @@ func (l *flushLoop) processResult(ctx context.Context, res source.RecordBatchRes
 			return err
 		}
 	}
+	if res.CDCUpload {
+		return l.uploadSnapshotChunk(ctx, res)
+	}
+	if res.CDCFlush {
+		if err := l.finishSnapshotUploads(ctx); err != nil {
+			if res.Batch != nil {
+				res.Batch.Release()
+			}
+			return err
+		}
+	}
 	if err := l.handleResult(ctx, res); err != nil {
 		return err
 	}
@@ -644,6 +673,135 @@ func (l *flushLoop) processResult(ctx context.Context, res source.RecordBatchRes
 	}
 	if token, ok := res.CommitToken.(source.CDCStateCommitToken); ok && len(token.SnapshotPositions) > 0 && (l.buffered > 0 || l.tokenDirty) {
 		return l.flush(ctx)
+	}
+	return nil
+}
+
+func (l *flushLoop) uploadSnapshotChunk(ctx context.Context, res source.RecordBatchResult) error {
+	if res.Truncate || res.CommitToken != nil {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return fmt.Errorf("source requested an invalid CDC snapshot upload")
+	}
+	st, ok := l.tableState(res.TableName)
+	if !ok {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return fmt.Errorf("source requested a CDC snapshot upload for unknown table %q", res.TableName)
+	}
+	if st.stagingTable == "" {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return fmt.Errorf("source requested a CDC snapshot upload for %q without a staging table", res.TableName)
+	}
+	if res.Batch == nil || res.Batch.NumRows() == 0 {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return nil
+	}
+	if st.snapshotUpload == nil {
+		if err := l.startSnapshotUpload(ctx, res.TableName, st); err != nil {
+			res.Batch.Release()
+			return err
+		}
+	}
+	rows := res.Batch.NumRows()
+	select {
+	case st.snapshotUpload.records <- source.RecordBatchResult{Batch: res.Batch}:
+		st.snapshotUpload.rows += rows
+		return nil
+	case err := <-l.uploadErrors:
+		res.Batch.Release()
+		return fmt.Errorf("streaming snapshot upload: %w", err)
+	case <-ctx.Done():
+		res.Batch.Release()
+		return ctx.Err()
+	}
+}
+
+func (l *flushLoop) startSnapshotUpload(ctx context.Context, recordTable string, st *streamTableState) error {
+	if err := connectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if l.opts.StateManager != nil {
+		sourceTable := l.stateSourceTable(recordTable)
+		if sourceTable == "" {
+			var err error
+			sourceTable, err = l.opts.StateManager.SourceTableForDestination(st.destTable)
+			if err != nil {
+				return err
+			}
+		}
+		if err := l.opts.StateManager.BindDestinationIncarnation(ctx, sourceTable, st.destTable); err != nil {
+			return fmt.Errorf("streaming snapshot upload: failed to bind CDC destination for %s: %w", sourceTable, err)
+		}
+	}
+
+	uploadCtx, cancel := source.WithoutCancelWithConnectorLease(ctx)
+	upload := &snapshotStagingUpload{
+		records:  make(chan source.RecordBatchResult),
+		finished: make(chan struct{}),
+		cancel:   cancel,
+	}
+	st.snapshotUpload = upload
+
+	writeOpts := destination.WriteOptions{
+		Table:            st.stagingTable,
+		Schema:           st.schema,
+		Parallelism:      l.cfg.EffectiveDestinationParallelism(),
+		StagingTable:     true,
+		StagingBucket:    l.cfg.StagingBucket,
+		LoaderFileSize:   l.cfg.LoaderFileSize,
+		LoaderFileFormat: l.cfg.LoaderFileFormat,
+	}
+	records := (<-chan source.RecordBatchResult)(upload.records)
+	if col, ok := loadTimestampColumn(st.schema); ok {
+		records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, time.Now().UTC().Truncate(time.Microsecond)))
+	}
+	if col, ok := runIDColumn(st.schema); ok {
+		records = transformer.Wrap(records, transformer.NewRunID(col, strings.ReplaceAll(uuid.NewString(), "-", "")))
+	}
+	records = countRecordBatchBytes(records, &upload.bytes)
+
+	go func() {
+		defer close(upload.finished)
+		if err := l.dest.WriteParallel(uploadCtx, records, writeOpts); err != nil {
+			l.uploadErrors <- err
+			drainAndRelease(records)
+		}
+	}()
+	return nil
+}
+
+func (l *flushLoop) finishSnapshotUploads(ctx context.Context) error {
+	for _, st := range l.tables {
+		upload := st.snapshotUpload
+		if upload == nil {
+			continue
+		}
+		close(upload.records)
+		upload.closed = true
+		select {
+		case <-upload.finished:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		upload.cancel()
+		st.snapshotUpload = nil
+		select {
+		case err := <-l.uploadErrors:
+			return fmt.Errorf("streaming snapshot upload: %w", err)
+		default:
+		}
+		if upload.rows > 0 {
+			st.stagingDirty = true
+			st.stagedRows += upload.rows
+			st.stagedBytes += upload.bytes
+		}
 	}
 	return nil
 }
@@ -1164,8 +1322,10 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	}
 
 	type flushWork struct {
-		name string
-		st   *streamTableState
+		name        string
+		st          *streamTableState
+		stagedRows  int64
+		stagedBytes uint64
 
 		batches []arrow.RecordBatch
 		rows    int64
@@ -1174,10 +1334,13 @@ func (l *flushLoop) flush(ctx context.Context) error {
 
 	var work []flushWork
 	for name, st := range l.tables {
-		if st.pendingRows == 0 {
+		if st.pendingRows == 0 && !st.stagingDirty {
 			continue
 		}
-		work = append(work, flushWork{name: name, st: st, batches: st.pending, rows: st.pendingRows})
+		work = append(work, flushWork{
+			name: name, st: st, batches: st.pending, rows: st.pendingRows,
+			stagedRows: st.stagedRows, stagedBytes: st.stagedBytes,
+		})
 		l.buffered -= st.pendingRows
 		st.pending = nil
 		st.pendingRows = 0
@@ -1206,44 +1369,46 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			displayName = st.destTable
 		}
 
-		writeOpts := destination.WriteOptions{
-			Table:            st.destTable,
-			Schema:           st.schema,
-			Parallelism:      l.cfg.EffectiveDestinationParallelism(),
-			StagingBucket:    l.cfg.StagingBucket,
-			LoaderFileSize:   l.cfg.LoaderFileSize,
-			LoaderFileFormat: l.cfg.LoaderFileFormat,
-		}
-		if st.stagingTable != "" {
-			writeOpts.Table = st.stagingTable
-			writeOpts.StagingTable = true
-		}
-
-		if err := connectorLeaseLoss(ctx); err != nil {
-			for _, batch := range w.batches {
-				batch.Release()
+		if w.rows > 0 {
+			writeOpts := destination.WriteOptions{
+				Table:            st.destTable,
+				Schema:           st.schema,
+				Parallelism:      l.cfg.EffectiveDestinationParallelism(),
+				StagingBucket:    l.cfg.StagingBucket,
+				LoaderFileSize:   l.cfg.LoaderFileSize,
+				LoaderFileFormat: l.cfg.LoaderFileFormat,
 			}
-			return err
-		}
-		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
-		if col, ok := loadTimestampColumn(st.schema); ok {
-			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
-		}
-		if col, ok := runIDColumn(st.schema); ok {
-			records = transformer.Wrap(records, transformer.NewRunID(col, runID))
-		}
-		var bytes uint64
-		records = countRecordBatchBytes(records, &bytes)
-		if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
-			drainAndRelease(records)
-			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, err)
-		}
-		w.bytes = bytes
-		if err := connectorLeaseLoss(ctx); err != nil {
-			return err
+			if st.stagingTable != "" {
+				writeOpts.Table = st.stagingTable
+				writeOpts.StagingTable = true
+			}
+
+			if err := connectorLeaseLoss(ctx); err != nil {
+				for _, batch := range w.batches {
+					batch.Release()
+				}
+				return err
+			}
+			records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
+			if col, ok := loadTimestampColumn(st.schema); ok {
+				records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
+			}
+			if col, ok := runIDColumn(st.schema); ok {
+				records = transformer.Wrap(records, transformer.NewRunID(col, runID))
+			}
+			var bytes uint64
+			records = countRecordBatchBytes(records, &bytes)
+			if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
+				drainAndRelease(records)
+				return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, err)
+			}
+			w.bytes = bytes
+			if err := connectorLeaseLoss(ctx); err != nil {
+				return err
+			}
 		}
 
-		if st.stagingTable != "" {
+		if st.stagingTable != "" && (st.stagingDirty || w.rows > 0) {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
@@ -1267,6 +1432,9 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
+			st.stagingDirty = false
+			st.stagedRows = 0
+			st.stagedBytes = 0
 		}
 		return nil
 	}
@@ -1319,7 +1487,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 
 	var flushedRows int64
 	for _, w := range work {
-		flushedRows += w.rows
+		flushedRows += w.rows + w.stagedRows
 	}
 
 	if l.opts.StateManager != nil && l.tokenDirty {
@@ -1367,7 +1535,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		if name == "" {
 			name = w.st.destTable // single-table streams key l.tables on ""
 		}
-		perTable[name] = metrics.SyncStats{Rows: w.rows, Bytes: w.bytes}
+		perTable[name] = metrics.SyncStats{Rows: w.rows + w.stagedRows, Bytes: w.bytes + w.stagedBytes}
 	}
 	metrics.RecordSync(perTable, time.Now())
 
@@ -1538,6 +1706,19 @@ func (l *flushLoop) cleanup(ctx context.Context) {
 
 func (l *flushLoop) releasePending() {
 	for _, st := range l.tables {
+		if upload := st.snapshotUpload; upload != nil {
+			upload.cancel()
+			if !upload.closed {
+				close(upload.records)
+				upload.closed = true
+			}
+			<-upload.finished
+			st.snapshotUpload = nil
+			select {
+			case <-l.uploadErrors:
+			default:
+			}
+		}
 		for _, b := range st.pending {
 			b.Release()
 		}
