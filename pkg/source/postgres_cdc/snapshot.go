@@ -342,106 +342,128 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 // each row are the text-cast keys of a key-ordered snapshot; lastKey returns
 // those of the final row converted.
 func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, keyColumns, batchSize int, maxBatchBytes int64, lsn string, syncedAt time.Time) (arrow.RecordBatch, int64, []string, error) {
-	mem := memory.NewGoAllocator()
-
-	// Create builders for all columns including CDC columns
-	builders := make([]array.Builder, len(s.tableSchema.Columns))
-	for i, field := range arrowSchema.Fields() {
-		builders[i] = array.NewBuilder(mem, field.Type)
-	}
-
-	var rowCount int64
-	var accBytes int64
-	var lastKey []string
 	typeMap := s.typeMap
 	if typeMap == nil {
 		typeMap = pgtype.NewMap()
 	}
+	builder := newSnapshotBatchBuilder(s.tableSchema, arrowSchema, columns, keyColumns, typeMap, lsn, syncedAt, maxBatchBytes > 0)
+	defer builder.release()
+
 	for rows.Next() {
-		raw, fields := rows.RawValues(), rows.FieldDescriptions()
-		if len(raw) != len(columns)+keyColumns || len(fields) != len(columns)+keyColumns {
-			for _, b := range builders {
-				b.Release()
-			}
-			return nil, 0, nil, fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), len(columns)+keyColumns)
+		if err := builder.appendRow(rows.RawValues(), rows.FieldDescriptions()); err != nil {
+			return nil, 0, nil, err
 		}
-
-		// Append source column values
-		for i, buf := range raw[:len(columns)] {
-			val, err := snapshotValue(typeMap, fields[i], buf, columns[i])
-			var converted any
-			if err == nil {
-				converted, err = convertValue(val, columns[i])
-			}
-			if err != nil {
-				for _, b := range builders {
-					b.Release()
-				}
-				return nil, 0, nil, fmt.Errorf("failed to convert snapshot column %q: %w", columns[i].Name, err)
-			}
-			arrowconv.AppendValue(builders[i], converted)
-			if maxBatchBytes > 0 {
-				accBytes += arrowconv.ValueBytes(val)
-			}
-		}
-
-		builders[len(columns)].(*array.StringBuilder).Append(lsn)
-		builders[len(columns)+1].(*array.BooleanBuilder).Append(false)
-		builders[len(columns)+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
-		builders[len(columns)+3].(*array.StringBuilder).Append("[]")
-
-		if keyColumns > 0 {
-			lastKey = make([]string, keyColumns)
-			for i, buf := range raw[len(columns):] {
-				if buf == nil {
-					for _, b := range builders {
-						b.Release()
-					}
-					return nil, 0, nil, fmt.Errorf("snapshot key column %d is NULL", i)
-				}
-				lastKey[i] = string(buf)
-			}
-		}
-
-		rowCount++
-
-		if batchSize > 0 && rowCount >= int64(batchSize) {
+		if batchSize > 0 && builder.rowCount >= int64(batchSize) {
 			break
 		}
-		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
+		if maxBatchBytes > 0 && builder.accBytes >= maxBatchBytes {
 			break
 		}
-	}
-
-	if rowCount == 0 {
-		for _, b := range builders {
-			b.Release()
-		}
-		if err := rows.Err(); err != nil {
-			return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
-		}
-		return nil, 0, nil, nil
 	}
 
 	if err := rows.Err(); err != nil {
-		for _, b := range builders {
-			b.Release()
-		}
 		return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
 	}
-
-	arrays := make([]arrow.Array, len(builders))
-	for i, b := range builders {
-		arrays[i] = b.NewArray()
+	if builder.rowCount == 0 {
+		return nil, 0, nil, nil
 	}
 
-	record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
+	return builder.record(), builder.rowCount, builder.lastKey, nil
+}
 
+type snapshotBatchBuilder struct {
+	arrowSchema  *arrow.Schema
+	columns      []schema.Column
+	keyColumns   int
+	typeMap      *pgtype.Map
+	builders     []array.Builder
+	lsn          string
+	syncedAt     time.Time
+	measureBytes bool
+	rowCount     int64
+	accBytes     int64
+	widestRow    int64
+	lastKey      []string
+}
+
+func newSnapshotBatchBuilder(tableSchema *schema.TableSchema, arrowSchema *arrow.Schema, columns []schema.Column, keyColumns int, typeMap *pgtype.Map, lsn string, syncedAt time.Time, measureBytes bool) *snapshotBatchBuilder {
+	builders := make([]array.Builder, len(tableSchema.Columns))
+	mem := memory.NewGoAllocator()
+	for i, field := range arrowSchema.Fields() {
+		builders[i] = array.NewBuilder(mem, field.Type)
+	}
+	return &snapshotBatchBuilder{
+		arrowSchema:  arrowSchema,
+		columns:      columns,
+		keyColumns:   keyColumns,
+		typeMap:      typeMap,
+		builders:     builders,
+		lsn:          lsn,
+		syncedAt:     syncedAt,
+		measureBytes: measureBytes,
+	}
+}
+
+func (b *snapshotBatchBuilder) appendRow(raw [][]byte, fields []pgconn.FieldDescription) error {
+	expected := len(b.columns) + b.keyColumns
+	if len(raw) != expected || len(fields) != expected {
+		return fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), expected)
+	}
+
+	var rowBytes int64
+	for i, buf := range raw[:len(b.columns)] {
+		val, err := snapshotValue(b.typeMap, fields[i], buf, b.columns[i])
+		var converted any
+		if err == nil {
+			converted, err = convertValue(val, b.columns[i])
+		}
+		if err != nil {
+			return fmt.Errorf("failed to convert snapshot column %q: %w", b.columns[i].Name, err)
+		}
+		arrowconv.AppendValue(b.builders[i], converted)
+		if b.measureBytes {
+			rowBytes += arrowconv.ValueBytes(val)
+		}
+	}
+
+	columnCount := len(b.columns)
+	b.builders[columnCount].(*array.StringBuilder).Append(b.lsn)
+	b.builders[columnCount+1].(*array.BooleanBuilder).Append(false)
+	b.builders[columnCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(b.syncedAt.UnixMicro()))
+	b.builders[columnCount+3].(*array.StringBuilder).Append("[]")
+
+	if b.keyColumns > 0 {
+		b.lastKey = make([]string, b.keyColumns)
+		for i, buf := range raw[columnCount:] {
+			if buf == nil {
+				return fmt.Errorf("snapshot key column %d is NULL", i)
+			}
+			b.lastKey[i] = string(buf)
+		}
+	}
+
+	b.rowCount++
+	b.accBytes += rowBytes
+	b.widestRow = max(b.widestRow, rowBytes)
+	return nil
+}
+
+func (b *snapshotBatchBuilder) record() arrow.RecordBatch {
+	arrays := make([]arrow.Array, len(b.builders))
+	for i, builder := range b.builders {
+		arrays[i] = builder.NewArray()
+	}
+	record := array.NewRecordBatch(b.arrowSchema, arrays, b.rowCount)
 	for _, arr := range arrays {
 		arr.Release()
 	}
+	return record
+}
 
-	return record, rowCount, lastKey, nil
+func (b *snapshotBatchBuilder) release() {
+	for _, builder := range b.builders {
+		builder.Release()
+	}
 }
 
 // String-like columns and all arrays are read as PostgreSQL text and decoded

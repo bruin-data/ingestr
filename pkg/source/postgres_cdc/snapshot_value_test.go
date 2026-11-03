@@ -25,6 +25,28 @@ func (r *failedSnapshotRows) Values() ([]any, error)                       { ret
 func (r *failedSnapshotRows) RawValues() [][]byte                          { return nil }
 func (r *failedSnapshotRows) Conn() *pgx.Conn                              { return nil }
 
+type snapshotTestRows struct {
+	fields []pgconn.FieldDescription
+	rows   [][][]byte
+	index  int
+}
+
+func (r *snapshotTestRows) Close()                        {}
+func (r *snapshotTestRows) Err() error                    { return nil }
+func (r *snapshotTestRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
+func (r *snapshotTestRows) FieldDescriptions() []pgconn.FieldDescription {
+	return r.fields
+}
+
+func (r *snapshotTestRows) Next() bool {
+	r.index++
+	return r.index < len(r.rows)
+}
+func (r *snapshotTestRows) Scan(...any) error      { return nil }
+func (r *snapshotTestRows) Values() ([]any, error) { return nil, nil }
+func (r *snapshotTestRows) RawValues() [][]byte    { return r.rows[r.index] }
+func (r *snapshotTestRows) Conn() *pgx.Conn        { return nil }
+
 func TestConvertSnapshotValueRejectsPostgresInfinity(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -89,6 +111,45 @@ func TestSnapshotRowsToBatchDoesNotTreatFirstRowDecodeErrorAsEmpty(t *testing.T)
 	require.ErrorIs(t, err, sentinel)
 	require.Nil(t, record)
 	require.Zero(t, count)
+}
+
+func TestSnapshotRowsToBatchStopsAtByteCapAndReturnsLastKey(t *testing.T) {
+	sourceColumns := []schema.Column{
+		{Name: "id", DataType: schema.TypeString},
+		{Name: "payload", DataType: schema.TypeString},
+	}
+	columns := append(append([]schema.Column(nil), sourceColumns...), cdcMetaColumns()...)
+	fields := []pgconn.FieldDescription{
+		{DataTypeOID: pgtype.TextOID, Format: pgx.TextFormatCode},
+		{DataTypeOID: pgtype.TextOID, Format: pgx.TextFormatCode},
+		{DataTypeOID: pgtype.TextOID, Format: pgx.TextFormatCode},
+	}
+	rows := &snapshotTestRows{
+		fields: fields,
+		index:  -1,
+		rows: [][][]byte{
+			{[]byte("1"), []byte("12345"), []byte("1")},
+			{[]byte("2"), []byte("12345"), []byte("2")},
+			{[]byte("3"), []byte("12345"), []byte("3")},
+		},
+	}
+	snapshot := &Snapshot{tableSchema: &schema.TableSchema{Columns: columns}}
+
+	record, count, lastKey, err := snapshot.rowsToBatch(
+		rows,
+		buildArrowSchema(columns),
+		sourceColumns,
+		1,
+		100,
+		10,
+		"0/1",
+		time.Now(),
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, count)
+	require.Equal(t, []string{"2"}, lastKey)
+	require.EqualValues(t, 2, record.NumRows())
+	record.Release()
 }
 
 func TestConvertSnapshotArrayRejectsInfinityElements(t *testing.T) {
