@@ -110,6 +110,19 @@ func TestSnapshotChunkByteCapBoundsServerExecution(t *testing.T) {
 	require.Equal(t, []int64{4, 5, 6}, chunkIDs(second))
 	require.EqualValues(t, 7, counter(), "the resumed chunk should not execute rows discarded by the previous chunk")
 
+	_, err = pool.Exec(ctx, "UPDATE public.chunk_width_items SET payload = CASE WHEN id = 1 THEN 'x' ELSE repeat('x', 65536) END")
+	require.NoError(t, err)
+	resetCounter()
+	variable, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", nil, nil, 100, 150<<10, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 2, 3, 4}, chunkIDs(variable))
+	require.EqualValues(t, 34, counter(), "a width increase may waste one adaptive fetch but must not append its unused rows")
+
+	resumedVariable, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", variable.LastKey, variable.UpperKey, 100, 150<<10, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, []int64{5, 6, 7}, chunkIDs(resumedVariable))
+	require.EqualValues(t, 37, counter(), "rows cut from the prior fetch must resume without a gap")
+
 	_, err = pool.Exec(ctx, "UPDATE public.chunk_width_items SET payload = 'x'")
 	require.NoError(t, err)
 	resetCounter()

@@ -178,7 +178,7 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 		}
 		fetchLimit := snapshotChunkFetchLimit(remaining, budget, builder.widestRow, previousFetch)
 		rows := tx.Conn().PgConn().ExecParams(ctx, fmt.Sprintf("FETCH FORWARD %d FROM %s", fetchLimit, quotedCursor), nil, nil, nil, formats)
-		fetched, err := appendSnapshotChunkRows(rows, builder)
+		fetched, err := appendSnapshotChunkRows(rows, builder, maxBytes)
 		if err != nil {
 			return chunk, err
 		}
@@ -221,14 +221,18 @@ func snapshotChunkFetchLimit(remaining int, budget, widest int64, previous int) 
 	return min(remaining, int(byBytes), growth)
 }
 
-func appendSnapshotChunkRows(rows *pgconn.ResultReader, builder *snapshotBatchBuilder) (int, error) {
+func appendSnapshotChunkRows(rows *pgconn.ResultReader, builder *snapshotBatchBuilder, maxBytes int64) (int, error) {
 	count := 0
+	keep := true
 	for rows.NextRow() {
-		if err := builder.appendRow(rows.Values(), rows.FieldDescriptions()); err != nil {
-			_, _ = rows.Close()
-			return 0, err
-		}
 		count++
+		if keep {
+			if err := builder.appendRow(rows.Values(), rows.FieldDescriptions()); err != nil {
+				_, _ = rows.Close()
+				return 0, err
+			}
+			keep = maxBytes == 0 || builder.accBytes < maxBytes
+		}
 	}
 	if _, err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("error iterating snapshot chunk rows: %w", err)
