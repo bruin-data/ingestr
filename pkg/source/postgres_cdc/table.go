@@ -241,18 +241,17 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 	}
 
 	pkQuery := `
-		SELECT kcu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-			ON tc.constraint_catalog = kcu.constraint_catalog
-			AND tc.constraint_schema = kcu.constraint_schema
-			AND tc.constraint_name = kcu.constraint_name
-			AND tc.table_schema = kcu.table_schema
-			AND tc.table_name = kcu.table_name
-		WHERE tc.constraint_type = 'PRIMARY KEY'
-			AND tc.table_schema = $1
-			AND tc.table_name = $2
-		ORDER BY kcu.ordinal_position
+		SELECT attr.attname
+		FROM pg_catalog.pg_constraint con
+		JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+		JOIN pg_catalog.pg_namespace nsp ON nsp.oid = rel.relnamespace
+		CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+		JOIN pg_catalog.pg_attribute attr
+			ON attr.attrelid = rel.oid AND attr.attnum = key_column.attnum
+		WHERE con.contype = 'p'
+			AND nsp.nspname = $1
+			AND rel.relname = $2
+		ORDER BY key_column.ordinality
 	`
 
 	var primaryKeys []string
