@@ -33,7 +33,7 @@ Here's how the replace strategy works:
 - The source table is downloaded.
 - The source table is uploaded to the destination, replacing the destination table.
 
-Replace can use `--extract-partition-by` to read a bounded incremental-key interval through parallel source queries. All extract windows are loaded before the destination replacement is finalized. On destinations with a staging-based or transactional in-place replace implementation, a failed extract or load leaves the existing destination data unchanged.
+Replace can use `--extract-partition-by` (see [Parallel Extract Partitioning](/getting-started/extract-partitioning)) to read a bounded incremental-key interval through parallel source queries. All extract windows are loaded before the destination replacement is finalized. On destinations with a staging-based or transactional in-place replace implementation, a failed extract or load leaves the existing destination data unchanged.
 
 The interval still defines the complete replacement data set: destination rows outside `--interval-start` and `--interval-end` are not retained. Use `merge` or `delete+insert` instead when the destination should keep rows outside the extracted interval.
 

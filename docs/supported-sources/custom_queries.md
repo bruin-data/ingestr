@@ -50,6 +50,9 @@ In this example, the query is filtering the data to only include rows where the 
 
 ### Parallel extract partitioning
 
+> [!TIP]
+> See [Parallel Extract Partitioning](/getting-started/extract-partitioning) for how windows are built, the available options, and the tradeoffs of reading in parallel.
+
 Custom queries on PostgreSQL, MySQL, Microsoft SQL Server, SQLite, DuckDB, Snowflake, and BigQuery can split the query result into parallel extract windows. The partition column must be returned by the query and must have a unique output name.
 
 ```bash
