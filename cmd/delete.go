@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/output"
@@ -44,7 +44,7 @@ func runDelete(ctx context.Context, c *cli.Command) (err error) {
 	case c.IsSet("replication-slot"):
 		return dropReplicationSlot(ctx, sourceURI, c.String("replication-slot"))
 	default:
-		return fmt.Errorf("no delete target specified; provide one of: --replication-slot")
+		return errors.New("no delete target specified; provide one of: --replication-slot")
 	}
 }
 
