@@ -77,6 +77,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
             link: "/getting-started/incremental-loading.md",
           },
           {
+            text: "Parallel Extract Partitioning",
+            link: "/getting-started/extract-partitioning.md",
+          },
+          {
             text: "Change Data Capture (CDC)",
             link: "/getting-started/cdc.md",
           },
