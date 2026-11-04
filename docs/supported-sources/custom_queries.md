@@ -80,6 +80,6 @@ WHERE __ingestr_query.partition_ts >= <window start>
   AND __ingestr_query.partition_ts < <window end>
 ```
 
-The final window includes its end boundary. Numeric partition columns and `--extract-partition-interval auto` use a bounds query over the same custom-query result.
+The final window includes its end boundary. Integer partition columns, and partition columns that differ from the incremental key, use a bounds query over the same custom-query result.
 
 Because the query is used as a derived table, it must be a single query that is valid inside a `FROM (...)` clause. Some dialect-specific constructs, such as an unbounded `ORDER BY` in Microsoft SQL Server, cannot be used in a derived table.
