@@ -45,6 +45,17 @@ Extract partitioning works for SQL database sources, both for whole tables and f
 
 [MongoDB](/supported-sources/mongodb) collections also support partitioning, with integer columns only. Any other source rejects `--extract-partition-by` with an error rather than silently ignoring it.
 
+## `--extract-partition-by` vs `--extract-partition-interval`
+
+The two flags answer different questions:
+
+- `--extract-partition-by` is **which column** to split on, for example `created_at` or `id`. It decides what a window is filtered on.
+- `--extract-partition-interval` is **how wide** each window is, for example `1d` or `100000`. It decides how many windows there are.
+
+Given a column and a range, the interval cuts the range into pieces. `--extract-partition-by created_at --extract-partition-interval 1d` over January produces 31 windows of one day each; `--extract-partition-interval 7d` produces five. `--extract-parallelism` then controls how many of those windows run at the same time.
+
+You always need the column. The interval is optional: if you set only `--extract-partition-by`, the interval defaults to `auto`. Setting an interval without a column is an error.
+
 ## Options
 
 | Flag | Environment variable | Description |
@@ -52,8 +63,6 @@ Extract partitioning works for SQL database sources, both for whole tables and f
 | `--extract-partition-by` | `INGESTR_EXTRACT_PARTITION_BY` | The source column to split on. Must be a `date`, `timestamp`, `timestamptz`, or integer column. Matched against the source schema case-insensitively. |
 | `--extract-partition-interval` | `INGESTR_EXTRACT_PARTITION_INTERVAL` | The width of each window. Defaults to `auto` when `--extract-partition-by` is set. |
 | `--extract-parallelism` | `INGESTR_EXTRACT_PARALLELISM` | How many windows are read at once. Defaults to `5`. |
-
-`--extract-partition-by` and `--extract-partition-interval` are a pair: setting an interval without a column is an error.
 
 ### Choosing the interval
 
