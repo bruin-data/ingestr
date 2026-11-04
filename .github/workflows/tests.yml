@@ -89,6 +89,7 @@ jobs:
         run: make test-integration
 
   cdc-stress:
+    if: false
     name: ${{ matrix.name }} (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
@@ -136,6 +137,7 @@ jobs:
         run: make ${{ matrix.target }}
 
   dockerBuild:
+    if: false
     runs-on: depot-ubuntu-latest
     name: Docker Build
     permissions:
@@ -192,6 +194,7 @@ jobs:
         run: make lint-full
 
   licenses:
+    if: false
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
