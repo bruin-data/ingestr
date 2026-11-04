@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"resty.dev/v3"
+
+	"github.com/bruin-data/ingestr/internal/output"
 )
 
 const (
@@ -40,6 +42,10 @@ func New(opts ...Option) *Client {
 	c.resty.AddRetryConditions(defaultRetryCondition)
 	c.resty.SetHeader("Accept", "application/json")
 	c.resty.SetHeader("User-Agent", DefaultUserAgent)
+
+	// Tests talk to plain-HTTP httptest servers with credentials, which makes resty
+	// log "Using sensitive credentials in HTTP mode" on every request.
+	c.resty.SetDisableWarn(output.Quiet())
 
 	for _, opt := range opts {
 		opt(c)

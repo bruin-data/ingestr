@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/bruin-data/ingestr/internal/testutil/quiettc"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"

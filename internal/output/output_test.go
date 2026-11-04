@@ -261,3 +261,10 @@ func TestEveryLineIsJSON(t *testing.T) {
 	assert.Equal(t, "log", recs[1]["event"])
 	assert.Equal(t, "end", recs[4]["event"])
 }
+
+func TestQuiet(t *testing.T) {
+	t.Setenv(QuietEnv, "")
+	assert.False(t, Quiet())
+	t.Setenv(QuietEnv, "1")
+	assert.True(t, Quiet())
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/testutil"
+	_ "github.com/bruin-data/ingestr/internal/testutil/quiettc"
 	destpkg "github.com/bruin-data/ingestr/pkg/destination"
 	chdest "github.com/bruin-data/ingestr/pkg/destination/clickhouse"
 	"github.com/bruin-data/ingestr/pkg/pipeline"

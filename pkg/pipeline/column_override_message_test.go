@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 
@@ -15,9 +14,10 @@ import (
 // not "changed from unknown to ...", which would imply a type mutated when
 // nothing was known before.
 func TestColumnOverrideMessage_UnknownSourceType(t *testing.T) {
+	prevOut, prevErr, prevMode := output.Current()
 	var out bytes.Buffer
 	output.Init(&out, &out, output.ModeText)
-	t.Cleanup(func() { output.Init(os.Stdout, os.Stderr, output.ModeText) })
+	t.Cleanup(func() { output.Init(prevOut, prevErr, prevMode) })
 
 	src := schema.TableSchema{Columns: []schema.Column{{Name: "payload", DataType: schema.TypeUnknown}}}
 	p := &Pipeline{config: &config.IngestConfig{Columns: "payload:json"}}
