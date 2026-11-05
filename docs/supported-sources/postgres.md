@@ -17,6 +17,7 @@ URI parameters:
 - `port`: the port number the database server is listening on, the default is 5432
 - `database-name`: the name of the database to connect to
 - `sslmode`: optional, the SSL mode to use when connecting to the database
+- `snapshot`: optional, source-only exported PostgreSQL snapshot identifier. A regular `postgres://` load imports it into read-only, repeatable-read transactions for schema discovery and data reads, including custom queries and extraction partitions. Keep the exporting session open for the entire load; an expired snapshot fails the run. See [Load a snapshot with ingestr and start CDC](/tutorials/cdc-postgres-snapshot.md) for obtaining the snapshot and its matching LSN.
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Postgres dialect [here](https://docs.sqlalchemy.org/en/14/dialects/postgresql.html).
 
@@ -100,6 +101,8 @@ Requirements and recovery:
 - Schema changes and source `TRUNCATE` during an unfinished bootstrap stop the run. Restart with `--full-refresh` to establish a new baseline. After the bootstrap finishes, ordinary CDC truncate handling applies.
 
 ### CDC without snapshots
+
+For a complete workflow that creates a matching snapshot/LSN pair, loads the snapshot using ingestr, and starts CDC while source writes continue, see [Load a PostgreSQL snapshot with ingestr and start CDC](/tutorials/cdc-postgres-snapshot.md). It also covers WAL retention, interrupted copies, and subsequent restarts.
 
 If you load the initial data externally, use `--cdc-snapshot-mode never` with `--cdc-start-lsn` to adopt that baseline without reading the source tables' existing rows:
 
