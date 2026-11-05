@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -267,4 +269,47 @@ func TestQuiet(t *testing.T) {
 	assert.False(t, Quiet())
 	t.Setenv(QuietEnv, "1")
 	assert.True(t, Quiet())
+}
+
+// TestQuietHelperProcess is the child half of TestQuietStartup. It is a no-op
+// unless re-executed by that test.
+func TestQuietHelperProcess(t *testing.T) {
+	if os.Getenv("OUTPUT_QUIET_HELPER") != "1" {
+		t.Skip("helper process for TestQuietStartup")
+	}
+	Warnf("default-writer-line\n")
+	var captured bytes.Buffer
+	Init(&captured, &captured, ModeText)
+	Warnf("captured-line\n")
+	_, _ = os.Stdout.WriteString("CAPTURED:" + captured.String())
+}
+
+// TestQuietStartup checks the package-init behavior, which can only be observed
+// in a fresh process: with QuietEnv set, output written before any Init is
+// discarded; unset, it reaches stdout. Either way an explicit Init still captures.
+func TestQuietStartup(t *testing.T) {
+	run := func(t *testing.T, quiet bool) string {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestQuietHelperProcess$")
+		cmd.Env = []string{"OUTPUT_QUIET_HELPER=1"}
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, QuietEnv+"=") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		if quiet {
+			cmd.Env = append(cmd.Env, QuietEnv+"=1")
+		}
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return string(out)
+	}
+
+	quiet := run(t, true)
+	assert.NotContains(t, quiet, "default-writer-line")
+	assert.Contains(t, quiet, "CAPTURED:captured-line")
+
+	noisy := run(t, false)
+	assert.Contains(t, noisy, "default-writer-line")
+	assert.Contains(t, noisy, "CAPTURED:captured-line")
 }

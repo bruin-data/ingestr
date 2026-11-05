@@ -7,9 +7,8 @@ import (
 	"net/url"
 	"time"
 
-	"resty.dev/v3"
-
 	"github.com/bruin-data/ingestr/internal/output"
+	"resty.dev/v3"
 )
 
 const (
