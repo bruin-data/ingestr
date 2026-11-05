@@ -52,10 +52,10 @@ Choose the execution order with `--cdc-snapshot-execution`:
 
 | Execution | Copying and change processing | Pending changes |
 |---|---|---|
-| `serial` (default) | Copy every selected table in chunks, then decode and apply changes from retained WAL. | Keep WAL in the PostgreSQL replication slot throughout the copy. No concurrent decoder runs during copying. |
+| `serial` (default) | Copy every selected table in chunks, upload chunks into staging while the next chunk is read, then merge each staged row window once. Decode and apply changes from retained WAL after the copy. | Keep WAL in the PostgreSQL replication slot throughout the copy. No concurrent decoder runs during copying. |
 | `parallel` | Decode changes while copying chunks; catch up the selected tables' change stream after each chunk. | Stage decoded events in memory or in the destination. |
 
-Both execution modes save durable chunk checkpoints, so an interrupted first bootstrap can resume from completed chunks. Catch-up includes changes to already copied rows and rows outside the current chunk. Single-table and multi-table selections are supported; omit `--stream` to catch up and exit, or include it to continue processing changes. Serial execution simplifies the copy phase, but the source must have enough space to retain all WAL needed from the initial boundary until copying and catch-up finish.
+Both execution modes save durable chunk checkpoints. Parallel execution checkpoints each chunk. Serial execution stages small chunks through one open destination writer while continuing to read, then merges and checkpoints when the staged rows reach `--flush-records` or the table copy ends. `--flush-interval` does not close serial snapshot-copy windows. If a run stops before that merge, its unmerged window is copied again on restart. Catch-up includes changes to already copied rows and rows outside the current chunk. Single-table and multi-table selections are supported; omit `--stream` to catch up and exit, or include it to continue processing changes. Serial execution simplifies the copy phase, but the source must have enough space to retain all WAL needed from the initial boundary until copying and catch-up finish.
 
 ```bash
 ingestr ingest \

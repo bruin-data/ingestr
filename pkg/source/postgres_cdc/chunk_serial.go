@@ -16,8 +16,14 @@ func (r *chunkReader) copySerialChunk(ctx context.Context, table source.SourceTa
 	if err != nil {
 		return err
 	}
+	rows := int64(0)
 	if chunk.Batch != nil {
-		if err := r.emit(ctx, source.RecordBatchResult{TableName: table.Name, Batch: chunk.Batch}); err != nil {
+		rows = chunk.Batch.NumRows()
+		if err := r.emit(ctx, source.RecordBatchResult{
+			TableName: table.Name,
+			Batch:     chunk.Batch,
+			CDCUpload: r.opts.FlushRecords > 0,
+		}); err != nil {
 			return err
 		}
 	}
@@ -26,7 +32,15 @@ func (r *chunkReader) copySerialChunk(ctx context.Context, table source.SourceTa
 		state.After = chunk.LastKey
 	}
 	state.Done = chunk.Done
+	r.serialWindowRows += rows
+	if r.opts.FlushRecords > 0 && !state.Done && r.serialWindowRows < int64(r.opts.FlushRecords) {
+		return nil
+	}
 	// Copy progress is durable independently of CDC progress. The slot must
 	// retain the original replay boundary until every table has been copied.
-	return r.checkpoint(ctx, r.state.Applied, nil)
+	if err := r.checkpoint(ctx, r.state.Applied, nil); err != nil {
+		return err
+	}
+	r.serialWindowRows = 0
+	return nil
 }

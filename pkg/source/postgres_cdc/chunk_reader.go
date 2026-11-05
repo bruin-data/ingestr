@@ -56,6 +56,8 @@ type chunkReader struct {
 	multi   bool
 	pending []DecodedChanges
 	bytes   int64
+
+	serialWindowRows int64
 }
 
 func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.SourceTableInfo, slot string, resumes map[string]string, opts source.ReadOptions, multi bool) (<-chan source.RecordBatchResult, error) {

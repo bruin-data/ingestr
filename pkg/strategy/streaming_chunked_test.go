@@ -26,6 +26,16 @@ func (d *chunkedAdapterDestination) TruncateTable(_ context.Context, table strin
 	return nil
 }
 
+type overlappingChunkDestination struct {
+	*chunkedAdapterDestination
+	started chan struct{}
+}
+
+func (d *overlappingChunkDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, options destination.WriteOptions) error {
+	close(d.started)
+	return d.chunkedAdapterDestination.WriteParallel(ctx, records, options)
+}
+
 func TestStreamingChunkedOptionsPreserveFiniteModeAndSourceNames(t *testing.T) {
 	for _, continuous := range []bool{false, true} {
 		for _, multi := range []bool{false, true} {
@@ -167,6 +177,60 @@ func TestStreamingCDCFlushAcknowledgesOnlyAfterDataAndState(t *testing.T) {
 	default:
 		t.Fatal("chunk checkpoint was not acknowledged")
 	}
+}
+
+func TestStreamingSerialSnapshotUploadsOverlapAndMergeOnce(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	dest := &overlappingChunkDestination{
+		chunkedAdapterDestination: &chunkedAdapterDestination{newCDCStateDestination()},
+		started:                   make(chan struct{}),
+	}
+	committer := &fakeCommitter{}
+	records := make(chan source.RecordBatchResult)
+	loop := newFlushLoop(dest, config.DefaultConfig(), StreamingOptions{
+		Strategy: config.StrategyMerge, Committer: committer, FlushInterval: time.Hour, FlushRecords: 1_000_000,
+	}, map[string]*streamTableState{"": {
+		destTable: "raw.orders", stagingTable: "staging", schema: streamTestSchema(), primaryKeys: []string{"id"},
+	}})
+	done := make(chan error, 1)
+	go func() { done <- loop.run(ctx, records) }()
+
+	records <- source.RecordBatchResult{CDCUpload: true, Batch: int64RecordBatch(t, "id", []int64{1, 2}, nil)}
+	select {
+	case <-dest.started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	require.Empty(t, dest.mergeCalls, "staging writer must start before the merge boundary")
+	records <- source.RecordBatchResult{CDCUpload: true, Batch: int64RecordBatch(t, "id", []int64{3, 4}, nil)}
+	records <- source.RecordBatchResult{CDCFlush: true, CommitToken: "window-1"}
+	close(records)
+
+	require.NoError(t, <-done)
+	require.Len(t, dest.writeCalls, 1)
+	require.Len(t, dest.mergeCalls, 1)
+	require.Equal(t, []any{"window-1"}, committer.committed())
+}
+
+func TestStreamingSerialSnapshotUploadFailureDoesNotMergeOrCommit(t *testing.T) {
+	dest := &chunkedAdapterDestination{newCDCStateDestination()}
+	dest.writeErr = errors.New("upload failed")
+	committer := &fakeCommitter{}
+	records := make(chan source.RecordBatchResult, 2)
+	records <- source.RecordBatchResult{CDCUpload: true, Batch: int64RecordBatch(t, "id", []int64{1}, nil)}
+	records <- source.RecordBatchResult{CDCFlush: true, CommitToken: "window-1"}
+	close(records)
+
+	loop := newFlushLoop(dest, config.DefaultConfig(), StreamingOptions{
+		Strategy: config.StrategyMerge, Committer: committer, FlushInterval: time.Hour, FlushRecords: 1_000_000,
+	}, map[string]*streamTableState{"": {
+		destTable: "raw.orders", stagingTable: "staging", schema: streamTestSchema(), primaryKeys: []string{"id"},
+	}})
+	err := loop.run(t.Context(), records)
+	require.ErrorContains(t, err, "upload failed")
+	require.Empty(t, dest.mergeCalls)
+	require.Empty(t, committer.committed())
 }
 
 func TestStreamingChunkedRequiresManagedAcknowledgments(t *testing.T) {

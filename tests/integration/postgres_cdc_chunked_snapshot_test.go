@@ -186,9 +186,9 @@ func awaitChunkedSnapshotGate(t *testing.T, gate *chunkedSnapshotGate, done <-ch
 	select {
 	case <-gate.blocked:
 	case err := <-done:
-		t.Fatalf("pipeline stopped before the second snapshot chunk: %v", err)
+		t.Fatalf("pipeline stopped before the second snapshot merge: %v", err)
 	case <-time.After(90 * time.Second):
-		t.Fatal("pipeline never reached its second snapshot chunk")
+		t.Fatal("pipeline never reached its second snapshot merge")
 	}
 }
 
@@ -252,6 +252,10 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
 			f := newChunkedCDCFixture(t, mode.staging, false)
 			f.cfg.CDCSnapshotExecution = mode.execution
+			if mode.execution == "serial" {
+				f.cfg.FlushRecords = 4
+				f.cfg.FlushInterval = time.Hour
+			}
 			f.cfg.Stream = true
 			f.cfg.IncrementalStrategy = config.StrategyMerge
 			gate := f.gate(t)
@@ -259,7 +263,11 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 			awaitChunkedSnapshotGate(t, gate, done)
 			var copied int
 			require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT count(*) FROM public.items").Scan(&copied))
-			require.Equal(t, 2, copied)
+			expectedCopied := 2
+			if mode.execution == "serial" {
+				expectedCopied = 4
+			}
+			require.Equal(t, expectedCopied, copied)
 			var openSnapshots int
 			require.NoError(t, f.src.QueryRow(f.ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend' AND backend_xmin IS NOT NULL`).Scan(&openSnapshots))
 			require.Zero(t, openSnapshots, "destination backpressure must not retain a source snapshot")
@@ -295,6 +303,10 @@ func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
 			f := newChunkedCDCFixture(t, mode.staging, false)
 			f.cfg.CDCSnapshotExecution = mode.execution
+			if mode.execution == "serial" {
+				f.cfg.FlushRecords = 4
+				f.cfg.FlushInterval = time.Hour
+			}
 			gate := f.gate(t)
 			cancel, done := f.start(t)
 			awaitChunkedSnapshotGate(t, gate, done)
