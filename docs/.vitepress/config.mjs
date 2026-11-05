@@ -176,6 +176,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
                 collapsed: true,
                 items: [
                   { text: "CDC to DuckDB Tutorial", link: "/tutorials/cdc-postgres-duckdb.md" },
+                  { text: "Snapshot to CDC Tutorial", link: "/tutorials/cdc-postgres-snapshot.md" },
                 ],
               },
               { text: "RabbitMQ", link: "/supported-sources/rabbitmq.md" },

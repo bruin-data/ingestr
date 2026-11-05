@@ -22,8 +22,9 @@ import (
 )
 
 type PostgresSource struct {
-	pool *pgxpool.Pool
-	uri  string
+	pool     *pgxpool.Pool
+	uri      string
+	snapshot string
 }
 
 func NewPostgresSource() *PostgresSource {
@@ -35,17 +36,17 @@ func (s *PostgresSource) Schemes() []string {
 }
 
 func (s *PostgresSource) Connect(ctx context.Context, uri string) error {
-	normalizedURI := uri
-	if strings.Contains(uri, "+") {
-		parts := strings.SplitN(uri, "://", 2)
-		if len(parts) == 2 {
-			normalizedURI = "postgres://" + parts[1]
-		}
+	normalizedURI, snapshot, err := parseSnapshotURI(uri)
+	if err != nil {
+		return err
 	}
 
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
 		return fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	if snapshot != "" {
+		pgConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgConfig)
@@ -60,6 +61,16 @@ func (s *PostgresSource) Connect(ctx context.Context, uri string) error {
 
 	s.pool = pool
 	s.uri = uri
+	s.snapshot = snapshot
+	if snapshot != "" {
+		_, release, err := s.acquireReadConnection(ctx)
+		if err != nil {
+			pool.Close()
+			s.pool = nil
+			return err
+		}
+		release()
+	}
 	return nil
 }
 
@@ -154,7 +165,13 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 		ORDER BY c.ordinal_position
 	`
 
-	rows, err := s.pool.Query(ctx, query, schemaName, tableName)
+	conn, release, err := s.acquireReadConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx, query, schemaName, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query schema: %w", err)
 	}
@@ -291,12 +308,12 @@ func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []
 		defer close(results)
 
 		startConn := time.Now()
-		conn, err := s.pool.Acquire(ctx)
+		conn, release, err := s.acquireReadConnection(ctx)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
 			return
 		}
-		defer conn.Release()
+		defer release()
 		config.Debug("[SOURCE] Connection acquired in %v", time.Since(startConn))
 
 		query := buildSelectQuery(table, columns, opts)
@@ -341,11 +358,11 @@ func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []
 func (s *PostgresSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
 	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, quoteIdentifier, quoteTableName, source.DefaultSQLTimeFormat)
 
-	conn, err := s.pool.Acquire(ctx)
+	conn, release, err := s.acquireReadConnection(ctx)
 	if err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer release()
 
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
@@ -356,11 +373,11 @@ func (s *PostgresSource) discoverExtractPartitionBounds(ctx context.Context, tab
 }
 
 func (s *PostgresSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
-	conn, err := s.pool.Acquire(ctx)
+	conn, release, err := s.acquireReadConnection(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer release()
 
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
@@ -391,11 +408,11 @@ func (s *PostgresSource) getCustomQuerySchema(ctx context.Context, query string)
 }
 
 func (s *PostgresSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
-	conn, err := s.pool.Acquire(ctx)
+	conn, release, err := s.acquireReadConnection(ctx)
 	if err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer release()
 
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
@@ -406,6 +423,9 @@ func (s *PostgresSource) discoverCustomQueryExtractPartitionBounds(ctx context.C
 }
 
 func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	if s.snapshot != "" {
+		query = source.SQLCustomQuerySelectQuery(query, source.ReadOptions{}, quoteIdentifier, source.DefaultSQLTimeFormat)
+	}
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000
@@ -416,12 +436,12 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 	go func() {
 		defer close(results)
 
-		conn, err := s.pool.Acquire(ctx)
+		conn, release, err := s.acquireReadConnection(ctx)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
 			return
 		}
-		defer conn.Release()
+		defer release()
 
 		config.Debug("[SOURCE] Executing custom query: %s", query)
 		typeMap := conn.Conn().TypeMap()

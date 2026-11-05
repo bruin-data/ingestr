@@ -64,6 +64,8 @@ On every run after the first, a CDC connector resumes from the last durable posi
 
 For externally loaded destinations, PostgreSQL supports [CDC without snapshots](/supported-sources/postgres#cdc-without-snapshots) using `--cdc-snapshot-mode never` and `--cdc-start-lsn`. This requires a consistent external baseline and a replication slot retaining changes from that boundary. The saved `never` policy prohibits full refresh and all automatic snapshot fallbacks, including the schema-change rebuilds described below.
 
+The [PostgreSQL snapshot-to-CDC walkthrough](/tutorials/cdc-postgres-snapshot.md) shows how to obtain the snapshot and LSN together, load the snapshot with ingestr, and start CDC without pausing ordinary source writes.
+
 ### One-shot vs. streaming
 
 By default a CDC run catches up to the current log position and exits — ideal for scheduled, batch-style syncs. Continuous streaming is available for `postgres+cdc`, `mysql+cdc`, `mariadb+cdc`, `vitess+cdc`, `ps_mysql+cdc`, `mssql+cdc`, `mssql+ct`, and `mongodb+cdc`: pass the `--stream` CLI flag and ingestr stays up as a long-running process, flushing buffered changes to the destination on an interval or record-count trigger, until it is interrupted. Streaming gives at-least-once delivery — for keyed tables the `merge` strategy makes replays harmless, though keyless append-only change logs can end up with duplicate events after a recovery. See [Streaming ingestion](/commands/ingest.md#streaming-ingestion) and [Monitoring a stream](/commands/ingest.md#monitoring-a-stream) for flags (`--flush-interval`, `--flush-records`, `--metrics-addr`) and lag metrics.
