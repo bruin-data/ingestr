@@ -104,13 +104,26 @@ func MapSnowflakeToDataType(sfType string) (schema.DataType, int, int, schema.Da
 	case "GEOGRAPHY", "GEOMETRY":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 
+	// Arrow types (from ADBC driver, used by custom queries)
+	case "INT8", "INT16", "INT32", "INT64":
+		return schema.TypeInt64, 0, 0, schema.TypeUnknown
+	case "FLOAT32", "FLOAT64":
+		return schema.TypeFloat64, 0, 0, schema.TypeUnknown
+	case "UTF8", "LARGE_UTF8":
+		return schema.TypeString, 0, 0, schema.TypeUnknown
+	case "DATE32", "DATE64":
+		return schema.TypeDate, 0, 0, schema.TypeUnknown
+
 	default:
 		// Handle variations with TIMESTAMP prefix
 		if strings.HasPrefix(baseType, "TIMESTAMP") {
-			if strings.Contains(upperType, "_TZ") || strings.Contains(upperType, "_LTZ") {
+			if strings.Contains(upperType, "_TZ") || strings.Contains(upperType, "_LTZ") || strings.Contains(upperType, "TZ=") {
 				return schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown
 			}
 			return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
+		}
+		if strings.HasPrefix(baseType, "TIME32[") || strings.HasPrefix(baseType, "TIME64[") {
+			return schema.TypeTime, 0, 0, schema.TypeUnknown
 		}
 
 		return schema.TypeString, 0, 0, schema.TypeUnknown

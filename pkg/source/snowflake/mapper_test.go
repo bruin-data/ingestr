@@ -1,6 +1,10 @@
 package snowflake
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/bruin-data/ingestr/pkg/schema"
+)
 
 func TestParseSnowflakeStringLength(t *testing.T) {
 	tests := []struct {
@@ -21,6 +25,38 @@ func TestParseSnowflakeStringLength(t *testing.T) {
 		t.Run(tt.in, func(t *testing.T) {
 			if got := parseSnowflakeStringLength(tt.in); got != tt.want {
 				t.Fatalf("parseSnowflakeStringLength(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapSnowflakeArrowTypeNames(t *testing.T) {
+	tests := []struct {
+		arrowType string
+		want      schema.DataType
+		precision int
+		scale     int
+	}{
+		{"bool", schema.TypeBoolean, 0, 0},
+		{"int8", schema.TypeInt64, 0, 0},
+		{"int64", schema.TypeInt64, 0, 0},
+		{"float32", schema.TypeFloat64, 0, 0},
+		{"float64", schema.TypeFloat64, 0, 0},
+		{"decimal(38, 0)", schema.TypeDecimal, 38, 0},
+		{"decimal(18, 4)", schema.TypeDecimal, 18, 4},
+		{"utf8", schema.TypeString, 0, 0},
+		{"large_utf8", schema.TypeString, 0, 0},
+		{"binary", schema.TypeBinary, 0, 0},
+		{"date32", schema.TypeDate, 0, 0},
+		{"time64[ns]", schema.TypeTime, 0, 0},
+		{"timestamp[ns]", schema.TypeTimestamp, 0, 0},
+		{"timestamp[ns, tz=America/Los_Angeles]", schema.TypeTimestampTZ, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.arrowType, func(t *testing.T) {
+			got, precision, scale, _ := MapSnowflakeToDataType(tt.arrowType)
+			if got != tt.want || precision != tt.precision || scale != tt.scale {
+				t.Fatalf("MapSnowflakeToDataType(%q) = %v(%d, %d), want %v(%d, %d)", tt.arrowType, got, precision, scale, tt.want, tt.precision, tt.scale)
 			}
 		})
 	}
