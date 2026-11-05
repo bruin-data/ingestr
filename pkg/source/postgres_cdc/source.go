@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pglogrepl"
@@ -1437,7 +1438,7 @@ func (s *PostgresCDCSource) warnKeylessTable(name string) {
 		return
 	}
 	s.keylessWarned[name] = true
-	fmt.Printf("Warning: table %s has no primary key or replica identity index; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
+	output.Warnf("Warning: table %s has no primary key or replica identity index; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
 }
 
 // publicationTableFullName renders a table name the way GetTables and the WAL
