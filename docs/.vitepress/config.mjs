@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import { organization, website } from "./schema.mjs";
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -52,6 +53,8 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
       {},
       `<iframe src="https://www.googletagmanager.com/ns.html?id=GTM-K2L7S5FP" height="0" width="0" style="display:none;visibility:hidden"></iframe>`,
     ],
+    ["script", { type: "application/ld+json" }, JSON.stringify(organization)],
+    ["script", { type: "application/ld+json" }, JSON.stringify(website)],
   ],
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
