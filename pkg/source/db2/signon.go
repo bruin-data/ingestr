@@ -75,7 +75,7 @@ func exchangeSignonAttributes(ctx context.Context, host string, port int, useSSL
 		}
 		tlsConn := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			return nil, fmt.Errorf("Sign-on Server TLS handshake: %w", err)
+			return nil, fmt.Errorf("TLS handshake with Sign-on Server: %w", err)
 		}
 		return tlsConn, nil
 	})
@@ -122,13 +122,13 @@ func exchangeSignonAttributesAt(ctx context.Context, addr string, timeout time.D
 
 	rc := binary.BigEndian.Uint32(reply[20:24])
 	if rc != 0 {
-		return signonAttributes{}, fmt.Errorf("Sign-on Server rejected attribute exchange (RC=%d)", rc)
+		return signonAttributes{}, fmt.Errorf("attribute exchange rejected by Sign-on Server (RC=%d)", rc)
 	}
 
 	fields := parseSignonReplyFields(reply)
 	serverSeed, ok := fields[signonCPSeed]
 	if !ok || len(serverSeed) < 8 {
-		return signonAttributes{}, fmt.Errorf("Sign-on Server reply has no server seed")
+		return signonAttributes{}, fmt.Errorf("no server seed in Sign-on Server reply")
 	}
 	passwordLevel := 0
 	if v, ok := fields[signonCPPasswordLevel]; ok && len(v) >= 1 {
