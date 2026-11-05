@@ -11,6 +11,8 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
+	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -175,6 +177,36 @@ func TestPostgresExportedSnapshotReadGuards(t *testing.T) {
 	}
 	require.ErrorContains(t, pipeline.New(&cfg).Run(ctx), "row-level security")
 	requirePostgresSnapshotRows(t, ctx, pool, "orders", map[int32]string{99: "keep destination"})
+
+	src := postgres.NewPostgresSource()
+	require.NoError(t, src.Connect(ctx, readerURI.String()))
+	t.Cleanup(func() { _ = src.Close(context.Background()) })
+	for _, tc := range []struct {
+		name  string
+		query string
+		code  string
+	}{
+		{name: "row security", query: "SELECT id, name FROM public.orders", code: "42501"},
+		{name: "missing column", query: "SELECT missing_column FROM public.orders", code: "42703"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			results, err := src.ExecuteCustomQuery(ctx, tc.query, source.ReadOptions{})
+			require.NoError(t, err)
+			var readErr error
+			for result := range results {
+				if result.Batch != nil {
+					result.Batch.Release()
+					t.Error("rejected query returned a data batch")
+				}
+				if result.Err != nil {
+					readErr = result.Err
+				}
+			}
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, readErr, &pgErr)
+			require.Equal(t, tc.code, pgErr.Code)
+		})
+	}
 
 	require.NoError(t, exporter.Close(ctx))
 	cfg.SourceURI = uri + "&snapshot=" + url.QueryEscape(snapshot.SnapshotName)

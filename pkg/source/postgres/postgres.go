@@ -450,6 +450,8 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 		if description, descErr := conn.Conn().PgConn().Prepare(ctx, "", query, nil); descErr == nil {
 			columns = customQueryColumns(typeMap, description.Fields)
 			rows, err = conn.Query(ctx, query, TextResultFormats(typeMap, description.Fields, columns, postgresTextFormat))
+		} else if conn.Conn().PgConn().TxStatus() != 'I' {
+			err = descErr
 		} else {
 			rows, err = conn.Query(ctx, query)
 		}
@@ -525,6 +527,10 @@ func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
 // Go structs or integers, while their text form is the value users expect.
 func queryWithTextStrings(ctx context.Context, conn *pgxpool.Conn, query string, columns []schema.Column) (pgx.Rows, error) {
 	description, err := conn.Conn().PgConn().Prepare(ctx, "", query, nil)
+	// Retrying inside a transaction can hide the original preparation error.
+	if err != nil && conn.Conn().PgConn().TxStatus() != 'I' {
+		return nil, err
+	}
 	if err != nil || len(description.Fields) != len(columns) {
 		return conn.Query(ctx, query)
 	}
