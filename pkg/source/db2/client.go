@@ -362,7 +362,7 @@ func (c *db2Client) handshake(ctx context.Context) error {
 		// mechanism that was never explicitly negotiated.
 		config.Debug("[DB2] handshake: re-sending ACCSEC with secmec=%d", resolved)
 		curID = 1
-		if curID, err = writeRequestDSS(c.conn, packACCSEC(c.database, resolved, nil), curID, false, true); err != nil {
+		if _, err = writeRequestDSS(c.conn, packACCSEC(c.database, resolved, nil), curID, false, true); err != nil {
 			return fmt.Errorf("re-sending ACCSEC with secmec=%d: %w", resolved, err)
 		}
 		confirmedSecmec, confirmedSecmecList, confirmedSectkn, err := c.parseACCSECRD()
@@ -946,8 +946,8 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte, substituteCredential [
 		return nil, fmt.Errorf("failed to encode database name: %w", err)
 	}
 	body.Write(rdbName)
-	switch {
-	case secmec == secmecEncryptedUserPassword:
+	switch secmec {
+	case secmecEncryptedUserPassword:
 		encodedUser, err := encodeString(c.user, "cp500")
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode user: %w", err)
@@ -967,7 +967,7 @@ func (c *db2Client) packSECCHK(secmec int, sectkn []byte, substituteCredential [
 			return nil, fmt.Errorf("credential encryption failed for password: %w", err)
 		}
 		body.Write(packBinary(cpSECTKN, password))
-	case secmec == secmecEUSRIDPWD:
+	case secmecEUSRIDPWD:
 		user, err := packString(cpUSRID, padUserID(c.user), "cp500")
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode user: %w", err)

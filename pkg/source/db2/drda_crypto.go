@@ -13,9 +13,8 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"golang.org/x/crypto/pbkdf2"
-
 	"github.com/bruin-data/ingestr/internal/config"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 var (
