@@ -1,6 +1,7 @@
 package starrocks
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -67,30 +68,9 @@ func recordBatchToJSON(record arrow.RecordBatch) ([]byte, int64, []string, error
 	if numRows == 0 {
 		return nil, 0, nil, nil
 	}
-	numCols := int(record.NumCols())
-	fields := record.Schema().Fields()
-
-	var binaryCols []string
-	for c := 0; c < numCols; c++ {
-		if id := fields[c].Type.ID(); id == arrow.BINARY || id == arrow.LARGE_BINARY {
-			binaryCols = append(binaryCols, fields[c].Name)
-		}
-	}
-
-	rows := make([]map[string]interface{}, 0, numRows)
-	for r := int64(0); r < numRows; r++ {
-		row := make(map[string]interface{}, numCols)
-		for c := 0; c < numCols; c++ {
-			row[fields[c].Name] = extractValue(record.Column(c), int(r))
-		}
-		rows = append(rows, row)
-	}
-
-	body, err := json.Marshal(rows)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	return body, numRows, binaryCols, nil
+	encoder := newJSONBatchEncoder(record, math.MaxInt)
+	body, rows, err := encoder.next(context.Background())
+	return body, rows, encoder.binaryColumns(), err
 }
 
 // columnsHeader builds the Stream Load `columns` value that decodes hex

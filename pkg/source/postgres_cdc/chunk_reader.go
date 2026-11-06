@@ -58,6 +58,7 @@ type chunkReader struct {
 	pending  []DecodedChanges
 	bytes    int64
 	prefetch *chunkPrefetch
+	walRange *chunkWALRange
 }
 
 func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.SourceTableInfo, slot string, resumes map[string]string, opts source.ReadOptions, multi bool) (<-chan source.RecordBatchResult, error) {
@@ -97,9 +98,7 @@ func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.Sou
 	if err := s.ValidateCDCChunkedSnapshot(ctx, tables); err != nil {
 		return nil, err
 	}
-	if s.standby {
-		output.Warnf("[CDC] Chunked snapshots on a standby create a temporary slot per chunk. Run SELECT pg_log_standby_snapshot(); regularly on the primary (for example, every second with pg_cron) to reduce slot creation waits.\n")
-	}
+	s.warnStandbySlotWait()
 	results := make(chan source.RecordBatchResult, 8)
 	r := &chunkReader{source: s, tables: tables, opts: opts, options: options, multi: multi, results: results}
 	go func() {
@@ -210,7 +209,7 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 			return err
 		}
 	}
-	if err := r.catchUp(ctx); err != nil {
+	if err := r.catchUp(ctx, nil); err != nil {
 		return err
 	}
 	var snapshots map[string]string
@@ -292,11 +291,13 @@ func (r *chunkReader) copyChunk(ctx context.Context, table source.SourceTableInf
 	if err := r.emitChunk(ctx, table, prefetch, read, timing); err != nil {
 		return err
 	}
+	r.walRange = newChunkWALRange(table, read.chunk)
+	defer func() { r.walRange = nil }()
 	catchUpStart := time.Now()
 	if err := r.drainCaptured(ctx); err != nil {
 		return err
 	}
-	if err := r.catchUp(ctx); err != nil {
+	if err := r.catchUp(ctx, timing); err != nil {
 		return err
 	}
 	catchUpTime := time.Since(catchUpStart)
@@ -319,15 +320,19 @@ func (r *chunkReader) copyChunk(ctx context.Context, table source.SourceTableInf
 	if err := r.checkpoint(ctx, position, completedTables, timing); err != nil {
 		return err
 	}
-	logChunkTiming(table.Name, prefetch, read.chunk, timing, catchUpTime, time.Since(checkpointStart))
+	var walSkipped int64
+	if r.walRange != nil {
+		walSkipped = r.walRange.skipped
+	}
+	logChunkTiming(table.Name, prefetch, read.chunk, timing, catchUpTime, time.Since(checkpointStart), walSkipped)
 	return nil
 }
 
-func logChunkTiming(table string, prefetch *chunkPrefetch, chunk snapshotChunk, timing *source.CDCChunkTiming, catchUp, checkpoint time.Duration) {
-	output.Infof("[CDC] Snapshot chunk table=%s rows=%d slot_ms=%d read_ms=%d load_ms=%d merge_ms=%d catchup_ms=%d checkpoint_ms=%d total_ms=%d\n",
+func logChunkTiming(table string, prefetch *chunkPrefetch, chunk snapshotChunk, timing *source.CDCChunkTiming, catchUp, checkpoint time.Duration, walSkipped int64) {
+	output.Infof("[CDC] Snapshot chunk table=%s rows=%d slot_ms=%d read_ms=%d load_ms=%d merge_ms=%d catchup_ms=%d checkpoint_ms=%d total_ms=%d wal_skipped=%d\n",
 		table, chunk.Rows, chunk.SlotTime.Milliseconds(), chunk.ReadTime.Milliseconds(),
 		time.Duration(timing.LoadNanos.Load()).Milliseconds(), time.Duration(timing.MergeNanos.Load()).Milliseconds(),
-		catchUp.Milliseconds(), checkpoint.Milliseconds(), time.Since(prefetch.started).Milliseconds())
+		catchUp.Milliseconds(), checkpoint.Milliseconds(), time.Since(prefetch.started).Milliseconds(), walSkipped)
 }
 
 func (r *chunkReader) checkChanges(groups []DecodedChanges) error {
@@ -400,7 +405,7 @@ func (r *chunkReader) apply(ctx context.Context, groups []DecodedChanges) error 
 		return err
 	}
 	for _, group := range groups {
-		r.accum.add(group.TableName, group.Changes, group.LSN)
+		r.accum.add(group.TableName, r.walRange.filter(group), group.LSN)
 	}
 	return r.flushReady(ctx)
 }
@@ -439,7 +444,7 @@ func (r *chunkReader) withAccumulatorResults(ctx context.Context, flush func(cha
 	return errors.Join(forwardErr, <-done)
 }
 
-func (r *chunkReader) catchUp(ctx context.Context) error {
+func (r *chunkReader) catchUp(ctx context.Context, timing *source.CDCChunkTiming) error {
 	barrier, err := r.source.beginBatchBarrier(ctx)
 	if err != nil {
 		return err
@@ -456,21 +461,28 @@ func (r *chunkReader) catchUp(ctx context.Context) error {
 			return err
 		}
 		if !r.repl.BarrierReached() {
-			if chunkExecution(r.options.Execution) == "serial" {
-				for _, group := range groups {
-					pendingRows += len(group.Changes)
+			for _, group := range groups {
+				pendingRows += len(group.Changes)
+			}
+			if pendingRows >= r.options.ChunkSize || time.Since(lastCheckpoint) >= streamingMaxAge(r.opts) {
+				if err := r.flushAll(ctx); err != nil {
+					return err
 				}
-				if pendingRows >= r.options.ChunkSize || time.Since(lastCheckpoint) >= streamingMaxAge(r.opts) {
-					if err := r.flushAll(ctx); err != nil {
+				if position := safeCommitLSN(r.repl, r.accum); position > r.state.Applied {
+					// Keep the chunk cursor unchanged until its catch-up completes.
+					// A restart re-reads that chunk at or beyond this durable LSN.
+					if err := r.checkpoint(ctx, position, nil, timing); err != nil {
 						return err
 					}
-					if position := safeCommitLSN(r.repl, r.accum); position > r.state.Applied {
-						if err := r.checkpoint(ctx, position, nil); err != nil {
+					// CDCFlush ends timing attribution; restore it for automatic
+					// destination flushes while this chunk continues catching up.
+					if timing != nil {
+						if err := r.emit(ctx, source.RecordBatchResult{CDCChunkTiming: timing}); err != nil {
 							return err
 						}
 					}
-					lastCheckpoint, pendingRows = time.Now(), 0
 				}
+				lastCheckpoint, pendingRows = time.Now(), 0
 			}
 			continue
 		}

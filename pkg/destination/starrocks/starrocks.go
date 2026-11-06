@@ -373,39 +373,28 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 // Load limit (streaming_load_max_batch_size_mb).
 var maxStreamLoadJSONBytes = 90 << 20
 
-// loadRecord stream-loads a batch, splitting it until each JSON body fits.
+// loadRecord builds bounded JSON bodies one row at a time, retaining a body
+// until its load (including any FE redirect) completes.
 func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string, rec arrow.RecordBatch) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	body, rows, binaryCols, err := recordBatchToJSON(rec)
-	if err != nil {
-		return 0, fmt.Errorf("encode batch: %w", err)
-	}
-	if rows == 0 {
-		return 0, nil
-	}
-	if len(body) > maxStreamLoadJSONBytes {
-		if rows == 1 {
-			return 0, fmt.Errorf("a single row encodes to %d bytes, above the %d-byte Stream Load limit", len(body), maxStreamLoadJSONBytes)
+	encoder := newJSONBatchEncoder(rec, maxStreamLoadJSONBytes)
+	columns := columnsHeader(rec.Schema(), encoder.binaryColumns())
+	var loaded int64
+	for {
+		body, rows, err := encoder.next(ctx)
+		if err != nil {
+			return loaded, fmt.Errorf("encode batch: %w", err)
 		}
-		mid := rec.NumRows() / 2
-		var loaded int64
-		for _, bounds := range [][2]int64{{0, mid}, {mid, rec.NumRows()}} {
-			part := rec.NewSlice(bounds[0], bounds[1])
-			n, err := d.loadRecord(ctx, db, table, part)
-			part.Release()
-			loaded += n
-			if err != nil {
-				return loaded, err
-			}
+		if rows == 0 {
+			return loaded, nil
 		}
-		return loaded, nil
+		if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, columns); err != nil {
+			return loaded, err
+		}
+		loaded += rows
 	}
-	if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, columnsHeader(rec.Schema(), binaryCols)); err != nil {
-		return 0, err
-	}
-	return rows, nil
 }
 
 // nextLabel returns a unique load label. StarRocks labels must match

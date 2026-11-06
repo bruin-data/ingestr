@@ -38,6 +38,6 @@ func (r *chunkReader) copySerialChunk(ctx context.Context, table source.SourceTa
 	if err := r.checkpoint(ctx, r.state.Applied, nil, timing); err != nil {
 		return err
 	}
-	logChunkTiming(table.Name, prefetch, chunk, timing, 0, time.Since(checkpointStart))
+	logChunkTiming(table.Name, prefetch, chunk, timing, 0, time.Since(checkpointStart), 0)
 	return nil
 }
