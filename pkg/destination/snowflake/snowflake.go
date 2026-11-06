@@ -941,7 +941,7 @@ func buildMergeSQLWithOptions(stagingTable, targetTable string, primaryKeys, all
 
 	dedupOrderBy := "(SELECT NULL)"
 	if incrementalKey != "" {
-		dedupOrderBy = quoteIdentifier(incrementalKey) + " DESC"
+		dedupOrderBy = quoteIdentifier(incrementalKey) + " DESC NULLS LAST"
 	}
 
 	var mergeSQL strings.Builder

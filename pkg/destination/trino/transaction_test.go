@@ -44,7 +44,7 @@ func TestDeleteInsertTransactional(t *testing.T) {
 		},
 		{
 			name: "composite primary keys", primaryKeys: []string{"id", "value"},
-			wantSelect: `SELECT "id", "updated_at", "value" FROM (SELECT "id", "updated_at", "value", ROW_NUMBER() OVER (PARTITION BY "id", "value" ORDER BY "updated_at" DESC) AS __bruin_dedup_rn FROM "hive"."stage"."events") AS _numbered WHERE __bruin_dedup_rn = 1`,
+			wantSelect: `SELECT "id", "updated_at", "value" FROM (SELECT "id", "updated_at", "value", ROW_NUMBER() OVER (PARTITION BY "id", "value" ORDER BY CASE WHEN "updated_at" IS NULL THEN 1 ELSE 0 END ASC, "updated_at" DESC) AS __bruin_dedup_rn FROM "hive"."stage"."events") AS _numbered WHERE __bruin_dedup_rn = 1`,
 		},
 		{
 			name:               "date incremental key casts bounds",
@@ -195,7 +195,7 @@ func TestDeleteInsertTransactional(t *testing.T) {
 			}
 			wantSelect := tt.wantSelect
 			if wantSelect == "" {
-				wantSelect = `SELECT "id", "updated_at", "value" FROM (SELECT "id", "updated_at", "value", ROW_NUMBER() OVER (PARTITION BY "id" ORDER BY "updated_at" DESC) AS __bruin_dedup_rn FROM "hive"."stage"."events") AS _numbered WHERE __bruin_dedup_rn = 1`
+				wantSelect = `SELECT "id", "updated_at", "value" FROM (SELECT "id", "updated_at", "value", ROW_NUMBER() OVER (PARTITION BY "id" ORDER BY CASE WHEN "updated_at" IS NULL THEN 1 ELSE 0 END ASC, "updated_at" DESC) AS __bruin_dedup_rn FROM "hive"."stage"."events") AS _numbered WHERE __bruin_dedup_rn = 1`
 			}
 			wantInsert := `INSERT INTO "hive"."prod"."events" ("id", "updated_at", "value") ` + wantSelect
 			if got[3].body != wantInsert {
