@@ -2,11 +2,28 @@ package source
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
 type CDCChunkedSnapshotValidator interface {
 	ValidateCDCChunkedSnapshot(context.Context, []SourceTableInfo) error
+}
+
+// CDCChunkTiming collects destination work until the chunk checkpoint is acknowledged.
+type CDCChunkTiming struct {
+	LoadNanos  atomic.Int64
+	MergeNanos atomic.Int64
+}
+
+// CDCSnapshotChunk brackets complete snapshot rows, without interleaved WAL.
+// Bounds follow the table's primary key order and describe (After, Last].
+type CDCSnapshotChunk struct {
+	After  []string
+	Last   []string
+	Timing *CDCChunkTiming
+	// OrderedIntegerKeys certifies source key ordering is signed integer order.
+	OrderedIntegerKeys bool
 }
 
 // CDCChunkedSnapshotOptions enables short, resumable PostgreSQL snapshot reads.

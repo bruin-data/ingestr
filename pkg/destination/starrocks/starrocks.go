@@ -20,6 +20,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "github.com/go-sql-driver/mysql"
+	"golang.org/x/sync/errgroup"
 )
 
 const defaultHTTPPort = 8030
@@ -309,29 +310,62 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 		return err
 	}
 	startTime := time.Now()
-	var totalRows int64
-	var batchNum int
+	var totalRows, batchNum atomic.Int64
+	parallelism := opts.Parallelism
+	if parallelism <= 0 {
+		parallelism = 4
+	}
+	// Direct writes may upsert the same key across batches, so loads must
+	// finish in input order. Managed staging preserves duplicates for merging
+	// or receives input whose keys are guaranteed unique by the strategy.
+	if !opts.StagingTable {
+		parallelism = 1
+	}
 
 	db, table := splitDatabaseTable(opts.Table)
 	if db == "" {
 		db = d.database
 	}
 
-	for result := range records {
-		if result.Err != nil {
-			return result.Err
-		}
-		batchNum++
-
-		rows, err := d.loadRecord(ctx, db, table, result.Batch)
-		result.Batch.Release()
-		if err != nil {
-			return fmt.Errorf("failed to stream load batch %d: %w", batchNum, err)
-		}
-		totalRows += rows
+	workers, writeCtx := errgroup.WithContext(ctx)
+	for range parallelism {
+		workers.Go(func() error {
+			for {
+				if err := writeCtx.Err(); err != nil {
+					return err
+				}
+				select {
+				case <-writeCtx.Done():
+					return writeCtx.Err()
+				case result, ok := <-records:
+					if !ok {
+						return nil
+					}
+					if result.Err != nil {
+						if result.Batch != nil {
+							result.Batch.Release()
+						}
+						return result.Err
+					}
+					if result.Batch == nil {
+						continue
+					}
+					n := batchNum.Add(1)
+					rows, err := d.loadRecord(writeCtx, db, table, result.Batch)
+					result.Batch.Release()
+					if err != nil {
+						return fmt.Errorf("failed to stream load batch %d: %w", n, err)
+					}
+					totalRows.Add(rows)
+				}
+			}
+		})
+	}
+	if err := workers.Wait(); err != nil {
+		return err
 	}
 
-	config.Debug("[STARROCKS] Wrote %d rows in %d batches in %v", totalRows, batchNum, time.Since(startTime))
+	config.Debug("[STARROCKS] Wrote %d rows in %d batches with %d workers in %v", totalRows.Load(), batchNum.Load(), parallelism, time.Since(startTime))
 	return d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation)
 }
 
@@ -341,6 +375,9 @@ var maxStreamLoadJSONBytes = 90 << 20
 
 // loadRecord stream-loads a batch, splitting it until each JSON body fits.
 func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string, rec arrow.RecordBatch) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	body, rows, binaryCols, err := recordBatchToJSON(rec)
 	if err != nil {
 		return 0, fmt.Errorf("encode batch: %w", err)

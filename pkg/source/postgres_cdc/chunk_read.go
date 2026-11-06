@@ -19,16 +19,18 @@ import (
 )
 
 type snapshotChunk struct {
-	Batch    arrow.RecordBatch
 	LastKey  []string
 	UpperKey []string
 	Boundary pglogrepl.LSN
 	Done     bool
+	Rows     int64
+	SlotTime time.Duration
+	ReadTime time.Duration
 }
 
-func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.SourceTableInfo, slotName string, after, upper []string, size int, maxBytes int64, timeout time.Duration) (chunk snapshotChunk, retErr error) {
-	if size <= 0 || maxBytes < 0 || timeout <= 0 {
-		return chunk, fmt.Errorf("snapshot chunk size and timeout must be positive and byte limit must be nonnegative")
+func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.SourceTableInfo, slotName string, after, upper []string, size, pageSize int, maxBytes int64, timeout time.Duration, consume func(arrow.RecordBatch) error) (chunk snapshotChunk, retErr error) {
+	if size <= 0 || pageSize <= 0 || maxBytes < 0 || timeout <= 0 {
+		return chunk, fmt.Errorf("snapshot chunk size, page size and timeout must be positive and byte limit must be nonnegative")
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -41,13 +43,6 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if err := s.validateChunkedTable(ctx, table); err != nil {
 		return chunk, err
 	}
-	defer func() {
-		if retErr != nil && chunk.Batch != nil {
-			chunk.Batch.Release()
-			chunk.Batch = nil
-		}
-	}()
-
 	replConn, err := s.openReplicationConn(ctx)
 	if err != nil {
 		return chunk, err
@@ -57,7 +52,9 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return chunk, fmt.Errorf("failed to name snapshot chunk slot: %w", err)
 	}
+	slotStart := time.Now()
 	created, err := s.createLogicalSlot(ctx, replConn, truncateSlotName(slotName+"_chunk_"+hex.EncodeToString(suffix[:])), true)
+	chunk.SlotTime = time.Since(slotStart)
 	if err != nil {
 		return chunk, fmt.Errorf("failed to create snapshot chunk slot: %w", err)
 	}
@@ -65,6 +62,8 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if err != nil {
 		return chunk, fmt.Errorf("failed to parse snapshot chunk boundary: %w", err)
 	}
+	readStart := time.Now()
+	defer func() { chunk.ReadTime = time.Since(readStart) }()
 
 	conn, err := s.queryPool.Acquire(ctx)
 	if err != nil {
@@ -125,12 +124,25 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	}
 	defer rows.Close()
 	snapshot := &Snapshot{tableSchema: table.Schema, typeMap: typeMap}
-	var count int64
-	chunk.Batch, count, chunk.LastKey, err = snapshot.rowsToBatch(rows, buildArrowSchema(table.Schema.Columns), columns, len(table.PrimaryKeys), size, maxBytes, FormatLSN(chunk.Boundary), time.Now().UTC())
-	if err != nil {
-		return chunk, err
+	arrowSchema := buildArrowSchema(table.Schema.Columns)
+	syncedAt := time.Now().UTC()
+	for {
+		batch, count, last, err := snapshot.rowsToBatch(rows, arrowSchema, columns, len(table.PrimaryKeys), pageSize, maxBytes, FormatLSN(chunk.Boundary), syncedAt)
+		if err != nil {
+			return chunk, err
+		}
+		if batch == nil {
+			break
+		}
+		chunk.Rows += count
+		chunk.LastKey = last
+		err = consume(batch)
+		batch.Release()
+		if err != nil {
+			return chunk, err
+		}
 	}
-	chunk.Done = count == 0 || slices.Equal(chunk.LastKey, chunk.UpperKey)
+	chunk.Done = chunk.Rows < int64(size) || slices.Equal(chunk.LastKey, chunk.UpperKey)
 	return chunk, nil
 }
 

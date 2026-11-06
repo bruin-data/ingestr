@@ -147,11 +147,16 @@ func RecordBatchBufferSize(opts ReadOptions, defaultSize int) int {
 type DurableID string
 
 type RecordBatchResult struct {
-	CDCFlush  bool // Flush preceding data and acknowledge its commit token before reading further.
-	Batch     arrow.RecordBatch
-	Err       error
-	TableName string // Source table name for multi-table sources (empty for single-table)
-	Truncate  bool   // Empty the destination table before applying subsequent results
+	// Chunk markers enclose page-sized snapshot batches. Only the following
+	// CDCFlush commits the chunk together with its captured WAL.
+	CDCSnapshotChunk    *CDCSnapshotChunk
+	CDCSnapshotChunkEnd *CDCSnapshotChunk
+	CDCChunkTiming      *CDCChunkTiming
+	CDCFlush            bool // Flush preceding data and acknowledge its commit token before reading further.
+	Batch               arrow.RecordBatch
+	Err                 error
+	TableName           string // Source table name for multi-table sources (empty for single-table)
+	Truncate            bool   // Empty the destination table before applying subsequent results
 	// CDCWALTruncate distinguishes a replicated source TRUNCATE from the
 	// destination reset emitted before a replacement snapshot.
 	CDCWALTruncate bool
