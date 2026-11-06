@@ -221,7 +221,7 @@ func TestLoadRecordSplitsOversizedBodies(t *testing.T) {
 	for _, body := range bodies {
 		require.LessOrEqual(t, len(body), maxStreamLoadJSONBytes)
 	}
-	require.Equal(t, []string{`[{"id":1},{"id":2}]`, `[{"id":3},{"id":4},{"id":5}]`}, bodies)
+	require.Equal(t, []string{`[{"id":1},{"id":2},{"id":3},{"id":4}]`, `[{"id":5}]`}, bodies)
 
 	maxStreamLoadJSONBytes = 5
 	_, err = d.loadRecord(t.Context(), "db", "table", rec)

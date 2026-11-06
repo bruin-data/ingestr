@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pglogrepl"
 )
 
+const snapshotChunkPageBytes = int64(16 << 20)
+
 type chunkReadResult struct {
 	chunk snapshotChunk
 	spool *os.File
@@ -37,15 +39,7 @@ func (r *chunkReader) startChunkRead(ctx context.Context, table source.SourceTab
 		completed: make(chan chunkReadResult, 1), cancel: cancel,
 	}
 	upper, slot := slices.Clone(state.Upper), r.state.Slot
-	pageSize := r.opts.PageSize
-	if pageSize <= 0 {
-		pageSize = min(r.options.ChunkSize, 10000)
-	}
-	pageSize = min(pageSize, r.options.ChunkSize)
-	maxBytes := r.opts.MaxBatchBytes
-	if maxBytes <= 0 {
-		maxBytes = r.options.WALBufferBytes
-	}
+	pageSize, maxBytes := snapshotChunkPageLimits(r.opts.PageSize, r.options.ChunkSize, r.opts.MaxBatchBytes)
 	go func() {
 		spool, err := os.CreateTemp("", "ingestr-snapshot-chunk-*.arrow")
 		if err != nil {
@@ -68,6 +62,16 @@ func (r *chunkReader) startChunkRead(ctx context.Context, table source.SourceTab
 		prefetch.completed <- chunkReadResult{chunk: chunk, spool: spool, err: err}
 	}()
 	return prefetch
+}
+
+func snapshotChunkPageLimits(pageSize, chunkSize int, maxBytes int64) (int, int64) {
+	if pageSize <= 0 {
+		pageSize = chunkSize
+	}
+	if maxBytes <= 0 || maxBytes > snapshotChunkPageBytes {
+		maxBytes = snapshotChunkPageBytes
+	}
+	return min(pageSize, chunkSize), maxBytes
 }
 
 func (p *chunkPrefetch) close() error {

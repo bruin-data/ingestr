@@ -82,6 +82,7 @@ type PostgresCDCSource struct {
 	// standbyGapWarned is the last list of tables reported as missing from the
 	// managed publication on a standby, so each gap is reported once.
 	standbyGapWarned string
+	standbySlotHint  sync.Once
 	generatedColumns sync.Map
 	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
 	// It is shared between the pipeline goroutine (CommitStream) and the

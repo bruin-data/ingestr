@@ -349,6 +349,11 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 	for i, field := range arrowSchema.Fields() {
 		builders[i] = array.NewBuilder(mem, field.Type)
 	}
+	defer func() {
+		for _, builder := range builders {
+			builder.Release()
+		}
+	}()
 
 	var rowCount int64
 	var accBytes int64
@@ -360,9 +365,6 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 	for rows.Next() {
 		raw, fields := rows.RawValues(), rows.FieldDescriptions()
 		if len(raw) != len(columns)+keyColumns || len(fields) != len(columns)+keyColumns {
-			for _, b := range builders {
-				b.Release()
-			}
 			return nil, 0, nil, fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), len(columns)+keyColumns)
 		}
 
@@ -374,14 +376,11 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 				converted, err = convertValue(val, columns[i])
 			}
 			if err != nil {
-				for _, b := range builders {
-					b.Release()
-				}
 				return nil, 0, nil, fmt.Errorf("failed to convert snapshot column %q: %w", columns[i].Name, err)
 			}
 			arrowconv.AppendValue(builders[i], converted)
 			if maxBatchBytes > 0 {
-				accBytes += arrowconv.ValueBytes(val)
+				accBytes += arrowconv.ValueBytes(converted) + 8
 			}
 		}
 
@@ -389,14 +388,14 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 		builders[len(columns)+1].(*array.BooleanBuilder).Append(false)
 		builders[len(columns)+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
 		builders[len(columns)+3].(*array.StringBuilder).Append("[]")
+		// Include offsets, validity and CDC metadata in the byte budget, even
+		// when every source value is NULL.
+		accBytes += int64(len(lsn) + 2 + 8 + 1 + 8 + 4)
 
 		if keyColumns > 0 {
 			lastKey = make([]string, keyColumns)
 			for i, buf := range raw[len(columns):] {
 				if buf == nil {
-					for _, b := range builders {
-						b.Release()
-					}
 					return nil, 0, nil, fmt.Errorf("snapshot key column %d is NULL", i)
 				}
 				lastKey[i] = string(buf)
@@ -414,9 +413,6 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 	}
 
 	if rowCount == 0 {
-		for _, b := range builders {
-			b.Release()
-		}
 		if err := rows.Err(); err != nil {
 			return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
 		}
@@ -424,9 +420,6 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 	}
 
 	if err := rows.Err(); err != nil {
-		for _, b := range builders {
-			b.Release()
-		}
 		return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 

@@ -16,7 +16,7 @@ import (
 // ingestr explains why. A standby builds the slot's initial snapshot from a
 // running-transactions record replayed from the primary, which the primary
 // only logs every 15s and only while it has write activity.
-const standbySlotHintAfter = 20 * time.Second
+const standbySlotHintAfter = 5 * time.Second
 
 // standbyBarrierProbeInterval is how often a standby batch run asks the
 // walsender for a keepalive while waiting to decode past its target.
@@ -25,9 +25,7 @@ const standbyBarrierProbeInterval = time.Second
 // createLogicalSlot creates a pgoutput slot that exports its snapshot.
 func (s *PostgresCDCSource) createLogicalSlot(ctx context.Context, conn *pgconn.PgConn, name string, temporary bool) (pglogrepl.CreateReplicationSlotResult, error) {
 	if s.standby {
-		hint := time.AfterFunc(standbySlotHintAfter, func() {
-			output.Warnf("Warning: creating replication slot %s on a PostgreSQL standby is waiting for the primary to log a running-transactions record; this needs write activity on the primary, or run SELECT pg_log_standby_snapshot(); there\n", name)
-		})
+		hint := time.AfterFunc(standbySlotHintAfter, s.warnStandbySlotWait)
 		defer hint.Stop()
 	}
 	return pglogrepl.CreateReplicationSlot(ctx, conn, name, "pgoutput", pglogrepl.CreateReplicationSlotOptions{
@@ -35,6 +33,14 @@ func (s *PostgresCDCSource) createLogicalSlot(ctx context.Context, conn *pgconn.
 		SnapshotAction: "EXPORT_SNAPSHOT",
 		Mode:           pglogrepl.LogicalReplication,
 	})
+}
+
+func (s *PostgresCDCSource) warnStandbySlotWait() {
+	if s.standby {
+		s.standbySlotHint.Do(func() {
+			output.Warnf("[CDC] Creating replication slots on a PostgreSQL standby can wait for the primary to log a running-transactions record; chunked snapshots repeat this wait for each chunk. Run SELECT pg_log_standby_snapshot(); on the primary (for example, every second with pg_cron) to reduce these waits.\n")
+		})
+	}
 }
 
 // explainSlotFailure names the reason Postgres invalidated a slot when starting

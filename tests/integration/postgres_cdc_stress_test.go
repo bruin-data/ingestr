@@ -672,7 +672,8 @@ func stressDumpReplicationState(t *testing.T, ctx context.Context, srcPool *pgxp
 	rows, err := srcPool.Query(ctx, `
 		SELECT slot_name, active, COALESCE(active_pid, 0),
 		       COALESCE(restart_lsn::text, '-'), COALESCE(confirmed_flush_lsn::text, '-'),
-		       pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)
+		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn), 0)::bigint,
+		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0)::bigint
 		FROM pg_replication_slots`)
 	if err != nil {
 		t.Logf("replication slot dump failed: %v", err)
@@ -683,9 +684,9 @@ func stressDumpReplicationState(t *testing.T, ctx context.Context, srcPool *pgxp
 		var name, restart, confirmed string
 		var active bool
 		var pid int
-		var lag int64
-		if err := rows.Scan(&name, &active, &pid, &restart, &confirmed, &lag); err == nil {
-			t.Logf("  slot %s: active=%t pid=%d restart=%s confirmed=%s lag=%d bytes", name, active, pid, restart, confirmed, lag)
+		var lag, retained int64
+		if err := rows.Scan(&name, &active, &pid, &restart, &confirmed, &lag, &retained); err == nil {
+			t.Logf("  slot %s: active=%t pid=%d restart=%s confirmed=%s unacknowledged_bytes=%d retained_bytes=%d", name, active, pid, restart, confirmed, lag, retained)
 		}
 	}
 

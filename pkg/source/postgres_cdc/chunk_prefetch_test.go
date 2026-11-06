@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -13,8 +16,84 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
+
+type wideSnapshotRows struct {
+	failedSnapshotRows
+	count   int
+	current int
+	payload []byte
+}
+
+func (r *wideSnapshotRows) Next() bool {
+	r.current++
+	return r.current <= r.count
+}
+
+func (r *wideSnapshotRows) RawValues() [][]byte {
+	key := []byte(strconv.Itoa(r.current))
+	return [][]byte{key, r.payload, key}
+}
+
+func (r *wideSnapshotRows) FieldDescriptions() []pgconn.FieldDescription {
+	return []pgconn.FieldDescription{
+		{Name: "id", DataTypeOID: pgtype.Int8OID},
+		{Name: "payload", DataTypeOID: pgtype.TextOID},
+		{Name: "__ingestr_key_0", DataTypeOID: pgtype.TextOID},
+	}
+}
+
+func TestSnapshotChunkPagesBoundWideRows(t *testing.T) {
+	columns := []schema.Column{{Name: "id", DataType: schema.TypeInt64}, {Name: "payload", DataType: schema.TypeString, Nullable: true}}
+	tableSchema := addCDCColumns(&schema.TableSchema{Columns: columns})
+	snapshot := &Snapshot{tableSchema: tableSchema}
+	for _, tc := range []struct {
+		name        string
+		pageSize    int
+		maxBytes    int64
+		payload     []byte
+		maxPageRows int64
+	}{
+		{name: "default wide pages", maxBytes: 512 << 20, payload: []byte(strings.Repeat("x", 50<<10)), maxPageRows: 328},
+		{name: "large row ceiling", pageSize: 5000, maxBytes: 512 << 20, payload: []byte(strings.Repeat("x", 50<<10)), maxPageRows: 328},
+		{name: "small byte ceiling", maxBytes: 1 << 20, payload: []byte(strings.Repeat("x", 50<<10)), maxPageRows: 21},
+		{name: "explicit row ceiling", pageSize: 7, payload: []byte(strings.Repeat("x", 50<<10)), maxPageRows: 7},
+		{name: "row exceeds byte ceiling", maxBytes: 1024, payload: []byte(strings.Repeat("x", 50<<10)), maxPageRows: 1},
+		{name: "NULL values include metadata", maxBytes: 512, maxPageRows: 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := &wideSnapshotRows{count: 700, payload: tc.payload}
+			pageSize, maxBytes := snapshotChunkPageLimits(tc.pageSize, 2000, tc.maxBytes)
+			var total int64
+			var pageCount int
+			for {
+				batch, count, last, err := snapshot.rowsToBatch(rows, buildArrowSchema(tableSchema.Columns), columns, 1, pageSize, maxBytes, "0/1", time.Unix(0, 0))
+				require.NoError(t, err)
+				if batch == nil {
+					break
+				}
+				func() {
+					defer batch.Release()
+					require.Positive(t, count)
+					require.LessOrEqual(t, count, tc.maxPageRows)
+					require.LessOrEqual(t, count*int64(len(tc.payload)), maxBytes+int64(len(tc.payload)))
+					ids := batch.Column(0).(*array.Int64)
+					for i := 0; i < ids.Len(); i++ {
+						require.Equal(t, total+int64(i)+1, ids.Value(i), "pages must not skip or repeat rows")
+					}
+					total += count
+					require.Equal(t, []string{strconv.FormatInt(total, 10)}, last)
+				}()
+				pageCount++
+			}
+			require.EqualValues(t, rows.count, total)
+			require.Greater(t, pageCount, 1)
+		})
+	}
+}
 
 func snapshotSpoolData(t *testing.T) []byte {
 	t.Helper()
