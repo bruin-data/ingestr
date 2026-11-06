@@ -32,6 +32,7 @@ type RunJobRequest struct {
 	LoaderFileFormat  string `json:"loaderFileFormat"`
 
 	ExtractParallelism       int      `json:"extractParallelism"`
+	DestinationParallelism   *int     `json:"destinationParallelism"`
 	ExtractPartitionBy       string   `json:"extractPartitionBy"`
 	ExtractPartitionInterval string   `json:"extractPartitionInterval"`
 	SQLLimit                 int      `json:"sqlLimit"`
@@ -101,6 +102,9 @@ func (r RunJobRequest) IngestArgs() []string {
 	appendInt("loader-file-size", r.LoaderFileSize)
 	appendString("loader-file-format", r.LoaderFileFormat)
 	appendInt("extract-parallelism", r.ExtractParallelism)
+	if r.DestinationParallelism != nil {
+		args = append(args, "--destination-parallelism="+strconv.Itoa(*r.DestinationParallelism))
+	}
 	appendString("extract-partition-by", r.ExtractPartitionBy)
 	appendString("extract-partition-interval", r.ExtractPartitionInterval)
 	appendInt("sql-limit", r.SQLLimit)

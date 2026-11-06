@@ -106,6 +106,7 @@ def ingest(
     loader_file_size: Optional[int] = None,
     loader_file_format: Optional[str] = None,
     extract_parallelism: Optional[int] = None,
+    destination_parallelism: Optional[int] = None,
     sql_limit: Optional[int] = None,
     sql_exclude_columns: Optional[Union[str, Sequence[str]]] = None,
     sql_backend: Optional[Union[str, Sequence[str]]] = None,
@@ -150,6 +151,7 @@ def ingest(
         loader_file_size=loader_file_size,
         loader_file_format=loader_file_format,
         extract_parallelism=extract_parallelism,
+        destination_parallelism=destination_parallelism,
         sql_limit=sql_limit,
         sql_exclude_columns=sql_exclude_columns,
         sql_backend=sql_backend,
@@ -193,6 +195,7 @@ def build_ingest_args(
     loader_file_size: Optional[int] = None,
     loader_file_format: Optional[str] = None,
     extract_parallelism: Optional[int] = None,
+    destination_parallelism: Optional[int] = None,
     sql_limit: Optional[int] = None,
     sql_exclude_columns: Optional[Union[str, Sequence[str]]] = None,
     sql_backend: Optional[Union[str, Sequence[str]]] = None,
@@ -239,6 +242,7 @@ def build_ingest_args(
     _append_option(args, "loader-file-size", loader_file_size)
     _append_option(args, "loader-file-format", loader_file_format)
     _append_option(args, "extract-parallelism", extract_parallelism)
+    _append_option(args, "destination-parallelism", destination_parallelism)
     _append_option(args, "sql-limit", sql_limit)
     _append_repeated(args, "sql-exclude-columns", sql_exclude_columns)
     _append_repeated(args, "sql-backend", sql_backend)
