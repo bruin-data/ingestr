@@ -44,6 +44,7 @@ Any other source rejects `--extract-partition-by` with an error.
 | `--extract-partition-by` | `INGESTR_EXTRACT_PARTITION_BY` | The source column to split on. Must be a `date`, `timestamp`, `timestamptz`, or integer column. Matched case-insensitively. |
 | `--extract-partition-interval` | `INGESTR_EXTRACT_PARTITION_INTERVAL` | The width of each window. Defaults to `auto` when `--extract-partition-by` is set. |
 | `--extract-parallelism` | `INGESTR_EXTRACT_PARALLELISM` | How many windows are read at once. Defaults to `5`. |
+| `--destination-parallelism` | `DESTINATION_PARALLELISM` or `INGESTR_DESTINATION_PARALLELISM` | Requests destination write concurrency independently of reads. Must be a positive integer; support and limits depend on the destination and load method. |
 
 `--extract-partition-by` decides **which column** windows are filtered on; `--extract-partition-interval` decides **how wide** each window is, and therefore how many there are. Over January, `--extract-partition-by created_at --extract-partition-interval 1d` produces 31 windows, while `7d` produces five. `--extract-parallelism` then sets how many of those windows run at the same time.
 
@@ -134,7 +135,7 @@ Extract partitioning changes how rows are read, not what is written, so it works
 - **`replace`** loads every window before the destination replacement is finalized. On destinations that replace through staging or a transaction, a failed window or load leaves existing data unchanged. The interval is the complete replacement data set, so destination rows outside `--interval-start` and `--interval-end` are not kept. Destinations that would replace in place without being able to stage the complete extract are rejected before reading.
 - **`scd2`** requires `--incremental-key` when extract partitioning is used.
 
-When you set `--extract-parallelism` explicitly, destination write parallelism follows it, so raising it also increases concurrent writes.
+Use `--extract-parallelism 2 --destination-parallelism 8` to read two windows at a time while requesting eight destination workers. When `--destination-parallelism` is omitted, destination write parallelism follows an explicitly set `--extract-parallelism`; if neither is set, destination-specific defaults apply. Actual write concurrency depends on the destination and load method.
 
 ingestr rejects these combinations before reading anything:
 
