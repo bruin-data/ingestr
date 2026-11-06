@@ -200,11 +200,12 @@ func (b *boundedJSONBuffer) writeQuoted(value string) {
 				continue
 			}
 			b.writeString(value[start:i])
-			if r == utf8.RuneError {
+			switch r {
+			case utf8.RuneError:
 				b.writeString(`\ufffd`)
-			} else if r == '\u2028' {
+			case '\u2028':
 				b.writeString(`\u2028`)
-			} else {
+			default:
 				b.writeString(`\u2029`)
 			}
 			i += size
