@@ -138,7 +138,7 @@ Destination URI parameters:
 - `replication_num` (optional): the replica count for created tables. If omitted, the cluster default is used; set it to `1` for single-backend clusters.
 - `ssl` (optional): same TLS handling as the source. Applies only to the query-port connection; it does not change the Stream Load scheme or certificate verification.
 
-`--extract-parallelism` also controls concurrent Stream Loads, including JSON encoding, for each write. Start with 2–4 workers and tune against backend load limits and memory. `--page-size` bounds the rows encoded per batch; a failed load cancels the other workers and prevents the flush checkpoint from advancing.
+`--extract-parallelism` also controls concurrent Stream Loads, including JSON encoding, when writing to managed staging tables, as used by replace, merge, and CDC. Direct writes, including append, load batches in order so an older batch cannot overwrite a newer value for the same primary key. Start with 2–4 workers for staged writes and tune against backend load limits and memory. `--page-size` bounds the rows encoded per batch; a failed load cancels the other workers and prevents the flush checkpoint from advancing.
 
 For an HTTPS-only CelerData Stream Load endpoint on port `443`, use:
 

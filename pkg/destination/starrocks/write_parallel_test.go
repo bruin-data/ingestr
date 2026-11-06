@@ -2,13 +2,16 @@ package starrocks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -37,13 +40,18 @@ func parallelLoadBatch(mem memory.Allocator, id int64) arrow.RecordBatch {
 
 func runParallelLoadTest(t *testing.T, records <-chan source.RecordBatchResult, mem *memory.CheckedAllocator, parallelism int, transport parallelLoadTransport) (context.Context, context.CancelFunc, <-chan error) {
 	t.Helper()
+	return runStreamLoadTest(t, records, mem, destination.WriteOptions{Table: "db.events", Parallelism: parallelism, StagingTable: true}, transport)
+}
+
+func runStreamLoadTest(t *testing.T, records <-chan source.RecordBatchResult, mem *memory.CheckedAllocator, opts destination.WriteOptions, transport parallelLoadTransport) (context.Context, context.CancelFunc, <-chan error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	d := &StarRocksDestination{loader: &streamLoader{endpoint: "http://starrocks", client: &http.Client{Transport: transport}}}
 	done := make(chan error, 1)
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		done <- d.WriteParallel(ctx, records, destination.WriteOptions{Table: "db.events", Parallelism: parallelism})
+		done <- d.WriteParallel(ctx, records, opts)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -65,6 +73,69 @@ func runParallelLoadTest(t *testing.T, records <-chan source.RecordBatchResult, 
 		}
 	})
 	return ctx, cancel, done
+}
+
+func TestWriteParallelDirectLoadsPreserveDuplicateKeyOrder(t *testing.T) {
+	for _, parallelism := range []int{0, 4} {
+		t.Run(strconv.Itoa(parallelism), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				records := make(chan source.RecordBatchResult, 2)
+				for _, value := range []string{"old", "new"} {
+					builder := array.NewRecordBuilder(mem, arrow.NewSchema([]arrow.Field{
+						{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+						{Name: "value", Type: arrow.BinaryTypes.String},
+					}, nil))
+					builder.Field(0).(*array.Int64Builder).Append(1)
+					builder.Field(1).(*array.StringBuilder).Append(value)
+					records <- source.RecordBatchResult{Batch: builder.NewRecordBatch()}
+					builder.Release()
+				}
+				close(records)
+				started := make(chan string, 2)
+				release := make(chan struct{})
+				var targetMu sync.Mutex
+				target := make(map[int64]string)
+				_, _, done := runStreamLoadTest(t, records, mem, destination.WriteOptions{
+					Table:       "db.events",
+					Parallelism: parallelism,
+				}, func(r *http.Request) (*http.Response, error) {
+					var rows []struct {
+						ID    int64  `json:"id"`
+						Value string `json:"value"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&rows); err != nil {
+						return nil, err
+					}
+					if len(rows) != 1 {
+						return nil, errors.New("expected one row per load")
+					}
+					row := rows[0]
+					started <- row.Value
+					if row.Value == "old" {
+						select {
+						case <-release:
+						case <-r.Context().Done():
+							return nil, r.Context().Err()
+						}
+					}
+					targetMu.Lock()
+					target[row.ID] = row.Value
+					targetMu.Unlock()
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"Status":"Success","NumberLoadedRows":1,"NumberTotalRows":1}`))}, nil
+				})
+				synctest.Wait()
+				require.Len(t, started, 1, "the next load must wait for the preceding load to finish")
+				require.Equal(t, "old", <-started)
+				require.Len(t, records, 1)
+				close(release)
+				require.NoError(t, <-done)
+				require.Equal(t, "new", <-started)
+				require.Equal(t, map[int64]string{1: "new"}, target)
+				mem.AssertSize(t, 0)
+			})
+		})
+	}
 }
 
 func TestWriteParallelBoundsConcurrencyAndUsesUniqueLabels(t *testing.T) {

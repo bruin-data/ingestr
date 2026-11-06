@@ -315,6 +315,12 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 	if parallelism <= 0 {
 		parallelism = 4
 	}
+	// Direct writes may upsert the same key across batches, so loads must
+	// finish in input order. Managed staging preserves duplicates for merging
+	// or receives input whose keys are guaranteed unique by the strategy.
+	if !opts.StagingTable {
+		parallelism = 1
+	}
 
 	db, table := splitDatabaseTable(opts.Table)
 	if db == "" {
