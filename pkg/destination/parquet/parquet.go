@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -56,22 +57,28 @@ func (d *ParquetDestination) Close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	var err error
 	if d.writer != nil {
-		if err := d.writer.Close(); err != nil {
-			return err
-		}
+		err = d.writer.Close()
 		d.writer = nil
 	}
 	if d.file != nil {
-		if err := d.file.Close(); err != nil {
-			return err
+		if closeErr := d.file.Close(); !errors.Is(closeErr, os.ErrClosed) {
+			err = errors.Join(err, closeErr)
 		}
 		d.file = nil
 	}
-	return nil
+	if d.tempPath != "" {
+		err = errors.Join(err, os.Remove(d.tempPath))
+		d.tempPath = ""
+	}
+	return err
 }
 
 func (d *ParquetDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := d.Close(ctx); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -84,23 +91,12 @@ func (d *ParquetDestination) PrepareTable(ctx context.Context, opts destination.
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Close existing writer if any
-	if d.writer != nil {
-		_ = d.writer.Close()
-		d.writer = nil
-	}
-	if d.file != nil {
-		_ = d.file.Close()
-		d.file = nil
-	}
-	d.tempPath = ""
-
-	// For DropFirst or new file, create/truncate
+	d.arrowSchema = nil
 	if opts.DropFirst {
 		if opts.Schema != nil {
 			d.arrowSchema = opts.Schema.ToArrowSchema()
 		}
-		// Don't create file yet - wait for first write to get schema
+		// Prefer the first batch's schema; use this schema for an empty stream.
 	}
 
 	return nil
@@ -134,6 +130,7 @@ func (d *ParquetDestination) WriteParallel(ctx context.Context, records <-chan s
 		// Initialize writer on first batch using the record's schema
 		if d.writer == nil {
 			if err := d.initWriter(ctx, record.Schema()); err != nil {
+				record.Release()
 				d.cleanupTempOnError()
 				return fmt.Errorf("failed to initialize parquet writer: %w", err)
 			}
@@ -171,11 +168,25 @@ func (d *ParquetDestination) WriteParallel(ctx context.Context, records <-chan s
 		record.Release()
 	}
 
+	if err := ctx.Err(); err != nil {
+		d.cleanupTempOnError()
+		return err
+	}
+	if d.writer == nil && !d.appendMode {
+		if d.arrowSchema == nil {
+			return fmt.Errorf("cannot write empty parquet replacement without a schema")
+		}
+		if err := d.initWriter(ctx, d.arrowSchema); err != nil {
+			d.cleanupTempOnError()
+			return fmt.Errorf("failed to initialize empty parquet writer: %w", err)
+		}
+	}
+
 	// Flush and get final stats
 	d.mu.Lock()
 	finalPath := d.filePath
 	tempPath := d.tempPath
-	shouldSwap := d.appendMode && tempPath != ""
+	shouldSwap := tempPath != ""
 	if d.writer != nil {
 		if err := d.writer.Close(); err != nil {
 			d.mu.Unlock()
@@ -185,7 +196,12 @@ func (d *ParquetDestination) WriteParallel(ctx context.Context, records <-chan s
 		d.writer = nil
 	}
 	if d.file != nil {
-		_ = d.file.Close()
+		if err := d.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			d.file = nil
+			d.mu.Unlock()
+			d.cleanupTempOnError()
+			return fmt.Errorf("failed to close parquet file: %w", err)
+		}
 		d.file = nil
 	}
 	d.tempPath = ""
@@ -195,7 +211,7 @@ func (d *ParquetDestination) WriteParallel(ctx context.Context, records <-chan s
 	if shouldSwap {
 		if err := os.Rename(tempPath, finalPath); err != nil {
 			_ = os.Remove(tempPath)
-			return fmt.Errorf("failed to finalize parquet append (rename): %w", err)
+			return fmt.Errorf("failed to finalize parquet write (rename): %w", err)
 		}
 	}
 
@@ -214,7 +230,14 @@ func (d *ParquetDestination) initWriter(ctx context.Context, arrowSchema *arrow.
 	normalizedSchema := stripSchemaMetadata(arrowSchema)
 
 	targetPath := d.filePath
-	if d.appendMode {
+	if !d.appendMode {
+		temp, err := destination.CreateReplacementFile(d.filePath)
+		if err != nil {
+			return fmt.Errorf("failed to create parquet replacement: %w", err)
+		}
+		d.tempPath = temp.Name()
+		d.file = temp
+	} else {
 		// If appending to an existing parquet file, write to a temp file first and swap atomically.
 		if info, err := os.Stat(d.filePath); err == nil && info.Size() > 0 {
 			d.tempPath = fmt.Sprintf("%s.tmp-%d", d.filePath, time.Now().UnixNano())
@@ -222,11 +245,13 @@ func (d *ParquetDestination) initWriter(ctx context.Context, arrowSchema *arrow.
 		}
 	}
 
-	file, err := os.Create(targetPath)
-	if err != nil {
-		return fmt.Errorf("failed to create parquet file: %w", err)
+	if d.file == nil {
+		file, err := os.Create(targetPath)
+		if err != nil {
+			return fmt.Errorf("failed to create parquet file: %w", err)
+		}
+		d.file = file
 	}
-	d.file = file
 	d.arrowSchema = normalizedSchema
 
 	// Configure parquet writer properties
@@ -240,9 +265,10 @@ func (d *ParquetDestination) initWriter(ctx context.Context, arrowSchema *arrow.
 		pqarrow.WithStoreSchema(),
 	)
 
-	writer, err := pqarrow.NewFileWriter(normalizedSchema, file, writerProps, arrowProps)
+	writer, err := pqarrow.NewFileWriter(normalizedSchema, d.file, writerProps, arrowProps)
 	if err != nil {
-		_ = file.Close()
+		_ = d.file.Close()
+		d.file = nil
 		return fmt.Errorf("failed to create parquet writer: %w", err)
 	}
 
@@ -325,12 +351,7 @@ func (d *ParquetDestination) copyExistingParquetIntoWriter(ctx context.Context, 
 }
 
 func (d *ParquetDestination) cleanupTempOnError() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.tempPath != "" {
-		_ = os.Remove(d.tempPath)
-		d.tempPath = ""
-	}
+	_ = d.Close(context.Background())
 	d.appendMode = false
 }
 
@@ -464,7 +485,7 @@ func (d *ParquetDestination) SupportsDeleteInsertStrategy() bool { return false 
 // SupportsSCD2Strategy returns false as Parquet does not support the SCD2 strategy.
 func (d *ParquetDestination) SupportsSCD2Strategy() bool { return false }
 
-// SupportsAtomicSwap returns false as Parquet writes directly to the target file.
+// SupportsAtomicSwap returns false because file publication is handled by Write.
 func (d *ParquetDestination) SupportsAtomicSwap() bool { return false }
 
 func (d *ParquetDestination) GetScheme() string { return "parquet" }
