@@ -111,9 +111,9 @@ func TestReadSnapshotChunkRejectsUnboundedReadBeforeConnecting(t *testing.T) {
 		{name: "negative timeout", size: 1, timeout: -time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			chunk, err := src.readSnapshotChunk(context.Background(), source.SourceTableInfo{}, "", nil, nil, tc.size, tc.maxBytes, tc.timeout)
+			chunk, err := src.readSnapshotChunk(context.Background(), source.SourceTableInfo{}, "", nil, nil, tc.size, 1, tc.maxBytes, tc.timeout, nil)
 			require.ErrorContains(t, err, "must be positive")
-			require.Nil(t, chunk.Batch)
+			require.Zero(t, chunk.Rows)
 		})
 	}
 }

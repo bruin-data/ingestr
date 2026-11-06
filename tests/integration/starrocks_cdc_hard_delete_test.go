@@ -84,6 +84,50 @@ func TestStarRocksDestinationCDCHardDelete(t *testing.T) {
 		})
 	})
 
+	t.Run("snapshot chunk then out-of-range WAL", func(t *testing.T) {
+		target, stage := prepare(t, "snapshot_chunk")
+		require.NoError(t, dest.Exec(ctx, "INSERT INTO "+target+` VALUES
+			(1, 'newer', '030', false, '2026-01-01'),
+			(2, 'tombstone', '020', true, '2026-01-01'),
+			(3, 'old', '010', false, '2026-01-01'),
+			(1000, 'outside', '010', false, '2026-01-01')`))
+		require.NoError(t, dest.Exec(ctx, "INSERT INTO "+stage+` VALUES
+			(1, 'stale', '020', false, '2026-01-02', '[]'),
+			(2, 'stale', '020', false, '2026-01-02', '[]'),
+			(3, 'snapshot', '020', false, '2026-01-02', '[]'),
+			(4, NULL, '020', false, '2026-01-02', '[]'),
+			(5, 'delete-after-snapshot', '020', false, '2026-01-02', '[]')`))
+		tableSchema := &schema.TableSchema{Columns: columns}
+		opts := destination.MergeOptions{
+			TargetTable: target, StagingTable: stage, PrimaryKeys: []string{"id"},
+			Columns: append(tableSchema.ColumnNames(), destination.CDCUnchangedColsColumn), Schema: tableSchema,
+			CDCSnapshot: true, CDCSnapshotRange: &destination.CDCSnapshotRange{Last: []string{"5"}}, CDCHardDelete: true,
+		}
+		for range 2 {
+			require.NoError(t, dest.MergeTable(ctx, opts))
+			require.Equal(t, map[int64]cdcHardDeleteRow{
+				1: {"newer", "030", false}, 2: {"tombstone", "020", true},
+				3: {"snapshot", "020", false}, 4: {"", "020", false},
+				5: {"delete-after-snapshot", "020", false}, 1000: {"outside", "010", false},
+			}, readRows(t, target))
+		}
+		require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+stage))
+		require.NoError(t, dest.Exec(ctx, "INSERT INTO "+stage+` VALUES
+			(3, NULL, '040', false, '2026-01-03', '["payload"]'),
+			(5, NULL, '040', true, '2026-01-03', '[]'),
+			(1000, NULL, '040', true, '2026-01-03', '[]'),
+			(2000, 'outside-insert', '040', false, '2026-01-03', '[]')`))
+		opts.CDCSnapshot, opts.CDCSnapshotRange = false, nil
+		for range 2 {
+			require.NoError(t, dest.MergeTable(ctx, opts))
+			require.Equal(t, map[int64]cdcHardDeleteRow{
+				1: {"newer", "030", false}, 2: {"tombstone", "020", true},
+				3: {"snapshot", "040", false}, 4: {"", "020", false},
+				2000: {"outside-insert", "040", false},
+			}, readRows(t, target))
+		}
+	})
+
 	t.Run("retire", func(t *testing.T) {
 		target, _ := prepare(t, "retire")
 		require.NoError(t, dest.Exec(ctx, "INSERT INTO "+target+` VALUES

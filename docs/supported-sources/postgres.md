@@ -47,16 +47,20 @@ CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` own
 
 ### Large initial snapshots
 
-Enable `--cdc-snapshot-chunked` to read PostgreSQL CDC snapshots in bounded chunks, each in a separate transaction. This is opt-in; omitting the flag preserves the default snapshot reader. The chunk reader releases its source transaction before waiting for destination writes, limiting the snapshot horizon held by a slow load.
+Enable `--cdc-snapshot-chunked` to read PostgreSQL CDC snapshots in bounded chunks, each in a separate transaction. This is opt-in; omitting the flag preserves the default snapshot reader. Rows are converted in `--page-size` batches, also bounded by `--batch-size` (MiB), and spooled to temporary Arrow files. The chunk reader releases its source transaction before waiting for destination writes, limiting the snapshot horizon held by a slow load. Allow temporary disk space for up to two chunks; temporary files are removed when consumed or cancelled.
+
+Set `TMPDIR` to a disk-backed directory if your default temporary directory is memory-backed. A forcibly killed process can leave `ingestr-snapshot-chunk-*.arrow` files there; remove those files after the process stops.
 
 Choose the execution order with `--cdc-snapshot-execution`:
 
 | Execution | Copying and change processing | Pending changes |
 |---|---|---|
 | `serial` (default) | Copy every selected table in chunks, then decode and apply changes from retained WAL. | Keep WAL in the PostgreSQL replication slot throughout the copy. No concurrent decoder runs during copying. |
-| `parallel` | Decode changes while copying chunks; catch up the selected tables' change stream after each chunk. | Stage decoded events in memory or in the destination. |
+| `parallel` | Decode changes while copying chunks; catch up the selected tables' change stream after each chunk. Read the next chunk while the current destination checkpoint completes. | Stage decoded events in memory or in the destination. |
 
 Both execution modes save durable chunk checkpoints, so an interrupted first bootstrap can resume from completed chunks. Catch-up includes changes to already copied rows and rows outside the current chunk. Single-table and multi-table selections are supported; omit `--stream` to catch up and exit, or include it to continue processing changes. Serial execution simplifies the copy phase, but the source must have enough space to retain all WAL needed from the initial boundary until copying and catch-up finish.
+
+Parallel execution reads at most one chunk ahead and commits chunk cursors in order. A prefetched chunk starts after the preceding chunk's WAL catch-up, so it includes changes already applied by that chunk. Page buffers bound snapshot memory independently of chunk size; a single unusually large row can still exceed a batch byte threshold. Each completed chunk logs `slot_ms`, `read_ms`, `load_ms`, `merge_ms`, `catchup_ms`, `checkpoint_ms`, and `total_ms`. Read time includes the local Arrow spool; overlapping stages mean these times need not add up to total elapsed time.
 
 ```bash
 ingestr ingest \
@@ -165,6 +169,14 @@ Behavior that differs from the primary:
 - Creating a replication slot on a standby waits until the primary logs a running-transactions record. An active primary does this every 15 seconds; an idle one does not, and slot creation waits until it does. ingestr warns when this takes longer than 20 seconds. Run `SELECT pg_log_standby_snapshot();` on the primary to unblock it.
 - A run without `--stream` stops at the standby's replay position when the run started, rather than at a marker written to the WAL, because a standby cannot write WAL.
 - Slots created on a standby keep working after that standby is promoted.
+
+Chunked snapshots create a temporary slot for every chunk, so these waits can dominate snapshot time. ingestr warns when starting a chunked snapshot on a standby. Run [`pg_log_standby_snapshot()`](https://www.postgresql.org/docs/17/logicaldecoding-explanation.html) regularly on the **primary** during the snapshot; with [`pg_cron`](https://github.com/citusdata/pg_cron) installed and configured there, for example:
+
+```sql
+SELECT cron.schedule('ingestr-standby-snapshot', '1 seconds', 'SELECT pg_log_standby_snapshot()');
+```
+
+The function writes a running-transactions record to WAL. Remove the job when it is no longer needed with `SELECT cron.unschedule('ingestr-standby-snapshot');`. Scheduling it on the replica does not help because it must run on the primary.
 
 ### Tutorial
 

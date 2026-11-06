@@ -494,6 +494,8 @@ type streamTableState struct {
 	pendingRows                 int64
 	snapshotBoundaryInvalidated bool
 	softReplace                 *pendingSoftReplace
+	snapshotRows                int64
+	snapshotBytes               uint64
 }
 
 // pendingSoftReplace is a snapshot replacement applied without emptying the
@@ -535,7 +537,8 @@ type flushLoop struct {
 	pendingTruncates map[string]string
 	legacyFinalized  bool
 
-	cycles int64
+	cycles      int64
+	chunkTiming *source.CDCChunkTiming
 }
 
 func newFlushLoop(dest destination.Destination, cfg *config.IngestConfig, opts StreamingOptions, tables map[string]*streamTableState) *flushLoop {
@@ -580,11 +583,17 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 				}
 				return l.abortLeaseLoss(records, err)
 			}
-			if err := l.processResult(ctx, res); err != nil {
+			var processErr error
+			if res.CDCSnapshotChunk != nil {
+				processErr = l.loadSnapshotChunk(ctx, records, res)
+			} else {
+				processErr = l.processResult(ctx, res)
+			}
+			if processErr != nil {
 				if loss := connectorLeaseLoss(ctx); loss != nil {
 					return l.abortLeaseLoss(records, loss)
 				}
-				return err
+				return processErr
 			}
 			if l.buffered >= l.opts.FlushRecords {
 				if err := connectorLeaseLoss(ctx); err != nil {
@@ -620,6 +629,15 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 }
 
 func (l *flushLoop) processResult(ctx context.Context, res source.RecordBatchResult) error {
+	if res.CDCSnapshotChunk != nil || res.CDCSnapshotChunkEnd != nil {
+		if res.Batch != nil {
+			res.Batch.Release()
+		}
+		return fmt.Errorf("unexpected snapshot chunk boundary")
+	}
+	if res.CDCChunkTiming != nil {
+		l.chunkTiming = res.CDCChunkTiming
+	}
 	if res.SnapshotInvalidation != nil {
 		if err := l.invalidateSnapshot(ctx, *res.SnapshotInvalidation); err != nil {
 			if res.Batch != nil {
@@ -640,7 +658,11 @@ func (l *flushLoop) processResult(ctx context.Context, res source.RecordBatchRes
 		return err
 	}
 	if res.CDCFlush {
-		return l.flush(ctx)
+		if err := l.flush(ctx); err != nil {
+			return err
+		}
+		l.chunkTiming = nil
+		return nil
 	}
 	if token, ok := res.CommitToken.(source.CDCStateCommitToken); ok && len(token.SnapshotPositions) > 0 && (l.buffered > 0 || l.tokenDirty) {
 		return l.flush(ctx)
@@ -1234,9 +1256,14 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		}
 		var bytes uint64
 		records = countRecordBatchBytes(records, &bytes)
-		if err := l.dest.WriteParallel(ctx, records, writeOpts); err != nil {
+		loadStart := time.Now()
+		writeErr := l.dest.WriteParallel(ctx, records, writeOpts)
+		if l.chunkTiming != nil {
+			l.chunkTiming.LoadNanos.Add(int64(time.Since(loadStart)))
+		}
+		if writeErr != nil {
 			drainAndRelease(records)
-			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, err)
+			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, writeErr)
 		}
 		w.bytes = bytes
 		if err := connectorLeaseLoss(ctx); err != nil {
@@ -1255,8 +1282,13 @@ func (l *flushLoop) flush(ctx context.Context) error {
 					return err
 				}
 			}
-			if err := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation, l.hardDeletesCDC()); err != nil {
-				return fmt.Errorf("streaming flush: failed to merge table %s: %w", displayName, err)
+			mergeStart := time.Now()
+			mergeErr := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation, l.hardDeletesCDC())
+			if l.chunkTiming != nil {
+				l.chunkTiming.MergeNanos.Add(int64(time.Since(mergeStart)))
+			}
+			if mergeErr != nil {
+				return fmt.Errorf("streaming flush: failed to merge table %s: %w", displayName, mergeErr)
 			}
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
@@ -1369,6 +1401,20 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		}
 		perTable[name] = metrics.SyncStats{Rows: w.rows, Bytes: w.bytes}
 	}
+	for name, st := range l.tables {
+		if st.snapshotRows == 0 {
+			continue
+		}
+		if name == "" {
+			name = st.destTable
+		}
+		stats := perTable[name]
+		stats.Rows += st.snapshotRows
+		stats.Bytes += st.snapshotBytes
+		perTable[name] = stats
+		flushedRows += st.snapshotRows
+		st.snapshotRows, st.snapshotBytes = 0, 0
+	}
 	metrics.RecordSync(perTable, time.Now())
 
 	l.cycles++
@@ -1457,6 +1503,14 @@ drain:
 		case res, ok := <-records:
 			if !ok {
 				break drain
+			}
+			if res.CDCSnapshotChunk != nil || res.CDCSnapshotChunkEnd != nil {
+				if res.Batch != nil {
+					res.Batch.Release()
+				}
+				// A partial snapshot has no checkpoint. Let the executor cancel
+				// and drain it without treating its pages as ordinary WAL.
+				return ctx.Err()
 			}
 			if res.Err != nil {
 				if loss := connectorLeaseLoss(drainCtx); loss != nil {

@@ -111,7 +111,17 @@ type MergeOptions struct {
 	// keeping them as _cdc_deleted tombstones. Only set for destinations that
 	// implement CDCHardDeleteCapable.
 	CDCHardDelete bool
-	Parallelism   int
+	// CDCSnapshot guarantees full snapshot row images without WAL or unchanged
+	// TOAST markers. The optional range contains every staged key.
+	CDCSnapshot      bool
+	CDCSnapshotRange *CDCSnapshotRange
+	Parallelism      int
+}
+
+// CDCSnapshotRange describes (After, Last] in PrimaryKeys order.
+type CDCSnapshotRange struct {
+	After []string
+	Last  []string
 }
 
 type CDCAtomicTableMerge struct {

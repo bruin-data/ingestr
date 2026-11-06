@@ -138,6 +138,8 @@ Destination URI parameters:
 - `replication_num` (optional): the replica count for created tables. If omitted, the cluster default is used; set it to `1` for single-backend clusters.
 - `ssl` (optional): same TLS handling as the source. Applies only to the query-port connection; it does not change the Stream Load scheme or certificate verification.
 
+`--extract-parallelism` also controls concurrent Stream Loads, including JSON encoding, for each write. Start with 2–4 workers and tune against backend load limits and memory. `--page-size` bounds the rows encoded per batch; a failed load cancels the other workers and prevents the flush checkpoint from advancing.
+
 For an HTTPS-only CelerData Stream Load endpoint on port `443`, use:
 
 ```text
@@ -183,7 +185,9 @@ SELECT * FROM analytics.events WHERE NOT _cdc_deleted;
 
 Source `TRUNCATE` clears the affected target before subsequent changes are applied. When a streaming run re-snapshots a keyed table after source DDL (for example `DROP COLUMN`), the target is not emptied: snapshot rows overwrite the existing rows in place, and once the snapshot completes, rows it did not contain are marked `_cdc_deleted` at the snapshot position. Readers filtering on `NOT _cdc_deleted` keep seeing the full table throughout, and earlier tombstones are preserved. Keyless tables, and targets holding positions at or beyond the new snapshot, are still truncated first. Source key changes require a full refresh.
 
-An in-place re-snapshot that is interrupted resumes after its last durable key on the next run rather than starting over; see [PostgreSQL schema changes while streaming](/getting-started/cdc.md#postgresql-schema-changes-while-streaming). Each CDC merge still reads the whole target table, so its cost grows with table size; larger `--flush-records` values spread that cost over more changes on large, busy tables.
+An in-place re-snapshot that is interrupted resumes after its last durable key on the next run rather than starting over; see [PostgreSQL schema changes while streaming](/getting-started/cdc.md#postgresql-schema-changes-while-streaming). General WAL merges can scan the target table; larger `--flush-records` values spread that cost over more changes on large, busy tables.
+
+With [chunked PostgreSQL snapshots](/supported-sources/postgres.md#large-initial-snapshots), ingestr merges snapshot rows separately before captured WAL. Snapshot merges rank complete rows once per key and omit per-column TOAST reconstruction. When every source and destination key is a signed integer and no masks or column overrides are configured, the target scan is restricted to the chunk's key range, including lexicographic composite-key ranges. Other cases use the same simpler snapshot merge without range pruning. CDC merges enable statement-local spilling with `SET_VAR(enable_spill=true)`; the cluster must have [spill storage configured](https://docs.starrocks.io/docs/administration/management/resource_management/spill_to_disk/).
 
 With `--cdc-delete-behavior hard`, deleted rows are removed instead of kept as tombstones. Each flush first publishes its upserts and tombstones in one load, then deletes the tombstones it wrote with a `DELETE ... USING` on the staging table, and waits for that delete to become query-visible before the flush advances the CDC position. Readers filtering on `NOT _cdc_deleted` never see a deleted row; other readers may briefly see the tombstone between the two statements, and a run killed between them leaves tombstones that the replayed flush removes. A streaming re-snapshot deletes the rows the snapshot did not contain instead of marking them. See [Deletes](/getting-started/cdc.md#deletes).
 
