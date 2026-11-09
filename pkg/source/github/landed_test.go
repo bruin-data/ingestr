@@ -595,8 +595,8 @@ func TestLandedSetChecksPassOnConsistentData(t *testing.T) {
 	if res.hasWarning("was merged") || res.hasWarning("the activity log says") {
 		t.Fatalf("unexpected set-check warning: %v", res.warnings)
 	}
-	if f.calls["bulk"] != 1 {
-		t.Fatalf("bulk PR listings=%d, want 1 for I6", f.calls["bulk"])
+	if f.calls["search"] != 1 || f.calls["bulk"] != 0 {
+		t.Fatalf("searches=%d bulk listings=%d, want one search and no bulk list for I6", f.calls["search"], f.calls["bulk"])
 	}
 	if f.calls["count"] != 1 {
 		t.Fatalf("compare counts=%d, want 1 for I9 (head M0 at the start, M1 at the end)", f.calls["count"])
@@ -777,5 +777,38 @@ func TestLandedConflictWithdrawsTrustGivenEarlier(t *testing.T) {
 	}
 	if f.calls["events"] != 1 {
 		t.Fatalf("event queries=%d, want 1: walking again must not ask for events again", f.calls["events"])
+	}
+}
+
+func TestLandedI6SearchSplitsWindowsPastTheResultLimit(t *testing.T) {
+	f := buttonMergeRepo()
+	var extra []ghPR
+	for i := 0; i < 7; i++ {
+		m := at(100 + 10*i)
+		extra = append(extra, ghPR{Number: 500 + i, MergedAt: &m, BaseRef: "release", HeadOid: oid("H"), MergeCommit: oid("M0")})
+	}
+	edge := at(iEnd)
+	extra = append(extra, ghPR{Number: 600, MergedAt: &edge, BaseRef: "main", HeadOid: oid("H"), MergeCommit: oid("M0")})
+	f.extraBulk = extra
+	run := newLandedRun(f, "main", at(iStart), at(iEnd), func(string, ...interface{}) {})
+	run.searchLimit = 3
+	f.searchCap = 3
+	run.now = at(10000)
+	prs, err := run.mergedPRsIn(t.Context(), at(iStart), at(iEnd))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int]bool{}
+	for _, pr := range prs {
+		if got[pr.Number] {
+			t.Fatalf("PR #%d returned twice", pr.Number)
+		}
+		got[pr.Number] = true
+	}
+	if len(got) != 8 || got[600] {
+		t.Fatalf("PRs %v, want the 7 release PRs and PR #1 (PR #600 is merged at the interval end, outside [S, E))", got)
+	}
+	if f.calls["search"] < 3 {
+		t.Fatalf("searches=%d, want the window split (more than 3 matches per search)", f.calls["search"])
 	}
 }

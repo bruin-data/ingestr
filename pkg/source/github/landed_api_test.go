@@ -133,6 +133,14 @@ func TestGithubReadCommitsEndToEnd(t *testing.T) {
 			body, _ := io.ReadAll(r.Body)
 			var req graphQLRequest
 			_ = json.Unmarshal(body, &req)
+			if strings.Contains(req.Query, "search(query:") {
+				pr := gqlPR(2, "2026-11-01T02:00:00Z", "main", sha("X1"), sha("M1"))
+				pr["timelineItems"] = map[string]interface{}{"nodes": []interface{}{map[string]interface{}{"commit": map[string]interface{}{"oid": sha("M1")}}}}
+				writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"search": map[string]interface{}{
+					"issueCount": 1, "pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": "s1"}, "nodes": []interface{}{pr},
+				}}})
+				return
+			}
 			if strings.Contains(req.Query, "pullRequests(states: MERGED) { totalCount") {
 				writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequests": map[string]interface{}{"totalCount": 2}}}})
 				return
@@ -461,5 +469,35 @@ func TestSendLandedRowsHonoursLimitAndBatchBytes(t *testing.T) {
 	pr.Release()
 	if total != 3 || batches != 3 {
 		t.Fatalf("caps: batches=%d rows=%d, want 3 rows in 3 batches", batches, total)
+	}
+}
+
+func TestLandedAPISearchMergedPRs(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, _ := io.ReadAll(r.Body)
+		var req graphQLRequest
+		_ = json.Unmarshal(body, &req)
+		if q := req.Variables["q"]; q != "repo:o/r is:pr is:merged merged:2019-06-01T00:00:00Z..2019-07-01T00:00:00Z" {
+			t.Errorf("search query %v", q)
+		}
+		next, cursor := true, "c1"
+		if req.Variables["page_after"] == "c1" {
+			next, cursor = false, "c2"
+		}
+		pr := gqlPR(calls, "2019-06-02T10:00:00Z", "master", oid("H"), "")
+		pr["mergeCommit"] = nil
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"search": map[string]interface{}{
+			"issueCount": 2, "pageInfo": map[string]interface{}{"hasNextPage": next, "endCursor": cursor}, "nodes": []interface{}{pr, map[string]interface{}{}},
+		}}})
+	}))
+	defer srv.Close()
+	prs, total, err := newGithubLandedAPI(testSource(srv.URL)).searchMergedPRs(context.Background(), time.Date(2019, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2019, 7, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || total != 2 || len(prs) != 2 || prs[1].Number != 2 || prs[0].MergeCommit != "" {
+		t.Fatalf("calls=%d total=%d prs=%+v (empty non-PR nodes must be skipped)", calls, total, prs)
 	}
 }

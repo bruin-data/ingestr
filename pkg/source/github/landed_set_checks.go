@@ -34,7 +34,7 @@ func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
 		config.Debug("[GITHUB] I6 skipped: the repository has no merged pull requests")
 		return
 	}
-	prs, err := r.mergedPRsSince(ctx, r.start)
+	prs, err := r.mergedPRsIn(ctx, r.start, r.intervalEndSeen())
 	if err != nil {
 		r.warnf("commits: merged pull requests not readable (%v); skipped the check that every PR merged in the interval is returned", err)
 		return
@@ -131,6 +131,41 @@ func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
 	}
 	config.Debug("[GITHUB] I6: %d PRs merged into %s in the interval, %d checked (%d upper-bound only, %d re-landed), %d warnings",
 		total, r.branch, checked, upperOnly, relanded, warnings)
+}
+
+// mergedPRsIn is every PR merged in [from, to), from GitHub search. A search returns at most 1,000
+// PRs, so a window with more matches is split in two until each part fits.
+func (r *landedRun) mergedPRsIn(ctx context.Context, from, to time.Time) ([]ghPR, error) {
+	prs, total, err := r.api.searchMergedPRs(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	if total > r.searchLimit {
+		if to.Sub(from) > time.Second {
+			mid := from.Add(to.Sub(from) / 2).Truncate(time.Second)
+			if mid.After(from) {
+				left, err := r.mergedPRsIn(ctx, from, mid)
+				if err != nil {
+					return nil, err
+				}
+				right, err := r.mergedPRsIn(ctx, mid, to)
+				if err != nil {
+					return nil, err
+				}
+				return append(left, right...), nil
+			}
+		}
+		r.warnf("commits: %d PRs merged in [%s, %s] but GitHub search returns %d; the rest are not checked", total, fmtT(&from), fmtT(&to), len(prs))
+	} else if total > len(prs) {
+		config.Debug("[GITHUB] search found %d merged PRs in [%s, %s] but returned %d", total, fmtT(&from), fmtT(&to), len(prs))
+	}
+	var out []ghPR
+	for _, pr := range prs {
+		if pr.MergedAt != nil && !pr.MergedAt.Before(from) && pr.MergedAt.Before(to) {
+			out = append(out, pr)
+		}
+	}
+	return out, nil
 }
 
 // checkI9: with B's heads at start and end known from the activity log and no force push between,

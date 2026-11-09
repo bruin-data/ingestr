@@ -114,6 +114,7 @@ type landedRun struct {
 	relanded    map[string]bool
 	ruleCs      map[string]trustInfo
 	restartWalk bool
+	searchLimit int
 	steps       []*chainStep
 	setFailures []string
 	// landedBy is an upper bound of the landing time of the walk's current position and of every
@@ -131,24 +132,25 @@ type landedRun struct {
 
 func newLandedRun(api landedAPI, branch string, start, end time.Time, warnf func(string, ...interface{})) *landedRun {
 	return &landedRun{
-		api:        api,
-		branch:     branch,
-		start:      start.UTC(),
-		end:        end.UTC(),
-		warnf:      warnf,
-		actByAfter: map[string][]activityEntry{},
-		oldNames:   map[string]bool{},
-		aliases:    map[string]bool{},
-		actLookups: map[string]*activityEntry{},
-		ciLookups:  map[string]*checkSuite{},
-		trusts:     [2]map[string]trustInfo{{}, {}},
-		conflicts:  map[int]bool{},
-		onBranch:   map[string]bool{},
-		statuses:   map[string]string{},
-		events:     map[string][]eventPR{},
-		relanded:   map[string]bool{},
-		ruleCs:     map[string]trustInfo{},
-		mergedPRs:  -1,
+		api:         api,
+		branch:      branch,
+		start:       start.UTC(),
+		end:         end.UTC(),
+		warnf:       warnf,
+		actByAfter:  map[string][]activityEntry{},
+		oldNames:    map[string]bool{},
+		aliases:     map[string]bool{},
+		actLookups:  map[string]*activityEntry{},
+		ciLookups:   map[string]*checkSuite{},
+		trusts:      [2]map[string]trustInfo{{}, {}},
+		conflicts:   map[int]bool{},
+		onBranch:    map[string]bool{},
+		statuses:    map[string]string{},
+		events:      map[string][]eventPR{},
+		relanded:    map[string]bool{},
+		ruleCs:      map[string]trustInfo{},
+		mergedPRs:   -1,
+		searchLimit: searchMaxResults,
 
 		belowFloor:   map[string]bool{},
 		firstTrusted: map[string]probeHit{},

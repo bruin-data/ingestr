@@ -30,6 +30,7 @@ type fakeRepo struct {
 	prCount     *int
 	failOn      map[string]error
 	evOverflow  map[string]bool
+	searchCap   int
 	calls       map[string]int
 }
 
@@ -240,6 +241,30 @@ func (f *fakeRepo) compareCount(_ context.Context, base, head string) (string, i
 		}
 	}
 	return st, n, nil
+}
+
+func (f *fakeRepo) searchMergedPRs(ctx context.Context, from, to time.Time) ([]ghPR, int, error) {
+	f.calls["search"]++
+	all, _ := f.mergedPullRequests(ctx, time.Time{})
+	f.calls["bulk"]--
+	seen := map[int]bool{}
+	var hits []ghPR
+	for _, pr := range all {
+		if pr.MergedAt == nil || seen[pr.Number] || pr.MergedAt.Before(from) || pr.MergedAt.After(to) {
+			continue
+		}
+		seen[pr.Number] = true
+		hits = append(hits, pr)
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].Number < hits[j].Number })
+	limit := searchMaxResults
+	if f.searchCap > 0 {
+		limit = f.searchCap
+	}
+	if len(hits) > limit {
+		return hits[:limit], len(hits), nil
+	}
+	return hits, len(hits), nil
 }
 
 func (f *fakeRepo) mergedPRCount(context.Context) (int, error) {

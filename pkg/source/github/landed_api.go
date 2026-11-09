@@ -92,7 +92,10 @@ type landedAPI interface {
 	mergedEvents(ctx context.Context, reqs []eventRequest) (map[string][]eventPR, map[string]bool, error)
 	resolveBranch(ctx context.Context, name string) (string, error)
 	mergedPullRequests(ctx context.Context, since time.Time) ([]ghPR, error)
+	searchMergedPRs(ctx context.Context, from, to time.Time) ([]ghPR, int, error)
 }
+
+const searchMaxResults = 1000
 
 const (
 	comparePageSize   = 100
@@ -126,6 +129,16 @@ query($owner: String!, $name: String!, $oid: GitObjectID!) {
         checkSuites(first: 50) { nodes { createdAt branch { name } push { previousSha } } }
       }
     }
+  }
+  rateLimit { limit cost remaining resetAt }
+}`
+
+const searchMergedPRsQuery = `
+query($q: String!, $page_after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $page_after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { number mergedAt baseRefName headRefOid mergeCommit { oid } timelineItems(itemTypes: [MERGED_EVENT], first: 10) { nodes { ... on MergedEvent { commit { oid } } } } } }
   }
   rateLimit { limit cost remaining resetAt }
 }`
@@ -660,6 +673,50 @@ func (a *githubLandedAPI) resolveBranch(ctx context.Context, name string) (strin
 // mergedPullRequests lists merged PRs newest-updated first and stops at the first page whose oldest
 // PR was updated before since (a PR merged at or after since was updated at or after it). No
 // baseRefName filter: PRs keep the base name they were merged into, also after a rename.
+// searchMergedPRs is one GitHub search for the PRs merged in [from, to] (both ends inclusive, the
+// search syntax): every page GitHub returns (at most searchMaxResults PRs) and issueCount, the
+// number of matches, which can be larger.
+func (a *githubLandedAPI) searchMergedPRs(ctx context.Context, from, to time.Time) ([]ghPR, int, error) {
+	q := fmt.Sprintf("repo:%s/%s is:pr is:merged merged:%s..%s", a.s.owner, a.s.repo, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	vars := map[string]interface{}{"q": q}
+	var out []ghPR
+	total := 0
+	for {
+		data, _, err := a.s.executeGraphQL(ctx, searchMergedPRsQuery, vars)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to search merged pull requests: %w", err)
+		}
+		var body struct {
+			Search struct {
+				IssueCount int `json:"issueCount"`
+				PageInfo   struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+				Nodes []gqlPRNode `json:"nodes"`
+			} `json:"search"`
+		}
+		if err := json.Unmarshal(data, &body); err != nil {
+			return nil, 0, fmt.Errorf("failed to parse the merged pull request search: %w", err)
+		}
+		total = body.Search.IssueCount
+		for _, n := range body.Search.Nodes {
+			if n.Number == 0 {
+				continue
+			}
+			pr, err := n.toPR()
+			if err != nil {
+				return nil, 0, err
+			}
+			out = append(out, pr)
+		}
+		if !body.Search.PageInfo.HasNextPage || body.Search.PageInfo.EndCursor == "" {
+			return out, total, nil
+		}
+		vars["page_after"] = body.Search.PageInfo.EndCursor
+	}
+}
+
 func (a *githubLandedAPI) mergedPullRequests(ctx context.Context, since time.Time) ([]ghPR, error) {
 	var out []ghPR
 	err := a.s.walkGraphQLConnection(ctx, mergedPullRequestsQuery, nil, []string{"repository", "pullRequests"}, "nodes",
