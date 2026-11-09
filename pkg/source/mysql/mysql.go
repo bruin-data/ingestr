@@ -304,6 +304,15 @@ func getMySQLSchema(ctx context.Context, db rowQuerier, database string, table s
 			col.MaxLength = int(charMaxLen.Int64)
 		}
 
+		if members, isSet, ok := parseMySQLEnumSetMembers(columnType); ok {
+			if isSet {
+				col.SetValues = members
+			} else {
+				col.EnumValues = members
+			}
+		}
+		col.Spatial = isMySQLSpatialType(columnType)
+
 		columns = append(columns, col)
 	}
 
