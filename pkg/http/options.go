@@ -94,7 +94,8 @@ func WithRetryStrategy(strategy func(resp *Response, err error) (time.Duration, 
 }
 
 // WithRetryHook runs hook before every retry wait, including the waits resty takes from a
-// 429/503 Retry-After header without calling the retry strategy.
+// 429/503 Retry-After header without calling the retry strategy. resty passes a nil error to
+// hooks, even after a transport error.
 func WithRetryHook(hook func(resp *Response, err error)) Option {
 	return func(c *Client) {
 		c.resty.AddRetryHooks(func(r *resty.Response, err error) {

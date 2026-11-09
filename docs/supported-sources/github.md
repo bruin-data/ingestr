@@ -14,7 +14,7 @@ github://?access_token=<access_token>&owner=<owner>&repo=<repo>
 
 URI parameters:
 
-- `access_token` (optional): Access Token used for authentication with the GitHub API
+- `access_token` (required for `issues`, `pull_requests` and `stargazers`): Access Token used for authentication with the GitHub API
 - `owner` (required): Refers to the owner of the repository
 - `repo` (required): Refers to the name of the repository
 
@@ -54,9 +54,9 @@ To connect to GitHub, you need to create a Personal Access Token (PAT).
 5. Click **Generate token**
 6. Copy the token (starts with `github_pat_`)
 
-> **Note**: The access token is optional for public repositories, but recommended to avoid rate limits: unauthenticated requests are limited to 60 per hour per IP, authenticated ones to 5,000 per hour.
+> **Note**: `issues`, `pull_requests` and `stargazers` read GitHub's GraphQL API, which needs an access token. `commits` and `repo_events` can read public repositories without one, but a token is recommended: unauthenticated requests are limited to 60 per hour per IP, authenticated ones to 5,000 per hour.
 >
-> When GitHub reports that a rate limit is exceeded, ingestr waits for the time GitHub asks for (the `Retry-After` header, or until the limit resets, at most one hour) and retries up to 5 times, printing a warning with each wait. For a secondary rate limit without either, it waits one minute and doubles the wait on each retry.
+> When GitHub reports that a rate limit is exceeded, ingestr waits for the time GitHub asks for (the `Retry-After` header, or until the limit resets; at least one second and at most one hour) and retries up to 5 times, printing a warning with each wait. For a secondary rate limit without either, it waits one minute and doubles the wait on each retry.
 
 Once you have your access token, let's say your access token is `ghp_test_1234`, the owner is `max`, and the name of the repository is `test_example`. Here is a sample command that will copy the data from GitHub into a DuckDB database:
 

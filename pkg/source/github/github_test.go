@@ -279,6 +279,13 @@ func TestGithubRateLimitWait(t *testing.T) {
 		{"graphql query costing more than the points left waits for the reset", cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "98", "X-RateLimit-Reset": in10m}, liveGraphQLCostAboveRemainingBody}, true, 9 * time.Minute, 11 * time.Minute},
 		{"secondary with spent quota waits for the reset", cannedResponse{403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": in10m}, `{"message":"You have exceeded a secondary rate limit."}`}, true, 9 * time.Minute, 11 * time.Minute},
 		{"graphql secondary 200", cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "4000"}, `{"errors":[{"message":"You have exceeded a secondary rate limit. Please wait a few minutes."}]}`}, true, time.Minute, time.Minute},
+		{"retry-after above an hour is capped", cannedResponse{429, map[string]string{"Retry-After": "7200"}, ""}, true, retryMaxWait, retryMaxWait},
+		{"retry-after as an HTTP date", cannedResponse{403, map[string]string{"Date": now.UTC().Format(http.TimeFormat), "Retry-After": now.Add(2 * time.Minute).UTC().Format(http.TimeFormat)}, ""}, true, 119 * time.Second, 121 * time.Second},
+		{"503 with retry-after", cannedResponse{503, map[string]string{"Retry-After": "30"}, ""}, true, 30 * time.Second, 30 * time.Second},
+		{"reset measured on GitHub's clock, not ours", cannedResponse{403, map[string]string{"Date": now.Add(-10 * time.Second).UTC().Format(http.TimeFormat), "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": epoch(now.Add(-5 * time.Second))}, ""}, true, 4 * time.Second, 7 * time.Second},
+		{"403 rate-limit message without headers", cannedResponse{403, nil, `{"message":"API rate limit exceeded for user ID 1."}`}, true, time.Minute, time.Minute},
+		{"abuse detection message", cannedResponse{403, nil, `{"message":"You have triggered an abuse detection mechanism. Please wait a few minutes before you try again."}`}, true, time.Minute, time.Minute},
+		{"graphql without a token never resets", cannedResponse{403, map[string]string{"X-RateLimit-Limit": "0", "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": in10m}, `{"message":"API rate limit exceeded for 1.2.3.4."}`}, false, 0, 0},
 		{"permission denied", cannedResponse{403, map[string]string{"X-RateLimit-Remaining": "4999"}, `{"message":"Resource not accessible by personal access token"}`}, false, 0, 0},
 		{"not found", cannedResponse{404, map[string]string{"X-RateLimit-Remaining": "0"}, ""}, false, 0, 0},
 		{"data mentioning rate limits", cannedResponse{200, nil, `{"data":{"issue":{"title":"We hit a secondary rate limit","label":"RATE_LIMIT"}}}`}, false, 0, 0},
@@ -609,12 +616,34 @@ func TestGithubRateLimitRetriesRunOut(t *testing.T) {
 	}
 }
 
-// resty waits out a 429 with Retry-After itself, without the retry strategy; the warning must
-// still be printed.
-func TestGithubRetryAfter429IsLogged(t *testing.T) {
+// resty would wait out a 429 with Retry-After itself, skipping the strategy's minimum; the wait
+// must still go through clampWait (raised to 100ms here) and be logged.
+func TestGithubRetryAfter429KeepsTheMinimumWait(t *testing.T) {
 	logs := captureOutput(t)
 	f := &fakeGitHub{rest: []cannedResponse{
 		{429, map[string]string{"Retry-After": "0"}, `{"message":"You have exceeded a secondary rate limit."}`},
+		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
+	}}
+	s, _ := connectToFake(t, f)
+	retryWait = 100 * time.Millisecond
+
+	start := time.Now()
+	rows, err := readTable(t, s, context.Background(), "commits")
+	if err != nil || rows != 1 {
+		t.Fatalf("rows=%d err=%v, want 1 row after the wait", rows, err)
+	}
+	if elapsed := time.Since(start); elapsed < retryWait {
+		t.Fatalf("retried after %v, want at least %v", elapsed, retryWait)
+	}
+	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o/r, waiting 100ms before retrying") {
+		t.Fatalf("missing rate-limit warning for the 429, output: %q", logs.String())
+	}
+}
+
+func TestGithubRetryAfter503IsLogged(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeGitHub{rest: []cannedResponse{
+		{503, map[string]string{"Retry-After": "0"}, `{"message":"Service unavailable"}`},
 		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
 	}}
 	s, _ := connectToFake(t, f)
@@ -623,8 +652,58 @@ func TestGithubRetryAfter429IsLogged(t *testing.T) {
 	if err != nil || rows != 1 {
 		t.Fatalf("rows=%d err=%v, want 1 row after the wait", rows, err)
 	}
-	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o/r, waiting 0s before retrying") {
-		t.Fatalf("missing rate-limit warning for the 429, output: %q", logs.String())
+	if !strings.Contains(logs.String(), "Warning: GitHub answered 503 for o/r and asked to retry later, waiting 1ms before retrying") {
+		t.Fatalf("missing warning for the 503, output: %q", logs.String())
+	}
+}
+
+func TestGithubGraphQLTablesNeedAToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no request expected, got %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	prevREST, prevGraphQL := restApiBaseUrl, graphqlBaseUrl
+	restApiBaseUrl, graphqlBaseUrl = srv.URL, srv.URL+"/graphql"
+	t.Cleanup(func() { restApiBaseUrl, graphqlBaseUrl = prevREST, prevGraphQL })
+
+	s := NewGitHubSource()
+	if err := s.Connect(context.Background(), "github://?owner=o&repo=r"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+
+	for _, table := range []string{"issues", "pull_requests", "stargazers"} {
+		if _, err := readTable(t, s, context.Background(), table); err == nil || !strings.Contains(err.Error(), "needs an access_token") {
+			t.Errorf("%s without a token: got %v, want an access_token error", table, err)
+		}
+	}
+}
+
+// Reactions are best effort, but a failure to fetch them must be visible.
+func TestGithubReactionFailureIsWarned(t *testing.T) {
+	logs := captureOutput(t)
+	pageWithReactedComment := cannedResponse{
+		200,
+		map[string]string{"X-RateLimit-Remaining": "4000"},
+		`{"data":{"repository":{"issues":{"totalCount":1,"pageInfo":{"endCursor":"c1"},"nodes":[` +
+			`{"number":1,"title":"issue 1","state":"OPEN","createdAt":"2026-01-01T00:00:00Z",` +
+			`"comments":{"totalCount":1,"nodes":[{"id":"IC_1","body":"hi","reactionGroups":[{"content":"THUMBS_UP","users":{"totalCount":1}}]}]},` +
+			`"reactions":{"totalCount":0,"nodes":[]}}]}}}}`,
+	}
+	responses := []cannedResponse{pageWithReactedComment}
+	for range retryCount + 1 {
+		responses = append(responses, graphQLQuotaSpent())
+	}
+	f := &fakeGitHub{graphql: append(responses, issuesPage(""))}
+	s, _ := connectToFake(t, f)
+
+	rows, err := readTable(t, s, context.Background(), "issues")
+	if err != nil || rows != 1 {
+		t.Fatalf("rows=%d err=%v, want the issue written without reactions", rows, err)
+	}
+	if !strings.Contains(logs.String(), "Warning: could not fetch comment reactions for o/r") {
+		t.Fatalf("missing reactions warning, output: %q", logs.String())
 	}
 }
 

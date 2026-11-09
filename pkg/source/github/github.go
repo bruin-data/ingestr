@@ -18,6 +18,7 @@ import (
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"resty.dev/v3"
 )
 
 // Variables rather than constants so tests can point the source at a local server and shorten the waits.
@@ -40,6 +41,7 @@ const (
 	backoffMax   = 30 * time.Second
 
 	secondaryRateLimitText = "secondary rate limit"
+	retryAfterHeader       = "X-Ingestr-Retry-After"
 	// Matches both GraphQL primary-limit types: RATE_LIMITED (query costs more than the points left)
 	// and RATE_LIMIT (no points left).
 	graphQLRateLimitType = "RATE_LIMIT"
@@ -59,6 +61,12 @@ var supportedTables = []string{
 	"pull_requests",
 	"repo_events",
 	"stargazers",
+}
+
+var graphQLTables = map[string]bool{
+	"issues":        true,
+	"pull_requests": true,
+	"stargazers":    true,
 }
 
 var issueFields = []schema.Column{
@@ -166,7 +174,7 @@ func (s *GithubSource) Connect(ctx context.Context, uri string) error {
 		ingestrhttp.WithRetry(retryCount, retryWait, retryMaxWait),
 		ingestrhttp.WithRetryCondition(githubRetryCondition),
 		ingestrhttp.WithRetryStrategy(githubRetryStrategy),
-		ingestrhttp.WithRetryHook(s.warnRateLimitRetry),
+		ingestrhttp.WithRetryHook(s.warnRetryWait),
 		ingestrhttp.WithDebug(config.DebugMode),
 	}
 
@@ -179,7 +187,7 @@ func (s *GithubSource) Connect(ctx context.Context, uri string) error {
 		ingestrhttp.WithAllowNonIdempotentRetry(),
 		ingestrhttp.WithRetryCondition(githubRetryCondition),
 		ingestrhttp.WithRetryStrategy(githubRetryStrategy),
-		ingestrhttp.WithRetryHook(s.warnRateLimitRetry),
+		ingestrhttp.WithRetryHook(s.warnRetryWait),
 		ingestrhttp.WithDebug(config.DebugMode),
 	}
 
@@ -194,16 +202,28 @@ func (s *GithubSource) Connect(ctx context.Context, uri string) error {
 
 	s.restClient = ingestrhttp.New(restOpts...)
 	s.graphqlClient = ingestrhttp.New(graphqlOpts...)
+	s.restClient.Resty().AddResponseMiddleware(moveRetryAfter)
+	s.graphqlClient.Resty().AddResponseMiddleware(moveRetryAfter)
 
 	return nil
 }
 
-// githubRetryCondition adds GitHub's rate-limit responses to the default retries.
+// moveRetryAfter moves Retry-After to retryAfterHeader. resty waits out a 429/503 with Retry-After
+// itself, without calling the retry strategy, so that wait would skip clampWait and the warning.
+func moveRetryAfter(_ *resty.Client, resp *resty.Response) error {
+	h := resp.Header()
+	if v := h.Get("Retry-After"); v != "" {
+		h.Del("Retry-After")
+		h.Set(retryAfterHeader, v)
+	}
+	return nil
+}
+
 func githubRetryCondition(resp *ingestrhttp.Response, _ error) bool {
 	return githubRateLimitKind(resp) != notRateLimited
 }
 
-// githubRetryStrategy waits as long as GitHub asks on a rate limit and backs off exponentially otherwise.
+// githubRetryStrategy waits as long as GitHub asks and backs off exponentially otherwise.
 func githubRetryStrategy(resp *ingestrhttp.Response, _ error) (time.Duration, error) {
 	if wait, ok := githubRateLimitWait(resp, time.Now()); ok {
 		return wait, nil
@@ -211,26 +231,23 @@ func githubRetryStrategy(resp *ingestrhttp.Response, _ error) (time.Duration, er
 	return githubBackoff(resp), nil
 }
 
-// warnRateLimitRetry logs every rate-limit wait. It is a retry hook rather than part of the strategy
-// because resty waits out a 429 with a Retry-After header itself, without calling the strategy.
-func (s *GithubSource) warnRateLimitRetry(resp *ingestrhttp.Response, _ error) {
-	wait, ok := githubRateLimitWait(resp, time.Now())
+func (s *GithubSource) warnRetryWait(resp *ingestrhttp.Response, _ error) {
+	wait, kind, ok := githubRetryWait(resp, time.Now())
 	if !ok {
 		return
 	}
-	if resp.StatusCode() == http.StatusTooManyRequests {
-		if secs, err := strconv.Atoi(resp.Header().Get("Retry-After")); err == nil && secs >= 0 {
-			wait = time.Duration(secs) * time.Second
-		}
+	if kind == notRateLimited {
+		output.Warnf("Warning: GitHub answered %d for %s/%s and asked to retry later, waiting %v before retrying\n", resp.StatusCode(), s.owner, s.repo, roundWait(wait))
+		return
 	}
 	output.Warnf("Warning: GitHub rate limit exceeded for %s/%s, waiting %v before retrying\n", s.owner, s.repo, roundWait(wait))
 }
 
 // githubRateLimitKind tells GitHub's rate-limit answers apart. REST answers 403/429. GraphQL answers
 // 200 with a RATE_LIMIT* error type for its primary limit, and 200 or 403 with a message for its
-// secondary limit.
+// secondary limit. A limit of 0 (GraphQL without a token) never resets, so it is not retried.
 func githubRateLimitKind(resp *ingestrhttp.Response) githubRateLimit {
-	if resp == nil {
+	if resp == nil || resp.Header().Get("X-RateLimit-Limit") == "0" {
 		return notRateLimited
 	}
 	switch resp.StatusCode() {
@@ -239,7 +256,8 @@ func githubRateLimitKind(resp *ingestrhttp.Response) githubRateLimit {
 		if h.Get("X-RateLimit-Remaining") == "0" {
 			return primaryRateLimit
 		}
-		if h.Get("Retry-After") != "" || strings.Contains(resp.String(), secondaryRateLimitText) {
+		body := strings.ToLower(resp.String())
+		if retryAfterValue(h) != "" || strings.Contains(body, "rate limit") || strings.Contains(body, "abuse detection") {
 			return secondaryRateLimit
 		}
 	case http.StatusOK:
@@ -252,7 +270,9 @@ func graphQLRateLimitKind(body []byte) githubRateLimit {
 	if !bytes.Contains(body, []byte(graphQLRateLimitType)) && !bytes.Contains(body, []byte(secondaryRateLimitText)) {
 		return notRateLimited
 	}
-	var parsed graphQLResponse
+	var parsed struct {
+		Errors []graphQLError `json:"errors"`
+	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return notRateLimited
 	}
@@ -268,26 +288,64 @@ func graphQLRateLimitKind(body []byte) githubRateLimit {
 	return kind
 }
 
-// githubRateLimitWait returns how long GitHub asks us to wait: Retry-After, else until
+func githubRateLimitWait(resp *ingestrhttp.Response, now time.Time) (time.Duration, bool) {
+	wait, _, ok := githubRetryWait(resp, now)
+	return wait, ok
+}
+
+// githubRetryWait returns how long GitHub asks us to wait: Retry-After, else until
 // x-ratelimit-reset for a primary limit or a spent quota, else a wait that doubles per attempt
 // from secondaryRateLimitWait. A GraphQL query that costs more than the points left keeps
-// x-ratelimit-remaining above zero, so the reset is used for every primary limit. Never below
-// retryWait, since resty treats a zero delay as "wait the maximum".
-func githubRateLimitWait(resp *ingestrhttp.Response, now time.Time) (time.Duration, bool) {
+// x-ratelimit-remaining above zero, so the reset is used for every primary limit. Times come from
+// the response's Date header, so a local clock ahead of GitHub's doesn't end the wait early.
+// Never below retryWait, since resty treats a zero delay as "wait the maximum".
+func githubRetryWait(resp *ingestrhttp.Response, now time.Time) (time.Duration, githubRateLimit, bool) {
 	kind := githubRateLimitKind(resp)
-	if kind == notRateLimited {
-		return 0, false
+	if resp == nil {
+		return 0, kind, false
 	}
 	h := resp.Header()
-	if secs, err := strconv.Atoi(h.Get("Retry-After")); err == nil {
-		return clampWait(time.Duration(secs) * time.Second), true
+	now = serverTime(h, now)
+	if wait, ok := retryAfter(h, now); ok {
+		return clampWait(wait), kind, true
+	}
+	if kind == notRateLimited {
+		return 0, kind, false
 	}
 	if kind == primaryRateLimit || h.Get("X-RateLimit-Remaining") == "0" {
 		if reset, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil {
-			return clampWait(time.Unix(reset, 0).Sub(now) + time.Second), true
+			return clampWait(time.Unix(reset, 0).Sub(now) + time.Second), kind, true
 		}
 	}
-	return clampWait(secondaryRateLimitWait << (retryAttempt(resp) - 1)), true
+	return clampWait(secondaryRateLimitWait << (retryAttempt(resp) - 1)), kind, true
+}
+
+func retryAfterValue(h http.Header) string {
+	if v := h.Get(retryAfterHeader); v != "" {
+		return v
+	}
+	return h.Get("Retry-After")
+}
+
+func retryAfter(h http.Header, now time.Time) (time.Duration, bool) {
+	v := strings.TrimSpace(retryAfterValue(h))
+	if v == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		return time.Duration(secs) * time.Second, true
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return t.Sub(now), true
+	}
+	return 0, false
+}
+
+func serverTime(h http.Header, fallback time.Time) time.Time {
+	if t, err := http.ParseTime(h.Get("Date")); err == nil {
+		return t
+	}
+	return fallback
 }
 
 func clampWait(d time.Duration) time.Duration {
@@ -308,7 +366,6 @@ func retryAttempt(resp *ingestrhttp.Response) int {
 	return 1
 }
 
-// githubBackoff doubles retryWait per attempt, capped at backoffMax.
 func githubBackoff(resp *ingestrhttp.Response) time.Duration {
 	return min(retryWait<<(retryAttempt(resp)-1), backoffMax)
 }
@@ -440,6 +497,9 @@ func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.Tab
 func (s *GithubSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	if !isValidTable(table) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", table, strings.Join(supportedTables, ", "))
+	}
+	if s.apiKey == "" && graphQLTables[table] {
+		return nil, fmt.Errorf("the %s table reads GitHub's GraphQL API, which needs an access_token", table)
 	}
 
 	results := make(chan source.RecordBatchResult, 8)
@@ -1326,8 +1386,7 @@ func (s *GithubSource) paginateGraphQL(
 		// For issues and pull_requests, fetch reactions for comments that have them
 		if rootField == "issues" || rootField == "pullRequests" {
 			if err := s.fetchCommentReactions(ctx, rawItems); err != nil {
-				config.Debug("[GITHUB] Warning: failed to fetch comment reactions: %v", err)
-				// Continue even if reaction fetching fails
+				output.Warnf("Warning: could not fetch comment reactions for %s/%s, writing these %s without them: %v\n", s.owner, s.repo, rootField, err)
 			}
 		}
 
