@@ -1320,7 +1320,7 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey, opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1346,11 +1346,13 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	return nil
 }
 
-func buildDeleteInsertDeleteSQL(targetTable, incrementalKey string) string {
-	return fmt.Sprintf(
-		"DELETE FROM %s WITH (TABLOCKX, HOLDLOCK) WHERE %s >= @p1 AND %s <= @p2",
-		quoteTable(targetTable), quoteColumn(incrementalKey), quoteColumn(incrementalKey),
-	)
+func buildDeleteInsertDeleteSQL(targetTable, incrementalKey, predicate string) string {
+	key := quoteColumn(incrementalKey)
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WITH (TABLOCKX, HOLDLOCK) WHERE %s >= @p1 AND %s <= @p2", quoteTable(targetTable), key, key)
+	}
+	return fmt.Sprintf("DELETE target FROM %s AS target WITH (TABLOCKX, HOLDLOCK) WHERE %s", quoteTable(targetTable),
+		destination.IntervalDeleteCondition("target", key, "@p1", "@p2", predicate))
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
@@ -1488,6 +1490,7 @@ func (d *MSSQLDestination) SupportsReplaceStrategy() bool          { return true
 func (d *MSSQLDestination) SupportsAppendStrategy() bool           { return true }
 func (d *MSSQLDestination) SupportsMergeStrategy() bool            { return true }
 func (d *MSSQLDestination) SupportsIncrementalPredicate() bool     { return true }
+func (d *MSSQLDestination) SupportsDeleteInsertPredicate() bool    { return true }
 func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool     { return true }
 func (d *MSSQLDestination) SupportsSCD2Strategy() bool             { return true }
 func (d *MSSQLDestination) SupportsAtomicSwap() bool               { return true }

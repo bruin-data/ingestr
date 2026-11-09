@@ -14,6 +14,11 @@ func TestNewRedshiftDestinationUsesFixedSchemaResolution(t *testing.T) {
 	require.Equal(t, "public", NewRedshiftDestination().DefaultSchema)
 }
 
+func TestRedshiftRejectsDeleteInsertPredicate(t *testing.T) {
+	require.False(t, NewRedshiftDestination().SupportsDeleteInsertPredicate())
+	require.True(t, NewRedshiftDestination().SupportsIncrementalPredicate())
+}
+
 func TestBuildMergeSQL(t *testing.T) {
 	dest := NewRedshiftDestination()
 	t.Run("composite key and quoted columns", func(t *testing.T) {

@@ -882,11 +882,19 @@ func TestFilterColumnsRetainsOrdinaryCaseInsensitiveMSSQLMatching(t *testing.T) 
 }
 
 func TestBuildDeleteInsertDeleteSQLUsesTableLock(t *testing.T) {
-	sql := buildDeleteInsertDeleteSQL("dbo.events", "updated_at")
+	sql := buildDeleteInsertDeleteSQL("dbo.events", "updated_at", "")
 
 	assertContains(t, sql, "DELETE FROM [dbo].[events] WITH (TABLOCKX, HOLDLOCK)")
 	assertContains(t, sql, "[updated_at] >= @p1")
 	assertContains(t, sql, "[updated_at] <= @p2")
+}
+
+func TestBuildDeleteInsertDeleteSQLWithIncrementalPredicate(t *testing.T) {
+	got := buildDeleteInsertDeleteSQL("dbo.events", "updated_at", "target.[event_date] >= '2026-01-01'")
+	want := "DELETE target FROM [dbo].[events] AS target WITH (TABLOCKX, HOLDLOCK) WHERE target.[updated_at] >= @p1 AND target.[updated_at] <= @p2 AND (target.[event_date] >= '2026-01-01')"
+	if got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
 }
 
 func TestRowsPerSecondAllowsZeroDuration(t *testing.T) {

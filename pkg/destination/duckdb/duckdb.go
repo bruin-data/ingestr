@@ -1438,10 +1438,7 @@ func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
-		quotedTargetTable, quoteIdentifier(opts.IncrementalKey), quoteIdentifier(opts.IncrementalKey),
-	)
+	deleteSQL := destination.IntervalDeleteSQL(quotedTargetTable, "target", quoteIdentifier(opts.IncrementalKey), "?", "?", opts.IncrementalPredicate)
 	config.Debug("[DUCKDB DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if err := d.exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1693,6 +1690,9 @@ func (d *DuckDBDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *DuckDBDestination) SupportsAppendStrategy() bool       { return true }
 func (d *DuckDBDestination) SupportsMergeStrategy() bool        { return true }
 func (d *DuckDBDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *DuckDBDestination) SupportsDeleteInsertPredicate() bool { return true }
+
 func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }

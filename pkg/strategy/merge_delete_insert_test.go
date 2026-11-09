@@ -383,6 +383,25 @@ func TestDeleteInsertStrategy_Execute_UsesAutoDetectedInterval(t *testing.T) {
 	}
 }
 
+func TestDeleteInsertStrategy_Execute_PassesIncrementalPredicate(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
+	job.Config.IncrementalKey = "id"
+	job.Config.IncrementalPredicate = "target.region = 'eu'"
+
+	src.readCh = mustClosedRecords(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{5, 10}, nil)})
+
+	if err := (&DeleteInsertStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(dest.diCalls) != 1 {
+		t.Fatalf("expected 1 DeleteInsertTable call, got %d", len(dest.diCalls))
+	}
+	if got := dest.diCalls[0].IncrementalPredicate; got != job.Config.IncrementalPredicate {
+		t.Fatalf("DeleteInsertOptions.IncrementalPredicate = %q, want %q", got, job.Config.IncrementalPredicate)
+	}
+}
+
 func TestDeleteInsertStrategy_Execute_TracksIncrementalKeyCaseInsensitive(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyDeleteInsert

@@ -700,11 +700,11 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 		}
 		return "", false
 	}
-	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s >= :1 AND %s <= :2", quoteTable(opts.TargetTable), key, key)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, key, ":1", ":2", opts.IncrementalPredicate)
 	deleteArgs := []interface{}{opts.IntervalStart, opts.IntervalEnd}
 	if start, ok := bound(opts.IntervalStart); ok {
 		if end, ok := bound(opts.IntervalEnd); ok {
-			deleteSQL = fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quoteTable(opts.TargetTable), key, start, key, end)
+			deleteSQL = buildDeleteInsertDeleteSQL(opts.TargetTable, key, start, end, opts.IncrementalPredicate)
 			deleteArgs = nil
 		}
 	}
@@ -878,6 +878,18 @@ func (d *OracleDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *OracleDestination) SupportsAtomicSwap() bool           { return true }
 func (d *OracleDestination) SupportsCDCMerge() bool             { return true }
 func (d *OracleDestination) SupportsCDCUnchangedCols() bool     { return true }
+
+func (d *OracleDestination) SupportsDeleteInsertPredicate() bool { return true }
+
+// buildDeleteInsertDeleteSQL aliases the target without AS, which Oracle
+// rejects for table aliases.
+func buildDeleteInsertDeleteSQL(targetTable, quotedKey, lower, upper, predicate string) string {
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quoteTable(targetTable), quotedKey, lower, quotedKey, upper)
+	}
+	return fmt.Sprintf("DELETE FROM %s target WHERE %s", quoteTable(targetTable),
+		destination.IntervalDeleteCondition("target", quotedKey, lower, upper, predicate))
+}
 
 func (d *OracleDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
 	return destination.ReplaceStagingPolicy{

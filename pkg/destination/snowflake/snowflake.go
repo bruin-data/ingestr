@@ -1107,10 +1107,7 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 	startVal := formatSnowflakeValue(opts.IntervalStart, opts.IncrementalKeyType)
 	endVal := formatSnowflakeValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
-		targetFull, quoteIdentifier(opts.IncrementalKey), startVal, quoteIdentifier(opts.IncrementalKey), endVal,
-	)
+	deleteSQL := destination.IntervalDeleteSQL(targetFull, "target", quoteIdentifier(opts.IncrementalKey), startVal, endVal, opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL); err != nil {
@@ -1553,6 +1550,9 @@ func (d *SnowflakeDestination) SupportsReplaceStrategy() bool      { return true
 func (d *SnowflakeDestination) SupportsAppendStrategy() bool       { return true }
 func (d *SnowflakeDestination) SupportsMergeStrategy() bool        { return true }
 func (d *SnowflakeDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *SnowflakeDestination) SupportsDeleteInsertPredicate() bool { return true }
+
 func (d *SnowflakeDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *SnowflakeDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *SnowflakeDestination) SupportsAtomicSwap() bool           { return true }

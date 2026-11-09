@@ -177,6 +177,21 @@ var (
 )
 
 var (
+	_ destination.DeleteInsertPredicateSupport = (*bigquery.BigQueryDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*databricks.DatabricksDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*duckdb.DuckDBDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*duckdb.DuckLakeDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*mssql.MSSQLDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*mysql.MySQLDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*oracle.OracleDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*planetscale.Destination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*postgres.PostgresDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*snowflake.SnowflakeDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*sqlite.SQLiteDestination)(nil)
+	_ destination.DeleteInsertPredicateSupport = (*vitess.Destination)(nil)
+)
+
+var (
 	_ destination.Destination = (*athena.AthenaDestination)(nil)
 	_ destination.Destination = (*bigquery.BigQueryDestination)(nil)
 	_ destination.Destination = (*cassandra.CassandraDestination)(nil)

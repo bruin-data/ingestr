@@ -750,6 +750,14 @@ func (m *mockPredicateDestination) SupportsIncrementalPredicate() bool {
 	return true
 }
 
+type mockDeleteInsertPredicateDestination struct {
+	mockDestination
+}
+
+func (m *mockDeleteInsertPredicateDestination) SupportsDeleteInsertPredicate() bool {
+	return true
+}
+
 type serializedCDCRunsDestination struct {
 	mockDestination
 }
@@ -1647,6 +1655,20 @@ func TestValidateIncrementalPredicate(t *testing.T) {
 	}
 	if err := validateIncrementalPredicate(cfg, &mockDestination{scheme: "mock"}, config.StrategyMerge); err == nil {
 		t.Fatal("expected unsupported destination to be rejected")
+	}
+	if err := validateIncrementalPredicate(cfg, supported, config.StrategyDeleteInsert); err == nil {
+		t.Fatal("expected delete+insert to be rejected by a merge-only predicate destination")
+	}
+
+	deleteInsert := &mockDeleteInsertPredicateDestination{mockDestination: mockDestination{scheme: "postgres"}}
+	if err := validateIncrementalPredicate(cfg, deleteInsert, config.StrategyDeleteInsert); err != nil {
+		t.Fatalf("expected delete+insert predicate to be accepted, got %v", err)
+	}
+	if err := validateIncrementalPredicate(cfg, deleteInsert, config.StrategyMerge); err == nil {
+		t.Fatal("expected merge to be rejected by a delete+insert-only predicate destination")
+	}
+	if err := validateIncrementalPredicate(cfg, deleteInsert, config.StrategySCD2); err == nil {
+		t.Fatal("expected scd2 to be rejected")
 	}
 }
 

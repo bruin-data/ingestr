@@ -1232,10 +1232,7 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 		return fmt.Errorf("failed to lock target table: %w", err)
 	}
 
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
-		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
-	)
+	deleteSQL := destination.IntervalDeleteSQL(quotedTargetTable, "target", destination.QuoteIdentifier(opts.IncrementalKey), "$1", "$2", opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1406,6 +1403,8 @@ func (d *PostgresDestination) SupportsAppendStrategy() bool { return true }
 func (d *PostgresDestination) SupportsMergeStrategy() bool { return true }
 
 func (d *PostgresDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *PostgresDestination) SupportsDeleteInsertPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as PostgreSQL supports the delete+insert strategy.
 func (d *PostgresDestination) SupportsDeleteInsertStrategy() bool { return true }

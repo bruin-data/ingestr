@@ -154,14 +154,15 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	}
 
 	if err := job.Destination.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
-		StagingTable:       stagingTable,
-		TargetTable:        job.Config.DestTable,
-		IncrementalKey:     destinationIncrementalKey,
-		IncrementalKeyType: incrementalKeyType,
-		IntervalStart:      intervalStart,
-		IntervalEnd:        intervalEnd,
-		Columns:            job.Schema.ColumnNames(),
-		PrimaryKeys:        job.Config.PrimaryKeys,
+		StagingTable:         stagingTable,
+		TargetTable:          job.Config.DestTable,
+		IncrementalKey:       destinationIncrementalKey,
+		IncrementalKeyType:   incrementalKeyType,
+		IntervalStart:        intervalStart,
+		IntervalEnd:          intervalEnd,
+		Columns:              job.Schema.ColumnNames(),
+		PrimaryKeys:          job.Config.PrimaryKeys,
+		IncrementalPredicate: job.Config.IncrementalPredicate,
 	}); err != nil {
 		return fmt.Errorf("failed to delete+insert data: %w", err)
 	}

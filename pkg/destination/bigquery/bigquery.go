@@ -2283,11 +2283,9 @@ func (d *BigQueryDestination) buildDeleteInsertStatements(project, stagingDatase
 	startVal := formatBigQueryValue(opts.IntervalStart, opts.IncrementalKeyType)
 	endVal := formatBigQueryValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s.%s.%s WHERE %s >= %s AND %s <= %s",
-		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
-		quoteIdentifier(opts.IncrementalKey), startVal,
-		quoteIdentifier(opts.IncrementalKey), endVal,
+	deleteSQL := destination.IntervalDeleteSQL(
+		fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName)),
+		"t", quoteIdentifier(opts.IncrementalKey), startVal, endVal, opts.IncrementalPredicate,
 	)
 
 	quotedCols := make([]string, len(opts.Columns))
@@ -2955,6 +2953,10 @@ func (d *BigQueryDestination) SupportsMergeStrategy() bool { return true }
 // SupportsIncrementalPredicate returns true as BigQuery applies
 // MergeOptions.IncrementalPredicate to MERGE updates.
 func (d *BigQueryDestination) SupportsIncrementalPredicate() bool { return true }
+
+// SupportsDeleteInsertPredicate returns true as BigQuery applies
+// DeleteInsertOptions.IncrementalPredicate to the DELETE (target alias t).
+func (d *BigQueryDestination) SupportsDeleteInsertPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as BigQuery supports the delete+insert strategy.
 func (d *BigQueryDestination) SupportsDeleteInsertStrategy() bool { return true }
