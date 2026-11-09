@@ -64,6 +64,7 @@ Add the scopes for the data you want to access. Common scopes include:
 - **Tickets**: `tickets`
 - **Sales**: `sales-email-read`
 - **Forms**: `forms`
+- **Campaigns**: `marketing.campaigns.read`
 
 Select **Read** access for each object type you want to ingest.
 
@@ -109,6 +110,7 @@ HubSpot source allows ingesting the following sources into separate tables:
 | [invoices](https://developers.hubspot.com/docs/api-reference/crm-invoices-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves invoice records. |
 | [commerce_payments](https://developers.hubspot.com/docs/api-reference/crm-commerce-payments-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves commerce payment records. |
 | [taxes](https://developers.hubspot.com/docs/api-reference/crm-taxes-v3/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves tax records. |
+| [campaigns](https://developers.hubspot.com/docs/api-reference/latest/marketing/campaigns/guide) | hs_object_id | hs_lastmodifieddate | merge | Retrieves marketing campaigns. |
 | [owners](https://developers.hubspot.com/docs/api-reference/crm-crm-owners-v3/guide#crm-api-owners) | id | – | merge | Retrieves HubSpot users who can be assigned to CRM records. |
 | [schemas](https://developers.hubspot.com/docs/reference/api/crm/objects/schemas#get-%2Fcrm-object-schemas%2Fv3%2Fschemas) | id | – | merge | Returns all object schemas that have been defined for your account. |
 | [pipelines](https://developers.hubspot.com/docs/reference/api/crm/pipelines) | object_type, pipeline_id | – | replace | Pipeline definitions across all pipelined object types. One row per pipeline. |
@@ -143,6 +145,7 @@ Use the format `property_history:<table>` as the `--source-table` value. An opti
 | property_history:invoices             | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for invoices.                   |
 | property_history:commerce_payments    | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for commerce payments.          |
 | property_history:taxes                | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for taxes.                      |
+| property_history:campaigns            | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for campaigns.                  |
 
 
 > **Note:** The `owners` and `schemas` tables do not have history variants.
