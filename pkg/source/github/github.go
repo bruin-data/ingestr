@@ -559,6 +559,26 @@ type graphQLError struct {
 	Message string `json:"message"`
 }
 
+// graphQLErrors is the error for a response whose "errors" list is not empty.
+type graphQLErrors []graphQLError
+
+func (e graphQLErrors) Error() string {
+	msgs := make([]string, len(e))
+	for i, x := range e {
+		msgs[i] = x.Message
+	}
+	return "graphql errors: " + strings.Join(msgs, "; ")
+}
+
+func (e graphQLErrors) hasType(t string) bool {
+	for _, x := range e {
+		if x.Type == t {
+			return true
+		}
+	}
+	return false
+}
+
 type rateLimitInfo struct {
 	Limit     int    `json:"limit"`
 	Cost      int    `json:"cost"`
@@ -594,11 +614,7 @@ func (s *GithubSource) executeGraphQL(ctx context.Context, query string, variabl
 	}
 
 	if len(resp.Errors) > 0 {
-		var errMsgs []string
-		for _, e := range resp.Errors {
-			errMsgs = append(errMsgs, e.Message)
-		}
-		return nil, nil, fmt.Errorf("graphql errors: %s", strings.Join(errMsgs, "; "))
+		return nil, nil, graphQLErrors(resp.Errors)
 	}
 
 	// Extract rateLimit from data (GitHub returns it in the data field)
@@ -1324,21 +1340,29 @@ func (s *GithubSource) fetchReactionsForComments(ctx context.Context, commentIDs
 	return nil
 }
 
-// paginateGraphQL handles cursor-based pagination for GraphQL queries
-func (s *GithubSource) paginateGraphQL(
-	ctx context.Context,
-	opts source.ReadOptions,
-	results chan<- source.RecordBatchResult,
-	query, rootField, extractKey string,
-	fields []schema.Column,
-	variables map[string]interface{},
-	transform func(map[string]interface{}) map[string]interface{},
-) error {
-	var cursor *string
-	totalSent := 0
-	batchNum := 0
-	totalCost := 0
+// restGet is a GET on the REST API. Rate limits, server errors and network errors are retried by
+// the client (githubRetryCondition, githubRetryStrategy); other answers are returned to the caller.
+func (s *GithubSource) restGet(ctx context.Context, path string, result interface{}) (*ingestrhttp.Response, error) {
+	req := s.restClient.R(ctx)
+	if result != nil {
+		req.SetResult(result)
+	}
+	return req.Get(path)
+}
 
+// walkGraphQLConnection pages through the connection found at path in the query's data (e.g.
+// repository.issues or repository.object.history), passing $owner, $name and the $page_after
+// cursor. visit gets each non-empty page; it returns false to stop early.
+func (s *GithubSource) walkGraphQLConnection(
+	ctx context.Context,
+	query string,
+	variables map[string]interface{},
+	path []string,
+	itemsKey string,
+	visit func(items []interface{}, rateLimit *rateLimitInfo) (bool, error),
+) error {
+	name := path[len(path)-1]
+	var cursor *string
 	for {
 		select {
 		case <-ctx.Done():
@@ -1346,7 +1370,6 @@ func (s *GithubSource) paginateGraphQL(
 		default:
 		}
 
-		// Copy base variables and add pagination
 		vars := map[string]interface{}{
 			"owner": s.owner,
 			"name":  s.repo,
@@ -1360,31 +1383,67 @@ func (s *GithubSource) paginateGraphQL(
 
 		data, rateLimit, err := s.executeGraphQL(ctx, query, vars)
 		if err != nil {
-			return fmt.Errorf("failed to fetch %s: %w", rootField, err)
+			return fmt.Errorf("failed to fetch %s: %w", name, err)
 		}
 
 		var result map[string]interface{}
 		if err := json.Unmarshal(data, &result); err != nil {
-			return fmt.Errorf("failed to parse %s response: %w", rootField, err)
+			return fmt.Errorf("failed to parse %s response: %w", name, err)
 		}
 
-		repoData, ok := result["repository"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("unexpected response format: missing repository")
+		connectionData := result
+		for i, key := range path {
+			next, ok := connectionData[key].(map[string]interface{})
+			if !ok {
+				if i == 0 {
+					return fmt.Errorf("unexpected response format: missing %s", key)
+				}
+				return fmt.Errorf("unexpected response format for %s", name)
+			}
+			connectionData = next
 		}
 
-		connectionData, ok := repoData[rootField].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("unexpected response format for %s", rootField)
-		}
-
-		// Extract items from either "nodes" or "edges"
-		rawItems, ok := connectionData[extractKey].([]interface{})
+		rawItems, ok := connectionData[itemsKey].([]interface{})
 		if !ok || len(rawItems) == 0 {
-			config.Debug("[GITHUB] No more %s to fetch", rootField)
-			break
+			config.Debug("[GITHUB] No more %s to fetch", name)
+			return nil
 		}
 
+		more, err := visit(rawItems, rateLimit)
+		if err != nil || !more {
+			return err
+		}
+
+		pageInfoData, ok := connectionData["pageInfo"].(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		endCursor, ok := pageInfoData["endCursor"].(string)
+		if !ok || endCursor == "" {
+			return nil
+		}
+		if hasNext, ok := pageInfoData["hasNextPage"].(bool); ok && !hasNext {
+			return nil
+		}
+		cursor = &endCursor
+	}
+}
+
+// paginateGraphQL handles cursor-based pagination for GraphQL queries
+func (s *GithubSource) paginateGraphQL(
+	ctx context.Context,
+	opts source.ReadOptions,
+	results chan<- source.RecordBatchResult,
+	query, rootField, extractKey string,
+	fields []schema.Column,
+	variables map[string]interface{},
+	transform func(map[string]interface{}) map[string]interface{},
+) error {
+	totalSent := 0
+	batchNum := 0
+	totalCost := 0
+
+	err := s.walkGraphQLConnection(ctx, query, variables, []string{"repository", rootField}, extractKey, func(rawItems []interface{}, rateLimit *rateLimitInfo) (bool, error) {
 		// For issues and pull_requests, fetch reactions for comments that have them
 		if rootField == "issues" || rootField == "pullRequests" {
 			if err := s.fetchCommentReactions(ctx, rawItems); err != nil {
@@ -1433,7 +1492,7 @@ func (s *GithubSource) paginateGraphQL(
 				rowBytes := arrowconv.RowBytes(transformed)
 				if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
 					if err := flush(); err != nil {
-						return err
+						return false, err
 					}
 				}
 				accBytes += rowBytes
@@ -1446,24 +1505,17 @@ func (s *GithubSource) paginateGraphQL(
 		}
 
 		if err := flush(); err != nil {
-			return err
+			return false, err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
 			config.Debug("[GITHUB] Reached limit of %d records", opts.Limit)
-			break
+			return false, nil
 		}
-
-		pageInfoData, ok := connectionData["pageInfo"].(map[string]interface{})
-		if !ok {
-			break
-		}
-
-		endCursor, ok := pageInfoData["endCursor"].(string)
-		if !ok || endCursor == "" {
-			break
-		}
-		cursor = &endCursor
+		return true, nil
+	})
+	if err != nil {
+		return err
 	}
 
 	config.Debug("[GITHUB] Finished reading %s, total records: %d", rootField, totalSent)
