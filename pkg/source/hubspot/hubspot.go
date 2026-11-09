@@ -379,6 +379,13 @@ var tables = map[string]tableConfig{
 		PrimaryKey:     []string{"hs_object_id"},
 		Strategy:       config.StrategyMerge,
 	},
+	"campaigns": {
+		ObjectType:     "campaigns",
+		IncrementalKey: "hs_lastmodifieddate",
+		DefaultProps:   []string{"hs_campaign_status", "hs_createdate", "hs_end_date", "hs_lastmodifieddate", "hs_name", "hs_object_id", "hs_start_date"},
+		PrimaryKey:     []string{"hs_object_id"},
+		Strategy:       config.StrategyMerge,
+	},
 	"owners": {
 		ObjectType: "owners",
 		PrimaryKey: []string{"id"},
