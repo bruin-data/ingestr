@@ -8,7 +8,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-var decimalPrecisionRegex = regexp.MustCompile(`(?i)(?:decimal|numeric)\((\d+)(?:,\s*(\d+))?\)`)
+// Anchored so that ENUM and SET member labels such as 'decimal(6,2)' do not match.
+var decimalPrecisionRegex = regexp.MustCompile(`(?i)^(?:unsigned\s+)?(?:decimal|numeric)\((\d+)(?:,\s*(\d+))?\)`)
 
 // MapMySQLToDataType maps MySQL type names to internal DataType.
 func MapMySQLToDataType(mysqlType string) (schema.DataType, int, int, schema.DataType) {

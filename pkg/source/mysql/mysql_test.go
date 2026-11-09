@@ -169,6 +169,27 @@ func TestMapMySQLToDataTypeUnsignedWidening(t *testing.T) {
 	}
 }
 
+func TestMapMySQLToDataTypeIgnoresTypeNamesInsideMembers(t *testing.T) {
+	cases := []struct {
+		columnType    string
+		want          schema.DataType
+		wantPrecision int
+		wantScale     int
+	}{
+		{"enum('decimal(6,2)','other')", schema.TypeString, 0, 0},
+		{"set('numeric(10)','x')", schema.TypeString, 0, 0},
+		{"decimal(6,2)", schema.TypeDecimal, 6, 2},
+		{"decimal(10,2) unsigned", schema.TypeDecimal, 10, 2},
+		{"NUMERIC(12)", schema.TypeDecimal, 12, 0},
+	}
+	for _, tc := range cases {
+		dt, precision, scale, _ := MapMySQLToDataType(tc.columnType)
+		if dt != tc.want || precision != tc.wantPrecision || scale != tc.wantScale {
+			t.Errorf("MapMySQLToDataType(%q) = %v(%d,%d), want %v(%d,%d)", tc.columnType, dt, precision, scale, tc.want, tc.wantPrecision, tc.wantScale)
+		}
+	}
+}
+
 func TestParseMySQLEnumSetMembers(t *testing.T) {
 	cases := []struct {
 		columnType string
