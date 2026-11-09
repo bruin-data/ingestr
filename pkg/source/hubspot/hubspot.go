@@ -406,15 +406,21 @@ var tables = map[string]tableConfig{
 		PrimaryKey: []string{"object_type", "pipeline_id", "stage_id"},
 		Strategy:   config.StrategyReplace,
 	},
+	"campaign_metrics": {
+		ObjectType: "campaign_metrics",
+		PrimaryKey: []string{"campaign_id"},
+		Strategy:   config.StrategyReplace,
+	},
 }
 
 const historyPrefix = "property_history:"
 
 var historyExcluded = map[string]struct{}{
-	"owners":          {},
-	"schemas":         {},
-	"pipelines":       {},
-	"pipeline_stages": {},
+	"owners":           {},
+	"schemas":          {},
+	"pipelines":        {},
+	"pipeline_stages":  {},
+	"campaign_metrics": {},
 }
 
 // For history tables, create a new entry in the tables map with the same config but no associations or default props, and a different incremental key
@@ -577,6 +583,8 @@ func (s *Hubspotsource) read(ctx context.Context, table string, historyProps []s
 			err = s.readPipelines(ctx, opts, results)
 		case "pipeline_stages":
 			err = s.readPipelineStages(ctx, opts, results)
+		case "campaign_metrics":
+			err = s.readCampaignMetrics(ctx, opts, results)
 		default:
 			if _, ok := tables[table]; ok {
 				err = s.readCRMObjects(ctx, table, historyProps, assocOverride, opts, results)
@@ -723,6 +731,11 @@ func (s *Hubspotsource) readPipelines(ctx context.Context, opts source.ReadOptio
 		return nil
 	}
 
+	return emitRows(rows, opts, results)
+}
+
+// emitRows sends rows as arrow batches, splitting them at opts.MaxBatchBytes.
+func emitRows(rows []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	var items []map[string]interface{}
 	var accBytes int64
 	flush := func() error {
@@ -789,34 +802,66 @@ func (s *Hubspotsource) readPipelineStages(ctx context.Context, opts source.Read
 		return nil
 	}
 
-	var items []map[string]interface{}
-	var accBytes int64
-	flush := func() error {
-		if len(items) == 0 {
-			return nil
+	return emitRows(rows, opts, results)
+}
+
+// readCampaignMetrics emits all-time totals per campaign; the metrics endpoint
+// has no daily breakdown, so the ingest interval is intentionally ignored.
+func (s *Hubspotsource) readCampaignMetrics(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	config.Debug("[HUBSPOT] reading campaign_metrics")
+
+	var rows []map[string]interface{}
+	cursor := ""
+	for {
+		req := s.client.R(ctx).
+			SetQueryParam("limit", fmt.Sprintf("%d", getPageLimit)).
+			SetQueryParam("properties", "hs_origin_asset_id")
+		if cursor != "" {
+			req.SetQueryParam("after", cursor)
 		}
-		record, err := arrowconv.ItemsToArrowRecordWithSchema(items, nil, opts.ExcludeColumns)
+
+		var listResp struct {
+			Results []struct {
+				ID         string            `json:"id"`
+				Properties map[string]string `json:"properties"`
+			} `json:"results"`
+			Paging *crmPaging `json:"paging"`
+		}
+		resp, err := req.SetResult(&listResp).Get("crm/v3/objects/campaigns")
 		if err != nil {
-			return fmt.Errorf("failed to build arrow record: %w", err)
+			return fmt.Errorf("failed to list campaigns: %w", err)
 		}
-		results <- source.RecordBatchResult{Batch: record}
-		items = nil
-		accBytes = 0
-		return nil
-	}
-	for _, row := range rows {
-		if opts.MaxBatchBytes > 0 {
-			rowBytes := arrowconv.RowBytes(row)
-			if len(items) > 0 && accBytes+rowBytes > opts.MaxBatchBytes {
-				if err := flush(); err != nil {
-					return err
-				}
+		if !resp.IsSuccess() {
+			return fmt.Errorf("hubspot API crm/v3/objects/campaigns returned status %d: %s", resp.StatusCode(), resp.String())
+		}
+
+		for _, c := range listResp.Results {
+			// hs_origin_asset_id is the campaign GUID the Marketing API is keyed by.
+			guid := c.Properties["hs_origin_asset_id"]
+			if guid == "" {
+				continue
 			}
-			accBytes += rowBytes
+			endpoint := fmt.Sprintf("marketing/v3/campaigns/%s/reports/metrics", guid)
+			var m map[string]interface{}
+			resp, err := s.client.R(ctx).SetResult(&m).Get(endpoint)
+			if err != nil {
+				return fmt.Errorf("failed to fetch %s: %w", endpoint, err)
+			}
+			if !resp.IsSuccess() {
+				return fmt.Errorf("hubspot API %s returned status %d: %s", endpoint, resp.StatusCode(), resp.String())
+			}
+			m["campaign_id"] = guid
+			m["hs_object_id"] = c.ID
+			rows = append(rows, m)
 		}
-		items = append(items, row)
+
+		if listResp.Paging == nil || listResp.Paging.Next == nil {
+			break
+		}
+		cursor = listResp.Paging.Next.After
 	}
-	return flush()
+
+	return emitRows(rows, opts, results)
 }
 
 func (s *Hubspotsource) fetchPropertyNames(ctx context.Context, tableName string) ([]string, error) {

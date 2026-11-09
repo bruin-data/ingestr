@@ -329,3 +329,44 @@ func TestHubspotByteCap(t *testing.T) {
 		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
 	}
 }
+
+func TestReadCampaignMetrics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/crm/v3/objects/campaigns" && r.URL.Query().Get("after") == "":
+			_, _ = fmt.Fprint(w, `{"results":[{"id":"11","properties":{"hs_origin_asset_id":"g1"}}],"paging":{"next":{"after":"p2"}}}`)
+		case r.URL.Path == "/crm/v3/objects/campaigns":
+			_, _ = fmt.Fprint(w, `{"results":[{"id":"22","properties":{"hs_origin_asset_id":"g2"}}]}`)
+		case r.URL.Path == "/marketing/v3/campaigns/g1/reports/metrics" || r.URL.Path == "/marketing/v3/campaigns/g2/reports/metrics":
+			_, _ = fmt.Fprint(w, `{"influencedContacts":5,"newContactsFirstTouch":2,"newContactsLastTouch":1,"sessions":40}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	s := &Hubspotsource{client: httpclient.New(httpclient.WithBaseURL(srv.URL))}
+	results := make(chan source.RecordBatchResult, 8)
+	if err := s.readCampaignMetrics(context.Background(), source.ReadOptions{}, results); err != nil {
+		t.Fatal(err)
+	}
+	close(results)
+
+	var rows int64
+	for res := range results {
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		for _, col := range []string{"campaign_id", "hs_object_id", "influencedContacts", "sessions"} {
+			if len(res.Batch.Schema().FieldIndices(col)) == 0 {
+				t.Fatalf("missing column %s", col)
+			}
+		}
+		rows += res.Batch.NumRows()
+		res.Batch.Release()
+	}
+	if rows != 2 {
+		t.Fatalf("expected 2 rows, got %d", rows)
+	}
+}
