@@ -525,7 +525,7 @@ func TestLandedTimeViolationWidensInsteadOfFailing(t *testing.T) {
 	}
 	for _, name := range []string{"D1", "D2"} {
 		r := res.row(t, name)
-		if r.exact || !slices.Contains(r.widened, "I4") {
+		if r.exact || !slices.Contains(r.widened, "I4") || !strings.HasSuffix(r.source, windowSuffix) {
 			t.Fatalf("%s exact=%v widened=%v, want a widened window", name, r.exact, r.widened)
 		}
 		if r.min == nil || r.min.After(at(140)) || r.max.Before(at(160)) {

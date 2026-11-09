@@ -150,7 +150,7 @@ func (r *landedRun) probeStep(ctx context.Context, p *probeState, j int) error {
 		if k := p.findRoot(v); k != j {
 			p.root[j] = k
 		} else {
-			r.warnf("commits: the parent probe reached %s twice; treating its line as having no trusted state", short(cur))
+			config.Debug("[GITHUB] probe reached %s twice (visited-set guard); no trusted state on this line", short(cur))
 			p.done[j] = true
 		}
 		return nil

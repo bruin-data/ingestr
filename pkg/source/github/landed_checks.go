@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -101,6 +102,9 @@ func (c *invariantChecker) note(inv string, cls checkClass, format string, args 
 
 func widen(row *landedRow, inv string, lo, hi *time.Time) {
 	row.exact = false
+	if !strings.HasSuffix(row.source, windowSuffix) {
+		row.source += windowSuffix
+	}
 	if lo != nil && row.min != nil && lo.Before(*row.min) {
 		l := *lo
 		row.min = &l

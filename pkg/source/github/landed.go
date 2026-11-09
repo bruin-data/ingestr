@@ -823,8 +823,9 @@ func (r *landedRun) ruleC(ctx context.Context, c *ghCommit) (trustInfo, bool, er
 var errRestartWalk = errors.New("walk again")
 
 // forgetPR drops every trust the PR gave (its mergeCommit was trusted before the conflict with its
-// MergedEvent commit showed up) and the probe results that ended on those commits. It reports
-// whether anything was dropped, i.e. whether the walk has to be done again.
+// MergedEvent commit showed up) and the probe results that ended on those commits. Commits found
+// without any trust are dropped too: their CI record may have been skipped as too old because of
+// the withdrawn time. It reports whether the walk has to be done again.
 func (r *landedRun) forgetPR(number int) bool {
 	dropped := map[string]bool{}
 	for _, cache := range r.trusts {
@@ -832,6 +833,15 @@ func (r *landedRun) forgetPR(number int) bool {
 			if t.source == srcPR && t.pr == number {
 				delete(cache, oid)
 				dropped[oid] = true
+			}
+		}
+	}
+	if len(dropped) > 0 {
+		for _, cache := range r.trusts {
+			for oid, t := range cache {
+				if t.kind == trustNone || t.kind == trustHalf {
+					delete(cache, oid)
+				}
 			}
 		}
 	}
@@ -1084,7 +1094,7 @@ func (r *landedRun) assignWindows() {
 			}
 		}
 		if st.min != nil && st.min.After(st.max) {
-			r.warnf("commits: step %s has min %s > max %s (%s)", short(st.oid), st.min.Format(time.RFC3339), st.max.Format(time.RFC3339), st.trust.source)
+			config.Debug("[GITHUB] step %s has min %s > max %s (%s)", short(st.oid), st.min.Format(time.RFC3339), st.max.Format(time.RFC3339), st.trust.source)
 		}
 		st.est = e
 		ee := e

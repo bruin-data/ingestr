@@ -104,7 +104,11 @@ Landing times come from pull request merges, the repository activity log (pushes
 created by pushes (GitHub keeps check data for at most 400 days). Without access to the activity log or to check
 suites (e.g. a fine-grained token cannot read check suites), the run continues with wider windows and logs a warning.
 A row is returned when its window overlaps the interval, so a commit with an uncertain landing time can appear in
-two neighbouring intervals; the `merge` strategy keeps one row per `sha`.
+two neighbouring intervals; the `merge` strategy keeps one row per `sha`. Rows of commits a force push removed from
+the branch since the interval start are always returned, whatever their landing time, so the table gets their
+`removed_from_branch_at`. Where GitHub keeps no evidence at all (a repository without merged PRs, or direct pushes
+before the activity log starts in March 2023), windows have no lower bound (`landed_at_min IS NULL`), and an interval
+in that period can return every commit of the period back to the first one.
 
 Older intervals cost more: the history is walked from today's head back to the interval.
 

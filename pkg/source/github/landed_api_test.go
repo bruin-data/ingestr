@@ -501,3 +501,31 @@ func TestLandedAPISearchMergedPRs(t *testing.T) {
 		t.Fatalf("calls=%d total=%d prs=%+v (empty non-PR nodes must be skipped)", calls, total, prs)
 	}
 }
+
+func TestLandedAPICheckSuitesArePaged(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, _ := io.ReadAll(r.Body)
+		var req graphQLRequest
+		_ = json.Unmarshal(body, &req)
+		next, created := true, "2026-11-01T10:00:05Z"
+		if req.Variables["page_after"] == "p1" {
+			next, created = false, "2026-11-01T10:00:01Z"
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"object": map[string]interface{}{
+			"checkSuites": map[string]interface{}{
+				"pageInfo": map[string]interface{}{"hasNextPage": next, "endCursor": "p1"},
+				"nodes":    []interface{}{map[string]interface{}{"createdAt": created, "branch": map[string]interface{}{"name": "main"}, "push": map[string]interface{}{"previousSha": oid("P")}}},
+			},
+		}}}})
+	}))
+	defer srv.Close()
+	suites, err := newGithubLandedAPI(testSource(srv.URL)).checkSuites(context.Background(), oid("A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(suites) != 2 || !suites[1].CreatedAt.Equal(time.Date(2026, 11, 1, 10, 0, 1, 0, time.UTC)) {
+		t.Fatalf("calls=%d suites=%+v, want both pages", calls, suites)
+	}
+}

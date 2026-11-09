@@ -122,11 +122,11 @@ query($owner: String!, $name: String!, $oid: GitObjectID!, $page_after: String) 
 }`
 
 const checkSuitesQuery = `
-query($owner: String!, $name: String!, $oid: GitObjectID!) {
+query($owner: String!, $name: String!, $oid: GitObjectID!, $page_after: String) {
   repository(owner: $owner, name: $name) {
     object(oid: $oid) {
       ... on Commit {
-        checkSuites(first: 50) { nodes { createdAt branch { name } push { previousSha } } }
+        checkSuites(first: 100, after: $page_after) { pageInfo { hasNextPage endCursor } nodes { createdAt branch { name } push { previousSha } } }
       }
     }
   }
@@ -535,57 +535,68 @@ func (a *githubLandedAPI) activity(ctx context.Context, query url.Values, stop t
 }
 
 func (a *githubLandedAPI) checkSuites(ctx context.Context, oid string) ([]checkSuite, error) {
-	data, _, err := a.s.executeGraphQL(ctx, checkSuitesQuery, map[string]interface{}{"owner": a.s.owner, "name": a.s.repo, "oid": oid})
-	if err != nil {
-		var gqlErrs graphQLErrors
-		if errors.As(err, &gqlErrs) && (gqlErrs.hasType("FORBIDDEN") || strings.Contains(strings.ToLower(err.Error()), "not accessible")) {
-			return nil, fmt.Errorf("%w: %v", errNoPermission, err)
-		}
-		if strings.Contains(err.Error(), "status 403") {
-			return nil, fmt.Errorf("%w: %v", errNoPermission, err)
-		}
-		return nil, err
-	}
-	var body struct {
-		Repository struct {
-			Object *struct {
-				CheckSuites struct {
-					Nodes []struct {
-						CreatedAt string `json:"createdAt"`
-						Branch    *struct {
-							Name string `json:"name"`
-						} `json:"branch"`
-						Push *struct {
-							PreviousSha string `json:"previousSha"`
-						} `json:"push"`
-					} `json:"nodes"`
-				} `json:"checkSuites"`
-			} `json:"object"`
-		} `json:"repository"`
-	}
-	if err := json.Unmarshal(data, &body); err != nil {
-		return nil, fmt.Errorf("failed to parse check suites of %s: %w", short(oid), err)
-	}
-	if body.Repository.Object == nil {
-		return nil, fmt.Errorf("commit %s not found while reading its check suites", oid)
-	}
+	vars := map[string]interface{}{"owner": a.s.owner, "name": a.s.repo, "oid": oid}
 	var out []checkSuite
-	for _, n := range body.Repository.Object.CheckSuites.Nodes {
-		created, err := parseGitHubTime(n.CreatedAt)
+	for {
+		data, _, err := a.s.executeGraphQL(ctx, checkSuitesQuery, vars)
 		if err != nil {
+			var gqlErrs graphQLErrors
+			if errors.As(err, &gqlErrs) && (gqlErrs.hasType("FORBIDDEN") || strings.Contains(strings.ToLower(err.Error()), "not accessible")) {
+				return nil, fmt.Errorf("%w: %w", errNoPermission, err)
+			}
+			if strings.Contains(err.Error(), "status 403") {
+				return nil, fmt.Errorf("%w: %w", errNoPermission, err)
+			}
 			return nil, err
 		}
-		cs := checkSuite{CreatedAt: created}
-		if n.Branch != nil {
-			cs.Branch = n.Branch.Name
+		var body struct {
+			Repository struct {
+				Object *struct {
+					CheckSuites struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []struct {
+							CreatedAt string `json:"createdAt"`
+							Branch    *struct {
+								Name string `json:"name"`
+							} `json:"branch"`
+							Push *struct {
+								PreviousSha string `json:"previousSha"`
+							} `json:"push"`
+						} `json:"nodes"`
+					} `json:"checkSuites"`
+				} `json:"object"`
+			} `json:"repository"`
 		}
-		if n.Push != nil {
-			cs.HasPush = true
-			cs.PreviousSha = n.Push.PreviousSha
+		if err := json.Unmarshal(data, &body); err != nil {
+			return nil, fmt.Errorf("failed to parse check suites of %s: %w", short(oid), err)
 		}
-		out = append(out, cs)
+		if body.Repository.Object == nil {
+			return nil, fmt.Errorf("commit %s not found while reading its check suites", oid)
+		}
+		for _, n := range body.Repository.Object.CheckSuites.Nodes {
+			created, err := parseGitHubTime(n.CreatedAt)
+			if err != nil {
+				return nil, err
+			}
+			cs := checkSuite{CreatedAt: created}
+			if n.Branch != nil {
+				cs.Branch = n.Branch.Name
+			}
+			if n.Push != nil {
+				cs.HasPush = true
+				cs.PreviousSha = n.Push.PreviousSha
+			}
+			out = append(out, cs)
+		}
+		page := body.Repository.Object.CheckSuites.PageInfo
+		if !page.HasNextPage || page.EndCursor == "" {
+			return out, nil
+		}
+		vars["page_after"] = page.EndCursor
 	}
-	return out, nil
 }
 
 // mergedEvents also reports the commits whose PR list was longer than the page asked for.
