@@ -7,14 +7,13 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 )
 
-// Parent choice at a merge that GitHub did not make for a PR (PLAN §4, Kerem 8–9 Nov, prototype
-// w1_chain_q10.sh v3): every parent's first-parent line is probed down to its first trusted state
-// (strict trust, Q8) and the parent reaching the newest one wins; a tie or nothing found picks
-// parent 1. There is no budget. A probe stops early only where stopping loses nothing:
+// Parent choice at a merge that GitHub did not make for a PR: every parent's first-parent line is
+// probed down to its first trusted state (strict trust: only states proven to be heads of the
+// branch) and the parent reaching the newest one wins; a tie or nothing found picks parent 1. There is no budget. A probe stops early only where stopping loses nothing:
 //   - meet: it reaches a commit another probe of this merge already visited; both get the same answer;
 //   - ancestor stop: it reaches an ancestor of another parent's first trusted state A, so everything
 //     below landed no later than A and cannot win;
-//   - activity floor (D3): in a repository without merged PRs, it reaches an ancestor of the commit
+//   - activity floor: in a repository without merged PRs, it reaches an ancestor of the commit
 //     the branch was at before the activity log starts, more than ciRetention ago: nothing below can
 //     be trusted.
 // First trusted states and stop points are cached for the run (never between runs).
@@ -151,7 +150,7 @@ func (r *landedRun) probeStep(ctx context.Context, p *probeState, j int) error {
 		if k := p.findRoot(v); k != j {
 			p.root[j] = k
 		} else {
-			r.warnf("commits: probe revisited %s (visited-set guard); no trusted state on this line", short(cur))
+			r.warnf("commits: the parent probe reached %s twice; treating its line as having no trusted state", short(cur))
 			p.done[j] = true
 		}
 		return nil
@@ -225,39 +224,26 @@ func (r *landedRun) aheadSet(ctx context.Context, base, head string) (map[string
 	if e, ok := r.aheadSets[key]; ok {
 		return e.set, e.ok, nil
 	}
+	commits, ahead, noCommon, err := r.compareAll(ctx, base, head)
+	if err != nil {
+		return nil, false, err
+	}
+	usable := !noCommon
 	set := map[string]bool{}
-	ahead := 0
-	usable := true
-	for page := 1; page <= compareMaxPages; page++ {
-		res, err := r.api.compare(ctx, base, head, page)
-		if err != nil {
-			return nil, false, err
-		}
-		if res.NoCommonAncestor {
-			usable = false
-			break
-		}
-		if page == 1 {
-			ahead = res.AheadBy
-		}
-		for _, cm := range res.Commits {
-			if sha, ok := cm["sha"].(string); ok {
-				set[sha] = true
-			}
-		}
-		if len(res.Commits) < comparePageSize {
-			break
+	for _, cm := range commits {
+		if sha, ok := cm["sha"].(string); ok {
+			set[sha] = true
 		}
 	}
 	if usable && len(set) < ahead {
-		r.warnf("commits: compare %s...%s truncated (%d of %d commits); no ancestor stop from it, the probe keeps walking", short(base), short(head), len(set), ahead)
+		r.warnf("commits: compare %s...%s has more commits than GitHub returns (%d of %d); the parent probe keeps walking instead of stopping early", short(base), short(head), len(set), ahead)
 		usable = false
 	}
 	r.aheadSets[key] = aheadEntry{set: set, ok: usable}
 	return set, usable, nil
 }
 
-// prepareActivityFloor (D3): in a repository with no merged PR, if B's activity log starts more
+// prepareActivityFloor: in a repository with no merged PR, if B's activity log starts more
 // than ciRetention ago, the commit B was at before its first entry is the floor: below it nothing
 // has a PR, an activity entry or a CI record left.
 func (r *landedRun) prepareActivityFloor(ctx context.Context) {
@@ -266,7 +252,7 @@ func (r *landedRun) prepareActivityFloor(ctx context.Context) {
 	}
 	first, err := r.api.oldestActivity(ctx, "refs/heads/"+r.branch)
 	if err != nil {
-		r.warnf("commits: oldest activity entry not readable (%v); probes have no floor", err)
+		r.warnf("commits: first activity log entry not readable (%v); parent probes walk to their first trusted state", err)
 		return
 	}
 	if first == nil || first.Before == "" || first.Before == zeroSHA || !first.Timestamp.Before(r.now.Add(-ciRetention)) {

@@ -2,14 +2,15 @@ package github
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 )
 
-// Set invariants I6 and I9 (PLAN §9). Both rest on GitHub side data with known errors (a PR whose
-// mergeCommit points at another PR's commit, activity entries GitHub never wrote), so a violation
-// is a warning and the rows are still written (Kerem, 9 Nov). Only the Q6 split count fails a run.
+// Set invariants I6 and I9. Both rest on GitHub side data with known errors (a PR whose mergeCommit
+// points at another PR's commit, activity entries GitHub never wrote), so a violation is a warning
+// and the rows are still written. Only the compare split count fails a run.
 
 func (r *landedRun) returned(row *landedRow) bool {
 	if row.removedAt != nil {
@@ -27,16 +28,15 @@ func (r *landedRun) intervalEndSeen() time.Time {
 
 // checkI6: every PR merged into B (or a former name) during the interval has its merge commit in the
 // output, with mergedAt inside that row's window. A PR GitHub detected from a push (head = the
-// commit) only gives mergedAt >= min; a commit that landed again later (Q2) only mergedAt <= max.
+// commit) only gives mergedAt >= min; a commit that landed again later only mergedAt <= max.
 func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
 	if r.mergedPRs == 0 {
 		config.Debug("[GITHUB] I6 skipped: the repository has no merged pull requests")
 		return
 	}
-	before := r.api.requestCount()
 	prs, err := r.mergedPRsSince(ctx, r.start)
 	if err != nil {
-		r.warnf("commits: I6 skipped: merged pull requests not readable (%v)", err)
+		r.warnf("commits: merged pull requests not readable (%v); skipped the check that every PR merged in the interval is returned", err)
 		return
 	}
 	bySha := map[string]*landedRow{}
@@ -58,7 +58,7 @@ func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
 		}
 		isB, err := r.isB(ctx, pr.BaseRef)
 		if err != nil {
-			r.warnf("commits: I6: base %q of PR #%d not resolvable (%v); PR not checked", pr.BaseRef, pr.Number, err)
+			r.warnf("commits: base branch %q of PR #%d not resolvable (%v); PR not checked", pr.BaseRef, pr.Number, err)
 			continue
 		}
 		if !isB {
@@ -67,7 +67,7 @@ func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
 		total++
 		var cands []string
 		for _, c := range append([]string{pr.MergeCommit}, pr.EventCommits...) {
-			if c != "" && !containsString(cands, c) {
+			if c != "" && !slices.Contains(cands, c) {
 				cands = append(cands, c)
 			}
 		}
@@ -83,12 +83,12 @@ func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
 			for _, c := range cands {
 				on, err := r.onB(ctx, c)
 				if err != nil {
-					r.warnf("commits: I6: PR #%d: could not check whether %s is on %s (%v)", pr.Number, short(c), r.branch, err)
+					r.warnf("commits: PR #%d: could not check whether %s is on %s (%v)", pr.Number, short(c), r.branch, err)
 					break
 				}
 				if on {
 					warnings++
-					r.warnf("commits: I6 warning: PR #%d merged %s into %s, its commit %s is on %s but not in the output", pr.Number, fmtT(&at), pr.BaseRef, short(c), r.branch)
+					r.warnf("commits: PR #%d was merged into %s at %s, its commit %s is on %s but missing from the output", pr.Number, pr.BaseRef, fmtT(&at), short(c), r.branch)
 					break
 				}
 			}
@@ -105,32 +105,32 @@ func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
 		case r.relanded[row.sha]:
 			relanded++
 			d = at.Sub(row.max)
-			what = "mergedAt after the window max (re-landed commit: only mergedAt <= max is checked)"
+			what = "merged after the window (the commit landed again later, so only the window end is checked)"
 		case upper:
 			upperOnly++
 			d = -time.Hour
 			if row.min != nil {
 				d = row.min.Sub(at)
 			}
-			what = "mergedAt before the window min (head = merge commit: only mergedAt >= min is checked)"
+			what = "merged before the window (GitHub detected this merge from a push, so only the window start is checked)"
 		default:
 			d = at.Sub(row.max)
 			if row.min != nil && row.min.Sub(at) > d {
 				d = row.min.Sub(at)
 			}
-			what = "mergedAt outside the window"
+			what = "merged outside the window"
 		}
 		switch {
 		case d > invariantTolerance:
 			warnings++
-			r.warnf("commits: I6 warning: PR #%d merged %s, commit %s has window (%s, %s] from %s via %s: %s", pr.Number, fmtT(&at), short(row.sha), fmtT(row.min), fmtT(&row.max), row.source, short(row.step), what)
+			r.warnf("commits: PR #%d was merged at %s, but its commit %s has the landing window (%s, %s] (%s via %s): %s", pr.Number, fmtT(&at), short(row.sha), fmtT(row.min), fmtT(&row.max), row.source, short(row.step), what)
 		case !upper && !r.relanded[row.sha] && !r.returned(row):
 			warnings++
-			r.warnf("commits: I6 warning: PR #%d merged %s, but its commit %s is not returned for the interval", pr.Number, fmtT(&at), short(row.sha))
+			r.warnf("commits: PR #%d was merged at %s, but its commit %s is not returned for the interval", pr.Number, fmtT(&at), short(row.sha))
 		}
 	}
-	config.Debug("[GITHUB] I6: %d PRs merged into %s in the interval, %d checked (%d upper-bound only, %d re-landed), %d warnings, %d API requests",
-		total, r.branch, checked, upperOnly, relanded, warnings, r.api.requestCount()-before)
+	config.Debug("[GITHUB] I6: %d PRs merged into %s in the interval, %d checked (%d upper-bound only, %d re-landed), %d warnings",
+		total, r.branch, checked, upperOnly, relanded, warnings)
 }
 
 // checkI9: with B's heads at start and end known from the activity log and no force push between,
@@ -163,11 +163,11 @@ func (r *landedRun) checkI9(ctx context.Context, rows []*landedRow) {
 	if headS != headE {
 		st, n, err := r.api.compareCount(ctx, headS, headE)
 		if err != nil {
-			r.warnf("commits: I9 skipped: compare %s...%s failed (%v)", short(headS), short(headE), err)
+			r.warnf("commits: could not compare the branch heads %s...%s (%v); skipped the row count check", short(headS), short(headE), err)
 			return
 		}
 		if st != "ahead" {
-			r.warnf("commits: I9 warning: activity heads %s at the start and %s at the end are not in order (compare status %q)", short(headS), short(headE), st)
+			r.warnf("commits: the activity log's branch heads %s (interval start) and %s (interval end) are not in order (compare status %q); skipped the row count check", short(headS), short(headE), st)
 			return
 		}
 		ahead = n
@@ -186,6 +186,6 @@ func (r *landedRun) checkI9(ctx context.Context, rows []*landedRow) {
 		config.Debug("[GITHUB] I9: rows inside %d <= ahead_by %d (%s...%s) <= rows returned %d", inside, ahead, short(headS), short(headE), returned)
 		return
 	}
-	r.warnf("commits: I9 warning: [%s, %s): %d commits landed by the activity log (compare %s...%s ahead_by), but %d rows have their window inside the interval and %d rows are returned",
-		fmtT(&r.start), fmtT(&r.end), ahead, short(headS), short(headE), inside, returned)
+	r.warnf("commits: the activity log says %d commits landed in [%s, %s) (compare %s...%s), but %d rows have their landing window inside the interval and %d rows are returned",
+		ahead, fmtT(&r.start), fmtT(&r.end), short(headS), short(headE), inside, returned)
 }

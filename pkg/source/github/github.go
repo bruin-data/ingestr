@@ -151,7 +151,6 @@ type GithubSource struct {
 	apiKey        string
 	restClient    *ingestrhttp.Client
 	graphqlClient *ingestrhttp.Client
-	requests      int
 }
 
 func NewGitHubSource() *GithubSource {
@@ -604,7 +603,6 @@ func (s *GithubSource) executeGraphQL(ctx context.Context, query string, variabl
 
 	config.Debug("[GITHUB] Executing GraphQL query")
 
-	s.requests++
 	httpResp, err := s.graphqlClient.R(ctx).
 		SetHeader("Content-Type", "application/json").
 		SetBody(reqBody).
@@ -1054,7 +1052,7 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 
 // readCommits returns the default-branch commits that landed on the branch (were pushed or merged
 // into it) during the interval, with landed_at and its window; see landed.go. Without an interval
-// it reads the last 24 hours (Kerem, 9 Nov).
+// it reads the last 24 hours.
 func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[GITHUB] Reading commits for %s/%s", s.owner, s.repo)
 
@@ -1362,7 +1360,6 @@ func (s *GithubSource) restGet(ctx context.Context, path string, result interfac
 	if result != nil {
 		req.SetResult(result)
 	}
-	s.requests++
 	return req.Get(path)
 }
 

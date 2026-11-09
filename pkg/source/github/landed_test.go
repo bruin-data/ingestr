@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,10 +64,10 @@ func TestLandedButtonMergesAreExact(t *testing.T) {
 	if r := res.row(t, "X1"); r.committedAt == nil || !r.committedAt.Equal(at(-5000)) || r.authoredAt == nil {
 		t.Fatalf("X1 committed_at=%v authored_at=%v", r.committedAt, r.authoredAt)
 	}
-	if !res.hasWarning("activity log unavailable") || !res.hasWarning("integrity check (b) unavailable") {
+	if !res.hasWarning("activity log unavailable") || !res.hasWarning("removed from main by force pushes cannot be marked") {
 		t.Fatalf("warnings=%v, want the activity warnings", res.warnings)
 	}
-	if res.hasWarning("violation") {
+	if res.hasWarning("conflicting landing times") {
 		t.Fatalf("unexpected invariant violation: %v", res.warnings)
 	}
 }
@@ -110,7 +111,7 @@ func TestLandedActivityPushRangeMakesEveryCommitExact(t *testing.T) {
 	expectExact(t, res, "D1", 120, srcActivity)
 	expectExact(t, res, "D2", 120, srcActivity)
 	expectExact(t, res, "D3", 160, srcActivity)
-	if res.hasWarning("violation") {
+	if res.hasWarning("conflicting landing times") {
 		t.Fatalf("warnings=%v", res.warnings)
 	}
 	if res.run.relanded[oid("M0")] {
@@ -140,7 +141,7 @@ func TestLandedCIRecordAndMissingPermission(t *testing.T) {
 	if res2.err != nil {
 		t.Fatal(res2.err)
 	}
-	if !res2.hasWarning("ci_record disabled") {
+	if !res2.hasWarning("CI records are not used") {
 		t.Fatalf("warnings=%v, want the CI permission warning", res2.warnings)
 	}
 	expectWindow(t, res2, "D3", intp(50), 10000, srcClient)
@@ -163,7 +164,7 @@ func TestLandedOldDatedCommitsPushedRecentlyAreAskedForCI(t *testing.T) {
 	for _, name := range []string{"D1", "D2", "D3"} {
 		expectExact(t, res, name, 500*24*60-5, srcCI)
 	}
-	if res.hasWarning("violation") {
+	if res.hasWarning("conflicting landing times") {
 		t.Fatalf("unexpected invariant violation: %v", res.warnings)
 	}
 }
@@ -459,7 +460,7 @@ func TestLandedConflictingMergeCommitAndEventTrustNeither(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if !res.hasWarning("conflict in PR #21") {
+	if !res.hasWarning("PR #21 has a merge commit") {
 		t.Fatalf("warnings=%v, want the conflict warning", res.warnings)
 	}
 	if res.row(t, "M1").exact {
@@ -494,7 +495,7 @@ func TestLandedHeadRewrittenDuringTheRunWarns(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if !res.hasWarning("Q3a: pinned head") {
+	if !res.hasWarning("main was rewritten during the run") {
 		t.Fatalf("warnings=%v, want the Q3a warning", res.warnings)
 	}
 
@@ -502,7 +503,7 @@ func TestLandedHeadRewrittenDuringTheRunWarns(t *testing.T) {
 	f2.add("Z", 300, "D3")
 	f2.liveHead = oid("Z")
 	res2 := runFake(t, f2, at(iStart), at(iEnd))
-	if res2.hasWarning("Q3a") {
+	if res2.hasWarning("rewritten") {
 		t.Fatalf("a head that only moved forward must not warn: %v", res2.warnings)
 	}
 }
@@ -519,12 +520,12 @@ func TestLandedTimeViolationWidensInsteadOfFailing(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if !res.hasWarning("I4 violation") || !res.hasWarning("I9 warning") {
+	if !res.hasWarning("trusted landing times go backwards") || !res.hasWarning("the activity log says") {
 		t.Fatalf("warnings=%v, want an I4 violation and an I9 count warning", res.warnings)
 	}
 	for _, name := range []string{"D1", "D2"} {
 		r := res.row(t, name)
-		if r.exact || !containsString(r.widened, "I4") {
+		if r.exact || !slices.Contains(r.widened, "I4") {
 			t.Fatalf("%s exact=%v widened=%v, want a widened window", name, r.exact, r.widened)
 		}
 		if r.min == nil || r.min.After(at(140)) || r.max.Before(at(160)) {
@@ -591,7 +592,7 @@ func TestLandedSetChecksPassOnConsistentData(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if res.hasWarning("I6") || res.hasWarning("I9") {
+	if res.hasWarning("was merged") || res.hasWarning("the activity log says") {
 		t.Fatalf("unexpected set-check warning: %v", res.warnings)
 	}
 	if f.calls["bulk"] != 1 {
@@ -614,10 +615,10 @@ func TestLandedI6WarnsAndStillWritesRows(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("I6 must not fail the run: %v", res.err)
 	}
-	if !res.hasWarning("I6 warning: PR #14 merged 2026-11-01T02:10:00Z into main, its commit " + short(oid("M0")) + " is on main but not in the output") {
+	if !res.hasWarning("PR #14 was merged into main at 2026-11-01T02:10:00Z, its commit " + short(oid("M0")) + " is on main but missing from the output") {
 		t.Fatalf("warnings=%v, want the PR #14 warning", res.warnings)
 	}
-	if !res.hasWarning("I6 warning: PR #99 merged 2026-11-01T02:30:00Z, commit " + short(oid("M1"))) {
+	if !res.hasWarning("PR #99 was merged at 2026-11-01T02:30:00Z, but its commit " + short(oid("M1"))) {
 		t.Fatalf("warnings=%v, want the PR #99 window warning", res.warnings)
 	}
 	if res.hasWarning("PR #98") || res.hasWarning("PR #1 ") {
@@ -633,7 +634,7 @@ func TestLandedI6ChecksOnlyTheUpperBoundForPushDetectedPRs(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if res.hasWarning("I6") {
+	if res.hasWarning("was merged") {
 		t.Fatalf("a push-detected PR with mergedAt at the window max must not warn: %v", res.warnings)
 	}
 
@@ -641,7 +642,7 @@ func TestLandedI6ChecksOnlyTheUpperBoundForPushDetectedPRs(t *testing.T) {
 	early := at(40)
 	f2.extraBulk = []ghPR{{Number: 77, MergedAt: &early, BaseRef: "main", HeadOid: oid("P2"), MergeCommit: oid("P2")}}
 	res2 := runFake(t, f2, at(30), at(iEnd))
-	if !res2.hasWarning("I6 warning: PR #77") || !res2.hasWarning("only mergedAt >= min is checked") {
+	if !res2.hasWarning("PR #77 was merged") || !res2.hasWarning("only the window start is checked") {
 		t.Fatalf("warnings=%v, want the push-detected PR #77 below the window min", res2.warnings)
 	}
 }
@@ -673,7 +674,7 @@ func TestLandedOneRowPerCommit(t *testing.T) {
 	if len(out) != 2 || out[0] != onB || out[1] != other {
 		t.Fatalf("rows=%d, want 2 with the on-branch row of A kept in place", len(out))
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "I5 warning: commit "+short(oid("A"))) || !strings.Contains(warnings[0], "keeping the one landed via "+short(oid("S1"))) {
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "commit "+short(oid("A"))+" produced two rows") || !strings.Contains(warnings[0], "keeping the one landed via "+short(oid("S1"))) {
 		t.Fatalf("warnings=%v", warnings)
 	}
 }

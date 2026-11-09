@@ -2,18 +2,27 @@ package github
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
 )
 
-// Runtime time invariants (PLAN §9, ported from w1_full_checks.py): I8 row sanity, I3 one push one
-// time, I4 chain order, I1 ancestry, I2 single head (full coverage), I7 server-clock floor. A
-// violation never drops rows: the run warns and the affected rows lose landed_at_exact and get a
-// window just wide enough to hold the conflicting time. Differences within invariantTolerance
-// (timestamp granularity) are "near" and ignored; I2 conflicts next to a force push are only
-// reported ("investigate").
+// Time invariants checked on every run: I8 row sanity, I3 one push one time, I4 chain order,
+// I1 ancestry, I2 single head, I7 server-clock floor. A violation never drops rows: the run warns and
+// the affected rows lose landed_at_exact and get a window just wide enough to hold the conflicting
+// time. Differences within invariantTolerance (timestamp granularity) are ignored; I2 conflicts next
+// to a force push are only reported.
+
+var invariantMeaning = map[string]string{
+	"I1": "a commit lands after its own descendant",
+	"I2": "the commits landed by one time are not one state of the branch",
+	"I3": "the commits of one push got different landing times",
+	"I4": "trusted landing times go backwards along the branch",
+	"I7": "a GitHub-signed commit lands before it was created",
+	"I8": "a row's landing window is inconsistent",
+}
 
 type checkClass int
 
@@ -65,7 +74,14 @@ func (r *landedRun) checkTimeInvariants(rows []*landedRow) {
 	c.checkI2()
 	c.checkI7()
 	if len(c.counts) > 0 {
-		r.warnf("commits: time invariant violations (rows kept, widened, landed_at_exact=false): %v", c.counts)
+		widened := 0
+		for _, row := range rows {
+			if len(row.widened) > 0 {
+				widened++
+			}
+		}
+		r.warnf("commits: %d rows got a wider landing window and landed_at_exact=false because their landing times conflicted", widened)
+		config.Debug("[GITHUB] time invariant violations: %v", c.counts)
 	}
 }
 
@@ -73,9 +89,11 @@ func (c *invariantChecker) note(inv string, cls checkClass, format string, args 
 	switch cls {
 	case checkViolation:
 		c.counts[inv]++
-		c.r.warnf("commits: %s violation: %s", inv, fmt.Sprintf(format, args...))
+		c.r.warnf("commits: conflicting landing times, %s: %s", invariantMeaning[inv], fmt.Sprintf(format, args...))
+		config.Debug("[GITHUB] %s violation", inv)
 	case checkInvestigate:
-		c.r.warnf("commits: %s investigate (force push nearby): %s", inv, fmt.Sprintf(format, args...))
+		c.r.warnf("commits: conflicting landing times next to a force push (rows unchanged), %s: %s", invariantMeaning[inv], fmt.Sprintf(format, args...))
+		config.Debug("[GITHUB] %s investigate", inv)
 	case checkNear:
 		config.Debug("[GITHUB] %s near (<= %v): %s", inv, invariantTolerance, fmt.Sprintf(format, args...))
 	}
@@ -96,7 +114,7 @@ func widen(row *landedRow, inv string, lo, hi *time.Time) {
 	if row.landed.After(row.max) {
 		row.landed = row.max
 	}
-	if !containsString(row.widened, inv) {
+	if !slices.Contains(row.widened, inv) {
 		row.widened = append(row.widened, inv)
 	}
 }
@@ -348,7 +366,7 @@ func (c *invariantChecker) forceNear(a, b time.Time) bool {
 
 // checkI2: for every exact landing time t, the rows landed by t must be exactly the ancestors of one
 // head; heads at successive times must be nested. Every row (exact or window) is checked against
-// the head sets (full coverage, Kerem 8 Nov).
+// the head sets.
 func (c *invariantChecker) checkI2() {
 	var exact []*landedRow
 	byT := map[time.Time][]string{}

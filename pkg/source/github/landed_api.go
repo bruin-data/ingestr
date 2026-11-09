@@ -83,7 +83,6 @@ type landedAPI interface {
 	compare(ctx context.Context, base, head string, page int) (*compareResult, error)
 	compareStatus(ctx context.Context, base, head string) (string, error)
 	compareCount(ctx context.Context, base, head string) (string, int, error)
-	requestCount() int
 	mergedPRCount(ctx context.Context) (int, error)
 	oldestActivity(ctx context.Context, ref string) (*activityEntry, error)
 	listCommits(ctx context.Context, sha string, page int) ([]map[string]interface{}, error)
@@ -409,10 +408,6 @@ func (a *githubLandedAPI) compareCount(ctx context.Context, base, head string) (
 	return body.Status, body.AheadBy, nil
 }
 
-func (a *githubLandedAPI) requestCount() int {
-	return a.s.requests
-}
-
 func (a *githubLandedAPI) mergedPRCount(ctx context.Context) (int, error) {
 	data, _, err := a.s.executeGraphQL(ctx, mergedPRCountQuery, map[string]interface{}{"owner": a.s.owner, "name": a.s.repo})
 	if err != nil {
@@ -425,8 +420,11 @@ func (a *githubLandedAPI) mergedPRCount(ctx context.Context) (int, error) {
 			} `json:"pullRequests"`
 		} `json:"repository"`
 	}
-	if err := json.Unmarshal(data, &body); err != nil || body.Repository == nil {
+	if err := json.Unmarshal(data, &body); err != nil {
 		return 0, fmt.Errorf("failed to parse the merged pull request count: %w", err)
+	}
+	if body.Repository == nil {
+		return 0, fmt.Errorf("repository %s/%s not found while counting merged pull requests", a.s.owner, a.s.repo)
 	}
 	return body.Repository.PullRequests.TotalCount, nil
 }
@@ -434,6 +432,15 @@ func (a *githubLandedAPI) mergedPRCount(ctx context.Context) (int, error) {
 // oldestActivity is the first entry of the ref's activity log (direction=asc), or nil when it is empty.
 func (a *githubLandedAPI) oldestActivity(ctx context.Context, ref string) (*activityEntry, error) {
 	q := url.Values{"ref": {ref}, "direction": {"asc"}, "per_page": {"1"}}
+	page, _, err := a.activityPage(ctx, a.repoPath("/activity?"+q.Encode()))
+	if err != nil || len(page) == 0 {
+		return nil, err
+	}
+	return &page[0], nil
+}
+
+// activityPage reads one page of the activity log and the link to the next page.
+func (a *githubLandedAPI) activityPage(ctx context.Context, path string) ([]activityEntry, string, error) {
 	var page []struct {
 		Before       string `json:"before"`
 		After        string `json:"after"`
@@ -441,21 +448,22 @@ func (a *githubLandedAPI) oldestActivity(ctx context.Context, ref string) (*acti
 		Timestamp    string `json:"timestamp"`
 		ActivityType string `json:"activity_type"`
 	}
-	resp, err := a.s.restGet(ctx, a.repoPath("/activity?"+q.Encode()), &page)
+	resp, err := a.s.restGet(ctx, path, &page)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode(), resp.String())
+		return nil, "", fmt.Errorf("status %d: %s", resp.StatusCode(), resp.String())
 	}
-	if len(page) == 0 {
-		return nil, nil
+	out := make([]activityEntry, 0, len(page))
+	for _, e := range page {
+		ts, err := parseGitHubTime(e.Timestamp)
+		if err != nil {
+			return nil, "", err
+		}
+		out = append(out, activityEntry{Before: e.Before, After: e.After, Timestamp: ts, Type: e.ActivityType, Ref: e.Ref})
 	}
-	ts, err := parseGitHubTime(page[0].Timestamp)
-	if err != nil {
-		return nil, err
-	}
-	return &activityEntry{Before: page[0].Before, After: page[0].After, Timestamp: ts, Type: page[0].ActivityType, Ref: page[0].Ref}, nil
+	return out, extractNextPageURL(resp.Header().Get("Link")), nil
 }
 
 func (a *githubLandedAPI) restCommit(ctx context.Context, sha string) (map[string]interface{}, error) {
@@ -484,7 +492,7 @@ func (a *githubLandedAPI) listCommits(ctx context.Context, sha string, page int)
 }
 
 // activity reads the activity log newest first, page by page, and stops after the first page whose
-// oldest entry is older than stop. There is no page limit (no walk budget, PLAN_REVIEW A7).
+// oldest entry is older than stop. There is no page limit.
 func (a *githubLandedAPI) activity(ctx context.Context, query url.Values, stop time.Time) ([]activityEntry, error) {
 	q := url.Values{}
 	for k, v := range query {
@@ -494,34 +502,18 @@ func (a *githubLandedAPI) activity(ctx context.Context, query url.Values, stop t
 	next := a.repoPath("/activity?" + q.Encode())
 	var out []activityEntry
 	for next != "" {
-		var page []struct {
-			Before       string `json:"before"`
-			After        string `json:"after"`
-			Ref          string `json:"ref"`
-			Timestamp    string `json:"timestamp"`
-			ActivityType string `json:"activity_type"`
-		}
-		resp, err := a.s.restGet(ctx, next, &page)
+		page, link, err := a.activityPage(ctx, next)
 		if err != nil {
 			return nil, err
-		}
-		if !resp.IsSuccess() {
-			return nil, fmt.Errorf("status %d: %s", resp.StatusCode(), resp.String())
 		}
 		if len(page) == 0 {
 			break
 		}
-		for _, e := range page {
-			ts, err := parseGitHubTime(e.Timestamp)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, activityEntry{Before: e.Before, After: e.After, Timestamp: ts, Type: e.ActivityType, Ref: e.Ref})
-		}
+		out = append(out, page...)
 		if out[len(out)-1].Timestamp.Before(stop) {
 			break
 		}
-		next = extractNextPageURL(resp.Header().Get("Link"))
+		next = link
 	}
 	return out, nil
 }
@@ -667,7 +659,7 @@ func (a *githubLandedAPI) resolveBranch(ctx context.Context, name string) (strin
 
 // mergedPullRequests lists merged PRs newest-updated first and stops at the first page whose oldest
 // PR was updated before since (a PR merged at or after since was updated at or after it). No
-// baseRefName filter: PRs keep the base name they were merged into (EXP-63).
+// baseRefName filter: PRs keep the base name they were merged into, also after a rename.
 func (a *githubLandedAPI) mergedPullRequests(ctx context.Context, since time.Time) ([]ghPR, error) {
 	var out []ghPR
 	err := a.s.walkGraphQLConnection(ctx, mergedPullRequestsQuery, nil, []string{"repository", "pullRequests"}, "nodes",

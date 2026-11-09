@@ -270,16 +270,6 @@ func (f *fakeRepo) oldestActivity(_ context.Context, ref string) (*activityEntry
 	return first, nil
 }
 
-func (f *fakeRepo) requestCount() int {
-	n := 0
-	for k, v := range f.calls {
-		if k != "head" {
-			n += v
-		}
-	}
-	return n
-}
-
 func (f *fakeRepo) listCommits(_ context.Context, sha string, page int) ([]map[string]interface{}, error) {
 	f.calls["list"]++
 	list := f.byDate(f.ancestors(sha))

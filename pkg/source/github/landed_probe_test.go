@@ -82,7 +82,7 @@ func TestProbeKeepsWalkingWhenTheAncestorCompareIsTruncated(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if !res.hasWarning("truncated") {
+	if !res.hasWarning("more commits than GitHub returns") {
 		t.Fatalf("warnings=%v, want the truncated-compare warning", res.warnings)
 	}
 	if !strictlyTrusted(res, "Q") {

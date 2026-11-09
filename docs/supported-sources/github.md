@@ -48,9 +48,8 @@ To connect to GitHub, you need to create a Personal Access Token (PAT).
 3. Under **Repository access**, select the repositories you need
 4. Under **Permissions**, set:
    - **Issues**: Read-only (for issues table)
-   - **Pull requests**: Read-only (for pull_requests table)
+   - **Pull requests**: Read-only (for pull_requests and commits)
    - **Contents**: Read-only (for commits and repo_events)
-   - **Pull requests**: Read-only (for commits: landing times of PR merges)
    - **Metadata**: Read-only (required)
 5. Click **Generate token**
 6. Copy the token (starts with `github_pat_`)

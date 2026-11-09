@@ -14,8 +14,9 @@ import (
 )
 
 // Landing times of the commits table: when a commit reached the default branch B, not when it was
-// written. The design, every rule's evidence and the decisions behind them are in the landed-commits
-// plan (PLAN.md, FULL_PROTO.md, Q10_PROTO.md, PLAN_REVIEW.md).
+// written. B's chain of states is walked from the pinned head; each state gets a server-side time
+// where GitHub has one (PR merge, activity log push, CI suite) and a window between trusted times
+// otherwise; compare between consecutive states gives the commits each state brought.
 
 const (
 	relandTolerance    = 10 * time.Second
@@ -41,7 +42,8 @@ const (
 	trustFull
 	// trustHalf: GitHub-signed without a PR into B; a lower bound only.
 	trustHalf
-	// trustUpper: a PR GitHub detected from a push (Q9) or rule (c); mergedAt is an upper bound only.
+	// trustUpper: a PR GitHub detected from a push, or a local merge of a PR head; mergedAt is an upper
+	// bound only.
 	trustUpper
 )
 
@@ -155,7 +157,7 @@ func newLandedRun(api landedAPI, branch string, start, end time.Time, warnf func
 }
 
 // collect runs the whole algorithm and returns the rows to write: the commits whose landing window
-// overlaps [start, end), plus commits a force push removed from B since start (Q3b).
+// overlaps [start, end), plus commits a force push removed from B since start.
 func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 	head, pinnedAt, empty, err := r.api.branchHead(ctx, r.branch)
 	if err != nil {
@@ -218,7 +220,7 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 	return out, nil
 }
 
-// oneRowPerCommit is the runtime part of I5: a run writes one row per commit. emitRows and
+// oneRowPerCommit: a run writes one row per commit (I5). emitRows and
 // removedRows each keep one row per sha; a sha in both would mean a commit both on B and removed
 // from it. The row still on B wins, with a warning; the run goes on.
 func (r *landedRun) oneRowPerCommit(rows []*landedRow) []*landedRow {
@@ -235,7 +237,7 @@ func (r *landedRun) oneRowPerCommit(rows []*landedRow) []*landedRow {
 		if prev.removedAt != nil && row.removedAt == nil {
 			out[i] = row
 		}
-		r.warnf("commits: I5 warning: commit %s produced two rows (landed %s via %s and %s via %s); keeping the one landed via %s",
+		r.warnf("commits: commit %s produced two rows (landed %s via %s and %s via %s); keeping the one landed via %s",
 			short(row.sha), fmtT(&prev.landed), short(prev.step), fmtT(&row.landed), short(row.step), short(out[i].step))
 	}
 	return out
@@ -244,13 +246,13 @@ func (r *landedRun) oneRowPerCommit(rows []*landedRow) []*landedRow {
 // ---------------------------------------------------------------- activity log (enrichment)
 
 // fetchActivity reads B's activity back to the first entry older than start, plus the activity of
-// B's former names (Q4: a rename is a branch_creation on the new name and a branch_deletion of the
+// B's former names (a rename is a branch_creation on the new name and a branch_deletion of the
 // same sha on the old name within a few seconds). Entries after the pinned head's time are dropped
 // so the activity and the walk see the same B. Unreachable activity is a warning, never an error.
 func (r *landedRun) fetchActivity(ctx context.Context) {
 	entries, err := r.api.activity(ctx, url.Values{"ref": {"refs/heads/" + r.branch}}, r.start)
 	if err != nil {
-		r.warnf("commits: activity log unavailable (%v); continuing without activity enrichment; force-pushed-away commits cannot be marked", err)
+		r.warnf("commits: activity log unavailable (%v); landing times come from pull requests and CI only, and commits removed by force pushes cannot be marked", err)
 		return
 	}
 	r.activityOK = true
@@ -292,7 +294,7 @@ func (r *landedRun) fetchActivity(ctx context.Context) {
 			}
 			deletions, err = r.api.activity(ctx, url.Values{"activity_type": {"branch_deletion"}}, oldest)
 			if err != nil {
-				r.warnf("commits: branch_deletion activity unavailable (%v); former names of %s not read", err, r.branch)
+				r.warnf("commits: branch deletions in the activity log unavailable (%v); former names of %s not read", err, r.branch)
 				break
 			}
 			deletionsRead = true
@@ -354,7 +356,7 @@ func (r *landedRun) status(ctx context.Context, base, head string) (string, erro
 	return st, nil
 }
 
-// actLookup is the latest activity entry that brought oid onto B (Q2: landed_at is the last time a
+// actLookup is the latest activity entry that brought oid onto B (landed_at is the last time a
 // commit entered B). A force_push counts only when oid is on the ahead side of before...after, so a
 // reset to an old commit is not a landing.
 func (r *landedRun) actLookup(ctx context.Context, oid string) (*activityEntry, error) {
@@ -386,7 +388,7 @@ func (r *landedRun) actLookup(ctx context.Context, oid string) (*activityEntry, 
 	}
 	if n > 1 {
 		r.relanded[oid] = true
-		config.Debug("[GITHUB] Q2: %s landed %d times; using the latest landing %s", short(oid), n, latest.Timestamp.Format(time.RFC3339))
+		config.Debug("[GITHUB] %s landed %d times; using the latest landing %s", short(oid), n, latest.Timestamp.Format(time.RFC3339))
 	}
 	r.actLookups[oid] = latest
 	return latest, nil
@@ -394,7 +396,7 @@ func (r *landedRun) actLookup(ctx context.Context, oid string) (*activityEntry, 
 
 // ---------------------------------------------------------------- CI record (enrichment)
 
-// ciLookup is the earliest check suite created by a push to B on this commit (Q7: on by default).
+// ciLookup is the earliest check suite created by a push to B on this commit.
 // No permission (e.g. a fine-grained token) is a warning and turns CI off for the run. GitHub deletes
 // check data after at most 400 days, so a commit is not asked when the upper bound of its landing
 // (landedBy, not its own date: an old commit can be pushed today) is older than ciRetention.
@@ -407,7 +409,7 @@ func (r *landedRun) ciLookup(ctx context.Context, c *ghCommit) (*checkSuite, err
 	}
 	suites, err := r.api.checkSuites(ctx, c.Oid)
 	if errors.Is(err, errNoPermission) {
-		r.warnf("commits: check suites not readable (%v); ci_record disabled for this run, windows stay", err)
+		r.warnf("commits: check suites not readable (%v); CI records are not used in this run", err)
 		r.ciDisabled = true
 		return nil, nil
 	}
@@ -458,7 +460,7 @@ func (r *landedRun) isB(ctx context.Context, base string) (bool, error) {
 }
 
 // prsOf is the commit's associated PRs. When the list is longer than the 10 the history page
-// carries, the bulk merged-PR list fills in the PRs whose mergeCommit is this commit (Kerem, 9 Nov).
+// carries, the bulk merged-PR list fills in the PRs whose mergeCommit is this commit.
 func (r *landedRun) prsOf(ctx context.Context, c *ghCommit) ([]ghPR, error) {
 	if c.PRsTotal <= len(c.PRs) {
 		return c.PRs, nil
@@ -514,9 +516,9 @@ func prHeadIsStep(c *ghCommit) bool {
 	return false
 }
 
-// mergedEventLookupWanted is when the MergedEvent lookup (Q10 (e)) is sent: never in a repository
-// without merged PRs (D2), otherwise for a commit that no merged PR names as its mergeCommit and that
-// is a merge or lists a merged PR (daily cost +2–4 points, Q10_PROTO §8).
+// mergedEventLookupWanted is when the MergedEvent lookup is sent (old PRs have no usable mergeCommit):
+// never in a repository without merged PRs, otherwise for a commit that no merged PR names as its
+// mergeCommit and that is a merge or lists a merged PR.
 func (r *landedRun) mergedEventLookupWanted(c *ghCommit) bool {
 	if r.mergedPRs == 0 {
 		return false
@@ -613,15 +615,6 @@ func (r *landedRun) completeEventPRs(ctx context.Context, q eventRequest, evs []
 	return evs, nil
 }
 
-func containsString(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
 func (r *landedRun) onB(ctx context.Context, oid string) (bool, error) {
 	if v, ok := r.onBranch[oid]; ok {
 		return v, nil
@@ -634,7 +627,7 @@ func (r *landedRun) onB(ctx context.Context, oid string) (bool, error) {
 	return r.onBranch[oid], nil
 }
 
-// ---------------------------------------------------------------- trust (PLAN §3)
+// ---------------------------------------------------------------- trust
 
 func (r *landedRun) trust(ctx context.Context, oid string, strict bool) (trustInfo, error) {
 	idx := 0
@@ -652,8 +645,10 @@ func (r *landedRun) trust(ctx context.Context, oid string, strict bool) (trustIn
 	return t, nil
 }
 
-// trustCompute applies PLAN §3 top to bottom. strict (probes, Q8) accepts only states proven to be
-// B heads: button-merge PRs, activity, CI; no upper bounds (Q9) and no signed-only commits.
+// trustCompute picks the first source that applies: a PR merged into B by GitHub (by mergeCommit or
+// MergedEvent), the activity log, a CI suite, then upper bounds (PRs detected from a push) and
+// GitHub-signed commits as lower bounds. strict (probes) accepts only states proven to be B heads:
+// button-merge PRs, activity, CI.
 func (r *landedRun) trustCompute(ctx context.Context, oid string, strict bool) (trustInfo, error) {
 	c, err := r.api.commit(ctx, oid)
 	if err != nil {
@@ -701,7 +696,7 @@ func (r *landedRun) trustCompute(ctx context.Context, oid string, strict bool) (
 			return trustInfo{}, err
 		}
 		for _, ev := range evs {
-			if !containsString(ev.EventCommits, oid) || r.conflicts[ev.Number] {
+			if !slices.Contains(ev.EventCommits, oid) || r.conflicts[ev.Number] {
 				continue
 			}
 			if ok, err := r.isB(ctx, ev.BaseRef); err != nil {
@@ -715,7 +710,7 @@ func (r *landedRun) trustCompute(ctx context.Context, oid string, strict bool) (
 					return trustInfo{}, err
 				}
 				if onB {
-					r.warnf("commits: conflict in PR #%d: mergeCommit %s and MergedEvent commit %s are both on %s; trusting neither", ev.Number, short(ev.MergeCommit), short(oid), r.branch)
+					r.warnf("commits: PR #%d has a merge commit %s and a merge event on %s, both on %s; neither is used as a landing time", ev.Number, short(ev.MergeCommit), short(oid), r.branch)
 					r.conflicts[ev.Number] = true
 					continue
 				}
@@ -776,7 +771,7 @@ func (r *landedRun) trustCompute(ctx context.Context, oid string, strict bool) (
 	return trustInfo{}, nil
 }
 
-// ruleC (Kerem, 8 Nov): a merge step followed through parent 1 whose parent 2 is the head and the
+// ruleC: a merge step followed through parent 1 whose parent 2 is the head and the
 // MergedEvent commit of a PR into B (a local merge GitHub detected from the push) has that PR's
 // mergedAt as an upper bound.
 func (r *landedRun) ruleC(ctx context.Context, c *ghCommit) (trustInfo, bool, error) {
@@ -790,7 +785,7 @@ func (r *landedRun) ruleC(ctx context.Context, c *ghCommit) (trustInfo, bool, er
 	}
 	var best *trustInfo
 	for _, ev := range evs {
-		if !ev.FromParent2 || ev.HeadOid != p2 || !containsString(ev.EventCommits, p2) || r.conflicts[ev.Number] {
+		if !ev.FromParent2 || ev.HeadOid != p2 || !slices.Contains(ev.EventCommits, p2) || r.conflicts[ev.Number] {
 			continue
 		}
 		ok, err := r.isB(ctx, ev.BaseRef)
@@ -807,7 +802,7 @@ func (r *landedRun) ruleC(ctx context.Context, c *ghCommit) (trustInfo, bool, er
 	return *best, true, nil
 }
 
-// ---------------------------------------------------------------- walk (PLAN §2, §4)
+// ---------------------------------------------------------------- walk
 
 // walk follows B's chain of states from the pinned head back to the first state with a trusted
 // (full or upper-bound) time before start, or to the root. Returns newest first.
@@ -873,12 +868,12 @@ func (r *landedRun) boundLanding(at time.Time) {
 }
 
 // isGitHubPRMerge: GitHub made this merge for a PR into B (signed, PR trust, and not a PR whose head
-// is the merge itself), so parent 1 is B's previous state (w1-p1, Q1).
+// is the merge itself), so parent 1 is B's previous state.
 func isGitHubPRMerge(t trustInfo, c *ghCommit) bool {
 	return t.source == srcPR && t.kind == trustFull && c.SignedByGitHub && !prHeadIsStep(c)
 }
 
-// ---------------------------------------------------------------- windows (PLAN §6)
+// ---------------------------------------------------------------- windows
 
 func (r *landedRun) buildSteps(ctx context.Context, chain []string) error {
 	r.steps = nil
@@ -916,7 +911,7 @@ func (r *landedRun) buildSteps(ctx context.Context, chain []string) error {
 
 // coverSteps: an activity push or CI suite whose previous head is an earlier chain step lands every
 // step in between at its time; for a PR step the push range makes its commits exact at the push time
-// (Q5). PR steps with a full time keep it; upper-bound PR steps (Q9, rule c) are replaced.
+// as well. PR steps with a full time keep it; upper-bound PR steps are replaced.
 func (r *landedRun) coverSteps(ctx context.Context) error {
 	if !r.activityOK && r.ciDisabled {
 		return nil
@@ -967,7 +962,7 @@ func (r *landedRun) coverSteps(ctx context.Context) error {
 			if st.trust.source == srcPR {
 				st.ct = at
 				src, ct = srcActivity, *at
-				config.Debug("[GITHUB] Q5: PR step %s: push %s->%s at %s covers %d earlier step(s)", short(st.oid), short(before), short(st.oid), at.Format(time.RFC3339), i-j-1)
+				config.Debug("[GITHUB] PR step %s: push %s->%s at %s covers %d earlier step(s)", short(st.oid), short(before), short(st.oid), at.Format(time.RFC3339), i-j-1)
 			}
 			for k := j + 1; k < i; k++ {
 				if r.steps[k].trust.source != srcPR || r.steps[k].trust.kind == trustUpper {
@@ -1176,7 +1171,7 @@ func newRowFromREST(raw map[string]interface{}) *landedRow {
 
 // stepCommits is every commit reachable from head and not from base (compare base...head). compare
 // silently keeps only the newest 10,000 commits; the missing parts are fetched from their frontier
-// heads and the union must have exactly ahead_by commits (Q6), otherwise the run fails. Unrelated
+// heads and the union must have exactly ahead_by commits, otherwise the run fails. Unrelated
 // histories (404 "No common ancestor") fall back to listing commits?sha=head.
 func (r *landedRun) stepCommits(ctx context.Context, base, head string) ([]map[string]interface{}, error) {
 	queue := []string{head}
@@ -1191,25 +1186,9 @@ func (r *landedRun) stepCommits(ctx context.Context, base, head string) ([]map[s
 			continue
 		}
 		visited[h] = true
-		var commits []map[string]interface{}
-		ahead := 0
-		fallback := false
-		for page := 1; page <= compareMaxPages; page++ {
-			res, err := r.api.compare(ctx, base, h, page)
-			if err != nil {
-				return nil, err
-			}
-			if res.NoCommonAncestor {
-				fallback = true
-				break
-			}
-			if page == 1 {
-				ahead = res.AheadBy
-			}
-			commits = append(commits, res.Commits...)
-			if len(res.Commits) < comparePageSize {
-				break
-			}
+		commits, ahead, fallback, err := r.compareAll(ctx, base, h)
+		if err != nil {
+			return nil, err
 		}
 		if fallback {
 			commits = nil
@@ -1224,7 +1203,7 @@ func (r *landedRun) stepCommits(ctx context.Context, base, head string) ([]map[s
 				}
 			}
 			ahead = len(commits)
-			config.Debug("[GITHUB] Q6: compare %s...%s: no common ancestor, listed %d commits instead", short(base), short(h), ahead)
+			config.Debug("[GITHUB] compare %s...%s: no common ancestor, listed %d commits instead", short(base), short(h), ahead)
 		}
 		if ahead0 < 0 {
 			ahead0 = ahead
@@ -1250,14 +1229,14 @@ func (r *landedRun) stepCommits(ctx context.Context, base, head string) ([]map[s
 					}
 				}
 			}
-			config.Debug("[GITHUB] Q6: compare %s...%s: ahead_by=%d returned=%d (truncated)", short(base), short(h), ahead, len(commits))
+			config.Debug("[GITHUB] compare %s...%s: ahead_by=%d returned=%d (truncated)", short(base), short(h), ahead, len(commits))
 		}
 	}
 	if len(got) != ahead0 {
-		r.setFailures = append(r.setFailures, fmt.Sprintf("Q6: compare %s...%s gave %d distinct commits after splitting, ahead_by %d", short(base), short(head), len(got), ahead0))
+		r.setFailures = append(r.setFailures, fmt.Sprintf("compare %s...%s gave %d distinct commits after splitting, but GitHub counts %d", short(base), short(head), len(got), ahead0))
 	}
 	if truncated > 0 {
-		config.Debug("[GITHUB] Q6: step %s: %d commits from %d truncated compares", short(head), len(got), truncated)
+		config.Debug("[GITHUB] step %s: %d commits from %d truncated compares", short(head), len(got), truncated)
 	}
 	out := make([]map[string]interface{}, 0, len(order))
 	for _, sha := range order {
@@ -1266,7 +1245,31 @@ func (r *landedRun) stepCommits(ctx context.Context, base, head string) ([]map[s
 	return out, nil
 }
 
-// ---------------------------------------------------------------- force pushes (Q2, Q3)
+// compareAll is every page of compare base...head: at most the newest 10,000 commits GitHub returns,
+// and ahead_by, which is never cut. noCommon reports unrelated histories.
+func (r *landedRun) compareAll(ctx context.Context, base, head string) ([]map[string]interface{}, int, bool, error) {
+	var commits []map[string]interface{}
+	ahead := 0
+	for page := 1; page <= compareMaxPages; page++ {
+		res, err := r.api.compare(ctx, base, head, page)
+		if err != nil {
+			return nil, 0, false, err
+		}
+		if res.NoCommonAncestor {
+			return nil, 0, true, nil
+		}
+		if page == 1 {
+			ahead = res.AheadBy
+		}
+		commits = append(commits, res.Commits...)
+		if len(res.Commits) < comparePageSize {
+			break
+		}
+	}
+	return commits, ahead, false, nil
+}
+
+// ---------------------------------------------------------------- force pushes
 
 func (r *landedRun) forcePushes(since *time.Time) []activityEntry {
 	var out []activityEntry
@@ -1278,7 +1281,7 @@ func (r *landedRun) forcePushes(since *time.Time) []activityEntry {
 	return out
 }
 
-// applyForcePushLandings (Q2): a force push lands every commit on the ahead side of before...after
+// applyForcePushLandings: a force push lands every commit on the ahead side of before...after
 // at its time, the latest landing wins; a reset to an old commit lands nothing.
 func (r *landedRun) applyForcePushLandings(ctx context.Context, rows []*landedRow) error {
 	if !r.activityOK {
@@ -1296,7 +1299,7 @@ func (r *landedRun) applyForcePushLandings(ctx context.Context, rows []*landedRo
 		}
 		if st != "ahead" && st != "diverged" {
 			if st == "not_found" {
-				r.warnf("commits: Q2: force push %s->%s at %s: old head not readable; its commits keep their chain times", short(e.Before), short(e.After), e.Timestamp.Format(time.RFC3339))
+				r.warnf("commits: force push %s->%s at %s: old head not readable; its commits keep their chain times", short(e.Before), short(e.After), e.Timestamp.Format(time.RFC3339))
 			}
 			continue
 		}
@@ -1323,17 +1326,17 @@ func (r *landedRun) applyForcePushLandings(ctx context.Context, rows []*landedRo
 		row.exact, row.landed, row.min, row.max, row.source, row.step, row.pr = true, at, &at, at, srcActivity, l.head, 0
 		row.included = row.included || r.overlapsRow(row)
 		r.relanded[row.sha] = true
-		config.Debug("[GITHUB] Q2: %s (re-)landed by the force push to %s at %s", short(row.sha), short(l.head), at.Format(time.RFC3339))
+		config.Debug("[GITHUB] %s (re-)landed by the force push to %s at %s", short(row.sha), short(l.head), at.Format(time.RFC3339))
 	}
 	return nil
 }
 
-// removedRows (Q3b, Kerem 8 Nov): commits a force push in [start, now) took off B and that are still
+// removedRows: commits a force push in [start, now) took off B and that are still
 // gone get removed_from_branch_at = the force push time; their full row is emitted again so the
 // merge updates it. Their landing comes from the activity entries that built the removed head.
 func (r *landedRun) removedRows(ctx context.Context) ([]*landedRow, error) {
 	if !r.activityOK {
-		r.warnf("commits: integrity check (b) unavailable (no activity log): force-pushed-away commits cannot be marked")
+		r.warnf("commits: no activity log, so commits removed from %s by force pushes cannot be marked", r.branch)
 		return nil, nil
 	}
 	latest := map[string]*landedRow{}
@@ -1346,7 +1349,7 @@ func (r *landedRun) removedRows(ctx context.Context) ([]*landedRow, error) {
 		case "ahead", "identical":
 			continue
 		case "not_found":
-			r.warnf("commits: Q3b: force push %s->%s at %s: old head not readable; its removed commits cannot be marked", short(fp.Before), short(fp.After), fp.Timestamp.Format(time.RFC3339))
+			r.warnf("commits: force push %s->%s at %s: old head not readable; the commits it removed cannot be marked", short(fp.Before), short(fp.After), fp.Timestamp.Format(time.RFC3339))
 			continue
 		}
 		removed, err := r.stepCommits(ctx, fp.After, fp.Before)
@@ -1392,7 +1395,7 @@ func (r *landedRun) removedRows(ctx context.Context) ([]*landedRow, error) {
 				latest[row.sha] = row
 			}
 		}
-		config.Debug("[GITHUB] Q3b: force push %s->%s at %s removed %d commit(s) still not on %s", short(fp.Before), short(fp.After), fp.Timestamp.Format(time.RFC3339), len(still), r.branch)
+		config.Debug("[GITHUB] force push %s->%s at %s removed %d commit(s) still not on %s", short(fp.Before), short(fp.After), fp.Timestamp.Format(time.RFC3339), len(still), r.branch)
 	}
 	out := make([]*landedRow, 0, len(latest))
 	for _, row := range latest {
@@ -1434,10 +1437,9 @@ func (r *landedRun) removedLandings(ctx context.Context, fp activityEntry, left 
 	return lands, nil
 }
 
-// removedRowWithoutLanding keeps the prototype's row for a removed commit whose landing the activity
-// log does not show (w1_chain_full.sh Q3b): window (unknown, removal time], estimate = its commit
-// date clamped to the removal time. Such a row can overwrite an exact landing written by an earlier
-// run: a wider but correct window is accepted (Kerem, 9 Nov).
+// removedRowWithoutLanding is the row of a removed commit whose landing the activity log does not
+// show: window (unknown, removal time], estimate = its commit date clamped to the removal time. It
+// can overwrite an exact landing written by an earlier run with this wider but correct window.
 func removedRowWithoutLanding(row *landedRow, fp activityEntry) {
 	est := fp.Timestamp
 	if row.committedAt != nil && row.committedAt.Before(est) {
@@ -1446,11 +1448,11 @@ func removedRowWithoutLanding(row *landedRow, fp activityEntry) {
 	row.step, row.landed, row.min, row.max, row.exact, row.source = fp.Before, est, nil, fp.Timestamp, false, srcClient+windowSuffix
 }
 
-// checkPinnedHead (Q3a): B must still contain the pinned head at the end of the run.
+// checkPinnedHead: B must still contain the pinned head at the end of the run.
 func (r *landedRun) checkPinnedHead(ctx context.Context) {
 	live, _, _, err := r.api.branchHead(ctx, r.branch)
 	if err != nil || live == "" {
-		r.warnf("commits: Q3a: live head of %s not readable (%v); pinned head not re-checked", r.branch, err)
+		r.warnf("commits: head of %s not readable at the end of the run (%v); could not check that the branch was not rewritten during the run", r.branch, err)
 		return
 	}
 	if live == r.head {
@@ -1458,8 +1460,8 @@ func (r *landedRun) checkPinnedHead(ctx context.Context) {
 	}
 	st, err := r.api.compareStatus(ctx, r.head, live)
 	if err == nil && st == "ahead" {
-		config.Debug("[GITHUB] Q3a: head advanced during the run %s -> %s; new commits belong to a later run", short(r.head), short(live))
+		config.Debug("[GITHUB] head advanced during the run %s -> %s; new commits belong to a later run", short(r.head), short(live))
 		return
 	}
-	r.warnf("commits: Q3a: pinned head %s is not an ancestor of the live head %s of %s (compare status %q, %v): the branch was rewritten during the run; rows may include commits no longer on it, re-run", short(r.head), short(live), r.branch, st, err)
+	r.warnf("commits: %s was rewritten during the run (head %s at the start is not an ancestor of %s now, compare status %q, %v); rows may include commits no longer on it, re-run", r.branch, short(r.head), short(live), st, err)
 }
