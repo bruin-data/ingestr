@@ -109,6 +109,10 @@ two neighbouring intervals; the `merge` strategy keeps one row per `sha`.
 
 Older intervals cost more: the history is walked from today's head back to the interval.
 
+Re-ingesting an old interval can lower the precision of some rows (a PR that GitHub later hid, CI records GitHub
+deletes after about 400 days, a force-pushed-away commit whose landing is no longer in the activity log); the rows
+stay correct, their window gets wider.
+
 > **Upgrading:** earlier versions filtered this table by the committer date and had no landing columns. Run the
 > `commits` table once with `--full-refresh` over the period you need, so old rows get the new columns.
  

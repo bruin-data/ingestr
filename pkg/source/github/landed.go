@@ -1357,7 +1357,7 @@ func (r *landedRun) removedLandings(ctx context.Context, fp activityEntry, left 
 // removedRowWithoutLanding keeps the prototype's row for a removed commit whose landing the activity
 // log does not show (w1_chain_full.sh Q3b): window (unknown, removal time], estimate = its commit
 // date clamped to the removal time. Such a row can overwrite an exact landing written by an earlier
-// run; what to emit instead is still open (PLAN_REVIEW §D).
+// run: a wider but correct window is accepted (Kerem, 9 Nov).
 func removedRowWithoutLanding(row *landedRow, fp activityEntry) {
 	est := fp.Timestamp
 	if row.committedAt != nil && row.committedAt.Before(est) {
