@@ -243,8 +243,12 @@ type cannedResponse struct {
 
 func epoch(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
 
-// The exact body GitHub returned when we exhausted a token's GraphQL quota live.
-const liveGraphQLRateLimitBody = `{"errors":[{"type":"RATE_LIMIT","code":"graphql_rate_limit","message":"API rate limit already exceeded for user ID 55869347."}]}`
+// The exact bodies GitHub returned live for the two GraphQL primary-limit cases: no points left
+// (x-ratelimit-remaining 0) and a query costing more than the points left (remaining stayed at 98).
+const (
+	liveGraphQLRateLimitBody          = `{"errors":[{"type":"RATE_LIMIT","code":"graphql_rate_limit","message":"API rate limit already exceeded for user ID 55869347."}]}`
+	liveGraphQLCostAboveRemainingBody = `{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded for user ID 55869347."}]}`
+)
 
 func graphQLQuotaSpent() cannedResponse {
 	return cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": epoch(time.Now().Add(-time.Minute))}, liveGraphQLRateLimitBody}
@@ -272,6 +276,8 @@ func TestGithubRateLimitWait(t *testing.T) {
 		{"secondary with retry-after", cannedResponse{403, map[string]string{"Retry-After": "30", "X-RateLimit-Remaining": "4000"}, ""}, true, 30 * time.Second, 30 * time.Second},
 		{"secondary without headers", cannedResponse{403, nil, `{"message":"You have exceeded a secondary rate limit."}`}, true, time.Minute, time.Minute},
 		{"graphql primary 200", cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": in10m}, liveGraphQLRateLimitBody}, true, 9 * time.Minute, 11 * time.Minute},
+		{"graphql query costing more than the points left waits for the reset", cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "98", "X-RateLimit-Reset": in10m}, liveGraphQLCostAboveRemainingBody}, true, 9 * time.Minute, 11 * time.Minute},
+		{"secondary with spent quota waits for the reset", cannedResponse{403, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": in10m}, `{"message":"You have exceeded a secondary rate limit."}`}, true, 9 * time.Minute, 11 * time.Minute},
 		{"graphql secondary 200", cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "4000"}, `{"errors":[{"message":"You have exceeded a secondary rate limit. Please wait a few minutes."}]}`}, true, time.Minute, time.Minute},
 		{"permission denied", cannedResponse{403, map[string]string{"X-RateLimit-Remaining": "4999"}, `{"message":"Resource not accessible by personal access token"}`}, false, 0, 0},
 		{"not found", cannedResponse{404, map[string]string{"X-RateLimit-Remaining": "0"}, ""}, false, 0, 0},
@@ -280,21 +286,48 @@ func TestGithubRateLimitWait(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeCanned(w, tc.resp)
-			}))
-			defer srv.Close()
-
-			resp, err := ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL), ingestrhttp.WithDisableRetry()).R(context.Background()).Get("/")
-			if err != nil {
-				t.Fatal(err)
-			}
-			wait, throttled := githubRateLimitWait(resp, now)
+			wait, throttled := githubRateLimitWait(cannedHTTPResponse(t, tc.resp), now)
 			if throttled != tc.throttled || wait < tc.minWait || wait > tc.maxWait {
 				t.Fatalf("got wait=%v throttled=%v, want throttled=%v wait in [%v, %v]", wait, throttled, tc.throttled, tc.minWait, tc.maxWait)
 			}
 		})
 	}
+}
+
+// GitHub answered the live GraphQL test from two counters with different resets, alternating
+// between requests; each wait must come from the response it follows.
+func TestGithubRateLimitWaitUsesEachResponse(t *testing.T) {
+	now := time.Now()
+	counterA := cannedHTTPResponse(t, cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": epoch(now.Add(-time.Minute))}, liveGraphQLRateLimitBody})
+	counterB := cannedHTTPResponse(t, cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "98", "X-RateLimit-Reset": epoch(now.Add(40 * time.Minute))}, liveGraphQLCostAboveRemainingBody})
+
+	for i, step := range []struct {
+		resp     *ingestrhttp.Response
+		min, max time.Duration
+	}{
+		{counterA, retryWait, retryWait},
+		{counterB, 39 * time.Minute, 41 * time.Minute},
+		{counterA, retryWait, retryWait},
+	} {
+		wait, ok := githubRateLimitWait(step.resp, now)
+		if !ok || wait < step.min || wait > step.max {
+			t.Fatalf("step %d: wait=%v ok=%v, want [%v, %v]", i, wait, ok, step.min, step.max)
+		}
+	}
+}
+
+func cannedHTTPResponse(t *testing.T, r cannedResponse) *ingestrhttp.Response {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeCanned(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	resp, err := ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL), ingestrhttp.WithDisableRetry()).R(context.Background()).Get("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 func writeCanned(w http.ResponseWriter, r cannedResponse) {
@@ -347,6 +380,10 @@ func connectToFake(t *testing.T, f *fakeGitHub) (*GithubSource, *httptest.Server
 	prevREST, prevGraphQL := restApiBaseUrl, graphqlBaseUrl
 	restApiBaseUrl, graphqlBaseUrl = srv.URL, srv.URL+"/graphql"
 	t.Cleanup(func() { restApiBaseUrl, graphqlBaseUrl = prevREST, prevGraphQL })
+
+	prevRetryWait, prevSecondaryWait := retryWait, secondaryRateLimitWait
+	retryWait, secondaryRateLimitWait = time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { retryWait, secondaryRateLimitWait = prevRetryWait, prevSecondaryWait })
 
 	s := NewGitHubSource()
 	if err := s.Connect(context.Background(), "github://?access_token=test-token&owner=o&repo=r"); err != nil {
@@ -423,15 +460,37 @@ func TestGithubGraphQLQuotaRunsOutMidRun(t *testing.T) {
 			t.Fatalf("retried request lost auth: %q", h)
 		}
 	}
-	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o/r, waiting 1s before retrying") {
+	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o/r, waiting 1ms before retrying") {
 		t.Fatalf("missing rate-limit warning, output: %q", logs.String())
+	}
+}
+
+// A query costing more than the points left gets RATE_LIMITED while x-ratelimit-remaining stays
+// above zero; it must still wait for the reset (1ms here, as the reset has passed) rather than the
+// secondary-limit wait (10ms in tests).
+func TestGithubGraphQLCostAboveRemainingWaitsForReset(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeGitHub{graphql: []cannedResponse{
+		issuesPage("c1", 1, 2),
+		{200, map[string]string{"X-RateLimit-Remaining": "98", "X-RateLimit-Reset": epoch(time.Now().Add(-time.Minute))}, liveGraphQLCostAboveRemainingBody},
+		issuesPage("c2", 3),
+		issuesPage(""),
+	}}
+	s, _ := connectToFake(t, f)
+
+	rows, err := readTable(t, s, context.Background(), "issues")
+	if err != nil || rows != 3 {
+		t.Fatalf("rows=%d err=%v, want all 3 issues after the wait", rows, err)
+	}
+	if !strings.Contains(logs.String(), "waiting 1ms before retrying") {
+		t.Fatalf("want the reset-based wait, output: %q", logs.String())
 	}
 }
 
 func TestGithubGraphQLSecondaryLimit403(t *testing.T) {
 	captureOutput(t)
 	f := &fakeGitHub{graphql: []cannedResponse{
-		{403, map[string]string{"Retry-After": "1", "X-RateLimit-Remaining": "4000"}, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`},
+		{403, map[string]string{"Retry-After": "0", "X-RateLimit-Remaining": "4000"}, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`},
 		issuesPage("c1", 1),
 		issuesPage(""),
 	}}
@@ -550,28 +609,46 @@ func TestGithubRateLimitRetriesRunOut(t *testing.T) {
 	}
 }
 
-// GitHub answered the live GraphQL test from two counters with different resets,
-// alternating between requests; each wait must come from the response it follows.
-func TestGithubRateLimitWaitUsesEachResponse(t *testing.T) {
+// resty waits out a 429 with Retry-After itself, without the retry strategy; the warning must
+// still be printed.
+func TestGithubRetryAfter429IsLogged(t *testing.T) {
 	logs := captureOutput(t)
-	start := time.Now()
-	counterA := graphQLQuotaSpent()
-	counterB := cannedResponse{200, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": epoch(start.Add(4 * time.Second))}, liveGraphQLRateLimitBody}
-	f := &fakeGitHub{graphql: []cannedResponse{counterA, counterB, issuesPage("c1", 1), issuesPage("")}}
+	f := &fakeGitHub{rest: []cannedResponse{
+		{429, map[string]string{"Retry-After": "0"}, `{"message":"You have exceeded a secondary rate limit."}`},
+		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
+	}}
 	s, _ := connectToFake(t, f)
 
-	rows, err := readTable(t, s, context.Background(), "issues")
+	rows, err := readTable(t, s, context.Background(), "commits")
 	if err != nil || rows != 1 {
-		t.Fatalf("rows=%d err=%v, want 1 row after both waits", rows, err)
+		t.Fatalf("rows=%d err=%v, want 1 row after the wait", rows, err)
 	}
-	waits := regexp.MustCompile(`waiting (\S+) before retrying`).FindAllStringSubmatch(logs.String(), -1)
-	if len(waits) != 2 {
-		t.Fatalf("warnings=%q, want one per counter", logs.String())
+	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o/r, waiting 0s before retrying") {
+		t.Fatalf("missing rate-limit warning for the 429, output: %q", logs.String())
 	}
-	first, _ := time.ParseDuration(waits[0][1])
-	second, _ := time.ParseDuration(waits[1][1])
-	if first != time.Second || second < 2*time.Second {
-		t.Fatalf("waits=%v,%v; want 1s for the counter that already reset and the second counter's own reset", first, second)
+}
+
+// Without Retry-After or a spent quota, GitHub asks to wait at least a minute and longer each
+// time the secondary limit persists (10ms in tests).
+func TestGithubSecondaryLimitWaitDoubles(t *testing.T) {
+	logs := captureOutput(t)
+	secondary := cannedResponse{403, nil, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`}
+	f := &fakeGitHub{rest: []cannedResponse{
+		secondary, secondary, secondary,
+		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
+	}}
+	s, _ := connectToFake(t, f)
+
+	rows, err := readTable(t, s, context.Background(), "commits")
+	if err != nil || rows != 1 {
+		t.Fatalf("rows=%d err=%v, want 1 row after the waits", rows, err)
+	}
+	var got []string
+	for _, m := range regexp.MustCompile(`waiting (\S+) before retrying`).FindAllStringSubmatch(logs.String(), -1) {
+		got = append(got, m[1])
+	}
+	if strings.Join(got, ",") != "10ms,20ms,40ms" {
+		t.Fatalf("waits=%v, want 10ms,20ms,40ms", got)
 	}
 }
 
