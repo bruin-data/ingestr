@@ -22,7 +22,6 @@ const (
 	renameTolerance    = 10 * time.Second
 	ciRetention        = 410 * 24 * time.Hour
 	defaultInterval    = 24 * time.Hour
-	legacyProbeLimit   = 200
 	zeroSHA            = "0000000000000000000000000000000000000000"
 
 	srcPR        = "pr_merged_at"
@@ -116,6 +115,14 @@ type landedRun struct {
 	// landedBy is an upper bound of the landing time of the walk's current position and of every
 	// commit below it: the earliest full or upper-bound time of the newer chain steps, else now.
 	landedBy time.Time
+
+	mergedPRs    int
+	floor        string
+	floorAt      time.Time
+	belowFloor   map[string]bool
+	firstTrusted map[string]probeHit
+	probeSkip    map[string]string
+	aheadSets    map[string]aheadEntry
 }
 
 func newLandedRun(api landedAPI, branch string, start, end time.Time, warnf func(string, ...interface{})) *landedRun {
@@ -137,6 +144,12 @@ func newLandedRun(api landedAPI, branch string, start, end time.Time, warnf func
 		events:     map[string][]eventPR{},
 		relanded:   map[string]bool{},
 		ruleCs:     map[string]trustInfo{},
+		mergedPRs:  -1,
+
+		belowFloor:   map[string]bool{},
+		firstTrusted: map[string]probeHit{},
+		probeSkip:    map[string]string{},
+		aheadSets:    map[string]aheadEntry{},
 	}
 }
 
@@ -154,7 +167,12 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 	r.head, r.now, r.landedBy = head, pinnedAt, pinnedAt
 	config.Debug("[GITHUB] commits: head of %s pinned at %s (%s); interval [%s, %s)", r.branch, short(head), pinnedAt.Format(time.RFC3339), r.start.Format(time.RFC3339), r.end.Format(time.RFC3339))
 
+	r.mergedPRs, err = r.api.mergedPRCount(ctx)
+	if err != nil {
+		return nil, err
+	}
 	r.fetchActivity(ctx)
+	r.prepareActivityFloor(ctx)
 
 	chain, err := r.walk(ctx)
 	if err != nil {
@@ -465,11 +483,13 @@ func prHeadIsStep(c *ghCommit) bool {
 	return false
 }
 
-// mergedEventLookupWanted is the interim trigger of the MergedEvent lookup (Q10 (e)), kept as in
-// w1_chain_q10.sh: a commit that no merged PR names as its mergeCommit and that is a merge or lists
-// a merged PR. When this query should be sent is still being measured (cost on linux,
-// PLAN_REVIEW §D); only this function changes then.
-func mergedEventLookupWanted(c *ghCommit) bool {
+// mergedEventLookupWanted is when the MergedEvent lookup (Q10 (e)) is sent: never in a repository
+// without merged PRs (D2), otherwise for a commit that no merged PR names as its mergeCommit and that
+// is a merge or lists a merged PR (daily cost +2–4 points, Q10_PROTO §8).
+func (r *landedRun) mergedEventLookupWanted(c *ghCommit) bool {
+	if r.mergedPRs == 0 {
+		return false
+	}
 	hasMerged := false
 	for _, pr := range c.PRs {
 		if pr.MergedAt == nil {
@@ -493,12 +513,12 @@ func eventRequestFor(c *ghCommit) eventRequest {
 // eventPRs is the PRs (with all their MergedEvent commits) around c, fetched in one aliased query
 // together with the other commits of c's history page that need the lookup.
 func (r *landedRun) eventPRs(ctx context.Context, c *ghCommit) ([]eventPR, error) {
-	if evs, ok := r.events[c.Oid]; ok {
+	if evs, ok := r.events[c.Oid]; ok || r.mergedPRs == 0 {
 		return evs, nil
 	}
 	reqs := []eventRequest{eventRequestFor(c)}
 	for _, m := range r.api.pageMates(c.Oid) {
-		if m.Oid == c.Oid || !mergedEventLookupWanted(m) {
+		if m.Oid == c.Oid || !r.mergedEventLookupWanted(m) {
 			continue
 		}
 		if _, ok := r.events[m.Oid]; ok {
@@ -601,7 +621,7 @@ func (r *landedRun) trustCompute(ctx context.Context, oid string, strict bool) (
 		}
 	}
 
-	if full == nil && upper == nil && mergedEventLookupWanted(c) {
+	if full == nil && upper == nil && r.mergedEventLookupWanted(c) {
 		evs, err := r.eventPRs(ctx, c)
 		if err != nil {
 			return trustInfo{}, err
@@ -747,7 +767,7 @@ func (r *landedRun) walk(ctx context.Context) ([]string, error) {
 		next := 0
 		if len(c.Parents) > 1 {
 			if !isGitHubPRMerge(t, c) {
-				next, err = r.probeParentsLegacy(ctx, c)
+				next, err = r.probeParents(ctx, c)
 				if err != nil {
 					return nil, err
 				}
@@ -782,52 +802,6 @@ func (r *landedRun) boundLanding(at time.Time) {
 // is the merge itself), so parent 1 is B's previous state (w1-p1, Q1).
 func isGitHubPRMerge(t trustInfo, c *ghCommit) bool {
 	return t.source == srcPR && t.kind == trustFull && c.SignedByGitHub && !prHeadIsStep(c)
-}
-
-// probeParentsLegacy picks the merge parent whose first-parent line reaches the newest trusted
-// state, looking at most legacyProbeLimit commits down each parent (w1_chain_full.sh first_trusted,
-// PROBE_MAX=200, with Q8's strict trust). A tie or nothing found picks parent 1. The unbudgeted probe
-// with the meet and ancestor stops (PLAN §4) replaces this function once its stop rules are settled
-// (PLAN_REVIEW §D).
-func (r *landedRun) probeParentsLegacy(ctx context.Context, c *ghCommit) (int, error) {
-	best := 0
-	var bestAt *time.Time
-	for i, p := range c.Parents {
-		at, err := r.firstTrustedLegacy(ctx, p)
-		if err != nil {
-			return 0, err
-		}
-		if i == 0 {
-			bestAt = at
-			continue
-		}
-		if at != nil && (bestAt == nil || at.After(*bestAt)) {
-			best, bestAt = i, at
-		}
-	}
-	return best, nil
-}
-
-func (r *landedRun) firstTrustedLegacy(ctx context.Context, oid string) (*time.Time, error) {
-	for n := 0; oid != "" && n < legacyProbeLimit; n++ {
-		t, err := r.trust(ctx, oid, true)
-		if err != nil {
-			return nil, err
-		}
-		if t.kind != trustNone {
-			at := t.at
-			return &at, nil
-		}
-		c, err := r.api.commit(ctx, oid)
-		if err != nil {
-			return nil, err
-		}
-		if len(c.Parents) == 0 {
-			return nil, nil
-		}
-		oid = c.Parents[0]
-	}
-	return nil, nil
 }
 
 // ---------------------------------------------------------------- windows (PLAN §6)

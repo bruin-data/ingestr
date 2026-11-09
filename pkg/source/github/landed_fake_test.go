@@ -27,6 +27,8 @@ type fakeRepo struct {
 	compareCap  int
 	aheadBias   int
 	extraBulk   []ghPR
+	prCount     *int
+	failOn      map[string]error
 	calls       map[string]int
 }
 
@@ -156,6 +158,9 @@ func (f *fakeRepo) branchHead(_ context.Context, branch string) (string, time.Ti
 }
 
 func (f *fakeRepo) commit(_ context.Context, o string) (*ghCommit, error) {
+	if err := f.failOn[o]; err != nil {
+		return nil, err
+	}
 	c := f.commits[o]
 	if c == nil {
 		return nil, fmt.Errorf("commit %s not found", o)
@@ -234,6 +239,34 @@ func (f *fakeRepo) compareCount(_ context.Context, base, head string) (string, i
 		}
 	}
 	return st, n, nil
+}
+
+func (f *fakeRepo) mergedPRCount(context.Context) (int, error) {
+	f.calls["prcount"]++
+	if f.prCount != nil {
+		return *f.prCount, nil
+	}
+	prs, _ := f.mergedPullRequests(context.Background(), time.Time{})
+	f.calls["bulk"]--
+	seen := map[int]bool{}
+	for _, pr := range prs {
+		if pr.MergedAt != nil {
+			seen[pr.Number] = true
+		}
+	}
+	return len(seen), nil
+}
+
+func (f *fakeRepo) oldestActivity(_ context.Context, ref string) (*activityEntry, error) {
+	f.calls["oldest"]++
+	var first *activityEntry
+	for i := range f.activityLog {
+		e := f.activityLog[i]
+		if e.Ref == ref && (first == nil || e.Timestamp.Before(first.Timestamp)) {
+			first = &e
+		}
+	}
+	return first, nil
 }
 
 func (f *fakeRepo) requestCount() int {

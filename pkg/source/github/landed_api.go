@@ -84,6 +84,8 @@ type landedAPI interface {
 	compareStatus(ctx context.Context, base, head string) (string, error)
 	compareCount(ctx context.Context, base, head string) (string, int, error)
 	requestCount() int
+	mergedPRCount(ctx context.Context) (int, error)
+	oldestActivity(ctx context.Context, ref string) (*activityEntry, error)
 	listCommits(ctx context.Context, sha string, page int) ([]map[string]interface{}, error)
 	restCommit(ctx context.Context, sha string) (map[string]interface{}, error)
 	activity(ctx context.Context, query url.Values, stop time.Time) ([]activityEntry, error)
@@ -126,6 +128,12 @@ query($owner: String!, $name: String!, $oid: GitObjectID!) {
       }
     }
   }
+  rateLimit { limit cost remaining resetAt }
+}`
+
+const mergedPRCountQuery = `
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { pullRequests(states: MERGED) { totalCount } }
   rateLimit { limit cost remaining resetAt }
 }`
 
@@ -403,6 +411,51 @@ func (a *githubLandedAPI) compareCount(ctx context.Context, base, head string) (
 
 func (a *githubLandedAPI) requestCount() int {
 	return a.s.requests
+}
+
+func (a *githubLandedAPI) mergedPRCount(ctx context.Context) (int, error) {
+	data, _, err := a.s.executeGraphQL(ctx, mergedPRCountQuery, map[string]interface{}{"owner": a.s.owner, "name": a.s.repo})
+	if err != nil {
+		return 0, fmt.Errorf("failed to count merged pull requests: %w", err)
+	}
+	var body struct {
+		Repository *struct {
+			PullRequests struct {
+				TotalCount int `json:"totalCount"`
+			} `json:"pullRequests"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil || body.Repository == nil {
+		return 0, fmt.Errorf("failed to parse the merged pull request count: %w", err)
+	}
+	return body.Repository.PullRequests.TotalCount, nil
+}
+
+// oldestActivity is the first entry of the ref's activity log (direction=asc), or nil when it is empty.
+func (a *githubLandedAPI) oldestActivity(ctx context.Context, ref string) (*activityEntry, error) {
+	q := url.Values{"ref": {ref}, "direction": {"asc"}, "per_page": {"1"}}
+	var page []struct {
+		Before       string `json:"before"`
+		After        string `json:"after"`
+		Ref          string `json:"ref"`
+		Timestamp    string `json:"timestamp"`
+		ActivityType string `json:"activity_type"`
+	}
+	resp, err := a.s.restGet(ctx, a.repoPath("/activity?"+q.Encode()), &page)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode(), resp.String())
+	}
+	if len(page) == 0 {
+		return nil, nil
+	}
+	ts, err := parseGitHubTime(page[0].Timestamp)
+	if err != nil {
+		return nil, err
+	}
+	return &activityEntry{Before: page[0].Before, After: page[0].After, Timestamp: ts, Type: page[0].ActivityType, Ref: page[0].Ref}, nil
 }
 
 func (a *githubLandedAPI) restCommit(ctx context.Context, sha string) (map[string]interface{}, error) {

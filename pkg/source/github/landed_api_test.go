@@ -133,6 +133,10 @@ func TestGithubReadCommitsEndToEnd(t *testing.T) {
 			body, _ := io.ReadAll(r.Body)
 			var req graphQLRequest
 			_ = json.Unmarshal(body, &req)
+			if strings.Contains(req.Query, "pullRequests(states: MERGED) { totalCount") {
+				writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequests": map[string]interface{}{"totalCount": 2}}}})
+				return
+			}
 			if strings.Contains(req.Query, "pullRequests(") {
 				pr := gqlPR(2, "2026-11-01T02:00:00Z", "main", sha("X1"), sha("M1"))
 				pr["updatedAt"] = "2026-11-01T02:00:00Z"
@@ -361,5 +365,29 @@ func TestLandedAPIMergedPullRequestsStopsAtSince(t *testing.T) {
 	}
 	if pages != 2 || len(prs) != 2 || prs[0].MergeCommit != oid("M") {
 		t.Fatalf("pages=%d prs=%+v", pages, prs)
+	}
+}
+
+func TestLandedAPIMergedPRCountAndOldestActivity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/graphql" {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequests": map[string]interface{}{"totalCount": 0}}}})
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("direction") != "asc" || q.Get("per_page") != "1" || q.Get("ref") != "refs/heads/master" {
+			t.Errorf("unexpected activity query %s", r.URL.RawQuery)
+		}
+		writeJSON(w, http.StatusOK, []map[string]string{{"before": oid("B"), "after": oid("A"), "ref": "refs/heads/master", "timestamp": "2023-03-07T21:25:25Z", "activity_type": "push"}})
+	}))
+	defer srv.Close()
+	api := newGithubLandedAPI(testSource(srv.URL))
+	n, err := api.mergedPRCount(context.Background())
+	if err != nil || n != 0 {
+		t.Fatalf("count=%d err=%v", n, err)
+	}
+	e, err := api.oldestActivity(context.Background(), "refs/heads/master")
+	if err != nil || e == nil || e.Before != oid("B") || !e.Timestamp.Equal(time.Date(2023, 3, 7, 21, 25, 25, 0, time.UTC)) {
+		t.Fatalf("entry=%+v err=%v", e, err)
 	}
 }

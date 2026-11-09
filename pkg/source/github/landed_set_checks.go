@@ -29,6 +29,10 @@ func (r *landedRun) intervalEndSeen() time.Time {
 // output, with mergedAt inside that row's window. A PR GitHub detected from a push (head = the
 // commit) only gives mergedAt >= min; a commit that landed again later (Q2) only mergedAt <= max.
 func (r *landedRun) checkI6(ctx context.Context, rows []*landedRow) {
+	if r.mergedPRs == 0 {
+		config.Debug("[GITHUB] I6 skipped: the repository has no merged pull requests")
+		return
+	}
 	before := r.api.requestCount()
 	prs, err := r.mergedPRsSince(ctx, r.start)
 	if err != nil {
