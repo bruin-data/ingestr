@@ -350,35 +350,6 @@ func TestLandedAPIMergedEventsReadsBothSides(t *testing.T) {
 	}
 }
 
-func TestLandedAPIMergedPullRequestsStopsAtSince(t *testing.T) {
-	pages := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pages++
-		body, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(body), "baseRefName:") {
-			t.Errorf("the bulk list must not filter by baseRefName: %s", body)
-		}
-		updated := "2026-11-05T00:00:00Z"
-		if pages == 2 {
-			updated = "2026-10-01T00:00:00Z"
-		}
-		pr := gqlPR(pages, updated, "main", oid("H"), oid("M"))
-		pr["updatedAt"] = updated
-		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequests": map[string]interface{}{
-			"pageInfo": map[string]interface{}{"hasNextPage": true, "endCursor": fmt.Sprintf("c%d", pages)},
-			"nodes":    []interface{}{pr},
-		}}}})
-	}))
-	defer srv.Close()
-	prs, err := newGithubLandedAPI(testSource(srv.URL)).mergedPullRequests(context.Background(), time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pages != 2 || len(prs) != 2 || prs[0].MergeCommit != oid("M") {
-		t.Fatalf("pages=%d prs=%+v", pages, prs)
-	}
-}
-
 func TestLandedAPIMergedPRCountAndOldestActivity(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/graphql" {

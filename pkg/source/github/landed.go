@@ -108,9 +108,7 @@ type landedRun struct {
 	onBranch    map[string]bool
 	statuses    map[string]string
 	events      map[string][]eventPR
-	bulkPRs     map[string][]ghPR
-	bulkSince   *time.Time
-	bulkList    []ghPR
+	searched    map[string][]ghPR
 	relanded    map[string]bool
 	ruleCs      map[string]trustInfo
 	restartWalk bool
@@ -150,6 +148,7 @@ func newLandedRun(api landedAPI, branch string, start, end time.Time, warnf func
 		relanded:    map[string]bool{},
 		ruleCs:      map[string]trustInfo{},
 		mergedPRs:   -1,
+		searched:    map[string][]ghPR{},
 		searchLimit: searchMaxResults,
 
 		belowFloor:   map[string]bool{},
@@ -473,16 +472,13 @@ func (r *landedRun) isB(ctx context.Context, base string) (bool, error) {
 }
 
 // prsOf is the commit's associated PRs. When the list is longer than the 10 the history page
-// carries, the bulk merged-PR list fills in the PRs whose mergeCommit is this commit.
+// carries, the PRs merged around the commit's landing fill in the ones whose mergeCommit it is.
 func (r *landedRun) prsOf(ctx context.Context, c *ghCommit) ([]ghPR, error) {
 	if c.PRsTotal <= len(c.PRs) {
 		return c.PRs, nil
 	}
-	since := r.start
-	if floor := c.CommittedDate.Add(-24 * time.Hour); floor.Before(since) {
-		since = floor
-	}
-	if _, err := r.mergedPRsSince(ctx, since); err != nil {
+	prs, err := r.prsMergedAround(ctx, c)
+	if err != nil {
 		return nil, err
 	}
 	out := append([]ghPR(nil), c.PRs...)
@@ -490,33 +486,39 @@ func (r *landedRun) prsOf(ctx context.Context, c *ghCommit) ([]ghPR, error) {
 	for _, pr := range out {
 		have[pr.Number] = true
 	}
-	for _, pr := range r.bulkPRs[c.Oid] {
-		if !have[pr.Number] {
+	for _, pr := range prs {
+		if pr.MergeCommit == c.Oid && !have[pr.Number] {
+			have[pr.Number] = true
 			out = append(out, pr)
 		}
 	}
-	config.Debug("[GITHUB] %s is in %d PRs (page lists %d); bulk list added %d", short(c.Oid), c.PRsTotal, len(c.PRs), len(out)-len(c.PRs))
+	config.Debug("[GITHUB] %s is in %d PRs (page lists %d); search added %d", short(c.Oid), c.PRsTotal, len(c.PRs), len(out)-len(c.PRs))
 	return out, nil
 }
 
-// mergedPRsSince is the bulk list of merged PRs updated since the given time, fetched once per run
-// and again only when an older start is needed.
-func (r *landedRun) mergedPRsSince(ctx context.Context, since time.Time) ([]ghPR, error) {
-	if r.bulkSince != nil && !since.Before(*r.bulkSince) {
-		return r.bulkList, nil
+// prsMergedAround is every PR merged between the commit's own date minus 7 days (its date is the
+// author's clock, which can run ahead) and the upper bound of its landing plus 1 hour (GitHub can
+// record a merge it detects from a push a few minutes late). A PR that names the commit as its
+// merge commit or merge event was merged in that window.
+func (r *landedRun) prsMergedAround(ctx context.Context, c *ghCommit) ([]ghPR, error) {
+	to := r.landedBy.Add(time.Hour)
+	if to.After(r.now) {
+		to = r.now
 	}
-	prs, err := r.api.mergedPullRequests(ctx, since)
+	from := c.CommittedDate.Add(-7 * 24 * time.Hour)
+	if latest := to.Add(-7 * 24 * time.Hour); from.After(latest) {
+		from = latest
+	}
+	key := from.String() + "|" + to.String()
+	if prs, ok := r.searched[key]; ok {
+		return prs, nil
+	}
+	config.Debug("[GITHUB] PR list of %s overflows; searching PRs merged in [%s, %s)", short(c.Oid), fmtT(&from), fmtT(&to))
+	prs, err := r.mergedPRsIn(ctx, from, to)
 	if err != nil {
 		return nil, err
 	}
-	r.bulkList = prs
-	r.bulkPRs = map[string][]ghPR{}
-	for _, pr := range prs {
-		if pr.MergeCommit != "" {
-			r.bulkPRs[pr.MergeCommit] = append(r.bulkPRs[pr.MergeCommit], pr)
-		}
-	}
-	r.bulkSince = &since
+	r.searched[key] = prs
 	return prs, nil
 }
 
@@ -591,7 +593,7 @@ func (r *landedRun) eventPRs(ctx context.Context, c *ghCommit) ([]eventPR, error
 	return r.events[c.Oid], nil
 }
 
-// completeEventPRs adds, from the bulk merged-PR list, the PRs a commit's (or its second parent's)
+// completeEventPRs adds, from the PRs merged around the commit's landing, the PRs a commit's (or its second parent's)
 // PR list did not fit: those whose MergedEvent names the commit or its second parent, or whose head
 // is the second parent.
 func (r *landedRun) completeEventPRs(ctx context.Context, q eventRequest, evs []eventPR) ([]eventPR, error) {
@@ -599,11 +601,7 @@ func (r *landedRun) completeEventPRs(ctx context.Context, q eventRequest, evs []
 	if err != nil {
 		return nil, err
 	}
-	since := r.start
-	if floor := c.CommittedDate.Add(-24 * time.Hour); floor.Before(since) {
-		since = floor
-	}
-	prs, err := r.mergedPRsSince(ctx, since)
+	prs, err := r.prsMergedAround(ctx, c)
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +622,7 @@ func (r *landedRun) completeEventPRs(ctx context.Context, q eventRequest, evs []
 		evs = append(evs, eventPR{ghPR: pr, FromParent2: head2})
 		added++
 	}
-	config.Debug("[GITHUB] PR list around %s overflowed the event query; bulk list added %d PRs", short(q.Commit), added)
+	config.Debug("[GITHUB] PR list around %s overflowed the event query; search added %d PRs", short(q.Commit), added)
 	return evs, nil
 }
 

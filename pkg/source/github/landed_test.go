@@ -534,7 +534,7 @@ func TestLandedTimeViolationWidensInsteadOfFailing(t *testing.T) {
 	}
 }
 
-func TestLandedPRListOverflowUsesTheBulkList(t *testing.T) {
+func TestLandedPRListOverflowUsesSearch(t *testing.T) {
 	f := noActivity(baseRepo())
 	f.add("X1", 110, "M0")
 	m1 := f.add("M1", 120, "M0", "X1")
@@ -547,8 +547,8 @@ func TestLandedPRListOverflowUsesTheBulkList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.calls["bulk"] != 1 {
-		t.Fatalf("bulk PR listings=%d want 1", f.calls["bulk"])
+	if f.calls["search"] != 2 {
+		t.Fatalf("searches=%d, want 2 (one for the overflowing PR list, one for the merged-PR check)", f.calls["search"])
 	}
 	found := false
 	for _, r := range rows {
@@ -557,7 +557,7 @@ func TestLandedPRListOverflowUsesTheBulkList(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("M1 must be trusted through the bulk PR list")
+		t.Fatal("M1 must be trusted through the PR search")
 	}
 }
 
@@ -595,8 +595,8 @@ func TestLandedSetChecksPassOnConsistentData(t *testing.T) {
 	if res.hasWarning("was merged") || res.hasWarning("the activity log says") {
 		t.Fatalf("unexpected set-check warning: %v", res.warnings)
 	}
-	if f.calls["search"] != 1 || f.calls["bulk"] != 0 {
-		t.Fatalf("searches=%d bulk listings=%d, want one search and no bulk list for I6", f.calls["search"], f.calls["bulk"])
+	if f.calls["search"] != 1 {
+		t.Fatalf("searches=%d, want one search for the merged-PR check", f.calls["search"])
 	}
 	if f.calls["count"] != 1 {
 		t.Fatalf("compare counts=%d, want 1 for I9 (head M0 at the start, M1 at the end)", f.calls["count"])
@@ -606,7 +606,7 @@ func TestLandedSetChecksPassOnConsistentData(t *testing.T) {
 func TestLandedI6WarnsAndStillWritesRows(t *testing.T) {
 	f := buttonMergeRepo()
 	late, inside := at(150), at(130)
-	f.extraBulk = []ghPR{
+	f.extraPRs = []ghPR{
 		{Number: 14, MergedAt: &inside, BaseRef: "main", HeadOid: oid("H14"), MergeCommit: oid("M0")},
 		{Number: 99, MergedAt: &late, BaseRef: "main", HeadOid: oid("H99"), MergeCommit: oid("M1")},
 		{Number: 98, MergedAt: &late, BaseRef: "release", HeadOid: oid("H98"), MergeCommit: oid("M0")},
@@ -640,7 +640,7 @@ func TestLandedI6ChecksOnlyTheUpperBoundForPushDetectedPRs(t *testing.T) {
 
 	f2 := noActivity(pushDetectedRepo())
 	early := at(40)
-	f2.extraBulk = []ghPR{{Number: 77, MergedAt: &early, BaseRef: "main", HeadOid: oid("P2"), MergeCommit: oid("P2")}}
+	f2.extraPRs = []ghPR{{Number: 77, MergedAt: &early, BaseRef: "main", HeadOid: oid("P2"), MergeCommit: oid("P2")}}
 	res2 := runFake(t, f2, at(30), at(iEnd))
 	if !res2.hasWarning("PR #77 was merged") || !res2.hasWarning("only the window start is checked") {
 		t.Fatalf("warnings=%v, want the push-detected PR #77 below the window min", res2.warnings)
@@ -715,19 +715,19 @@ func TestLandedRootCommitWithAServerTimeIsWritten(t *testing.T) {
 	}
 }
 
-func TestLandedEventPRListOverflowUsesTheBulkList(t *testing.T) {
+func TestLandedEventPRListOverflowUsesSearch(t *testing.T) {
 	f := preMergeCommitRepo(false)
 	pr := f.events[oid("M1")][0].ghPR
 	delete(f.events, oid("M1"))
 	f.evOverflow = map[string]bool{oid("M1"): true}
-	f.extraBulk = []ghPR{pr}
+	f.extraPRs = []ghPR{pr}
 	res := runFake(t, f, at(iStart), at(iEnd))
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
 	expectExact(t, res, "M1", 120, srcPR)
 	if res.row(t, "M1").pr != 21 {
-		t.Fatalf("M1 pr=%d want 21 (found through the bulk list)", res.row(t, "M1").pr)
+		t.Fatalf("M1 pr=%d want 21 (found through the PR search)", res.row(t, "M1").pr)
 	}
 }
 
@@ -789,7 +789,7 @@ func TestLandedI6SearchSplitsWindowsPastTheResultLimit(t *testing.T) {
 	}
 	edge := at(iEnd)
 	extra = append(extra, ghPR{Number: 600, MergedAt: &edge, BaseRef: "main", HeadOid: oid("H"), MergeCommit: oid("M0")})
-	f.extraBulk = extra
+	f.extraPRs = extra
 	run := newLandedRun(f, "main", at(iStart), at(iEnd), func(string, ...interface{}) {})
 	run.searchLimit = 3
 	f.searchCap = 3

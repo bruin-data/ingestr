@@ -91,7 +91,6 @@ type landedAPI interface {
 	checkSuites(ctx context.Context, oid string) ([]checkSuite, error)
 	mergedEvents(ctx context.Context, reqs []eventRequest) (map[string][]eventPR, map[string]bool, error)
 	resolveBranch(ctx context.Context, name string) (string, error)
-	mergedPullRequests(ctx context.Context, since time.Time) ([]ghPR, error)
 	searchMergedPRs(ctx context.Context, from, to time.Time) ([]ghPR, int, error)
 }
 
@@ -146,17 +145,6 @@ query($q: String!, $page_after: String) {
 const mergedPRCountQuery = `
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) { pullRequests(states: MERGED) { totalCount } }
-  rateLimit { limit cost remaining resetAt }
-}`
-
-const mergedPullRequestsQuery = `
-query($owner: String!, $name: String!, $page_after: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequests(first: 100, after: $page_after, states: MERGED, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes { number updatedAt mergedAt baseRefName headRefOid mergeCommit { oid } timelineItems(itemTypes: [MERGED_EVENT], first: 10) { nodes { ... on MergedEvent { commit { oid } } } } }
-    }
-  }
   rateLimit { limit cost remaining resetAt }
 }`
 
@@ -684,10 +672,8 @@ func (a *githubLandedAPI) resolveBranch(ctx context.Context, name string) (strin
 	return b.Name, nil
 }
 
-// mergedPullRequests lists merged PRs newest-updated first and stops at the first page whose oldest
-// PR was updated before since (a PR merged at or after since was updated at or after it). No
-// baseRefName filter: PRs keep the base name they were merged into, also after a rename.
-// searchMergedPRs is one GitHub search for the PRs merged in [from, to] (both ends inclusive, the
+// searchMergedPRs is one GitHub search (no base filter: PRs keep the base name they were merged
+// into, also after a rename) for the PRs merged in [from, to] (both ends inclusive, the
 // search syntax): every page GitHub returns (at most searchMaxResults PRs) and issueCount, the
 // number of matches, which can be larger.
 func (a *githubLandedAPI) searchMergedPRs(ctx context.Context, from, to time.Time) ([]ghPR, int, error) {
@@ -729,31 +715,6 @@ func (a *githubLandedAPI) searchMergedPRs(ctx context.Context, from, to time.Tim
 		}
 		vars["page_after"] = body.Search.PageInfo.EndCursor
 	}
-}
-
-func (a *githubLandedAPI) mergedPullRequests(ctx context.Context, since time.Time) ([]ghPR, error) {
-	var out []ghPR
-	err := a.s.walkGraphQLConnection(ctx, mergedPullRequestsQuery, nil, []string{"repository", "pullRequests"}, "nodes",
-		func(items []interface{}, _ *rateLimitInfo) (bool, error) {
-			var oldest time.Time
-			for _, item := range items {
-				var n gqlPRNode
-				if err := remarshal(item, &n); err != nil {
-					return false, fmt.Errorf("failed to parse pull request: %w", err)
-				}
-				pr, err := n.toPR()
-				if err != nil {
-					return false, err
-				}
-				out = append(out, pr)
-				oldest = pr.UpdatedAt
-			}
-			return !oldest.Before(since), nil
-		})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 func short(sha string) string {

@@ -156,8 +156,8 @@ func TestNoMergedPRsSkipsEventsAndStopsProbesAtTheActivityFloor(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if f.calls["events"] != 0 || f.calls["bulk"] != 0 {
-		t.Fatalf("events=%d bulk=%d, want no PR queries in a repository without merged PRs", f.calls["events"], f.calls["bulk"])
+	if f.calls["events"] != 0 || f.calls["search"] != 0 {
+		t.Fatalf("events=%d searches=%d, want no PR queries in a repository without merged PRs", f.calls["events"], f.calls["search"])
 	}
 	if res.run.floor != oid("O2") {
 		t.Fatalf("floor=%s want O2", short(res.run.floor))

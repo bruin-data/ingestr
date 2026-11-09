@@ -26,7 +26,7 @@ type fakeRepo struct {
 	branches    map[string]string
 	compareCap  int
 	aheadBias   int
-	extraBulk   []ghPR
+	extraPRs    []ghPR
 	prCount     *int
 	failOn      map[string]error
 	evOverflow  map[string]bool
@@ -246,8 +246,7 @@ func (f *fakeRepo) compareCount(_ context.Context, base, head string) (string, i
 
 func (f *fakeRepo) searchMergedPRs(ctx context.Context, from, to time.Time) ([]ghPR, int, error) {
 	f.calls["search"]++
-	all, _ := f.mergedPullRequests(ctx, time.Time{})
-	f.calls["bulk"]--
+	all := f.allPRs()
 	seen := map[int]bool{}
 	var hits []ghPR
 	for _, pr := range all {
@@ -273,8 +272,7 @@ func (f *fakeRepo) mergedPRCount(context.Context) (int, error) {
 	if f.prCount != nil {
 		return *f.prCount, nil
 	}
-	prs, _ := f.mergedPullRequests(context.Background(), time.Time{})
-	f.calls["bulk"]--
+	prs := f.allPRs()
 	seen := map[int]bool{}
 	for _, pr := range prs {
 		if pr.MergedAt != nil {
@@ -354,8 +352,7 @@ func (f *fakeRepo) resolveBranch(_ context.Context, name string) (string, error)
 	return f.branches[name], nil
 }
 
-func (f *fakeRepo) mergedPullRequests(context.Context, time.Time) ([]ghPR, error) {
-	f.calls["bulk"]++
+func (f *fakeRepo) allPRs() []ghPR {
 	var out []ghPR
 	for _, c := range f.commits {
 		out = append(out, c.prs...)
@@ -365,7 +362,7 @@ func (f *fakeRepo) mergedPullRequests(context.Context, time.Time) ([]ghPR, error
 			out = append(out, ev.ghPR)
 		}
 	}
-	return append(out, f.extraBulk...), nil
+	return append(out, f.extraPRs...)
 }
 
 type runResult struct {
