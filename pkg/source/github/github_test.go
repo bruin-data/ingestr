@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -794,6 +795,7 @@ func TestGithubReadRepositories(t *testing.T) {
 		{name: "token user", ownerTyp: "User", apiKey: "tok", viewer: "O", wantPath: "/user/repos", wantQ: map[string]string{"affiliation": "owner", "visibility": "all"}},
 		{name: "other user", ownerTyp: "User", apiKey: "tok", viewer: "someone", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
 		{name: "unauthenticated user", ownerTyp: "User", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
+		{name: "bot", ownerTyp: "Bot", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
 	}
 
 	for _, tc := range cases {
@@ -887,6 +889,9 @@ func TestGithubOwnerOnlyURI(t *testing.T) {
 	if pks := table.PrimaryKeys(); len(pks) != 1 || pks[0] != "id" {
 		t.Fatalf("primary keys=%v want [id]", pks)
 	}
+	if table.Strategy() != config.StrategyReplace || table.IncrementalKey() != "" {
+		t.Fatalf("strategy=%q incremental key=%q, want replace without an incremental key", table.Strategy(), table.IncrementalKey())
+	}
 
 	if _, err := s.GetTable(context.Background(), source.TableRequest{Name: "issues"}); err == nil || !strings.Contains(err.Error(), "repo parameter is required") {
 		t.Fatalf("issues without repo should fail with a repo error, got %v", err)
@@ -936,7 +941,7 @@ func TestGithubReadRepositoriesInstallationToken(t *testing.T) {
 						}
 						_ = json.NewEncoder(w).Encode(map[string]interface{}{
 							"total_count":  3,
-							"repositories": []map[string]interface{}{repo(2, "shared", "O", false), repo(3, "secret", "o", true)},
+							"repositories": []map[string]interface{}{repo(2, "shared", "o", false), repo(3, "secret", "O", true)},
 						})
 						return
 					}
@@ -1121,22 +1126,44 @@ func TestGithubRepositoriesAppTokenIsNotRetried(t *testing.T) {
 }
 
 func TestGithubRepositoriesTokenWithoutUserOrInstallationWarns(t *testing.T) {
-	logs := captureOutput(t)
+	cases := []struct {
+		name  string
+		user  cannedResponse
+		probe cannedResponse
+	}{
+		{"403", noUserForToken, cannedResponse{403, nil, `{"message":"You must authenticate with an installation access token in order to list repositories for an installation."}`}},
+		{"401", cannedResponse{401, nil, `{"message":"Bad credentials"}`}, cannedResponse{401, nil, `{"message":"Bad credentials"}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureOutput(t)
+			f := &fakeGitHub{}
+			s, _ := connectOwnerToFake(t, f)
+			f.rest = []cannedResponse{ownerIsUser, tc.user, tc.probe, {200, nil, repoList(repoJSON(1, "o", false))}}
+
+			ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+			if err != nil || fmt.Sprint(ids) != "[1]" {
+				t.Fatalf("ids=%v err=%v, want the public repository", ids, err)
+			}
+			if !strings.Contains(logs.String(), "listing only the public repositories of o") {
+				t.Fatalf("missing public-only warning, output: %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestGithubRepositoriesUnknownOwnerFails(t *testing.T) {
+	captureOutput(t)
 	f := &fakeGitHub{}
 	s, _ := connectOwnerToFake(t, f)
-	f.rest = []cannedResponse{
-		ownerIsUser,
-		noUserForToken,
-		{403, nil, `{"message":"You must authenticate with an installation access token in order to list repositories for an installation."}`},
-		{200, nil, repoList(repoJSON(1, "o", false))},
-	}
+	f.rest = []cannedResponse{{404, nil, `{"message":"Not Found"}`}}
 
-	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
-	if err != nil || fmt.Sprint(ids) != "[1]" {
-		t.Fatalf("ids=%v err=%v, want the public repository", ids, err)
+	_, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "failed to look up github owner o with status 404") {
+		t.Fatalf("err=%v, want the owner lookup to fail", err)
 	}
-	if !strings.Contains(logs.String(), "listing only the public repositories of o") {
-		t.Fatalf("missing public-only warning, output: %q", logs.String())
+	if len(f.restPaths) != 1 {
+		t.Fatalf("rest requests=%q, want only the owner lookup", f.restPaths)
 	}
 }
 

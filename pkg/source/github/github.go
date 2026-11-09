@@ -386,7 +386,7 @@ func githubBackoff(resp *ingestrhttp.Response) time.Duration {
 	return min(retryWait<<(retryAttempt(resp)-1), backoffMax)
 }
 
-// target names what the run reads: owner/repo, or just the owner for owner-level tables.
+// target names the run in messages: owner/repo, or just the owner when no repo is set.
 func (s *GithubSource) target() string {
 	if s.repo == "" {
 		return s.owner
