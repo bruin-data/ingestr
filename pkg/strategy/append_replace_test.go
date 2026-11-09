@@ -1062,3 +1062,27 @@ func TestFinalizeReplace_SkipsAfterConnectorLeaseLoss(t *testing.T) {
 	require.ErrorIs(t, finalizeReplace(ctx, dest, "landing.orders"), source.ErrConnectorLeaseLost)
 	require.Empty(t, dest.finalized)
 }
+
+func TestStrategies_ReadUseSourceIncrementalKey(t *testing.T) {
+	for name, strat := range map[string]WriteStrategy{
+		"replace": &ReplaceStrategy{},
+		"append":  &AppendStrategy{},
+		"merge":   &MergeStrategy{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			job, src, _ := minimalJob()
+			job.Config.IncrementalKey = "create_date"
+			job.SourceSchema = &schema.TableSchema{
+				Columns:        []schema.Column{{Name: "ID", DataType: schema.TypeInt64}, {Name: "CREATE_DATE", DataType: schema.TypeTimestamp}},
+				PrimaryKeys:    []string{"ID"},
+				IncrementalKey: "CREATE_DATE",
+			}
+			src.readCh = mustClosedRecords()
+
+			require.NoError(t, strat.Execute(context.Background(), job))
+			src.mu.Lock()
+			defer src.mu.Unlock()
+			require.Equal(t, "CREATE_DATE", src.readOpts.IncrementalKey)
+		})
+	}
+}
