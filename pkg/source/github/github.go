@@ -120,6 +120,15 @@ var repoEventFields = []schema.Column{
 
 var commitFields = []schema.Column{
 	{Name: "sha", DataType: schema.TypeString, Nullable: false},
+	{Name: "landed_at", DataType: schema.TypeTimestampTZ, Nullable: false},
+	{Name: "landed_at_min", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "landed_at_max", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "landed_at_exact", DataType: schema.TypeBoolean, Nullable: true},
+	{Name: "landed_at_source", DataType: schema.TypeString, Nullable: true},
+	{Name: "landed_via_sha", DataType: schema.TypeString, Nullable: true},
+	{Name: "pr_number", DataType: schema.TypeInt64, Nullable: true},
+	{Name: "removed_from_branch_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "authored_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 	{Name: "committed_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 	{Name: "node_id", DataType: schema.TypeString, Nullable: true},
 	{Name: "commit", DataType: schema.TypeJSON, Nullable: true},
@@ -446,7 +455,7 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 		incrementalKey = "created_at"
 		strategy = config.StrategyMerge
 	case "commits":
-		incrementalKey = "committed_at"
+		incrementalKey = "landed_at"
 		strategy = config.StrategyMerge
 	}
 
@@ -1041,99 +1050,103 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 	return nil
 }
 
-// readCommits lists default-branch commits. GitHub applies since/until to the committer date.
+// readCommits returns the default-branch commits that landed on the branch (were pushed or merged
+// into it) during the interval, with landed_at and its window; see landed.go. Without an interval
+// it reads the last 24 hours (Kerem, 9 Nov).
 func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[GITHUB] Reading commits for %s/%s", s.owner, s.repo)
 
-	params := url.Values{}
-	params.Set("per_page", strconv.Itoa(maxPageSize))
-	if opts.IntervalStart != nil {
-		params.Set("since", opts.IntervalStart.UTC().Format(time.RFC3339))
-	}
+	end := time.Now().UTC()
 	if opts.IntervalEnd != nil {
-		params.Set("until", opts.IntervalEnd.UTC().Format(time.RFC3339))
+		end = opts.IntervalEnd.UTC()
+	}
+	start := end.Add(-defaultInterval)
+	if opts.IntervalStart != nil {
+		start = opts.IntervalStart.UTC()
 	}
 
-	nextURL := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(s.owner), url.PathEscape(s.repo), params.Encode())
-	totalSent := 0
+	api := newGithubLandedAPI(s)
+	branch, err := api.defaultBranch(ctx)
+	if err != nil {
+		return err
+	}
+	run := newLandedRun(api, branch, start, end, output.Warnf)
+	rows, err := run.collect(ctx)
+	if err != nil {
+		return err
+	}
+	return sendLandedRows(rows, opts, results)
+}
 
-	for nextURL != "" {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		var commits []map[string]interface{}
-		httpResp, err := s.restClient.R(ctx).
-			SetResult(&commits).
-			Get(nextURL)
-		if err != nil {
-			return fmt.Errorf("failed to fetch commits: %w", err)
-		}
-
-		if isEmptyRepository(httpResp) {
-			config.Debug("[GITHUB] %s/%s has no commits yet", s.owner, s.repo)
-			break
-		}
-
-		if !httpResp.IsSuccess() {
-			return fmt.Errorf("failed to fetch commits with status %d: %s", httpResp.StatusCode(), httpResp.String())
-		}
-		config.Debug("[GITHUB] Got %d commits, requests remaining: %s", len(commits), httpResp.Header().Get("x-ratelimit-remaining"))
-
-		if opts.Limit > 0 && totalSent+len(commits) > opts.Limit {
-			commits = commits[:opts.Limit-totalSent]
-		}
-
-		var batch []map[string]interface{}
-		var batchBytes int64
-		flush := func() error {
-			if len(batch) == 0 {
-				return nil
-			}
-			record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, commitFields, opts.ExcludeColumns)
-			if err != nil {
-				return fmt.Errorf("failed to convert commits to Arrow: %w", err)
-			}
-			results <- source.RecordBatchResult{Batch: record}
-			totalSent += len(batch)
-			batch = nil
-			batchBytes = 0
+func sendLandedRows(rows []*landedRow, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	if opts.Limit > 0 && len(rows) > opts.Limit {
+		rows = rows[:opts.Limit]
+	}
+	var batch []map[string]interface{}
+	var batchBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
 			return nil
 		}
-
-		for _, c := range commits {
-			c["committed_at"] = committerDate(c)
-			if opts.MaxBatchBytes > 0 {
-				rowBytes := arrowconv.RowBytes(c)
-				if len(batch) > 0 && batchBytes+rowBytes > opts.MaxBatchBytes {
-					if err := flush(); err != nil {
-						return err
-					}
-				}
-				batchBytes += rowBytes
-			}
-			batch = append(batch, c)
+		record, err := arrowconv.ItemsToArrowRecordWithSchema(batch, commitFields, opts.ExcludeColumns)
+		if err != nil {
+			return fmt.Errorf("failed to convert commits to Arrow: %w", err)
 		}
-		if err := flush(); err != nil {
-			return err
-		}
-
-		if opts.Limit > 0 && totalSent >= opts.Limit {
-			break
-		}
-		nextURL = extractNextPageURL(httpResp.Header().Get("Link"))
+		results <- source.RecordBatchResult{Batch: record}
+		batch = nil
+		batchBytes = 0
+		return nil
 	}
-
-	config.Debug("[GITHUB] Finished reading commits, total records: %d", totalSent)
+	for _, row := range rows {
+		item := row.item()
+		if opts.MaxBatchBytes > 0 {
+			rowBytes := arrowconv.RowBytes(item)
+			if len(batch) > 0 && batchBytes+rowBytes > opts.MaxBatchBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			batchBytes += rowBytes
+		}
+		batch = append(batch, item)
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	config.Debug("[GITHUB] Finished reading commits, total records: %d", len(rows))
 	return nil
 }
 
-func committerDate(c map[string]interface{}) interface{} {
-	commit, _ := c["commit"].(map[string]interface{})
-	committer, _ := commit["committer"].(map[string]interface{})
-	return committer["date"]
+func (row *landedRow) item() map[string]interface{} {
+	item := map[string]interface{}{
+		"sha":              row.sha,
+		"landed_at":        row.landed,
+		"landed_at_max":    row.max,
+		"landed_at_exact":  row.exact,
+		"landed_at_source": row.source,
+		"landed_via_sha":   row.step,
+	}
+	if row.min != nil {
+		item["landed_at_min"] = *row.min
+	}
+	if row.pr != 0 {
+		item["pr_number"] = int64(row.pr)
+	}
+	if row.removedAt != nil {
+		item["removed_from_branch_at"] = *row.removedAt
+	}
+	if row.authoredAt != nil {
+		item["authored_at"] = *row.authoredAt
+	}
+	if row.committedAt != nil {
+		item["committed_at"] = *row.committedAt
+	}
+	for _, key := range []string{"node_id", "commit", "url", "html_url", "comments_url", "author", "committer", "parents"} {
+		if v, ok := row.raw[key]; ok && v != nil {
+			item[key] = v
+		}
+	}
+	return item
 }
 
 // isEmptyRepository reports GitHub's answer for a repository with no commits yet:
