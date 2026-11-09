@@ -45,6 +45,9 @@ type invariantChecker struct {
 
 func (r *landedRun) checkTimeInvariants(rows []*landedRow) {
 	c := &invariantChecker{r: r, all: rows, onB: map[string]*landedRow{}, counts: map[string]int{}, runEnd: time.Now().UTC()}
+	if r.now.After(c.runEnd) {
+		c.runEnd = r.now
+	}
 	for _, row := range rows {
 		if row.removedAt == nil {
 			if _, ok := c.onB[row.sha]; !ok {

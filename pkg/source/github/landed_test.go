@@ -147,15 +147,56 @@ func TestLandedCIRecordAndMissingPermission(t *testing.T) {
 	}
 }
 
-func TestLandedOldCommitsSkipTheCILookup(t *testing.T) {
+func TestLandedOldDatedCommitsPushedRecentlyAreAskedForCI(t *testing.T) {
 	f := noActivity(directPushRepo())
-	f.pinnedAt = at(401 * 24 * 60)
+	f.pinnedAt = at(500 * 24 * 60)
+	f.suites[oid("D3")] = []checkSuite{{CreatedAt: at(500*24*60 - 5), Branch: "main", HasPush: true, PreviousSha: oid("M0")}}
+	res := runFake(t, f, at(500*24*60-60), at(500*24*60))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if f.calls["ci"] != 3 {
+		t.Fatalf("check-suite lookups=%d, want 3: the landings are bounded by recent times, not by the old commit dates", f.calls["ci"])
+	}
+	for _, name := range []string{"D1", "D2", "D3"} {
+		expectExact(t, res, name, 500*24*60-5, srcCI)
+	}
+	if res.hasWarning("violation") {
+		t.Fatalf("unexpected invariant violation: %v", res.warnings)
+	}
+}
+
+// ciCutRepo: the direct pushes D1..D3 sit below M2, a button merge at minute 150, and the run pins
+// the head pinnedDays later, so M2's time bounds every landing below it.
+func ciCutRepo(pinnedDays int) *fakeRepo {
+	f := noActivity(directPushRepo())
+	f.add("X2", 140, "M0")
+	m2 := f.add("M2", 150, "D3", "X2")
+	m2.signed = true
+	f.pr(2, "M2", "X2", "M2", 150, "main")
+	f.head = oid("M2")
+	f.pinnedAt = at(150 + pinnedDays*24*60)
+	return f
+}
+
+func TestLandedCIIsSkippedWhenTheLandingBoundIsPastTheRetention(t *testing.T) {
+	f := ciCutRepo(411)
 	res := runFake(t, f, at(iStart), at(iEnd))
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
 	if f.calls["ci"] != 0 {
-		t.Fatalf("check-suite lookups=%d, want none for commits older than the retention", f.calls["ci"])
+		t.Fatalf("check-suite lookups=%d, want none: everything below M2 landed by minute 150, more than 410 days ago", f.calls["ci"])
+	}
+	expectWindow(t, res, "D3", intp(50), 150, srcClient)
+
+	f2 := ciCutRepo(409)
+	res2 := runFake(t, f2, at(iStart), at(iEnd))
+	if res2.err != nil {
+		t.Fatal(res2.err)
+	}
+	if f2.calls["ci"] == 0 {
+		t.Fatal("within 410 days of the landing bound the check suites must still be asked")
 	}
 }
 

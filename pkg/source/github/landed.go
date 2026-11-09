@@ -20,7 +20,7 @@ const (
 	relandTolerance    = 10 * time.Second
 	invariantTolerance = 2 * time.Second
 	renameTolerance    = 10 * time.Second
-	ciRetention        = 400 * 24 * time.Hour
+	ciRetention        = 410 * 24 * time.Hour
 	defaultInterval    = 24 * time.Hour
 	legacyProbeLimit   = 200
 	zeroSHA            = "0000000000000000000000000000000000000000"
@@ -112,6 +112,9 @@ type landedRun struct {
 	ruleCs      map[string]trustInfo
 	steps       []*chainStep
 	setFailures []string
+	// landedBy is an upper bound of the landing time of the walk's current position and of every
+	// commit below it: the earliest full or upper-bound time of the newer chain steps, else now.
+	landedBy time.Time
 }
 
 func newLandedRun(api landedAPI, branch string, start, end time.Time, warnf func(string, ...interface{})) *landedRun {
@@ -147,7 +150,7 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 		config.Debug("[GITHUB] repository has no commits yet")
 		return nil, nil
 	}
-	r.head, r.now = head, pinnedAt
+	r.head, r.now, r.landedBy = head, pinnedAt, pinnedAt
 	config.Debug("[GITHUB] commits: head of %s pinned at %s (%s); interval [%s, %s)", r.branch, short(head), pinnedAt.Format(time.RFC3339), r.start.Format(time.RFC3339), r.end.Format(time.RFC3339))
 
 	r.fetchActivity(ctx)
@@ -347,14 +350,15 @@ func (r *landedRun) actLookup(ctx context.Context, oid string) (*activityEntry, 
 // ---------------------------------------------------------------- CI record (enrichment)
 
 // ciLookup is the earliest check suite created by a push to B on this commit (Q7: on by default).
-// No permission (e.g. a fine-grained token) is a warning and turns CI off for the run. Check data is
-// kept for at most 400 days, so older commits are not asked (PLAN_REVIEW A6).
+// No permission (e.g. a fine-grained token) is a warning and turns CI off for the run. GitHub deletes
+// check data after at most 400 days, so a commit is not asked when the upper bound of its landing
+// (landedBy, not its own date: an old commit can be pushed today) is older than ciRetention.
 func (r *landedRun) ciLookup(ctx context.Context, c *ghCommit) (*checkSuite, error) {
-	if r.ciDisabled || c.CommittedDate.Before(r.now.Add(-ciRetention)) {
-		return nil, nil
-	}
 	if cs, ok := r.ciLookups[c.Oid]; ok {
 		return cs, nil
+	}
+	if r.ciDisabled || r.landedBy.Before(r.now.Add(-ciRetention)) {
+		return nil, nil
 	}
 	suites, err := r.api.checkSuites(ctx, c.Oid)
 	if errors.Is(err, errNoPermission) {
@@ -713,6 +717,9 @@ func (r *landedRun) walk(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		if t.kind == trustFull || t.kind == trustUpper {
+			r.boundLanding(t.at)
+		}
 		if (t.kind == trustFull || t.kind == trustUpper) && t.at.Before(r.start) {
 			break
 		}
@@ -739,6 +746,7 @@ func (r *landedRun) walk(ctx context.Context) ([]string, error) {
 				}
 				if ok {
 					r.ruleCs[cur] = rc
+					r.boundLanding(rc.at)
 					if rc.at.Before(r.start) {
 						break
 					}
@@ -748,6 +756,12 @@ func (r *landedRun) walk(ctx context.Context) ([]string, error) {
 		cur = c.Parents[next]
 	}
 	return chain, nil
+}
+
+func (r *landedRun) boundLanding(at time.Time) {
+	if at.Before(r.landedBy) {
+		r.landedBy = at
+	}
 }
 
 // isGitHubPRMerge: GitHub made this merge for a PR into B (signed, PR trust, and not a PR whose head
