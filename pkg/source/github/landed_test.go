@@ -3,6 +3,8 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -641,5 +643,37 @@ func TestLandedI6ChecksOnlyTheUpperBoundForPushDetectedPRs(t *testing.T) {
 	res2 := runFake(t, f2, at(30), at(iEnd))
 	if !res2.hasWarning("I6 warning: PR #77") || !res2.hasWarning("only mergedAt >= min is checked") {
 		t.Fatalf("warnings=%v, want the push-detected PR #77 below the window min", res2.warnings)
+	}
+}
+
+func TestLandedCIRecordUnderAFormerBranchName(t *testing.T) {
+	f := noActivity(directPushRepo())
+	f.branches["master"] = "main"
+	f.suites[oid("D3")] = []checkSuite{
+		{CreatedAt: at(125), Branch: "feature", HasPush: true, PreviousSha: oid("M0")},
+		{CreatedAt: at(161), Branch: "master", HasPush: true, PreviousSha: oid("M0")},
+	}
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	for _, name := range []string{"D1", "D2", "D3"} {
+		expectExact(t, res, name, 161, srcCI)
+	}
+}
+
+func TestLandedOneRowPerCommit(t *testing.T) {
+	var warnings []string
+	r := newLandedRun(newFakeRepo(), "main", at(iStart), at(iEnd), func(f string, a ...interface{}) { warnings = append(warnings, fmt.Sprintf(f, a...)) })
+	gone := at(150)
+	onB := &landedRow{sha: oid("A"), step: oid("S1"), landed: at(120), max: at(120)}
+	removed := &landedRow{sha: oid("A"), step: oid("S2"), landed: at(110), max: at(110), removedAt: &gone}
+	other := &landedRow{sha: oid("B"), step: oid("S1"), landed: at(120), max: at(120)}
+	out := r.oneRowPerCommit([]*landedRow{removed, other, onB})
+	if len(out) != 2 || out[0] != onB || out[1] != other {
+		t.Fatalf("rows=%d, want 2 with the on-branch row of A kept in place", len(out))
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "I5 warning: commit "+short(oid("A"))) || !strings.Contains(warnings[0], "keeping the one landed via "+short(oid("S1"))) {
+		t.Fatalf("warnings=%v", warnings)
 	}
 }

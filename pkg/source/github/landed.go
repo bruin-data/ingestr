@@ -197,7 +197,7 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 	}
 	r.checkPinnedHead(ctx)
 
-	all := append(rows, removed...)
+	all := r.oneRowPerCommit(append(rows, removed...))
 	r.checkTimeInvariants(all)
 	r.checkI6(ctx, all)
 	r.checkI9(ctx, all)
@@ -215,6 +215,29 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 		return out[i].sha < out[j].sha
 	})
 	return out, nil
+}
+
+// oneRowPerCommit is the runtime part of I5: a run writes one row per commit. emitRows and
+// removedRows each keep one row per sha; a sha in both would mean a commit both on B and removed
+// from it. The row still on B wins, with a warning; the run goes on.
+func (r *landedRun) oneRowPerCommit(rows []*landedRow) []*landedRow {
+	first := map[string]int{}
+	out := make([]*landedRow, 0, len(rows))
+	for _, row := range rows {
+		i, dup := first[row.sha]
+		if !dup {
+			first[row.sha] = len(out)
+			out = append(out, row)
+			continue
+		}
+		prev := out[i]
+		if prev.removedAt != nil && row.removedAt == nil {
+			out[i] = row
+		}
+		r.warnf("commits: I5 warning: commit %s produced two rows (landed %s via %s and %s via %s); keeping the one landed via %s",
+			short(row.sha), fmtT(&prev.landed), short(prev.step), fmtT(&row.landed), short(row.step), short(out[i].step))
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- activity log (enrichment)
@@ -393,7 +416,14 @@ func (r *landedRun) ciLookup(ctx context.Context, c *ghCommit) (*checkSuite, err
 	var best *checkSuite
 	for i := range suites {
 		s := suites[i]
-		if !s.HasPush || s.Branch != r.branch {
+		if !s.HasPush {
+			continue
+		}
+		onB, err := r.isB(ctx, s.Branch)
+		if err != nil {
+			return nil, err
+		}
+		if !onB {
 			continue
 		}
 		if best == nil || s.CreatedAt.Before(best.CreatedAt) {
