@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -776,5 +779,436 @@ func TestGithubClientsAllowHourLongRateLimitWaits(t *testing.T) {
 		if got := c.Resty().RetryCount(); got != retryCount {
 			t.Errorf("%s client retry count=%d, want %d", name, got, retryCount)
 		}
+	}
+}
+
+func TestGithubReadRepositories(t *testing.T) {
+	cases := []struct {
+		name     string
+		ownerTyp string
+		apiKey   string
+		viewer   string
+		wantPath string
+		wantQ    map[string]string
+	}{
+		{name: "organization", ownerTyp: "Organization", apiKey: "tok", wantPath: "/orgs/o/repos", wantQ: map[string]string{"type": "all"}},
+		{name: "token user", ownerTyp: "User", apiKey: "tok", viewer: "O", wantPath: "/user/repos", wantQ: map[string]string{"affiliation": "owner", "visibility": "all"}},
+		{name: "other user", ownerTyp: "User", apiKey: "tok", viewer: "someone", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
+		{name: "unauthenticated user", ownerTyp: "User", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
+		{name: "bot", ownerTyp: "Bot", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/users/o":
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": "o", "type": tc.ownerTyp})
+					return
+				case "/user":
+					if tc.apiKey == "" {
+						t.Errorf("unexpected /user call without a token")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": tc.viewer})
+					return
+				case tc.wantPath:
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				q := r.URL.Query()
+				if q.Get("page") == "" {
+					for k, v := range tc.wantQ {
+						if got := q.Get(k); got != v {
+							t.Errorf("%s=%q want %q", k, got, v)
+						}
+					}
+					w.Header().Set("Link", "<"+srv.URL+tc.wantPath+"?page=2>; rel=\"next\"")
+					_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+						{"id": 1, "name": "a", "private": false, "owner": map[string]interface{}{"login": "o"}},
+						{"id": 2, "name": "b", "private": true, "owner": map[string]interface{}{"login": "o"}},
+					})
+					return
+				}
+				_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+					{"id": 3, "name": "c", "private": false, "owner": map[string]interface{}{"login": "o"}},
+				})
+			}))
+			defer srv.Close()
+
+			s := &GithubSource{
+				owner:      "o",
+				apiKey:     tc.apiKey,
+				restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL)),
+			}
+			results := make(chan source.RecordBatchResult, 8)
+			go func() {
+				defer close(results)
+				if err := s.readRepositories(context.Background(), source.ReadOptions{}, results); err != nil {
+					results <- source.RecordBatchResult{Err: err}
+				}
+			}()
+
+			var rows int64
+			for res := range results {
+				if res.Err != nil {
+					t.Fatal(res.Err)
+				}
+				for _, col := range []string{"id", "name", "private", "owner"} {
+					if len(res.Batch.Schema().FieldIndices(col)) == 0 {
+						t.Fatalf("missing %s column: %s", col, res.Batch.Schema())
+					}
+				}
+				if typ := res.Batch.Schema().Field(res.Batch.Schema().FieldIndices("id")[0]).Type.Name(); typ != "int64" {
+					t.Fatalf("id type=%s want int64", typ)
+				}
+				rows += res.Batch.NumRows()
+				res.Batch.Release()
+			}
+			if rows != 3 {
+				t.Fatalf("rows=%d want 3", rows)
+			}
+		})
+	}
+}
+
+func TestGithubOwnerOnlyURI(t *testing.T) {
+	s := NewGitHubSource()
+	if err := s.Connect(context.Background(), "github://?owner=o"); err != nil {
+		t.Fatalf("owner-only URI should connect: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "repositories"})
+	if err != nil {
+		t.Fatalf("repositories should not need repo: %v", err)
+	}
+	if pks := table.PrimaryKeys(); len(pks) != 1 || pks[0] != "id" {
+		t.Fatalf("primary keys=%v want [id]", pks)
+	}
+	if table.Strategy() != config.StrategyReplace || table.IncrementalKey() != "" {
+		t.Fatalf("strategy=%q incremental key=%q, want replace without an incremental key", table.Strategy(), table.IncrementalKey())
+	}
+
+	if _, err := s.GetTable(context.Background(), source.TableRequest{Name: "issues"}); err == nil || !strings.Contains(err.Error(), "repo parameter is required") {
+		t.Fatalf("issues without repo should fail with a repo error, got %v", err)
+	}
+}
+
+func TestGithubReadRepositoriesInstallationToken(t *testing.T) {
+	repo := func(id int, name, owner string, private bool) map[string]interface{} {
+		return map[string]interface{}{"id": id, "name": name, "private": private, "owner": map[string]interface{}{"login": owner}}
+	}
+
+	cases := []struct {
+		name         string
+		installation bool
+		wantIDs      []int64
+	}{
+		{name: "installation token adds private repos once", installation: true, wantIDs: []int64{1, 2, 3}},
+		{name: "token without user or installation stays public", installation: false, wantIDs: []int64{1, 2}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				q := r.URL.Query()
+				switch r.URL.Path {
+				case "/users/o":
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": "o", "type": "User"})
+				case "/user":
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+				case "/users/o/repos":
+					if got := q.Get("type"); got != "owner" {
+						t.Errorf("type=%q want owner", got)
+					}
+					_ = json.NewEncoder(w).Encode([]map[string]interface{}{repo(1, "a", "o", false), repo(2, "shared", "o", false)})
+				case "/installation/repositories":
+					if !tc.installation {
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = w.Write([]byte(`{"message":"You must authenticate with an installation access token"}`))
+						return
+					}
+					if q.Get("page") == "" {
+						if q.Get("per_page") != "1" {
+							w.Header().Set("Link", "<"+srv.URL+"/installation/repositories?page=2>; rel=\"next\"")
+						}
+						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+							"total_count":  3,
+							"repositories": []map[string]interface{}{repo(2, "shared", "o", false), repo(3, "secret", "O", true)},
+						})
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"total_count":  3,
+						"repositories": []map[string]interface{}{repo(4, "foreign", "someone-else", true)},
+					})
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			s := &GithubSource{
+				owner:      "o",
+				apiKey:     "ghs_x",
+				restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL)),
+			}
+			results := make(chan source.RecordBatchResult, 8)
+			go func() {
+				defer close(results)
+				if err := s.readRepositories(context.Background(), source.ReadOptions{}, results); err != nil {
+					results <- source.RecordBatchResult{Err: err}
+				}
+			}()
+
+			var ids []int64
+			for res := range results {
+				if res.Err != nil {
+					t.Fatal(res.Err)
+				}
+				col := res.Batch.Column(res.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+				for i := 0; i < col.Len(); i++ {
+					ids = append(ids, col.Value(i))
+				}
+				res.Batch.Release()
+			}
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			if fmt.Sprint(ids) != fmt.Sprint(tc.wantIDs) {
+				t.Fatalf("ids=%v want %v", ids, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func repoJSON(id int, owner string, private bool) string {
+	return fmt.Sprintf(`{"id":%d,"node_id":"R%d","name":"r%d","full_name":"%s/r%d","owner":{"login":%q},"private":%t,"fork":false,"html_url":"https://github.com/%s/r%d","description":null}`, id, id, id, owner, id, owner, private, owner, id)
+}
+
+func repoList(repos ...string) string { return "[" + strings.Join(repos, ",") + "]" }
+
+func connectOwnerToFake(t *testing.T, f *fakeGitHub) (*GithubSource, *httptest.Server) {
+	t.Helper()
+	s, srv := connectToFake(t, f)
+	s.repo = ""
+	return s, srv
+}
+
+func readRepositoryIDs(t *testing.T, s *GithubSource, opts source.ReadOptions) ([]int64, []string, error) {
+	t.Helper()
+	results, err := s.read(context.Background(), "repositories", opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ids []int64
+	var columns []string
+	var readErr error
+	for res := range results {
+		if res.Err != nil {
+			readErr = res.Err
+			continue
+		}
+		if columns == nil {
+			for _, f := range res.Batch.Schema().Fields() {
+				columns = append(columns, f.Name)
+			}
+		}
+		col := res.Batch.Column(res.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+		res.Batch.Release()
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, columns, readErr
+}
+
+var (
+	ownerIsUser    = cannedResponse{200, nil, `{"login":"o","type":"User"}`}
+	tokenUserIsO   = cannedResponse{200, nil, `{"login":"o"}`}
+	noUserForToken = cannedResponse{403, nil, `{"message":"Resource not accessible by integration"}`}
+)
+
+func TestGithubRepositoriesQuotaRunsOutMidRun(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeGitHub{}
+	s, srv := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{
+		ownerIsUser,
+		tokenUserIsO,
+		{200, map[string]string{"Link": "<" + srv.URL + `/user/repos?page=2>; rel="next"`}, repoList(repoJSON(1, "o", false))},
+		restQuotaSpent(),
+		{200, nil, repoList(repoJSON(2, "o", true))},
+	}
+
+	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err != nil || fmt.Sprint(ids) != "[1 2]" {
+		t.Fatalf("ids=%v err=%v, want both repositories", ids, err)
+	}
+	if len(f.restPaths) != 5 || f.restPaths[3] != f.restPaths[4] {
+		t.Fatalf("rest requests=%q, want page 2 retried", f.restPaths)
+	}
+	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o, waiting") {
+		t.Fatalf("warning should name the owner alone, output: %q", logs.String())
+	}
+}
+
+func TestGithubRepositoriesUserLookupFailureStopsTheRun(t *testing.T) {
+	cases := []struct {
+		name string
+		user cannedResponse
+	}{
+		{"server keeps failing", cannedResponse{502, nil, `{"message":"Bad Gateway"}`}},
+		{"secondary limit never lifts", cannedResponse{403, nil, `{"message":"You have exceeded a secondary rate limit"}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captureOutput(t)
+			f := &fakeGitHub{}
+			s, _ := connectOwnerToFake(t, f)
+			f.rest = []cannedResponse{ownerIsUser, tc.user}
+
+			ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+			if err == nil || !strings.Contains(err.Error(), "failed to resolve the authenticated github user") {
+				t.Fatalf("ids=%v err=%v, want the run to fail instead of listing public repositories", ids, err)
+			}
+			for _, p := range f.restPaths {
+				if strings.Contains(p, "/repos") {
+					t.Fatalf("listed repositories after /user failed: %q", f.restPaths)
+				}
+			}
+		})
+	}
+}
+
+func TestGithubRepositoriesInstallationProbeFailureStopsTheRun(t *testing.T) {
+	captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{ownerIsUser, noUserForToken, {502, nil, `{"message":"Bad Gateway"}`}}
+
+	_, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "failed to probe github installation repositories") {
+		t.Fatalf("err=%v, want the probe failure to stop the run", err)
+	}
+}
+
+func TestGithubRepositoriesAppTokenIsNotRetried(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{
+		ownerIsUser,
+		noUserForToken,
+		{200, nil, `{"total_count":2,"repositories":[` + repoJSON(2, "o", false) + `]}`},
+		{200, nil, repoList(repoJSON(1, "o", false), repoJSON(2, "o", false))},
+		{200, nil, `{"total_count":2,"repositories":[` + repoJSON(2, "o", false) + "," + repoJSON(3, "o", true) + `]}`},
+	}
+
+	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err != nil || fmt.Sprint(ids) != "[1 2 3]" {
+		t.Fatalf("ids=%v err=%v, want public and installation repositories once each", ids, err)
+	}
+	want := []string{"/users/o", "/user", "/installation/repositories?per_page=1", "/users/o/repos?per_page=100&type=owner", "/installation/repositories?per_page=100"}
+	if fmt.Sprint(f.restPaths) != fmt.Sprint(want) {
+		t.Fatalf("rest requests=%q, want %q", f.restPaths, want)
+	}
+	if strings.Contains(logs.String(), "Warning") {
+		t.Fatalf("app token path should not warn, output: %q", logs.String())
+	}
+}
+
+func TestGithubRepositoriesTokenWithoutUserOrInstallationWarns(t *testing.T) {
+	cases := []struct {
+		name  string
+		user  cannedResponse
+		probe cannedResponse
+	}{
+		{"403", noUserForToken, cannedResponse{403, nil, `{"message":"You must authenticate with an installation access token in order to list repositories for an installation."}`}},
+		{"401", cannedResponse{401, nil, `{"message":"Bad credentials"}`}, cannedResponse{401, nil, `{"message":"Bad credentials"}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureOutput(t)
+			f := &fakeGitHub{}
+			s, _ := connectOwnerToFake(t, f)
+			f.rest = []cannedResponse{ownerIsUser, tc.user, tc.probe, {200, nil, repoList(repoJSON(1, "o", false))}}
+
+			ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+			if err != nil || fmt.Sprint(ids) != "[1]" {
+				t.Fatalf("ids=%v err=%v, want the public repository", ids, err)
+			}
+			if !strings.Contains(logs.String(), "listing only the public repositories of o") {
+				t.Fatalf("missing public-only warning, output: %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestGithubRepositoriesUnknownOwnerFails(t *testing.T) {
+	captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{{404, nil, `{"message":"Not Found"}`}}
+
+	_, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "failed to look up github owner o with status 404") {
+		t.Fatalf("err=%v, want the owner lookup to fail", err)
+	}
+	if len(f.restPaths) != 1 {
+		t.Fatalf("rest requests=%q, want only the owner lookup", f.restPaths)
+	}
+}
+
+func TestGithubRepositoriesLimitSpansListings(t *testing.T) {
+	captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{
+		ownerIsUser,
+		noUserForToken,
+		{200, nil, `{"total_count":1,"repositories":[` + repoJSON(2, "o", true) + `]}`},
+		{200, nil, repoList(repoJSON(1, "o", false))},
+		{200, nil, `{"total_count":1,"repositories":[` + repoJSON(2, "o", true) + `]}`},
+	}
+
+	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{Limit: 1})
+	if err != nil || fmt.Sprint(ids) != "[1]" {
+		t.Fatalf("ids=%v err=%v, want exactly one row", ids, err)
+	}
+}
+
+func TestGithubRepositoriesKeepsDeclaredColumnsWhenNull(t *testing.T) {
+	captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{ownerIsUser, tokenUserIsO, {200, nil, `[{"id":1}]`}}
+
+	_, columns, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"id", "node_id", "name", "full_name", "owner", "private", "fork", "html_url", "description"}
+	got := "," + strings.Join(columns, ",") + ","
+	for _, c := range want {
+		if !strings.Contains(got, ","+c+",") {
+			t.Fatalf("column %q missing from %q", c, columns)
+		}
+	}
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "repositories"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sch, err := table.GetSchema(context.Background())
+	if err != nil || len(sch.Columns) != len(want) {
+		t.Fatalf("schema=%v err=%v, want the %d declared columns for an owner without repositories", sch, err, len(want))
 	}
 }

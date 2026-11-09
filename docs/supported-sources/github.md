@@ -15,8 +15,14 @@ github://?access_token=<access_token>&owner=<owner>&repo=<repo>
 URI parameters:
 
 - `access_token` (required for `issues`, `pull_requests` and `stargazers`): Access Token used for authentication with the GitHub API
-- `owner` (required): Refers to the owner of the repository
-- `repo` (required): Refers to the name of the repository
+- `owner` (required): Refers to the owner of the repository (a user or an organization)
+- `repo` (required for every table except `repositories`): Refers to the name of the repository
+
+To ingest the repositories of a user or organization, leave out `repo` and use the `repositories` table (`repo` is ignored for this table):
+
+```sh
+ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max' --source-table 'repositories' --dest-uri duckdb:///github.duckdb --dest-table 'dest.repositories'
+```
 
 
 ## Setting up a GitHub Integration
@@ -54,7 +60,7 @@ To connect to GitHub, you need to create a Personal Access Token (PAT).
 5. Click **Generate token**
 6. Copy the token (starts with `github_pat_`)
 
-> **Note**: `issues`, `pull_requests` and `stargazers` read GitHub's GraphQL API, which needs an access token. `commits` and `repo_events` can read public repositories without one, but a token is recommended: unauthenticated requests are limited to 60 per hour per IP, authenticated ones to 5,000 per hour.
+> **Note**: `issues`, `pull_requests` and `stargazers` read GitHub's GraphQL API, which needs an access token. `commits`, `repo_events` and `repositories` can read public data without one, but a token is recommended: unauthenticated requests are limited to 60 per hour per IP, authenticated ones to 5,000 per hour.
 >
 > When GitHub reports that a rate limit is exceeded, ingestr waits for the time GitHub asks for (the `Retry-After` header, or until the limit resets; at least one second and at most one hour) and retries up to 5 times, printing a warning with each wait. For a secondary rate limit without either, it waits one minute and doubles the wait on each retry.
 
@@ -77,6 +83,7 @@ GitHub source allows ingesting the following sources into separate tables:
 | `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
 | `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
+| `repositories`  | `id` | –                | replace               | Retrieves the repositories owned by `owner`, including forks and archived repositories. Private repositories are included when the token can see them: the organization's repositories the token has access to, a user's own repositories when `owner` is the token's user, or the repositories a GitHub App installation token was granted. Otherwise only public repositories are returned. `id`, `node_id`, `name`, `full_name`, `owner`, `private`, `fork`, `html_url` and `description` are always present; other fields GitHub returns are added when at least one repository has a value for them. Full reload on each run. |
 | `stargazers`    | - | –                | replace               | Retrieves stargazers. Full reload on each run.                                  |
 
 
