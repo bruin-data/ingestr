@@ -113,6 +113,7 @@ type landedRun struct {
 	bulkList    []ghPR
 	relanded    map[string]bool
 	ruleCs      map[string]trustInfo
+	restartWalk bool
 	steps       []*chainStep
 	setFailures []string
 	// landedBy is an upper bound of the landing time of the walk's current position and of every
@@ -177,7 +178,17 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 	r.fetchActivity(ctx)
 	r.prepareActivityFloor(ctx)
 
-	chain, err := r.walk(ctx)
+	var chain []string
+	for {
+		r.restartWalk = false
+		r.landedBy = r.now
+		r.ruleCs = map[string]trustInfo{}
+		chain, err = r.walk(ctx)
+		if !errors.Is(err, errRestartWalk) {
+			break
+		}
+		config.Debug("[GITHUB] a PR conflict withdrew trust given earlier; walking the branch again")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -712,6 +723,9 @@ func (r *landedRun) trustCompute(ctx context.Context, oid string, strict bool) (
 				if onB {
 					r.warnf("commits: PR #%d has a merge commit %s and a merge event on %s, both on %s; neither is used as a landing time", ev.Number, short(ev.MergeCommit), short(oid), r.branch)
 					r.conflicts[ev.Number] = true
+					if r.forgetPR(ev.Number) {
+						r.restartWalk = true
+					}
 					continue
 				}
 			}
@@ -804,6 +818,29 @@ func (r *landedRun) ruleC(ctx context.Context, c *ghCommit) (trustInfo, bool, er
 
 // ---------------------------------------------------------------- walk
 
+var errRestartWalk = errors.New("walk again")
+
+// forgetPR drops every trust the PR gave (its mergeCommit was trusted before the conflict with its
+// MergedEvent commit showed up) and the probe results that ended on those commits. It reports
+// whether anything was dropped, i.e. whether the walk has to be done again.
+func (r *landedRun) forgetPR(number int) bool {
+	dropped := map[string]bool{}
+	for _, cache := range r.trusts {
+		for oid, t := range cache {
+			if t.source == srcPR && t.pr == number {
+				delete(cache, oid)
+				dropped[oid] = true
+			}
+		}
+	}
+	for oid, hit := range r.firstTrusted {
+		if dropped[hit.oid] {
+			delete(r.firstTrusted, oid)
+		}
+	}
+	return len(dropped) > 0
+}
+
 // walk follows B's chain of states from the pinned head back to the first state with a trusted
 // (full or upper-bound) time before start, or to the root. Returns newest first.
 func (r *landedRun) walk(ctx context.Context) ([]string, error) {
@@ -819,6 +856,9 @@ func (r *landedRun) walk(ctx context.Context) ([]string, error) {
 		t, err := r.trust(ctx, cur, false)
 		if err != nil {
 			return nil, err
+		}
+		if r.restartWalk {
+			return nil, errRestartWalk
 		}
 		if t.kind == trustFull || t.kind == trustUpper {
 			r.boundLanding(t.at)
@@ -839,6 +879,9 @@ func (r *landedRun) walk(ctx context.Context) ([]string, error) {
 				next, err = r.probeParents(ctx, c)
 				if err != nil {
 					return nil, err
+				}
+				if r.restartWalk {
+					return nil, errRestartWalk
 				}
 				config.Debug("[GITHUB] merge %s: follow parent %d %s", short(cur), next+1, short(c.Parents[next]))
 			}

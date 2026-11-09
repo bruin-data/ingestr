@@ -748,3 +748,34 @@ func TestLandedForcePushLandingNeverMovesARowBelowItsWindow(t *testing.T) {
 	}
 	expectWindow(t, res, "C", intp(130), 150, srcPR+windowSuffix)
 }
+
+// A conflict found after the PR's mergeCommit was already trusted: X (newer, mergeCommit of PR #22)
+// is walked first, Y (older, the PR's MergedEvent commit) later. Neither may give a landing time.
+func TestLandedConflictWithdrawsTrustGivenEarlier(t *testing.T) {
+	f := noActivity(baseRepo())
+	f.add("H", 105, "M0")
+	f.add("Y", 110, "M0", "H")
+	x := f.add("X", 111, "Y")
+	x.signed = true
+	merged := at(110)
+	pr := ghPR{Number: 22, MergedAt: &merged, BaseRef: "main", HeadOid: oid("H"), MergeCommit: oid("X"), EventCommits: []string{oid("Y")}}
+	x.prs = append(x.prs, pr)
+	f.events[oid("Y")] = []eventPR{{ghPR: pr, FromParent2: true}}
+	f.head = oid("X")
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if !res.hasWarning("PR #22 has a merge commit") {
+		t.Fatalf("warnings=%v, want the conflict warning", res.warnings)
+	}
+	for _, name := range []string{"X", "Y", "H"} {
+		r := res.row(t, name)
+		if r.exact || r.pr == 22 {
+			t.Fatalf("%s exact=%v pr=%d source=%s: PR #22 must not give a landing time", name, r.exact, r.pr, r.source)
+		}
+	}
+	if f.calls["events"] != 1 {
+		t.Fatalf("event queries=%d, want 1: walking again must not ask for events again", f.calls["events"])
+	}
+}
