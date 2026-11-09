@@ -1056,14 +1056,7 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[GITHUB] Reading commits for %s/%s", s.owner, s.repo)
 
-	end := time.Now().UTC()
-	if opts.IntervalEnd != nil {
-		end = opts.IntervalEnd.UTC()
-	}
-	start := end.Add(-defaultInterval)
-	if opts.IntervalStart != nil {
-		start = opts.IntervalStart.UTC()
-	}
+	start, end := landedInterval(opts, time.Now())
 
 	api := newGithubLandedAPI(s)
 	branch, err := api.defaultBranch(ctx)
@@ -1076,6 +1069,20 @@ func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions,
 		return err
 	}
 	return sendLandedRows(rows, opts, results)
+}
+
+// landedInterval is the interval the commits table reads: the requested one, or the 24 hours up to
+// its end (or up to now when there is none).
+func landedInterval(opts source.ReadOptions, now time.Time) (time.Time, time.Time) {
+	end := now.UTC()
+	if opts.IntervalEnd != nil {
+		end = opts.IntervalEnd.UTC()
+	}
+	start := end.Add(-defaultInterval)
+	if opts.IntervalStart != nil {
+		start = opts.IntervalStart.UTC()
+	}
+	return start, end
 }
 
 func sendLandedRows(rows []*landedRow, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {

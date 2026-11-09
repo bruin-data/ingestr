@@ -197,3 +197,31 @@ func TestActivityFloorNeedsAnOldLogAndNoMergedPRs(t *testing.T) {
 		t.Fatal("with merged PRs the MergedEvent lookup keeps its trigger")
 	}
 }
+
+func TestProbeOctopusMergeFollowsTheParentWithTheNewestTrustedState(t *testing.T) {
+	f := noActivity(baseRepo())
+	f.add("A", 60, "M0")
+	f.add("B", 61, "M0")
+	f.add("C", 62, "M0")
+	f.add("O", 150, "A", "B", "C")
+	f.suites[oid("A")] = []checkSuite{{CreatedAt: at(120), Branch: "main", HasPush: true, PreviousSha: oid("M0")}}
+	f.suites[oid("B")] = []checkSuite{{CreatedAt: at(130), Branch: "main", HasPush: true, PreviousSha: oid("M0")}}
+	f.suites[oid("C")] = []checkSuite{{CreatedAt: at(145), Branch: "main", HasPush: true, PreviousSha: oid("M0")}}
+	f.suites[oid("O")] = []checkSuite{{CreatedAt: at(150), Branch: "main", HasPush: true, PreviousSha: oid("C")}}
+	f.head = oid("O")
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	var chain []string
+	for _, st := range res.run.steps {
+		chain = append(chain, short(st.oid))
+	}
+	if got, want := strings.Join(chain, " "), short(oid("M0"))+" "+short(oid("C"))+" "+short(oid("O")); got != want {
+		t.Fatalf("chain %s, want M0 C O (parent 3 has the newest trusted state)", got)
+	}
+	expectExact(t, res, "C", 145, srcCI)
+	for _, name := range []string{"A", "B", "O"} {
+		expectExact(t, res, name, 150, srcCI)
+	}
+}

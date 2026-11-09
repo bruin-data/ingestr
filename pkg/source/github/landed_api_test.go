@@ -394,3 +394,72 @@ func TestLandedAPIMergedPRCountAndOldestActivity(t *testing.T) {
 		t.Fatalf("entry=%+v err=%v", e, err)
 	}
 }
+
+func TestLandedIntervalDefaultsToTheLast24Hours(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.FixedZone("TRT", 3*3600))
+	start, end := landedInterval(source.ReadOptions{}, now)
+	if !end.Equal(now) || !start.Equal(now.Add(-24*time.Hour)) || end.Location() != time.UTC {
+		t.Fatalf("no interval: [%s, %s), want the 24 hours up to now in UTC", start, end)
+	}
+	e := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	start, end = landedInterval(source.ReadOptions{IntervalEnd: &e}, now)
+	if !end.Equal(e) || !start.Equal(e.Add(-24*time.Hour)) {
+		t.Fatalf("end only: [%s, %s), want the 24 hours up to the end", start, end)
+	}
+	s := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	start, end = landedInterval(source.ReadOptions{IntervalStart: &s, IntervalEnd: &e}, now)
+	if !start.Equal(s) || !end.Equal(e) {
+		t.Fatalf("both: [%s, %s)", start, end)
+	}
+}
+
+func TestSendLandedRowsHonoursLimitAndBatchBytes(t *testing.T) {
+	var rows []*landedRow
+	big := strings.Repeat("x", 2048)
+	for i := 0; i < 5; i++ {
+		at := time.Date(2026, 11, 1, 0, i, 0, 0, time.UTC)
+		row := &landedRow{
+			sha: oid(fmt.Sprintf("R%d", i)), step: oid("S"), landed: at, max: at, exact: true, source: srcPR,
+			raw: map[string]interface{}{"commit": map[string]interface{}{"message": big}},
+		}
+		if i == 0 {
+			row.pr = 7
+			row.min = &at
+		}
+		rows = append(rows, row)
+	}
+	run := func(opts source.ReadOptions) (int, int64, *array.Int64) {
+		results := make(chan source.RecordBatchResult, 16)
+		if err := sendLandedRows(rows, opts, results); err != nil {
+			t.Fatal(err)
+		}
+		close(results)
+		batches, total := 0, int64(0)
+		var firstPR *array.Int64
+		for res := range results {
+			batches++
+			total += res.Batch.NumRows()
+			if firstPR == nil {
+				idx := res.Batch.Schema().FieldIndices("pr_number")
+				firstPR = res.Batch.Column(idx[0]).(*array.Int64)
+				firstPR.Retain()
+				minIdx := res.Batch.Schema().FieldIndices("landed_at_min")
+				if res.Batch.Column(minIdx[0]).IsNull(0) || res.Batch.NumRows() > 1 && !res.Batch.Column(minIdx[0]).IsNull(1) {
+					t.Fatal("landed_at_min must be set only where the row has a lower bound")
+				}
+			}
+			res.Batch.Release()
+		}
+		return batches, total, firstPR
+	}
+	batches, total, pr := run(source.ReadOptions{})
+	if batches != 1 || total != 5 || pr.Value(0) != 7 || !pr.IsNull(1) {
+		t.Fatalf("no caps: batches=%d rows=%d, want 1 batch of 5 with pr_number 7 then null", batches, total)
+	}
+	pr.Release()
+	batches, total, pr = run(source.ReadOptions{MaxBatchBytes: 3000, Limit: 3})
+	pr.Release()
+	if total != 3 || batches != 3 {
+		t.Fatalf("caps: batches=%d rows=%d, want 3 rows in 3 batches", batches, total)
+	}
+}
