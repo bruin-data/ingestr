@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ type IntervalTracker struct {
 	mu       sync.Mutex
 	colIndex int
 	foundCol bool
+	err      error
 }
 
 func NewIntervalTracker(incrementalKey string) *IntervalTracker {
@@ -44,6 +47,10 @@ func (t *IntervalTracker) updateBounds(batch arrow.RecordBatch) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	if batch.NumRows() == 0 || t.err != nil {
+		return
+	}
+
 	if !t.foundCol || t.colIndex < 0 || t.colIndex >= int(batch.NumCols()) ||
 		batch.ColumnName(t.colIndex) != t.IncrementalKey {
 		t.colIndex = -1
@@ -58,18 +65,25 @@ func (t *IntervalTracker) updateBounds(batch arrow.RecordBatch) {
 	}
 
 	if !t.foundCol || t.colIndex < 0 {
+		t.err = fmt.Errorf("incremental key %q is missing from a nonempty batch", t.IncrementalKey)
 		return
 	}
 
 	col := batch.Column(t.colIndex)
 	for i := 0; i < col.Len(); i++ {
 		if col.IsNull(i) {
+			t.err = fmt.Errorf("incremental key %q contains NULL; filter or replace NULL keys before using delete+insert", t.IncrementalKey)
 			continue
 		}
 
 		val := extractValue(col, i)
 		if val == nil {
-			continue
+			t.err = fmt.Errorf("incremental key %q has unsupported Arrow type %s", t.IncrementalKey, col.DataType())
+			return
+		}
+		if t.Min != nil && reflect.TypeOf(val) != reflect.TypeOf(t.Min) {
+			t.err = fmt.Errorf("incremental key %q changed bound type from %T to %T; use a consistent key type for delete+insert", t.IncrementalKey, t.Min, val)
+			return
 		}
 
 		if t.Min == nil || compareValues(val, t.Min) < 0 {
@@ -89,9 +103,15 @@ func extractValue(col arrow.Array, idx int) interface{} {
 		return int64(arr.Value(idx))
 	case *array.Int16:
 		return int64(arr.Value(idx))
-	case *array.Uint64:
+	case *array.Int8:
 		return int64(arr.Value(idx))
+	case *array.Uint64:
+		return arr.Value(idx)
 	case *array.Uint32:
+		return int64(arr.Value(idx))
+	case *array.Uint16:
+		return int64(arr.Value(idx))
+	case *array.Uint8:
 		return int64(arr.Value(idx))
 	case *array.Float64:
 		return arr.Value(idx)
@@ -119,6 +139,8 @@ func extractValue(col arrow.Array, idx int) interface{} {
 		return arr.Value(idx).ToTime()
 	case *array.Date64:
 		return arr.Value(idx).ToTime()
+	case *array.Time64:
+		return arr.Value(idx).FormattedString(arr.DataType().(*arrow.Time64Type).Unit)
 	default:
 		return nil
 	}
@@ -126,6 +148,14 @@ func extractValue(col arrow.Array, idx int) interface{} {
 
 func compareValues(a, b interface{}) int {
 	switch va := a.(type) {
+	case uint64:
+		vb := b.(uint64)
+		if va < vb {
+			return -1
+		} else if va > vb {
+			return 1
+		}
+		return 0
 	case int64:
 		vb := b.(int64)
 		if va < vb {
