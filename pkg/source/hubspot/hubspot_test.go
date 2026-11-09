@@ -10,7 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	httpclient "github.com/bruin-data/ingestr/pkg/http"
+	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
@@ -333,13 +336,17 @@ func TestHubspotByteCap(t *testing.T) {
 func TestReadCampaignMetrics(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/crm/v3/objects/campaigns" && r.URL.Query().Get("after") == "":
-			_, _ = fmt.Fprint(w, `{"results":[{"id":"11","properties":{"hs_origin_asset_id":"g1"}}],"paging":{"next":{"after":"p2"}}}`)
-		case r.URL.Path == "/crm/v3/objects/campaigns":
+		switch r.URL.Path {
+		case "/crm/v3/objects/campaigns":
+			if r.URL.Query().Get("after") == "" {
+				_, _ = fmt.Fprint(w, `{"results":[{"id":"11","properties":{"hs_origin_asset_id":"g1"}}],"paging":{"next":{"after":"p2"}}}`)
+				return
+			}
 			_, _ = fmt.Fprint(w, `{"results":[{"id":"22","properties":{"hs_origin_asset_id":"g2"}}]}`)
-		case r.URL.Path == "/marketing/v3/campaigns/g1/reports/metrics" || r.URL.Path == "/marketing/v3/campaigns/g2/reports/metrics":
+		case "/marketing/v3/campaigns/g1/reports/metrics":
 			_, _ = fmt.Fprint(w, `{"influencedContacts":5,"newContactsFirstTouch":2,"newContactsLastTouch":1,"sessions":40}`)
+		case "/marketing/v3/campaigns/g2/reports/metrics":
+			_, _ = fmt.Fprint(w, `{"influencedContacts":7,"newContactsFirstTouch":3,"newContactsLastTouch":0,"sessions":9}`)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -353,20 +360,59 @@ func TestReadCampaignMetrics(t *testing.T) {
 	}
 	close(results)
 
-	var rows int64
+	got := map[string]string{}
 	for res := range results {
 		if res.Err != nil {
 			t.Fatal(res.Err)
 		}
-		for _, col := range []string{"campaign_id", "hs_object_id", "influencedContacts", "sessions"} {
-			if len(res.Batch.Schema().FieldIndices(col)) == 0 {
-				t.Fatalf("missing column %s", col)
-			}
+		for row := 0; row < int(res.Batch.NumRows()); row++ {
+			got[fmt.Sprint(unknownValue(t, res.Batch, "campaign_id", row))] = fmt.Sprintf("%v %v %v %v %v",
+				unknownValue(t, res.Batch, "hs_object_id", row),
+				unknownValue(t, res.Batch, "influencedContacts", row),
+				unknownValue(t, res.Batch, "newContactsFirstTouch", row),
+				unknownValue(t, res.Batch, "newContactsLastTouch", row),
+				unknownValue(t, res.Batch, "sessions", row))
 		}
-		rows += res.Batch.NumRows()
 		res.Batch.Release()
 	}
-	if rows != 2 {
-		t.Fatalf("expected 2 rows, got %d", rows)
+
+	want := map[string]string{"g1": "11 5 2 1 40", "g2": "22 7 3 0 9"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
+}
+
+func TestCampaignMetricsFallbackSchema(t *testing.T) {
+	table, err := (&Hubspotsource{}).GetTable(context.Background(), source.TableRequest{Name: "campaign_metrics"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sch, err := table.GetSchema(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sch.Columns) != 6 || !reflect.DeepEqual(sch.PrimaryKeys, []string{"campaign_id"}) {
+		t.Fatalf("unexpected fallback schema: %+v", sch)
+	}
+}
+
+func unknownValue(t *testing.T, record arrow.RecordBatch, col string, row int) any {
+	t.Helper()
+	idx := record.Schema().FieldIndices(col)
+	if len(idx) == 0 {
+		t.Fatalf("missing column %s", col)
+	}
+	ext, ok := record.Column(idx[0]).(array.ExtensionArray)
+	if !ok {
+		t.Fatalf("column %s is not an extension array", col)
+	}
+	raw, ok := schemainfer.StringValueAt(ext.Storage(), row)
+	if !ok {
+		t.Fatalf("column %s storage is not string-backed", col)
+	}
+	v, err := schemainfer.DecodeUnknownValue(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
 }

@@ -559,6 +559,9 @@ func (s *Hubspotsource) GetTable(ctx context.Context, req source.TableRequest) (
 		TableStrategy:       cfg.Strategy,
 		KnownSchema:         false,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
+			if base == "campaign_metrics" {
+				return campaignMetricsSchema(), nil
+			}
 			return nil, fmt.Errorf("hubspot source does not have a predefined schema; schema inference is required")
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -803,6 +806,23 @@ func (s *Hubspotsource) readPipelineStages(ctx context.Context, opts source.Read
 	}
 
 	return emitRows(rows, opts, results)
+}
+
+// campaignMetricsSchema is the fallback for runs with no campaigns, so replace
+// still clears the previous snapshot.
+func campaignMetricsSchema() *schema.TableSchema {
+	return &schema.TableSchema{
+		Name: "campaign_metrics",
+		Columns: []schema.Column{
+			{Name: "campaign_id", DataType: schema.TypeString, Nullable: false},
+			{Name: "hs_object_id", DataType: schema.TypeString, Nullable: true},
+			{Name: "influencedContacts", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "newContactsFirstTouch", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "newContactsLastTouch", DataType: schema.TypeInt64, Nullable: true},
+			{Name: "sessions", DataType: schema.TypeInt64, Nullable: true},
+		},
+		PrimaryKeys: []string{"campaign_id"},
+	}
 }
 
 // readCampaignMetrics emits all-time totals per campaign; the metrics endpoint
