@@ -50,6 +50,7 @@ To connect to GitHub, you need to create a Personal Access Token (PAT).
    - **Issues**: Read-only (for issues table)
    - **Pull requests**: Read-only (for pull_requests table)
    - **Contents**: Read-only (for commits and repo_events)
+   - **Pull requests**: Read-only (for commits: landing times of PR merges)
    - **Metadata**: Read-only (required)
 5. Click **Generate token**
 6. Copy the token (starts with `github_pat_`)
@@ -73,7 +74,7 @@ This is a sample command that will copy the data from the GitHub source to DuckD
 GitHub source allows ingesting the following sources into separate tables:
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `commits`       | `sha` | `committed_at` | merge | Retrieves commits on the default branch, including signature verification (`commit.verification`). `--interval-start`/`--interval-end` filter on the committer date, which `committed_at` mirrors. Commits pushed after their interval has already run are not picked up; use a lookback window. |
+| `commits`       | `sha` | `landed_at` | merge | Retrieves the commits that landed on (were pushed or merged into) the default branch during `--interval-start`/`--interval-end`, by landing time rather than by the commit's own date. Without an interval, the last 24 hours. See [Commits](#commits). |
 | `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
 | `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
@@ -81,4 +82,33 @@ GitHub source allows ingesting the following sources into separate tables:
 
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+## Commits
+
+A commit's own date is written by the author's clock and can be days or years older than the moment the commit
+reached the default branch (a merged branch keeps its commits' dates, a local merge can be pushed later). The
+`commits` table therefore walks the default branch's history and returns every commit whose **landing time**
+falls in the interval, with these columns besides the commit's own data:
+
+| Column | Meaning |
+|---|---|
+| `landed_at` | When the commit reached the default branch. Always set: the exact time, or an estimate inside the window below. |
+| `landed_at_min`, `landed_at_max` | The window the landing time is known to be in (`landed_at_min` null = no lower bound). |
+| `landed_at_exact` | `true` when the landing time comes from GitHub's server (`landed_at_min` = `landed_at_max`). |
+| `landed_at_source` | `pr_merged_at`, `activity_log`, `ci_record`, `github_signed` or `client_date`; `+window` when that source only bounds this commit. |
+| `landed_via_sha` | The push head or merge commit that brought the commit onto the branch. |
+| `pr_number` | The pull request that merged it, when the landing time comes from a pull request. |
+| `removed_from_branch_at` | Set when a force push removed the commit from the branch; filter on `removed_from_branch_at IS NULL` for the current branch. |
+| `authored_at`, `committed_at` | The commit's own author and committer dates. |
+
+Landing times come from pull request merges, the repository activity log (pushes since March 2023) and check suites
+created by pushes (GitHub keeps check data for at most 400 days). Without access to the activity log or to check
+suites (e.g. a fine-grained token cannot read check suites), the run continues with wider windows and logs a warning.
+A row is returned when its window overlaps the interval, so a commit with an uncertain landing time can appear in
+two neighbouring intervals; the `merge` strategy keeps one row per `sha`.
+
+Older intervals cost more: the history is walked from today's head back to the interval.
+
+> **Upgrading:** earlier versions filtered this table by the committer date and had no landing columns. Run the
+> `commits` table once with `--full-refresh` over the period you need, so old rows get the new columns.
  
