@@ -194,6 +194,7 @@ func (s *GithubSource) Connect(ctx context.Context, uri string) error {
 		// GraphQL queries are POSTs but read-only; resty skips retries for POST otherwise.
 		ingestrhttp.WithAllowNonIdempotentRetry(),
 		ingestrhttp.WithRetryCondition(githubRetryCondition),
+		ingestrhttp.WithRetryCondition(graphQLTransientAnswer),
 		ingestrhttp.WithRetryStrategy(s.githubRetryStrategy),
 		ingestrhttp.WithDebug(config.DebugMode),
 	}
@@ -228,6 +229,37 @@ func moveRetryAfter(_ *resty.Client, resp *resty.Response) error {
 
 func githubRetryCondition(resp *ingestrhttp.Response, _ error) bool {
 	return githubRateLimitKind(resp) != notRateLimited
+}
+
+// graphQLTransientAnswer: a GraphQL 200 that is not a usable answer is a passing failure on GitHub's
+// side and is retried like a 5xx: an empty or unparsable body, no data and no errors, or GitHub's
+// "something went wrong" error (its query timeout).
+func graphQLTransientAnswer(resp *ingestrhttp.Response, err error) bool {
+	if err != nil || resp == nil || resp.StatusCode() != http.StatusOK {
+		return false
+	}
+	body := bytes.TrimSpace(resp.Body())
+	if len(body) == 0 {
+		return true
+	}
+	var parsed struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []graphQLError  `json:"errors"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return true
+	}
+	if len(parsed.Errors) == 0 {
+		data := bytes.TrimSpace(parsed.Data)
+		return len(data) == 0 || bytes.Equal(data, []byte("null"))
+	}
+	for _, e := range parsed.Errors {
+		m := strings.ToLower(e.Message)
+		if strings.Contains(m, "something went wrong") || strings.Contains(m, "timedout") || strings.Contains(m, "timed out") {
+			return true
+		}
+	}
+	return false
 }
 
 // githubRetryStrategy waits as long as GitHub asks, with a warning, and backs off exponentially

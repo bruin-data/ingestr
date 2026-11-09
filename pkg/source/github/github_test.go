@@ -409,6 +409,29 @@ func TestGithubGraphQLServerErrorIsRetried(t *testing.T) {
 	}
 }
 
+func TestGithubGraphQLTransientAnswersAreRetried(t *testing.T) {
+	for name, first := range map[string]cannedResponse{
+		"empty body":           {200, nil, ``},
+		"unparsable body":      {200, nil, `{"data":{"repository":`},
+		"no data, no errors":   {200, nil, `{"data":null}`},
+		"something went wrong": {200, nil, `{"data":null,"errors":[{"message":"Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug."}]}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			captureOutput(t)
+			f := &fakeGitHub{graphql: []cannedResponse{first, issuesPage("c1", 1), issuesPage("")}}
+			s, _ := connectToFake(t, f)
+
+			rows, err := readTable(t, s, context.Background(), "issues")
+			if err != nil || rows != 1 {
+				t.Fatalf("rows=%d err=%v, want the answer retried", rows, err)
+			}
+			if len(f.cursors) != 3 {
+				t.Fatalf("graphql requests=%d, want 3 (one retry)", len(f.cursors))
+			}
+		})
+	}
+}
+
 func TestGithubGraphQLOtherErrorsAreNotRetried(t *testing.T) {
 	captureOutput(t)
 	f := &fakeGitHub{graphql: []cannedResponse{
