@@ -677,3 +677,39 @@ func TestLandedOneRowPerCommit(t *testing.T) {
 		t.Fatalf("warnings=%v", warnings)
 	}
 }
+
+func TestLandedRootCommitWithAServerTimeIsWritten(t *testing.T) {
+	f := noActivity(newFakeRepo())
+	f.add("R", 0)
+	f.suites[oid("R")] = []checkSuite{{CreatedAt: at(151), Branch: "main", HasPush: true, PreviousSha: zeroSHA}}
+	f.head = oid("R")
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if len(res.rows) != 1 {
+		t.Fatalf("rows=%d want 1 (the root)", len(res.rows))
+	}
+	expectExact(t, res, "R", 151, srcCI)
+
+	f2 := noActivity(newFakeRepo())
+	f2.add("R", 0)
+	f2.add("A", 1, "R")
+	f2.suites[oid("R")] = []checkSuite{{CreatedAt: at(121), Branch: "main", HasPush: true, PreviousSha: zeroSHA}}
+	f2.suites[oid("A")] = []checkSuite{{CreatedAt: at(151), Branch: "main", HasPush: true, PreviousSha: oid("R")}}
+	f2.head = oid("A")
+	res2 := runFake(t, f2, at(iStart), at(iEnd))
+	if res2.err != nil {
+		t.Fatal(res2.err)
+	}
+	expectExact(t, res2, "R", 121, srcCI)
+	expectExact(t, res2, "A", 151, srcCI)
+
+	res3 := runFake(t, f2, at(130), at(iEnd))
+	if res3.err != nil {
+		t.Fatal(res3.err)
+	}
+	if _, ok := res3.rows[oid("R")]; ok {
+		t.Fatal("a root that landed before the interval must not be returned")
+	}
+}

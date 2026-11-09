@@ -1046,7 +1046,8 @@ func (r *landedRun) emitRows(ctx context.Context) ([]*landedRow, error) {
 	}
 	s0 := r.steps[0]
 	upperBeforeStart := s0.trust.kind == trustUpper && s0.trust.at.Before(r.start)
-	if s0.trust.kind != trustFull && !upperBeforeStart {
+	trustedRoot := s0.trust.kind == trustFull && len(s0.commit.Parents) == 0
+	if trustedRoot || s0.trust.kind != trustFull && !upperBeforeStart {
 		raw, err := r.api.restCommit(ctx, s0.oid)
 		if err != nil {
 			return nil, err
