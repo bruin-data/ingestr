@@ -15,8 +15,14 @@ github://?access_token=<access_token>&owner=<owner>&repo=<repo>
 URI parameters:
 
 - `access_token` (required for `issues`, `pull_requests` and `stargazers`): Access Token used for authentication with the GitHub API
-- `owner` (required): Refers to the owner of the repository
-- `repo` (required): Refers to the name of the repository
+- `owner` (required): Refers to the owner of the repository (a user or an organization)
+- `repo` (required for every table except `repositories`): Refers to the name of the repository
+
+To ingest the repositories of a user or organization, leave out `repo` and use the `repositories` table:
+
+```sh
+ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max' --source-table 'repositories' --dest-uri duckdb:///github.duckdb --dest-table 'dest.repositories'
+```
 
 
 ## Setting up a GitHub Integration
@@ -77,6 +83,7 @@ GitHub source allows ingesting the following sources into separate tables:
 | `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
 | `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
+| `repositories`  | `id` | –                | replace               | Retrieves the repositories owned by `owner`, including forks and archived repositories. Private repositories are included when the token can see them: the organization's repositories the token has access to, a user's own repositories when `owner` is the token's user, or the repositories a GitHub App installation token was granted. Otherwise only public repositories are returned. Full reload on each run. |
 | `stargazers`    | - | –                | replace               | Retrieves stargazers. Full reload on each run.                                  |
 
 

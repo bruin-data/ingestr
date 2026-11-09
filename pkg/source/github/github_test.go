@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/output"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -776,5 +778,207 @@ func TestGithubClientsAllowHourLongRateLimitWaits(t *testing.T) {
 		if got := c.Resty().RetryCount(); got != retryCount {
 			t.Errorf("%s client retry count=%d, want %d", name, got, retryCount)
 		}
+	}
+}
+
+func TestGithubReadRepositories(t *testing.T) {
+	cases := []struct {
+		name     string
+		ownerTyp string
+		apiKey   string
+		viewer   string
+		wantPath string
+		wantQ    map[string]string
+	}{
+		{name: "organization", ownerTyp: "Organization", apiKey: "tok", wantPath: "/orgs/o/repos", wantQ: map[string]string{"type": "all"}},
+		{name: "token user", ownerTyp: "User", apiKey: "tok", viewer: "O", wantPath: "/user/repos", wantQ: map[string]string{"affiliation": "owner", "visibility": "all"}},
+		{name: "other user", ownerTyp: "User", apiKey: "tok", viewer: "someone", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
+		{name: "unauthenticated user", ownerTyp: "User", wantPath: "/users/o/repos", wantQ: map[string]string{"type": "owner"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/users/o":
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": "o", "type": tc.ownerTyp})
+					return
+				case "/user":
+					if tc.apiKey == "" {
+						t.Errorf("unexpected /user call without a token")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": tc.viewer})
+					return
+				case tc.wantPath:
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				q := r.URL.Query()
+				if q.Get("page") == "" {
+					for k, v := range tc.wantQ {
+						if got := q.Get(k); got != v {
+							t.Errorf("%s=%q want %q", k, got, v)
+						}
+					}
+					w.Header().Set("Link", "<"+srv.URL+tc.wantPath+"?page=2>; rel=\"next\"")
+					_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+						{"id": 1, "name": "a", "private": false, "owner": map[string]interface{}{"login": "o"}},
+						{"id": 2, "name": "b", "private": true, "owner": map[string]interface{}{"login": "o"}},
+					})
+					return
+				}
+				_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+					{"id": 3, "name": "c", "private": false, "owner": map[string]interface{}{"login": "o"}},
+				})
+			}))
+			defer srv.Close()
+
+			s := &GithubSource{
+				owner:      "o",
+				apiKey:     tc.apiKey,
+				restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL)),
+			}
+			results := make(chan source.RecordBatchResult, 8)
+			go func() {
+				defer close(results)
+				if err := s.readRepositories(context.Background(), source.ReadOptions{}, results); err != nil {
+					results <- source.RecordBatchResult{Err: err}
+				}
+			}()
+
+			var rows int64
+			for res := range results {
+				if res.Err != nil {
+					t.Fatal(res.Err)
+				}
+				for _, col := range []string{"id", "name", "private", "owner"} {
+					if len(res.Batch.Schema().FieldIndices(col)) == 0 {
+						t.Fatalf("missing %s column: %s", col, res.Batch.Schema())
+					}
+				}
+				if typ := res.Batch.Schema().Field(res.Batch.Schema().FieldIndices("id")[0]).Type.Name(); typ != "int64" {
+					t.Fatalf("id type=%s want int64", typ)
+				}
+				rows += res.Batch.NumRows()
+				res.Batch.Release()
+			}
+			if rows != 3 {
+				t.Fatalf("rows=%d want 3", rows)
+			}
+		})
+	}
+}
+
+func TestGithubOwnerOnlyURI(t *testing.T) {
+	s := NewGitHubSource()
+	if err := s.Connect(context.Background(), "github://?owner=o"); err != nil {
+		t.Fatalf("owner-only URI should connect: %v", err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "repositories"})
+	if err != nil {
+		t.Fatalf("repositories should not need repo: %v", err)
+	}
+	if pks := table.PrimaryKeys(); len(pks) != 1 || pks[0] != "id" {
+		t.Fatalf("primary keys=%v want [id]", pks)
+	}
+
+	if _, err := s.GetTable(context.Background(), source.TableRequest{Name: "issues"}); err == nil || !strings.Contains(err.Error(), "repo parameter is required") {
+		t.Fatalf("issues without repo should fail with a repo error, got %v", err)
+	}
+}
+
+func TestGithubReadRepositoriesInstallationToken(t *testing.T) {
+	repo := func(id int, name, owner string, private bool) map[string]interface{} {
+		return map[string]interface{}{"id": id, "name": name, "private": private, "owner": map[string]interface{}{"login": owner}}
+	}
+
+	cases := []struct {
+		name         string
+		installation bool
+		wantIDs      []int64
+	}{
+		{name: "installation token adds private repos once", installation: true, wantIDs: []int64{1, 2, 3}},
+		{name: "token without user or installation stays public", installation: false, wantIDs: []int64{1, 2}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				q := r.URL.Query()
+				switch r.URL.Path {
+				case "/users/o":
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": "o", "type": "User"})
+				case "/user":
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+				case "/users/o/repos":
+					if got := q.Get("type"); got != "owner" {
+						t.Errorf("type=%q want owner", got)
+					}
+					_ = json.NewEncoder(w).Encode([]map[string]interface{}{repo(1, "a", "o", false), repo(2, "shared", "o", false)})
+				case "/installation/repositories":
+					if !tc.installation {
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = w.Write([]byte(`{"message":"You must authenticate with an installation access token"}`))
+						return
+					}
+					if q.Get("page") == "" {
+						if q.Get("per_page") != "1" {
+							w.Header().Set("Link", "<"+srv.URL+"/installation/repositories?page=2>; rel=\"next\"")
+						}
+						_ = json.NewEncoder(w).Encode(map[string]interface{}{
+							"total_count":  3,
+							"repositories": []map[string]interface{}{repo(2, "shared", "O", false), repo(3, "secret", "o", true)},
+						})
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"total_count":  3,
+						"repositories": []map[string]interface{}{repo(4, "foreign", "someone-else", true)},
+					})
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			s := &GithubSource{
+				owner:      "o",
+				apiKey:     "ghs_x",
+				restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL)),
+			}
+			results := make(chan source.RecordBatchResult, 8)
+			go func() {
+				defer close(results)
+				if err := s.readRepositories(context.Background(), source.ReadOptions{}, results); err != nil {
+					results <- source.RecordBatchResult{Err: err}
+				}
+			}()
+
+			var ids []int64
+			for res := range results {
+				if res.Err != nil {
+					t.Fatal(res.Err)
+				}
+				col := res.Batch.Column(res.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+				for i := 0; i < col.Len(); i++ {
+					ids = append(ids, col.Value(i))
+				}
+				res.Batch.Release()
+			}
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			if fmt.Sprint(ids) != fmt.Sprint(tc.wantIDs) {
+				t.Fatalf("ids=%v want %v", ids, tc.wantIDs)
+			}
+		})
 	}
 }
