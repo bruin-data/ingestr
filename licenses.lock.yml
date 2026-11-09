@@ -341,7 +341,7 @@ dependencies:
         - Apache-2.0
       status: allowed
     - module: github.com/andybalholm/brotli
-      version: v1.2.3
+      version: v1.2.7
       licenses:
         - MIT
       status: allowed
