@@ -230,7 +230,7 @@ func TestLandedAPICompareWithoutCommonAncestor(t *testing.T) {
 		t.Fatalf("res=%+v err=%v, want NoCommonAncestor", res, err)
 	}
 	st, err := api.compareStatus(context.Background(), oid("A"), oid("B"))
-	if err != nil || st != "not_found" {
+	if err != nil || st != "unrelated" {
 		t.Fatalf("status=%q err=%v", st, err)
 	}
 }

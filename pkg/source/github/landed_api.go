@@ -395,8 +395,8 @@ func (a *githubLandedAPI) compare(ctx context.Context, base, head string, page i
 	return &compareResult{Status: body.Status, AheadBy: body.AheadBy, Commits: body.Commits}, nil
 }
 
-// compareStatus is compare's status alone ("ahead", "behind", "identical", "diverged"); "not_found"
-// when either commit is unknown or the histories are unrelated.
+// compareStatus is compare's status alone ("ahead", "behind", "identical", "diverged"), "unrelated"
+// when the two histories have no common ancestor, "not_found" when either commit is unknown.
 func (a *githubLandedAPI) compareStatus(ctx context.Context, base, head string) (string, error) {
 	st, _, err := a.compareCount(ctx, base, head)
 	return st, err
@@ -413,6 +413,9 @@ func (a *githubLandedAPI) compareCount(ctx context.Context, base, head string) (
 		return "", 0, fmt.Errorf("compare %s...%s: %w", short(base), short(head), err)
 	}
 	if resp.StatusCode() == http.StatusNotFound {
+		if strings.Contains(resp.String(), "No common ancestor") {
+			return "unrelated", 0, nil
+		}
 		return "not_found", 0, nil
 	}
 	if !resp.IsSuccess() {

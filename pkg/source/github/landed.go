@@ -390,7 +390,7 @@ func (r *landedRun) actLookup(ctx context.Context, oid string) (*activityEntry, 
 			if err != nil {
 				return nil, err
 			}
-			if st != "ahead" && st != "diverged" {
+			if st != "ahead" && st != "diverged" && st != "unrelated" {
 				continue
 			}
 		}
@@ -1142,7 +1142,7 @@ func (r *landedRun) emitRows(ctx context.Context) ([]*landedRow, error) {
 		if !r.stepOverlaps(r.steps[i]) {
 			continue
 		}
-		commits, err := r.stepCommits(ctx, r.steps[i-1].oid, r.steps[i].oid)
+		commits, err := r.stepCommits(ctx, r.steps[i-1].oid, r.steps[i].oid, true)
 		if err != nil {
 			return nil, err
 		}
@@ -1218,7 +1218,19 @@ func newRowFromREST(raw map[string]interface{}) *landedRow {
 // silently keeps only the newest 10,000 commits; the missing parts are fetched from their frontier
 // heads and the union must have exactly ahead_by commits, otherwise the run fails. Unrelated
 // histories (404 "No common ancestor") fall back to listing commits?sha=head.
-func (r *landedRun) stepCommits(ctx context.Context, base, head string) ([]map[string]interface{}, error) {
+// countMismatchError: the commits found for base...head are not the number GitHub counts.
+type countMismatchError struct {
+	base, head string
+	got, want  int
+}
+
+func (e *countMismatchError) Error() string {
+	return fmt.Sprintf("compare %s...%s gave %d distinct commits after splitting, but GitHub counts %d", short(e.base), short(e.head), e.got, e.want)
+}
+
+// stepCommits: on a count mismatch a chain step (mustMatch) fails the run; any other caller gets a
+// *countMismatchError and decides itself.
+func (r *landedRun) stepCommits(ctx context.Context, base, head string, mustMatch bool) ([]map[string]interface{}, error) {
 	queue := []string{head}
 	visited := map[string]bool{}
 	got := map[string]map[string]interface{}{}
@@ -1278,7 +1290,11 @@ func (r *landedRun) stepCommits(ctx context.Context, base, head string) ([]map[s
 		}
 	}
 	if len(got) != ahead0 {
-		r.setFailures = append(r.setFailures, fmt.Sprintf("compare %s...%s gave %d distinct commits after splitting, but GitHub counts %d", short(base), short(head), len(got), ahead0))
+		mismatch := &countMismatchError{base: base, head: head, got: len(got), want: ahead0}
+		if !mustMatch {
+			return nil, mismatch
+		}
+		r.setFailures = append(r.setFailures, mismatch.Error())
 	}
 	if truncated > 0 {
 		config.Debug("[GITHUB] step %s: %d commits from %d truncated compares", short(head), len(got), truncated)
@@ -1342,13 +1358,18 @@ func (r *landedRun) applyForcePushLandings(ctx context.Context, rows []*landedRo
 		if err != nil {
 			return err
 		}
-		if st != "ahead" && st != "diverged" {
+		if st != "ahead" && st != "diverged" && st != "unrelated" {
 			if st == "not_found" {
 				r.warnf("commits: force push %s->%s at %s: old head not readable; its commits keep their chain times", short(e.Before), short(e.After), e.Timestamp.Format(time.RFC3339))
 			}
 			continue
 		}
-		commits, err := r.stepCommits(ctx, e.Before, e.After)
+		commits, err := r.stepCommits(ctx, e.Before, e.After, false)
+		var mismatch *countMismatchError
+		if errors.As(err, &mismatch) {
+			r.warnf("commits: force push %s->%s at %s skipped: %v", short(e.Before), short(e.After), e.Timestamp.Format(time.RFC3339), mismatch)
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -1397,11 +1418,16 @@ func (r *landedRun) removedRows(ctx context.Context) ([]*landedRow, error) {
 			r.warnf("commits: force push %s->%s at %s: old head not readable; the commits it removed cannot be marked", short(fp.Before), short(fp.After), fp.Timestamp.Format(time.RFC3339))
 			continue
 		}
-		removed, err := r.stepCommits(ctx, fp.After, fp.Before)
-		if err != nil {
-			return nil, err
+		removed, err := r.stepCommits(ctx, fp.After, fp.Before, false)
+		var goneList []map[string]interface{}
+		if err == nil {
+			goneList, err = r.stepCommits(ctx, r.head, fp.Before, false)
 		}
-		goneList, err := r.stepCommits(ctx, r.head, fp.Before)
+		var mismatch *countMismatchError
+		if errors.As(err, &mismatch) {
+			r.warnf("commits: force push %s->%s at %s: the commits it removed cannot be marked: %v", short(fp.Before), short(fp.After), fp.Timestamp.Format(time.RFC3339), mismatch)
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1423,6 +1449,10 @@ func (r *landedRun) removedRows(ctx context.Context) ([]*landedRow, error) {
 			continue
 		}
 		lands, err := r.removedLandings(ctx, fp, left)
+		if errors.As(err, &mismatch) {
+			r.warnf("commits: force push %s->%s at %s: the commits it removed cannot be marked: %v", short(fp.Before), short(fp.After), fp.Timestamp.Format(time.RFC3339), mismatch)
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1466,7 +1496,7 @@ func (r *landedRun) removedLandings(ctx context.Context, fp activityEntry, left 
 		if entry == nil || entry.Before == zeroSHA || entry.Before == "" {
 			break
 		}
-		commits, err := r.stepCommits(ctx, entry.Before, x)
+		commits, err := r.stepCommits(ctx, entry.Before, x, false)
 		if err != nil {
 			return nil, err
 		}

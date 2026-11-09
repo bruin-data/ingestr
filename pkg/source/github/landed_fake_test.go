@@ -31,6 +31,7 @@ type fakeRepo struct {
 	failOn      map[string]error
 	evOverflow  map[string]bool
 	searchCap   int
+	biasFor     map[string]int
 	calls       map[string]int
 }
 
@@ -193,16 +194,16 @@ func (f *fakeRepo) status(base, head string) string {
 			return "diverged"
 		}
 	}
-	return "not_found"
+	return "unrelated"
 }
 
 func (f *fakeRepo) compare(_ context.Context, base, head string, page int) (*compareResult, error) {
 	f.calls["compare"]++
 	st := f.status(base, head)
 	if st == "not_found" {
-		if f.commits[base] == nil || f.commits[head] == nil {
-			return nil, fmt.Errorf("compare %s...%s failed with status 404", short(base), short(head))
-		}
+		return nil, fmt.Errorf("compare %s...%s failed with status 404", short(base), short(head))
+	}
+	if st == "unrelated" {
 		return &compareResult{NoCommonAncestor: true}, nil
 	}
 	ah, ab := f.ancestors(head), f.ancestors(base)
@@ -218,7 +219,7 @@ func (f *fakeRepo) compare(_ context.Context, base, head string, page int) (*com
 	}
 	lo := (page - 1) * comparePageSize
 	hi := min(lo+comparePageSize, len(list))
-	res := &compareResult{Status: st, AheadBy: len(diff) + f.aheadBias}
+	res := &compareResult{Status: st, AheadBy: len(diff) + f.aheadBias + f.biasFor[base+"..."+head]}
 	for _, o := range list[min(lo, len(list)):hi] {
 		res.Commits = append(res.Commits, f.raw(o))
 	}

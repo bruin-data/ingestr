@@ -812,3 +812,57 @@ func TestLandedI6SearchSplitsWindowsPastTheResultLimit(t *testing.T) {
 		t.Fatalf("searches=%d, want the window split (more than 3 matches per search)", f.calls["search"])
 	}
 }
+
+func TestLandedForcePushToAnUnrelatedHistory(t *testing.T) {
+	f := baseRepo()
+	f.add("U1", 105, "M0")
+	f.add("O1", 140)
+	f.push("pr_merge", "R", "M0", 50)
+	f.push("push", "M0", "U1", 110)
+	f.push("force_push", "U1", "O1", 150)
+	f.head = oid("O1")
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if res.hasWarning("not readable") {
+		t.Fatalf("an unrelated history is not an unreadable head: %v", res.warnings)
+	}
+	expectExact(t, res, "O1", 150, srcActivity)
+	u1 := res.row(t, "U1")
+	if u1.removedAt == nil || !u1.removedAt.Equal(at(150)) {
+		t.Fatalf("U1 removed_from_branch_at=%v, want minute 150", u1.removedAt)
+	}
+	expectExact(t, res, "U1", 110, srcActivity)
+	if m0 := res.row(t, "M0"); m0.removedAt == nil {
+		t.Fatal("the whole old history left the branch; M0 must be marked removed too")
+	}
+}
+
+func TestLandedForcePushCountMismatchIsSkippedNotFatal(t *testing.T) {
+	f := baseRepo()
+	f.add("B1", 105, "M0")
+	f.add("C1", 106, "B1")
+	f.add("D1", 129, "M0")
+	f.push("pr_merge", "R", "M0", 50)
+	f.push("push", "M0", "C1", 110)
+	f.push("force_push", "C1", "M0", 120)
+	f.push("push", "M0", "D1", 130)
+	f.push("force_push", "D1", "C1", 140)
+	f.head = oid("C1")
+	f.biasFor = map[string]int{oid("D1") + "..." + oid("C1"): 1}
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatalf("a count mismatch in a force push must not fail the run: %v", res.err)
+	}
+	if !res.hasWarning("skipped: compare") {
+		t.Fatalf("warnings=%v, want the skipped force push", res.warnings)
+	}
+	expectExact(t, res, "C1", 140, srcActivity)
+	if res.row(t, "B1").exact {
+		t.Fatal("B1 keeps its chain window when the restore force push is skipped")
+	}
+	if d1 := res.row(t, "D1"); d1.removedAt == nil {
+		t.Fatal("D1 is still marked removed (its own compares match)")
+	}
+}
