@@ -88,7 +88,7 @@ func TestLandedDirectPushesWithoutAnyServerTimeGetWindows(t *testing.T) {
 		t.Fatal(res.err)
 	}
 	for _, name := range []string{"D1", "D2", "D3"} {
-		expectWindow(t, res, name, intp(50), 10000, srcClient)
+		expectWindow(t, res, name, intp(50), 10000, srcClient+windowSuffix)
 		if r := res.row(t, name); !r.landed.Equal(at(50)) {
 			t.Fatalf("%s estimate=%s, want its commit date clamped to the window start", name, r.landed.Format(time.RFC3339))
 		}
@@ -144,7 +144,7 @@ func TestLandedCIRecordAndMissingPermission(t *testing.T) {
 	if !res2.hasWarning("CI records are not used") {
 		t.Fatalf("warnings=%v, want the CI permission warning", res2.warnings)
 	}
-	expectWindow(t, res2, "D3", intp(50), 10000, srcClient)
+	expectWindow(t, res2, "D3", intp(50), 10000, srcClient+windowSuffix)
 	if f2.calls["ci"] != 1 {
 		t.Fatalf("check-suite lookups=%d, want 1 before CI is turned off", f2.calls["ci"])
 	}
@@ -191,7 +191,7 @@ func TestLandedCIIsSkippedWhenTheLandingBoundIsPastTheRetention(t *testing.T) {
 	if f.calls["ci"] != 0 {
 		t.Fatalf("check-suite lookups=%d, want none: everything below M2 landed by minute 150, more than 410 days ago", f.calls["ci"])
 	}
-	expectWindow(t, res, "D3", intp(50), 150, srcClient)
+	expectWindow(t, res, "D3", intp(50), 150, srcClient+windowSuffix)
 
 	f2 := ciCutRepo(409)
 	res2 := runFake(t, f2, at(iStart), at(iEnd))
@@ -219,7 +219,7 @@ func TestLandedPushDetectedPRIsAnUpperBound(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	expectWindow(t, res, "P1", intp(50), 130, srcClient)
+	expectWindow(t, res, "P1", intp(50), 130, srcClient+windowSuffix)
 	expectWindow(t, res, "P2", intp(50), 130, srcPR+windowSuffix)
 	if res.row(t, "P2").pr != 3 {
 		t.Fatalf("P2 pr=%d want 3", res.row(t, "P2").pr)

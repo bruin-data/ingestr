@@ -94,7 +94,7 @@ falls in the interval, with these columns besides the commit's own data:
 | `landed_at` | When the commit reached the default branch. Always set: the exact time, or an estimate inside the window below. |
 | `landed_at_min`, `landed_at_max` | The window the landing time is known to be in (`landed_at_min` null = no lower bound). |
 | `landed_at_exact` | `true` when the landing time comes from GitHub's server (`landed_at_min` = `landed_at_max`). |
-| `landed_at_source` | `pr_merged_at`, `activity_log`, `ci_record`, `github_signed` or `client_date`; `+window` when that source only bounds this commit. |
+| `landed_at_source` | `pr_merged_at`, `activity_log`, `ci_record` or `github_signed`, with `+window` when that source only bounds this commit; `client_date+window` when GitHub has no server-side time for it (the estimate is the push's or merge's own date inside the window). |
 | `landed_via_sha` | The push head or merge commit that brought the commit onto the branch. |
 | `pr_number` | The pull request that merged it, when the landing time comes from a pull request. |
 | `removed_from_branch_at` | Set when a force push removed the commit from the branch; filter on `removed_from_branch_at IS NULL` for the current branch. |

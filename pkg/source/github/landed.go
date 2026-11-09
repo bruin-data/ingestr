@@ -1176,7 +1176,7 @@ func (r *landedRun) rowFor(i int, raw map[string]interface{}) *landedRow {
 		case !row.exact:
 			row.source += windowSuffix
 		}
-	case trustHalf, trustUpper:
+	case trustHalf, trustUpper, trustNone:
 		row.source += windowSuffix
 	}
 	return row
