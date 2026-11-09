@@ -90,7 +90,7 @@ type landedAPI interface {
 	restCommit(ctx context.Context, sha string) (map[string]interface{}, error)
 	activity(ctx context.Context, query url.Values, stop time.Time) ([]activityEntry, error)
 	checkSuites(ctx context.Context, oid string) ([]checkSuite, error)
-	mergedEvents(ctx context.Context, reqs []eventRequest) (map[string][]eventPR, error)
+	mergedEvents(ctx context.Context, reqs []eventRequest) (map[string][]eventPR, map[string]bool, error)
 	resolveBranch(ctx context.Context, name string) (string, error)
 	mergedPullRequests(ctx context.Context, since time.Time) ([]ghPR, error)
 }
@@ -101,7 +101,7 @@ const (
 	eventBatchSize    = 50
 	activityPageSize  = 100
 	landedCommitQuery = `oid committedDate parents(first: 100) { nodes { oid } } signature { wasSignedByGitHub } associatedPullRequests(first: 10) { totalCount nodes { number mergedAt baseRefName headRefOid mergeCommit { oid } } }`
-	eventPRFields     = `associatedPullRequests(first: 5) { nodes { number mergedAt baseRefName headRefOid mergeCommit { oid } timelineItems(itemTypes: [MERGED_EVENT], first: 10) { nodes { ... on MergedEvent { commit { oid } } } } } }`
+	eventPRFields     = `associatedPullRequests(first: 5) { totalCount nodes { number mergedAt baseRefName headRefOid mergeCommit { oid } timelineItems(itemTypes: [MERGED_EVENT], first: 10) { nodes { ... on MergedEvent { commit { oid } } } } } }`
 )
 
 const historyQuery = `
@@ -580,8 +580,10 @@ func (a *githubLandedAPI) checkSuites(ctx context.Context, oid string) ([]checkS
 	return out, nil
 }
 
-func (a *githubLandedAPI) mergedEvents(ctx context.Context, reqs []eventRequest) (map[string][]eventPR, error) {
+// mergedEvents also reports the commits whose PR list was longer than the page asked for.
+func (a *githubLandedAPI) mergedEvents(ctx context.Context, reqs []eventRequest) (map[string][]eventPR, map[string]bool, error) {
 	out := map[string][]eventPR{}
+	overflow := map[string]bool{}
 	for startIdx := 0; startIdx < len(reqs); startIdx += eventBatchSize {
 		batch := reqs[startIdx:min(startIdx+eventBatchSize, len(reqs))]
 		var parts []string
@@ -592,7 +594,7 @@ func (a *githubLandedAPI) mergedEvents(ctx context.Context, reqs []eventRequest)
 			}
 			if r.Parent2 != "" {
 				if !oidPattern.MatchString(r.Parent2) {
-					return nil, fmt.Errorf("not a commit id: %q", r.Parent2)
+					return nil, nil, fmt.Errorf("not a commit id: %q", r.Parent2)
 				}
 				alias := fmt.Sprintf("a%d", i)
 				parts = append(parts, fmt.Sprintf(`%s: object(oid: "%s") { ... on Commit { %s } }`, alias, r.Parent2, eventPRFields))
@@ -600,7 +602,7 @@ func (a *githubLandedAPI) mergedEvents(ctx context.Context, reqs []eventRequest)
 			}
 			if r.Parent2 == "" || r.Own {
 				if !oidPattern.MatchString(r.Commit) {
-					return nil, fmt.Errorf("not a commit id: %q", r.Commit)
+					return nil, nil, fmt.Errorf("not a commit id: %q", r.Commit)
 				}
 				alias := fmt.Sprintf("b%d", i)
 				parts = append(parts, fmt.Sprintf(`%s: object(oid: "%s") { ... on Commit { %s } }`, alias, r.Commit, eventPRFields))
@@ -610,27 +612,31 @@ func (a *githubLandedAPI) mergedEvents(ctx context.Context, reqs []eventRequest)
 		query := "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { " + strings.Join(parts, " ") + " } rateLimit { limit cost remaining resetAt } }"
 		data, _, err := a.s.executeGraphQL(ctx, query, map[string]interface{}{"owner": a.s.owner, "name": a.s.repo})
 		if err != nil {
-			return nil, fmt.Errorf("MergedEvent lookup failed: %w", err)
+			return nil, nil, fmt.Errorf("MergedEvent lookup failed: %w", err)
 		}
 		var body struct {
 			Repository map[string]*struct {
 				AssociatedPullRequests struct {
-					Nodes []gqlPRNode `json:"nodes"`
+					TotalCount int         `json:"totalCount"`
+					Nodes      []gqlPRNode `json:"nodes"`
 				} `json:"associatedPullRequests"`
 			} `json:"repository"`
 		}
 		if err := json.Unmarshal(data, &body); err != nil {
-			return nil, fmt.Errorf("failed to parse MergedEvent lookup: %w", err)
+			return nil, nil, fmt.Errorf("failed to parse MergedEvent lookup: %w", err)
 		}
 		for alias, obj := range body.Repository {
 			r, ok := owners[alias]
 			if !ok || obj == nil {
 				continue
 			}
+			if obj.AssociatedPullRequests.TotalCount > len(obj.AssociatedPullRequests.Nodes) {
+				overflow[r.Commit] = true
+			}
 			for _, n := range obj.AssociatedPullRequests.Nodes {
 				pr, err := n.toPR()
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				if pr.MergedAt == nil {
 					continue
@@ -639,7 +645,7 @@ func (a *githubLandedAPI) mergedEvents(ctx context.Context, reqs []eventRequest)
 			}
 		}
 	}
-	return out, nil
+	return out, overflow, nil
 }
 
 func (a *githubLandedAPI) resolveBranch(ctx context.Context, name string) (string, error) {

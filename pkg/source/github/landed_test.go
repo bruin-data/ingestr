@@ -713,3 +713,37 @@ func TestLandedRootCommitWithAServerTimeIsWritten(t *testing.T) {
 		t.Fatal("a root that landed before the interval must not be returned")
 	}
 }
+
+func TestLandedEventPRListOverflowUsesTheBulkList(t *testing.T) {
+	f := preMergeCommitRepo(false)
+	pr := f.events[oid("M1")][0].ghPR
+	delete(f.events, oid("M1"))
+	f.evOverflow = map[string]bool{oid("M1"): true}
+	f.extraBulk = []ghPR{pr}
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	expectExact(t, res, "M1", 120, srcPR)
+	if res.row(t, "M1").pr != 21 {
+		t.Fatalf("M1 pr=%d want 21 (found through the bulk list)", res.row(t, "M1").pr)
+	}
+}
+
+func TestLandedForcePushLandingNeverMovesARowBelowItsWindow(t *testing.T) {
+	f := baseRepo()
+	f.add("K", 60, "M0")
+	f.add("C", 61, "M0")
+	f.add("Z", 62, "M0")
+	f.add("P", 150, "K", "C")
+	f.pr(5, "P", "C", "P", 150, "main")
+	f.push("pr_merge", "R", "M0", 50)
+	f.push("force_push", "Z", "C", 110)
+	f.push("push", "M0", "K", 130)
+	f.head = oid("P")
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	expectWindow(t, res, "C", intp(130), 150, srcPR+windowSuffix)
+}

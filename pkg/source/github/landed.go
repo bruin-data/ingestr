@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -559,14 +560,57 @@ func (r *landedRun) eventPRs(ctx context.Context, c *ghCommit) ([]eventPR, error
 			break
 		}
 	}
-	got, err := r.api.mergedEvents(ctx, reqs)
+	got, overflow, err := r.api.mergedEvents(ctx, reqs)
 	if err != nil {
 		return nil, err
 	}
 	for _, q := range reqs {
-		r.events[q.Commit] = got[q.Commit]
+		evs := got[q.Commit]
+		if overflow[q.Commit] {
+			if evs, err = r.completeEventPRs(ctx, q, evs); err != nil {
+				return nil, err
+			}
+		}
+		r.events[q.Commit] = evs
 	}
 	return r.events[c.Oid], nil
+}
+
+// completeEventPRs adds, from the bulk merged-PR list, the PRs a commit's (or its second parent's)
+// PR list did not fit: those whose MergedEvent names the commit or its second parent, or whose head
+// is the second parent.
+func (r *landedRun) completeEventPRs(ctx context.Context, q eventRequest, evs []eventPR) ([]eventPR, error) {
+	c, err := r.api.commit(ctx, q.Commit)
+	if err != nil {
+		return nil, err
+	}
+	since := r.start
+	if floor := c.CommittedDate.Add(-24 * time.Hour); floor.Before(since) {
+		since = floor
+	}
+	prs, err := r.mergedPRsSince(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	have := map[int]bool{}
+	for _, ev := range evs {
+		have[ev.Number] = true
+	}
+	added := 0
+	for _, pr := range prs {
+		if pr.MergedAt == nil || have[pr.Number] {
+			continue
+		}
+		head2 := q.Parent2 != "" && pr.HeadOid == q.Parent2
+		if !head2 && !slices.Contains(pr.EventCommits, q.Commit) && (q.Parent2 == "" || !slices.Contains(pr.EventCommits, q.Parent2)) {
+			continue
+		}
+		have[pr.Number] = true
+		evs = append(evs, eventPR{ghPR: pr, FromParent2: head2})
+		added++
+	}
+	config.Debug("[GITHUB] PR list around %s overflowed the event query; bulk list added %d PRs", short(q.Commit), added)
+	return evs, nil
 }
 
 func containsString(list []string, s string) bool {
@@ -1270,6 +1314,9 @@ func (r *landedRun) applyForcePushLandings(ctx context.Context, rows []*landedRo
 	for _, row := range rows {
 		l, ok := reland[row.sha]
 		if !ok || (row.exact && !row.landed.Before(l.at.Add(-invariantTolerance))) {
+			continue
+		}
+		if !row.exact && row.min != nil && l.at.Before(*row.min) {
 			continue
 		}
 		at := l.at

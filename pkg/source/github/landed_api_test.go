@@ -324,14 +324,17 @@ func TestLandedAPIMergedEventsReadsBothSides(t *testing.T) {
 			map[string]interface{}{"commit": map[string]interface{}{"oid": oid("P2")}},
 		}}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{
-			"a0": map[string]interface{}{"associatedPullRequests": map[string]interface{}{"nodes": []interface{}{pr}}},
+			"a0": map[string]interface{}{"associatedPullRequests": map[string]interface{}{"totalCount": 7, "nodes": []interface{}{pr}}},
 			"b0": map[string]interface{}{"associatedPullRequests": map[string]interface{}{"nodes": []interface{}{}}},
 		}}})
 	}))
 	defer srv.Close()
-	got, err := newGithubLandedAPI(testSource(srv.URL)).mergedEvents(context.Background(), []eventRequest{{Commit: oid("M"), Parent2: oid("P2"), Own: true}})
+	got, overflow, err := newGithubLandedAPI(testSource(srv.URL)).mergedEvents(context.Background(), []eventRequest{{Commit: oid("M"), Parent2: oid("P2"), Own: true}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !overflow[oid("M")] {
+		t.Fatal("a PR list longer than the page (totalCount 7, 1 node) must be reported")
 	}
 	evs := got[oid("M")]
 	if len(evs) != 1 || !evs[0].FromParent2 || evs[0].MergeCommit != "" || len(evs[0].EventCommits) != 2 {

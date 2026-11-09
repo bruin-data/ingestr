@@ -29,6 +29,7 @@ type fakeRepo struct {
 	extraBulk   []ghPR
 	prCount     *int
 	failOn      map[string]error
+	evOverflow  map[string]bool
 	calls       map[string]int
 }
 
@@ -322,13 +323,15 @@ func (f *fakeRepo) checkSuites(_ context.Context, o string) ([]checkSuite, error
 	return f.suites[o], nil
 }
 
-func (f *fakeRepo) mergedEvents(_ context.Context, reqs []eventRequest) (map[string][]eventPR, error) {
+func (f *fakeRepo) mergedEvents(_ context.Context, reqs []eventRequest) (map[string][]eventPR, map[string]bool, error) {
 	f.calls["events"]++
 	out := map[string][]eventPR{}
+	overflow := map[string]bool{}
 	for _, r := range reqs {
 		out[r.Commit] = f.events[r.Commit]
+		overflow[r.Commit] = f.evOverflow[r.Commit]
 	}
-	return out, nil
+	return out, overflow, nil
 }
 
 func (f *fakeRepo) resolveBranch(_ context.Context, name string) (string, error) {
