@@ -26,6 +26,7 @@ type fakeRepo struct {
 	branches    map[string]string
 	compareCap  int
 	aheadBias   int
+	extraBulk   []ghPR
 	calls       map[string]int
 }
 
@@ -222,6 +223,29 @@ func (f *fakeRepo) compareStatus(_ context.Context, base, head string) (string, 
 	return f.status(base, head), nil
 }
 
+func (f *fakeRepo) compareCount(_ context.Context, base, head string) (string, int, error) {
+	f.calls["count"]++
+	st := f.status(base, head)
+	n := 0
+	ab := f.ancestors(base)
+	for o := range f.ancestors(head) {
+		if !ab[o] {
+			n++
+		}
+	}
+	return st, n, nil
+}
+
+func (f *fakeRepo) requestCount() int {
+	n := 0
+	for k, v := range f.calls {
+		if k != "head" {
+			n += v
+		}
+	}
+	return n
+}
+
 func (f *fakeRepo) listCommits(_ context.Context, sha string, page int) ([]map[string]interface{}, error) {
 	f.calls["list"]++
 	list := f.byDate(f.ancestors(sha))
@@ -284,7 +308,12 @@ func (f *fakeRepo) mergedPullRequests(context.Context, time.Time) ([]ghPR, error
 	for _, c := range f.commits {
 		out = append(out, c.prs...)
 	}
-	return out, nil
+	for _, evs := range f.events {
+		for _, ev := range evs {
+			out = append(out, ev.ghPR)
+		}
+	}
+	return append(out, f.extraBulk...), nil
 }
 
 type runResult struct {

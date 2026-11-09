@@ -517,8 +517,8 @@ func TestLandedTimeViolationWidensInsteadOfFailing(t *testing.T) {
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if !res.hasWarning("I4 violation") {
-		t.Fatalf("warnings=%v, want an I4 violation", res.warnings)
+	if !res.hasWarning("I4 violation") || !res.hasWarning("I9 warning") {
+		t.Fatalf("warnings=%v, want an I4 violation and an I9 count warning", res.warnings)
 	}
 	for _, name := range []string{"D1", "D2"} {
 		r := res.row(t, name)
@@ -569,4 +569,77 @@ func (o *overflowAPI) commit(ctx context.Context, oidStr string) (*ghCommit, err
 	hidden.PRs = nil
 	hidden.PRsTotal = 11
 	return &hidden, nil
+}
+
+func buttonMergeRepo() *fakeRepo {
+	f := baseRepo()
+	f.add("X1", 110, "M0")
+	m1 := f.add("M1", 120, "M0", "X1")
+	m1.signed = true
+	f.pr(1, "M1", "X1", "M1", 120, "main")
+	f.push("pr_merge", "R", "M0", 50)
+	f.push("pr_merge", "M0", "M1", 120)
+	f.head = oid("M1")
+	return f
+}
+
+func TestLandedSetChecksPassOnConsistentData(t *testing.T) {
+	f := buttonMergeRepo()
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if res.hasWarning("I6") || res.hasWarning("I9") {
+		t.Fatalf("unexpected set-check warning: %v", res.warnings)
+	}
+	if f.calls["bulk"] != 1 {
+		t.Fatalf("bulk PR listings=%d, want 1 for I6", f.calls["bulk"])
+	}
+	if f.calls["count"] != 1 {
+		t.Fatalf("compare counts=%d, want 1 for I9 (head M0 at the start, M1 at the end)", f.calls["count"])
+	}
+}
+
+func TestLandedI6WarnsAndStillWritesRows(t *testing.T) {
+	f := buttonMergeRepo()
+	late, inside := at(150), at(130)
+	f.extraBulk = []ghPR{
+		{Number: 14, MergedAt: &inside, BaseRef: "main", HeadOid: oid("H14"), MergeCommit: oid("M0")},
+		{Number: 99, MergedAt: &late, BaseRef: "main", HeadOid: oid("H99"), MergeCommit: oid("M1")},
+		{Number: 98, MergedAt: &late, BaseRef: "release", HeadOid: oid("H98"), MergeCommit: oid("M0")},
+	}
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatalf("I6 must not fail the run: %v", res.err)
+	}
+	if !res.hasWarning("I6 warning: PR #14 merged 2026-11-01T02:10:00Z into main, its commit " + short(oid("M0")) + " is on main but not in the output") {
+		t.Fatalf("warnings=%v, want the PR #14 warning", res.warnings)
+	}
+	if !res.hasWarning("I6 warning: PR #99 merged 2026-11-01T02:30:00Z, commit " + short(oid("M1"))) {
+		t.Fatalf("warnings=%v, want the PR #99 window warning", res.warnings)
+	}
+	if res.hasWarning("PR #98") || res.hasWarning("PR #1 ") {
+		t.Fatalf("PRs into other branches and consistent PRs must not warn: %v", res.warnings)
+	}
+	expectExact(t, res, "M1", 120, srcPR)
+	expectExact(t, res, "X1", 120, srcPR)
+}
+
+func TestLandedI6ChecksOnlyTheUpperBoundForPushDetectedPRs(t *testing.T) {
+	f := noActivity(pushDetectedRepo())
+	res := runFake(t, f, at(iStart), at(iEnd))
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if res.hasWarning("I6") {
+		t.Fatalf("a push-detected PR with mergedAt at the window max must not warn: %v", res.warnings)
+	}
+
+	f2 := noActivity(pushDetectedRepo())
+	early := at(40)
+	f2.extraBulk = []ghPR{{Number: 77, MergedAt: &early, BaseRef: "main", HeadOid: oid("P2"), MergeCommit: oid("P2")}}
+	res2 := runFake(t, f2, at(30), at(iEnd))
+	if !res2.hasWarning("I6 warning: PR #77") || !res2.hasWarning("only mergedAt >= min is checked") {
+		t.Fatalf("warnings=%v, want the push-detected PR #77 below the window min", res2.warnings)
+	}
 }

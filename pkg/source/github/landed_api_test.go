@@ -133,6 +133,15 @@ func TestGithubReadCommitsEndToEnd(t *testing.T) {
 			body, _ := io.ReadAll(r.Body)
 			var req graphQLRequest
 			_ = json.Unmarshal(body, &req)
+			if strings.Contains(req.Query, "pullRequests(") {
+				pr := gqlPR(2, "2026-11-01T02:00:00Z", "main", sha("X1"), sha("M1"))
+				pr["updatedAt"] = "2026-11-01T02:00:00Z"
+				pr["timelineItems"] = map[string]interface{}{"nodes": []interface{}{map[string]interface{}{"commit": map[string]interface{}{"oid": sha("M1")}}}}
+				writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequests": map[string]interface{}{
+					"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": "p1"}, "nodes": []interface{}{pr},
+				}}}})
+				return
+			}
 			if !strings.Contains(req.Query, "history(") {
 				t.Errorf("unexpected GraphQL query %s", req.Query)
 			}

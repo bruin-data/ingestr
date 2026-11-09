@@ -82,6 +82,8 @@ type landedAPI interface {
 	pageMates(oid string) []*ghCommit
 	compare(ctx context.Context, base, head string, page int) (*compareResult, error)
 	compareStatus(ctx context.Context, base, head string) (string, error)
+	compareCount(ctx context.Context, base, head string) (string, int, error)
+	requestCount() int
 	listCommits(ctx context.Context, sha string, page int) ([]map[string]interface{}, error)
 	restCommit(ctx context.Context, sha string) (map[string]interface{}, error)
 	activity(ctx context.Context, query url.Values, stop time.Time) ([]activityEntry, error)
@@ -132,7 +134,7 @@ query($owner: String!, $name: String!, $page_after: String) {
   repository(owner: $owner, name: $name) {
     pullRequests(first: 100, after: $page_after, states: MERGED, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
-      nodes { number updatedAt mergedAt baseRefName headRefOid mergeCommit { oid } }
+      nodes { number updatedAt mergedAt baseRefName headRefOid mergeCommit { oid } timelineItems(itemTypes: [MERGED_EVENT], first: 10) { nodes { ... on MergedEvent { commit { oid } } } } }
     }
   }
   rateLimit { limit cost remaining resetAt }
@@ -376,20 +378,31 @@ func (a *githubLandedAPI) compare(ctx context.Context, base, head string, page i
 // compareStatus is compare's status alone ("ahead", "behind", "identical", "diverged"); "not_found"
 // when either commit is unknown or the histories are unrelated.
 func (a *githubLandedAPI) compareStatus(ctx context.Context, base, head string) (string, error) {
+	st, _, err := a.compareCount(ctx, base, head)
+	return st, err
+}
+
+// compareCount is compare's status and ahead_by, without the commit list.
+func (a *githubLandedAPI) compareCount(ctx context.Context, base, head string) (string, int, error) {
 	var body struct {
-		Status string `json:"status"`
+		Status  string `json:"status"`
+		AheadBy int    `json:"ahead_by"`
 	}
 	resp, err := a.s.restGet(ctx, a.repoPath(fmt.Sprintf("/compare/%s...%s?per_page=1", base, head)), &body)
 	if err != nil {
-		return "", fmt.Errorf("compare %s...%s: %w", short(base), short(head), err)
+		return "", 0, fmt.Errorf("compare %s...%s: %w", short(base), short(head), err)
 	}
 	if resp.StatusCode() == http.StatusNotFound {
-		return "not_found", nil
+		return "not_found", 0, nil
 	}
 	if !resp.IsSuccess() {
-		return "", fmt.Errorf("compare %s...%s failed with status %d: %s", short(base), short(head), resp.StatusCode(), resp.String())
+		return "", 0, fmt.Errorf("compare %s...%s failed with status %d: %s", short(base), short(head), resp.StatusCode(), resp.String())
 	}
-	return body.Status, nil
+	return body.Status, body.AheadBy, nil
+}
+
+func (a *githubLandedAPI) requestCount() int {
+	return a.s.requests
 }
 
 func (a *githubLandedAPI) restCommit(ctx context.Context, sha string) (map[string]interface{}, error) {

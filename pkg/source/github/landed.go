@@ -108,6 +108,7 @@ type landedRun struct {
 	events      map[string][]eventPR
 	bulkPRs     map[string][]ghPR
 	bulkSince   *time.Time
+	bulkList    []ghPR
 	relanded    map[string]bool
 	ruleCs      map[string]trustInfo
 	steps       []*chainStep
@@ -180,6 +181,8 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 
 	all := append(rows, removed...)
 	r.checkTimeInvariants(all)
+	r.checkI6(ctx, all)
+	r.checkI9(ctx, all)
 
 	var out []*landedRow
 	for _, row := range all {
@@ -415,18 +418,8 @@ func (r *landedRun) prsOf(ctx context.Context, c *ghCommit) ([]ghPR, error) {
 	if floor := c.CommittedDate.Add(-24 * time.Hour); floor.Before(since) {
 		since = floor
 	}
-	if r.bulkSince == nil || since.Before(*r.bulkSince) {
-		prs, err := r.api.mergedPullRequests(ctx, since)
-		if err != nil {
-			return nil, err
-		}
-		r.bulkPRs = map[string][]ghPR{}
-		for _, pr := range prs {
-			if pr.MergeCommit != "" {
-				r.bulkPRs[pr.MergeCommit] = append(r.bulkPRs[pr.MergeCommit], pr)
-			}
-		}
-		r.bulkSince = &since
+	if _, err := r.mergedPRsSince(ctx, since); err != nil {
+		return nil, err
 	}
 	out := append([]ghPR(nil), c.PRs...)
 	have := map[int]bool{}
@@ -440,6 +433,27 @@ func (r *landedRun) prsOf(ctx context.Context, c *ghCommit) ([]ghPR, error) {
 	}
 	config.Debug("[GITHUB] %s is in %d PRs (page lists %d); bulk list added %d", short(c.Oid), c.PRsTotal, len(c.PRs), len(out)-len(c.PRs))
 	return out, nil
+}
+
+// mergedPRsSince is the bulk list of merged PRs updated since the given time, fetched once per run
+// and again only when an older start is needed.
+func (r *landedRun) mergedPRsSince(ctx context.Context, since time.Time) ([]ghPR, error) {
+	if r.bulkSince != nil && !since.Before(*r.bulkSince) {
+		return r.bulkList, nil
+	}
+	prs, err := r.api.mergedPullRequests(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	r.bulkList = prs
+	r.bulkPRs = map[string][]ghPR{}
+	for _, pr := range prs {
+		if pr.MergeCommit != "" {
+			r.bulkPRs[pr.MergeCommit] = append(r.bulkPRs[pr.MergeCommit], pr)
+		}
+	}
+	r.bulkSince = &since
+	return prs, nil
 }
 
 func prHeadIsStep(c *ghCommit) bool {

@@ -151,6 +151,7 @@ type GithubSource struct {
 	apiKey        string
 	restClient    *ingestrhttp.Client
 	graphqlClient *ingestrhttp.Client
+	requests      int
 }
 
 func NewGitHubSource() *GithubSource {
@@ -603,6 +604,7 @@ func (s *GithubSource) executeGraphQL(ctx context.Context, query string, variabl
 
 	config.Debug("[GITHUB] Executing GraphQL query")
 
+	s.requests++
 	httpResp, err := s.graphqlClient.R(ctx).
 		SetHeader("Content-Type", "application/json").
 		SetBody(reqBody).
@@ -1360,6 +1362,7 @@ func (s *GithubSource) restGet(ctx context.Context, path string, result interfac
 	if result != nil {
 		req.SetResult(result)
 	}
+	s.requests++
 	return req.Get(path)
 }
 
