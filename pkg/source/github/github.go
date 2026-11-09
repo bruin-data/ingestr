@@ -70,8 +70,17 @@ var graphQLTables = map[string]bool{
 	"stargazers":    true,
 }
 
+// The fields GitHub's OpenAPI marks as required on every repository list response; the rest are inferred.
 var repositoryFields = []schema.Column{
 	{Name: "id", DataType: schema.TypeInt64, Nullable: false},
+	{Name: "node_id", DataType: schema.TypeString, Nullable: true},
+	{Name: "name", DataType: schema.TypeString, Nullable: true},
+	{Name: "full_name", DataType: schema.TypeString, Nullable: true},
+	{Name: "owner", DataType: schema.TypeJSON, Nullable: true},
+	{Name: "private", DataType: schema.TypeBoolean, Nullable: true},
+	{Name: "fork", DataType: schema.TypeBoolean, Nullable: true},
+	{Name: "html_url", DataType: schema.TypeString, Nullable: true},
+	{Name: "description", DataType: schema.TypeString, Nullable: true},
 }
 
 var issueFields = []schema.Column{
@@ -198,9 +207,9 @@ func (s *GithubSource) Connect(ctx context.Context, uri string) error {
 	if s.apiKey != "" {
 		restOpts = append(restOpts, ingestrhttp.WithAuth(ingestrhttp.NewBearerAuth(s.apiKey)))
 		graphqlOpts = append(graphqlOpts, ingestrhttp.WithAuth(ingestrhttp.NewBearerAuth(s.apiKey)))
-		config.Debug("[GITHUB] Connected to repo: %s/%s (authenticated)", s.owner, s.repo)
+		config.Debug("[GITHUB] Connected to %s (authenticated)", s.target())
 	} else {
-		config.Debug("[GITHUB] Connected to repo: %s/%s (unauthenticated - 60 requests/hour limit)", s.owner, s.repo)
+		config.Debug("[GITHUB] Connected to %s (unauthenticated - 60 requests/hour limit)", s.target())
 	}
 
 	s.restClient = ingestrhttp.New(restOpts...)
@@ -234,9 +243,9 @@ func (s *GithubSource) githubRetryStrategy(resp *ingestrhttp.Response, _ error) 
 		return githubBackoff(resp), nil
 	}
 	if kind == notRateLimited {
-		output.Warnf("\nWarning: GitHub answered %d for %s/%s and asked to retry later, waiting %v before retrying\n", resp.StatusCode(), s.owner, s.repo, roundWait(wait))
+		output.Warnf("\nWarning: GitHub answered %d for %s and asked to retry later, waiting %v before retrying\n", resp.StatusCode(), s.target(), roundWait(wait))
 	} else {
-		output.Warnf("\nWarning: GitHub rate limit exceeded for %s/%s, waiting %v before retrying\n", s.owner, s.repo, roundWait(wait))
+		output.Warnf("\nWarning: GitHub rate limit exceeded for %s, waiting %v before retrying\n", s.target(), roundWait(wait))
 	}
 	return wait, nil
 }
@@ -375,6 +384,14 @@ func retryAttempt(resp *ingestrhttp.Response) int {
 
 func githubBackoff(resp *ingestrhttp.Response) time.Duration {
 	return min(retryWait<<(retryAttempt(resp)-1), backoffMax)
+}
+
+// target names what the run reads: owner/repo, or just the owner for owner-level tables.
+func (s *GithubSource) target() string {
+	if s.repo == "" {
+		return s.owner
+	}
+	return s.owner + "/" + s.repo
 }
 
 func parseGitHubURI(uri string) (owner, repo, apiKey string, err error) {
@@ -1053,10 +1070,11 @@ func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions,
 	}
 
 	path := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(s.owner), url.PathEscape(s.repo), params.Encode())
-	return s.paginateREST(ctx, opts, results, path, "", "commits", commitFields, func(c map[string]interface{}) bool {
+	_, err := s.paginateREST(ctx, opts, results, path, "", "commits", commitFields, func(c map[string]interface{}) bool {
 		c["committed_at"] = committerDate(c)
 		return true
 	})
+	return err
 }
 
 type restListing struct {
@@ -1076,6 +1094,7 @@ func (s *GithubSource) readRepositories(ctx context.Context, opts source.ReadOpt
 	}
 
 	seen := make(map[interface{}]bool)
+	sent := 0
 	for _, l := range listings {
 		filter := l.keep
 		keep := func(item map[string]interface{}) bool {
@@ -1089,9 +1108,18 @@ func (s *GithubSource) readRepositories(ctx context.Context, opts source.ReadOpt
 			seen[id] = true
 			return true
 		}
-		if err := s.paginateREST(ctx, opts, results, l.path, l.itemsKey, "repositories", repositoryFields, keep); err != nil {
+		listingOpts := opts
+		if opts.Limit > 0 {
+			listingOpts.Limit = opts.Limit - sent
+			if listingOpts.Limit <= 0 {
+				break
+			}
+		}
+		n, err := s.paginateREST(ctx, listingOpts, results, l.path, l.itemsKey, "repositories", repositoryFields, keep)
+		if err != nil {
 			return err
 		}
+		sent += n
 	}
 	return nil
 }
@@ -1122,7 +1150,10 @@ func (s *GithubSource) repositoryListings(ctx context.Context) ([]restListing, e
 
 	login := ""
 	if s.apiKey != "" {
-		login = s.authenticatedLogin(ctx)
+		login, err = s.authenticatedLogin(ctx)
+		if err != nil {
+			return nil, err
+		}
 		if login != "" && strings.EqualFold(login, owner.Login) {
 			params.Set("affiliation", "owner")
 			params.Set("visibility", "all")
@@ -1141,7 +1172,7 @@ func (s *GithubSource) repositoryListings(ctx context.Context) ([]restListing, e
 		if installation != nil {
 			listings = append(listings, *installation)
 		} else {
-			config.Debug("[GITHUB] Could not resolve the authenticated user, listing public repositories only")
+			output.Warnf("\nWarning: the GitHub token has no user and no app installation, listing only the public repositories of %s\n", owner.Login)
 		}
 	}
 	return listings, nil
@@ -1155,7 +1186,10 @@ func (s *GithubSource) installationListing(ctx context.Context, owner string) (*
 		return nil, fmt.Errorf("failed to probe github installation repositories: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, nil
+		if tokenLacksAccess(resp) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to probe github installation repositories with status %d: %s", resp.StatusCode(), resp.String())
 	}
 	config.Debug("[GITHUB] Installation token detected, adding the installation's repositories owned by %s", owner)
 	return &restListing{
@@ -1170,16 +1204,35 @@ func (s *GithubSource) installationListing(ctx context.Context, owner string) (*
 }
 
 // authenticatedLogin returns the token's user login, or "" when the token has no user
-// (e.g. a GitHub App installation token).
-func (s *GithubSource) authenticatedLogin(ctx context.Context) string {
+// (e.g. a GitHub App installation token). Any other failure is an error, so an outage can't
+// shrink the table to public repositories.
+func (s *GithubSource) authenticatedLogin(ctx context.Context) (string, error) {
 	var user struct {
 		Login string `json:"login"`
 	}
 	resp, err := s.restClient.R(ctx).SetResult(&user).Get("/user")
-	if err != nil || !resp.IsSuccess() {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve the authenticated github user: %w", err)
 	}
-	return user.Login
+	if resp.IsSuccess() {
+		return user.Login, nil
+	}
+	if tokenLacksAccess(resp) {
+		return "", nil
+	}
+	return "", fmt.Errorf("failed to resolve the authenticated github user with status %d: %s", resp.StatusCode(), resp.String())
+}
+
+// tokenLacksAccess reports a 401, or a 403 that is not a rate limit: the token can't use the
+// endpoint at all, as opposed to GitHub failing or throttling.
+func tokenLacksAccess(resp *ingestrhttp.Response) bool {
+	switch resp.StatusCode() {
+	case http.StatusUnauthorized:
+		return true
+	case http.StatusForbidden:
+		return githubRateLimitKind(resp) == notRateLimited
+	}
+	return false
 }
 
 func (s *GithubSource) paginateREST(
@@ -1189,34 +1242,34 @@ func (s *GithubSource) paginateREST(
 	path, itemsKey, table string,
 	fields []schema.Column,
 	keep func(map[string]interface{}) bool,
-) error {
+) (int, error) {
 	nextURL := path
 	totalSent := 0
 
 	for nextURL != "" {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return totalSent, ctx.Err()
 		default:
 		}
 
 		httpResp, err := s.restClient.R(ctx).Get(nextURL)
 		if err != nil {
-			return fmt.Errorf("failed to fetch %s: %w", table, err)
+			return totalSent, fmt.Errorf("failed to fetch %s: %w", table, err)
 		}
 
-		if isEmptyRepository(httpResp) {
-			config.Debug("[GITHUB] %s/%s has no commits yet", s.owner, s.repo)
+		if table == "commits" && isEmptyRepository(httpResp) {
+			config.Debug("[GITHUB] %s has no commits yet", s.target())
 			break
 		}
 
 		if !httpResp.IsSuccess() {
-			return fmt.Errorf("failed to fetch %s with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
+			return totalSent, fmt.Errorf("failed to fetch %s with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
 		}
 
 		items, err := decodeRESTItems(httpResp.Body(), itemsKey)
 		if err != nil {
-			return fmt.Errorf("failed to decode %s: %w", table, err)
+			return totalSent, fmt.Errorf("failed to decode %s: %w", table, err)
 		}
 		config.Debug("[GITHUB] Got %d %s, requests remaining: %s", len(items), table, httpResp.Header().Get("x-ratelimit-remaining"))
 
@@ -1256,7 +1309,7 @@ func (s *GithubSource) paginateREST(
 				rowBytes := arrowconv.RowBytes(item)
 				if len(batch) > 0 && batchBytes+rowBytes > opts.MaxBatchBytes {
 					if err := flush(); err != nil {
-						return err
+						return totalSent, err
 					}
 				}
 				batchBytes += rowBytes
@@ -1264,7 +1317,7 @@ func (s *GithubSource) paginateREST(
 			batch = append(batch, item)
 		}
 		if err := flush(); err != nil {
-			return err
+			return totalSent, err
 		}
 
 		if opts.Limit > 0 && totalSent >= opts.Limit {
@@ -1274,7 +1327,7 @@ func (s *GithubSource) paginateREST(
 	}
 
 	config.Debug("[GITHUB] Finished reading %s, total records: %d", table, totalSent)
-	return nil
+	return totalSent, nil
 }
 
 // decodeRESTItems reads a REST list page: a JSON array, or the array under itemsKey for

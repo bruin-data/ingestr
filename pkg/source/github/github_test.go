@@ -982,3 +982,206 @@ func TestGithubReadRepositoriesInstallationToken(t *testing.T) {
 		})
 	}
 }
+
+func repoJSON(id int, owner string, private bool) string {
+	return fmt.Sprintf(`{"id":%d,"node_id":"R%d","name":"r%d","full_name":"%s/r%d","owner":{"login":%q},"private":%t,"fork":false,"html_url":"https://github.com/%s/r%d","description":null}`, id, id, id, owner, id, owner, private, owner, id)
+}
+
+func repoList(repos ...string) string { return "[" + strings.Join(repos, ",") + "]" }
+
+func connectOwnerToFake(t *testing.T, f *fakeGitHub) (*GithubSource, *httptest.Server) {
+	t.Helper()
+	s, srv := connectToFake(t, f)
+	s.repo = ""
+	return s, srv
+}
+
+func readRepositoryIDs(t *testing.T, s *GithubSource, opts source.ReadOptions) ([]int64, []string, error) {
+	t.Helper()
+	results, err := s.read(context.Background(), "repositories", opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ids []int64
+	var columns []string
+	var readErr error
+	for res := range results {
+		if res.Err != nil {
+			readErr = res.Err
+			continue
+		}
+		if columns == nil {
+			for _, f := range res.Batch.Schema().Fields() {
+				columns = append(columns, f.Name)
+			}
+		}
+		col := res.Batch.Column(res.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+		res.Batch.Release()
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, columns, readErr
+}
+
+var (
+	ownerIsUser    = cannedResponse{200, nil, `{"login":"o","type":"User"}`}
+	tokenUserIsO   = cannedResponse{200, nil, `{"login":"o"}`}
+	noUserForToken = cannedResponse{403, nil, `{"message":"Resource not accessible by integration"}`}
+)
+
+func TestGithubRepositoriesQuotaRunsOutMidRun(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeGitHub{}
+	s, srv := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{
+		ownerIsUser,
+		tokenUserIsO,
+		{200, map[string]string{"Link": "<" + srv.URL + `/user/repos?page=2>; rel="next"`}, repoList(repoJSON(1, "o", false))},
+		restQuotaSpent(),
+		{200, nil, repoList(repoJSON(2, "o", true))},
+	}
+
+	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err != nil || fmt.Sprint(ids) != "[1 2]" {
+		t.Fatalf("ids=%v err=%v, want both repositories", ids, err)
+	}
+	if len(f.restPaths) != 5 || f.restPaths[3] != f.restPaths[4] {
+		t.Fatalf("rest requests=%q, want page 2 retried", f.restPaths)
+	}
+	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o, waiting") {
+		t.Fatalf("warning should name the owner alone, output: %q", logs.String())
+	}
+}
+
+func TestGithubRepositoriesUserLookupFailureStopsTheRun(t *testing.T) {
+	cases := []struct {
+		name string
+		user cannedResponse
+	}{
+		{"server keeps failing", cannedResponse{502, nil, `{"message":"Bad Gateway"}`}},
+		{"secondary limit never lifts", cannedResponse{403, nil, `{"message":"You have exceeded a secondary rate limit"}`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captureOutput(t)
+			f := &fakeGitHub{}
+			s, _ := connectOwnerToFake(t, f)
+			f.rest = []cannedResponse{ownerIsUser, tc.user}
+
+			ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+			if err == nil || !strings.Contains(err.Error(), "failed to resolve the authenticated github user") {
+				t.Fatalf("ids=%v err=%v, want the run to fail instead of listing public repositories", ids, err)
+			}
+			for _, p := range f.restPaths {
+				if strings.Contains(p, "/repos") {
+					t.Fatalf("listed repositories after /user failed: %q", f.restPaths)
+				}
+			}
+		})
+	}
+}
+
+func TestGithubRepositoriesInstallationProbeFailureStopsTheRun(t *testing.T) {
+	captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{ownerIsUser, noUserForToken, {502, nil, `{"message":"Bad Gateway"}`}}
+
+	_, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "failed to probe github installation repositories") {
+		t.Fatalf("err=%v, want the probe failure to stop the run", err)
+	}
+}
+
+func TestGithubRepositoriesAppTokenIsNotRetried(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{
+		ownerIsUser,
+		noUserForToken,
+		{200, nil, `{"total_count":2,"repositories":[` + repoJSON(2, "o", false) + `]}`},
+		{200, nil, repoList(repoJSON(1, "o", false), repoJSON(2, "o", false))},
+		{200, nil, `{"total_count":2,"repositories":[` + repoJSON(2, "o", false) + "," + repoJSON(3, "o", true) + `]}`},
+	}
+
+	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err != nil || fmt.Sprint(ids) != "[1 2 3]" {
+		t.Fatalf("ids=%v err=%v, want public and installation repositories once each", ids, err)
+	}
+	want := []string{"/users/o", "/user", "/installation/repositories?per_page=1", "/users/o/repos?per_page=100&type=owner", "/installation/repositories?per_page=100"}
+	if fmt.Sprint(f.restPaths) != fmt.Sprint(want) {
+		t.Fatalf("rest requests=%q, want %q", f.restPaths, want)
+	}
+	if strings.Contains(logs.String(), "Warning") {
+		t.Fatalf("app token path should not warn, output: %q", logs.String())
+	}
+}
+
+func TestGithubRepositoriesTokenWithoutUserOrInstallationWarns(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{
+		ownerIsUser,
+		noUserForToken,
+		{403, nil, `{"message":"You must authenticate with an installation access token in order to list repositories for an installation."}`},
+		{200, nil, repoList(repoJSON(1, "o", false))},
+	}
+
+	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err != nil || fmt.Sprint(ids) != "[1]" {
+		t.Fatalf("ids=%v err=%v, want the public repository", ids, err)
+	}
+	if !strings.Contains(logs.String(), "listing only the public repositories of o") {
+		t.Fatalf("missing public-only warning, output: %q", logs.String())
+	}
+}
+
+func TestGithubRepositoriesLimitSpansListings(t *testing.T) {
+	captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{
+		ownerIsUser,
+		noUserForToken,
+		{200, nil, `{"total_count":1,"repositories":[` + repoJSON(2, "o", true) + `]}`},
+		{200, nil, repoList(repoJSON(1, "o", false))},
+		{200, nil, `{"total_count":1,"repositories":[` + repoJSON(2, "o", true) + `]}`},
+	}
+
+	ids, _, err := readRepositoryIDs(t, s, source.ReadOptions{Limit: 1})
+	if err != nil || fmt.Sprint(ids) != "[1]" {
+		t.Fatalf("ids=%v err=%v, want exactly one row", ids, err)
+	}
+}
+
+func TestGithubRepositoriesKeepsDeclaredColumnsWhenNull(t *testing.T) {
+	captureOutput(t)
+	f := &fakeGitHub{}
+	s, _ := connectOwnerToFake(t, f)
+	f.rest = []cannedResponse{ownerIsUser, tokenUserIsO, {200, nil, `[{"id":1}]`}}
+
+	_, columns, err := readRepositoryIDs(t, s, source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"id", "node_id", "name", "full_name", "owner", "private", "fork", "html_url", "description"}
+	got := "," + strings.Join(columns, ",") + ","
+	for _, c := range want {
+		if !strings.Contains(got, ","+c+",") {
+			t.Fatalf("column %q missing from %q", c, columns)
+		}
+	}
+
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "repositories"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sch, err := table.GetSchema(context.Background())
+	if err != nil || len(sch.Columns) != len(want) {
+		t.Fatalf("schema=%v err=%v, want the %d declared columns for an owner without repositories", sch, err, len(want))
+	}
+}
