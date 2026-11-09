@@ -14,14 +14,17 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
-	"github.com/bruin-data/ingestr/pkg/progress"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
+// Variables rather than constants so tests can point the source at a local server.
+var (
+	restApiBaseUrl = "https://api.github.com"
+	graphqlBaseUrl = "https://api.github.com/graphql"
+)
+
 const (
-	restApiBaseUrl   = "https://api.github.com"
-	graphqlBaseUrl   = "https://api.github.com/graphql"
 	maxPageSize      = 100 // GitHub GraphQL allows up to 100
 	defaultBatchSize = 50
 	rateLimit        = 10
@@ -140,13 +143,17 @@ func (s *GithubSource) Connect(ctx context.Context, uri string) error {
 		ingestrhttp.WithRateLimiter(rateLimit, rateLimitBurst),
 		ingestrhttp.WithDebug(config.DebugMode),
 	}
+	restOpts = append(restOpts, retryOptions(owner, repo)...)
 
 	graphqlOpts := []ingestrhttp.Option{
 		ingestrhttp.WithBaseURL(graphqlBaseUrl),
 		ingestrhttp.WithTimeout(60 * time.Second),
 		ingestrhttp.WithRateLimiter(rateLimit, rateLimitBurst),
 		ingestrhttp.WithDebug(config.DebugMode),
+		// GraphQL queries are POSTs but read-only; resty skips retries for POST otherwise.
+		ingestrhttp.WithAllowNonIdempotentRetry(),
 	}
+	graphqlOpts = append(graphqlOpts, retryOptions(owner, repo)...)
 
 	// Add auth if access_token is provided (optional - unauthenticated has 60 req/hour limit)
 	if s.apiKey != "" {
@@ -343,6 +350,7 @@ type graphQLResponse struct {
 }
 
 type graphQLError struct {
+	Type    string `json:"type"`
 	Message string `json:"message"`
 }
 
@@ -361,65 +369,23 @@ func (s *GithubSource) executeGraphQL(ctx context.Context, query string, variabl
 
 	config.Debug("[GITHUB] Executing GraphQL query")
 
-	var resp graphQLResponse
 	httpResp, err := s.graphqlClient.R(ctx).
 		SetHeader("Content-Type", "application/json").
 		SetBody(reqBody).
-		SetResult(&resp).
 		Post("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("graphql request failed: %w", err)
 	}
 
 	if !httpResp.IsSuccess() {
-		// Check if it's a rate limit error (403)
-		if httpResp.StatusCode() == 403 {
-			// Check response body for rate limit message (lazy evaluation)
-			responseBody := httpResp.String()
-			isRateLimitError := strings.Contains(responseBody, "rate limit exceeded") ||
-				strings.Contains(responseBody, "API rate limit")
-
-			if isRateLimitError {
-				// Try to extract rate limit info from headers
-				resetHeader := httpResp.Header().Get("x-ratelimit-reset")
-				config.Debug("[GITHUB] Rate limit 403 error - reset header: %s", resetHeader)
-
-				var waitTime time.Duration
-				if resetHeader != "" {
-					if resetUnix, err := strconv.ParseInt(resetHeader, 10, 64); err == nil {
-						resetTime := time.Unix(resetUnix, 0)
-						waitTime = time.Until(resetTime)
-						config.Debug("[GITHUB] Reset time: %v, wait time: %v", resetTime, waitTime)
-					}
-				}
-
-				// If no valid reset time from header, use default 1 hour wait
-				if waitTime <= 0 {
-					waitTime = 1 * time.Hour
-					config.Debug("[GITHUB] No valid reset time from header, using default 1 hour wait")
-				}
-
-				// Cap wait time at 1 hour for safety
-				maxWait := 1 * time.Hour
-				if waitTime > maxWait {
-					waitTime = maxWait
-				}
-
-				config.Debug("[GITHUB] Rate limit exceeded, waiting %v for reset before retrying", waitTime.Round(time.Second))
-				progress.UpdateSpinnerMessage(ctx, fmt.Sprintf("Rate limit exceeded, waiting %v for reset...", waitTime.Round(time.Second)))
-
-				// Wait for rate limit reset
-				select {
-				case <-ctx.Done():
-					return nil, nil, ctx.Err()
-				case <-time.After(waitTime + time.Second):
-					config.Debug("[GITHUB] Rate limit reset complete, retrying request")
-					progress.UpdateSpinnerMessage(ctx, "Retrying after rate limit reset...")
-					return s.executeGraphQL(ctx, query, variables)
-				}
-			}
-		}
 		return nil, nil, fmt.Errorf("graphql request failed with status %d: %s", httpResp.StatusCode(), httpResp.String())
+	}
+
+	// Decoded here rather than via SetResult: the rate-limit retry condition reads the body,
+	// and a result reused across retries would keep a rate-limited attempt's errors.
+	var resp graphQLResponse
+	if err := httpResp.JSON(&resp); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode graphql response: %w", err)
 	}
 
 	if len(resp.Errors) > 0 {

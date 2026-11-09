@@ -54,7 +54,9 @@ To connect to GitHub, you need to create a Personal Access Token (PAT).
 5. Click **Generate token**
 6. Copy the token (starts with `github_pat_`)
 
-> **Note**: The access token is optional for public repositories, but recommended to avoid rate limits.
+> **Note**: The access token is optional for public repositories, but recommended to avoid rate limits: unauthenticated requests are limited to 60 per hour per IP, authenticated ones to 5,000 per hour.
+>
+> When GitHub reports that a rate limit is exceeded, ingestr waits for the time GitHub asks for (until the limit resets, at most one hour) and retries, printing a warning with the wait time.
 
 Once you have your access token, let's say your access token is `ghp_test_1234`, the owner is `max`, and the name of the repository is `test_example`. Here is a sample command that will copy the data from GitHub into a DuckDB database:
 
