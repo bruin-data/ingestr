@@ -22,16 +22,17 @@ import (
 )
 
 const (
-	apiBaseURL         = "https://api.searchads.apple.com/api/v5"
+	apiBaseURL         = "https://api.ads.apple.com/v1"
 	oauthTokenURL      = "https://appleid.apple.com/auth/oauth2/token"
 	jwtAudience        = "https://appleid.apple.com"
 	jwtExpDuration     = 30 * 24 * time.Hour
 	accessTokenSkew    = 5 * time.Minute
-	maxPageSize        = 1000
+	maxPageSize        = 1000 // query endpoints reject pageSize > 1000
+	reportPageSize     = 1000 // report endpoints allow up to 5000
 	rateLimit          = 10.0 // Apple returns actual limits in X-Rate-Limit header; 10 req/s is a conservative default
 	rateLimitBurst     = 5
 	oauthScope         = "searchadsorg"
-	orgContextHeader   = "X-AP-Context"
+	contextHeader      = "X-AP-Context"
 	defaultParallelism = 5
 )
 
@@ -44,6 +45,8 @@ var supportedTables = []string{
 	"ad_group_reports",
 	"ad_reports",
 }
+
+const queryTimeLayout = "2006-01-02T15:04:05.000"
 
 type AppleAdsSource struct {
 	clientID    string
@@ -90,7 +93,7 @@ func (s *AppleAdsSource) Connect(ctx context.Context, uri string) error {
 		httpclient.WithAuth(httpclient.NewBearerAuth(s.accessToken)),
 		httpclient.WithDebug(config.DebugMode),
 	)
-	config.Debug("[APPLEADS] Connected successfully (orgIds=%v)", s.orgIDs)
+	config.Debug("[APPLEADS] Connected successfully (adAccountIds=%v)", s.orgIDs)
 	return nil
 }
 
@@ -132,9 +135,15 @@ func parseURI(uri string) (parsedConfig, error) {
 	if cfg.keyID == "" {
 		return cfg, fmt.Errorf("key_id is required in appleads URI")
 	}
-	raw := q.Get("org_id")
+	// The Platform API scopes requests by ad account instead of organization. On
+	// accounts migrated from v5 the ad account id equals the old org id, so
+	// existing URIs with org_id keep working.
+	raw := q.Get("ad_account_id")
 	if raw == "" {
-		return cfg, fmt.Errorf("org_id is required in appleads URI (comma-separate for multiple)")
+		raw = q.Get("org_id")
+	}
+	if raw == "" {
+		return cfg, fmt.Errorf("ad_account_id (or org_id) is required in appleads URI (comma-separate for multiple)")
 	}
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
@@ -325,6 +334,10 @@ func (s *AppleAdsSource) GetTable(ctx context.Context, req source.TableRequest) 
 			return nil, err
 		}
 
+		if baseTable == "ad_reports" && rc.granularity == "HOURLY" {
+			return nil, fmt.Errorf("ad_reports do not support hourly granularity")
+		}
+
 		// Ads reports only support groupBy on countryOrRegion.
 		if baseTable == "ad_reports" && len(rc.groupBy) > 0 {
 			for _, g := range rc.groupBy {
@@ -403,125 +416,91 @@ func (s *AppleAdsSource) read(ctx context.Context, table string, opts source.Rea
 	return results, nil
 }
 
-func (s *AppleAdsSource) paginate(ctx context.Context, orgID, endpoint, filterKey string, start, end *time.Time, emit func([]map[string]interface{}) error) error {
+func accountContext(accountID string) string {
+	return "adAccountId=" + accountID
+}
+
+// queryAll reads a Platform API `POST …/query` list to the end. List responses
+// carry no total count and `pagination.pageSize` is the number of items
+// returned, so the only reliable end marker is an empty page.
+func (s *AppleAdsSource) queryAll(ctx context.Context, accountID, path string, filters []map[string]interface{}, emit func([]map[string]interface{}) error) error {
 	offset := 0
-	findURL := endpoint + "/find"
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		reqBody := buildFindBody(filterKey, start, end, offset, maxPageSize)
+		reqBody := map[string]interface{}{
+			"pagination": map[string]interface{}{
+				"offset":   offset,
+				"pageSize": maxPageSize,
+			},
+		}
+		if len(filters) > 0 {
+			reqBody["filters"] = filters
+		}
 		resp, err := s.client.R(ctx).
-			SetHeader(orgContextHeader, fmt.Sprintf("orgId=%s", orgID)).
+			SetHeader(contextHeader, accountContext(accountID)).
 			SetHeader("Content-Type", "application/json").
 			SetBody(reqBody).
-			Post(findURL)
+			Post(path)
 		if err != nil {
-			return fmt.Errorf("POST %s (org %s) failed: %w", findURL, orgID, err)
+			return fmt.Errorf("POST %s (ad account %s) failed: %w", path, accountID, err)
 		}
 		if !resp.IsSuccess() {
-			return fmt.Errorf("POST %s (org %s) returned status %d: %s", findURL, orgID, resp.StatusCode(), resp.String())
+			return fmt.Errorf("POST %s (ad account %s) returned status %d: %s", path, accountID, resp.StatusCode(), resp.String())
 		}
 		var body struct {
-			Data       []map[string]interface{} `json:"data"`
-			Pagination struct {
-				TotalResults int `json:"totalResults"`
-				StartIndex   int `json:"startIndex"`
-				ItemsPerPage int `json:"itemsPerPage"`
-			} `json:"pagination"`
+			Result []map[string]interface{} `json:"result"`
 		}
 		if err := json.Unmarshal(resp.Body(), &body); err != nil {
-			return fmt.Errorf("failed to parse %s response: %w", findURL, err)
+			return fmt.Errorf("failed to parse %s response: %w", path, err)
 		}
-		if len(body.Data) == 0 {
-			break
+		if len(body.Result) == 0 {
+			return nil
 		}
-		for _, item := range body.Data {
-			item["orgId"] = orgID
+		for _, item := range body.Result {
+			item["orgId"] = accountID
 		}
-		items := body.Data
-		// Apple rejects two conditions on modificationTime, so enforce the `end` boundary here.
-		if filterKey != "" && start != nil && end != nil {
-			items = clientFilterEnd(items, filterKey, *end)
-		}
-		if emit != nil && len(items) > 0 {
-			if err := emit(items); err != nil {
+		if emit != nil {
+			if err := emit(body.Result); err != nil {
 				return err
 			}
 		}
-		offset += len(body.Data)
-		if body.Pagination.TotalResults > 0 && offset >= body.Pagination.TotalResults {
-			break
-		}
+		offset += len(body.Result)
 	}
-	return nil
 }
 
-func buildFindBody(filterKey string, start, end *time.Time, offset, limit int) map[string]interface{} {
-	reqBody := map[string]interface{}{
-		"pagination": map[string]interface{}{
-			"offset": offset,
-			"limit":  limit,
-		},
+// queryWithDeleted returns live and soft-deleted entities. The Platform API
+// leaves deleted entities out unless they are asked for explicitly, while the
+// v5 source always included them.
+func (s *AppleAdsSource) queryWithDeleted(ctx context.Context, accountID, path string, filters []map[string]interface{}, emit func([]map[string]interface{}) error) error {
+	if err := s.queryAll(ctx, accountID, path, filters, emit); err != nil {
+		return err
 	}
-
-	conditions := []map[string]interface{}{
-		{
-			"field":    "deleted",
-			"operator": "IN",
-			"values":   []string{"true", "false"},
-		},
-	}
-	// Apple v5 allows only one condition per field on modificationTime, and
-	// doesn't support BETWEEN on timestamps. Send GREATER_THAN start server-side
-	// and leave the end boundary to client-side filtering in paginate.
-	// If only end is supplied, send LESS_THAN instead.
-	if filterKey != "" {
-		switch {
-		case start != nil:
-			conditions = append(conditions, map[string]interface{}{
-				"field":    filterKey,
-				"operator": "GREATER_THAN",
-				"values":   []string{start.UTC().Format("2006-01-02T15:04:05.000")},
-			})
-		case end != nil:
-			conditions = append(conditions, map[string]interface{}{
-				"field":    filterKey,
-				"operator": "LESS_THAN",
-				"values":   []string{end.UTC().Format("2006-01-02T15:04:05.000")},
-			})
-		}
-	}
-	reqBody["conditions"] = conditions
-	return reqBody
+	deleted := append(append([]map[string]interface{}{}, filters...), map[string]interface{}{
+		"field":    "deleted",
+		"operator": "EQUALS",
+		"value":    true,
+	})
+	return s.queryAll(ctx, accountID, path, deleted, emit)
 }
 
-// Used for endpoints like /campaigns where Apple allows a single server-side condition
-func clientFilterEnd(items []map[string]interface{}, filterKey string, end time.Time) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(items))
-	for _, it := range items {
-		raw, ok := it[filterKey].(string)
-		if !ok || raw == "" {
-			out = append(out, it)
-			continue
-		}
-		ts, err := time.Parse("2006-01-02T15:04:05.000", raw)
-		if err != nil {
-			out = append(out, it)
-			continue
-		}
-		if ts.Before(end) {
-			out = append(out, it)
-		}
+func campaignFilter(campaignID string) []map[string]interface{} {
+	id, err := strconv.ParseInt(campaignID, 10, 64)
+	var value interface{} = campaignID
+	if err == nil {
+		value = id
 	}
-	return out
+	return []map[string]interface{}{{"field": "campaignId", "operator": "EQUALS", "value": value}}
 }
 
-// Used for endpoints like /creatives/find where Apple rejects any server-side filtering
+// clientFilterInterval keeps items whose filterKey falls in (start, end).
+// Incremental windows are applied client-side: which fields accept range
+// filters varies by endpoint, and entity lists are small.
 func clientFilterInterval(items []map[string]interface{}, filterKey string, start, end *time.Time) []map[string]interface{} {
-	if start == nil && end == nil {
+	if filterKey == "" || (start == nil && end == nil) {
 		return items
 	}
 	out := make([]map[string]interface{}, 0, len(items))
@@ -531,7 +510,7 @@ func clientFilterInterval(items []map[string]interface{}, filterKey string, star
 			out = append(out, it)
 			continue
 		}
-		ts, err := time.Parse("2006-01-02T15:04:05.000", raw)
+		ts, err := time.Parse(queryTimeLayout, raw)
 		if err != nil {
 			out = append(out, it)
 			continue
@@ -559,9 +538,9 @@ func extractID(item map[string]interface{}) (string, bool) {
 	return "", false
 }
 
-func (s *AppleAdsSource) fetchCampaignIDs(ctx context.Context, orgID string) ([]string, error) {
+func (s *AppleAdsSource) fetchCampaignIDs(ctx context.Context, accountID string) ([]string, error) {
 	var ids []string
-	err := s.paginate(ctx, orgID, "/campaigns", "", nil, nil, func(items []map[string]interface{}) error {
+	err := s.queryWithDeleted(ctx, accountID, "/campaigns/query", nil, func(items []map[string]interface{}) error {
 		for _, c := range items {
 			if id, ok := extractID(c); ok {
 				ids = append(ids, id)
@@ -611,74 +590,53 @@ func emitPage(label string, opts source.ReadOptions, results chan<- source.Recor
 	return flush(batch)
 }
 
+func (s *AppleAdsSource) emitFiltered(label string, opts source.ReadOptions, results chan<- source.RecordBatchResult) func([]map[string]interface{}) error {
+	return func(items []map[string]interface{}) error {
+		items = clientFilterInterval(items, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd)
+		return emitPage(label, opts, results, items)
+	}
+}
+
 func (s *AppleAdsSource) readCampaigns(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[APPLEADS] reading campaigns")
-	for _, orgID := range s.orgIDs {
-		err := s.paginate(ctx, orgID, "/campaigns", opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd,
-			func(items []map[string]interface{}) error {
-				return emitPage("campaigns", opts, results, items)
-			})
+	for _, accountID := range s.orgIDs {
+		if err := s.queryWithDeleted(ctx, accountID, "/campaigns/query", nil, s.emitFiltered("campaigns", opts, results)); err != nil {
+			return fmt.Errorf("failed to fetch campaigns for ad account %s: %w", accountID, err)
+		}
+	}
+	return nil
+}
+
+// readPerCampaign reads an entity that the Platform API scopes by campaignId.
+func (s *AppleAdsSource) readPerCampaign(ctx context.Context, label, path string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+	config.Debug("[APPLEADS] reading %s", label)
+	for _, accountID := range s.orgIDs {
+		campaignIDs, err := s.fetchCampaignIDs(ctx, accountID)
 		if err != nil {
-			return fmt.Errorf("failed to fetch campaigns for org %s: %w", orgID, err)
+			return fmt.Errorf("failed to list campaigns for %s (ad account %s): %w", label, accountID, err)
+		}
+		for _, cid := range campaignIDs {
+			if err := s.queryWithDeleted(ctx, accountID, path, campaignFilter(cid), s.emitFiltered(label, opts, results)); err != nil {
+				return fmt.Errorf("failed to fetch %s for campaign %s (ad account %s): %w", label, cid, accountID, err)
+			}
 		}
 	}
 	return nil
 }
 
 func (s *AppleAdsSource) readAdGroups(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[APPLEADS] reading ad_groups")
-	for _, orgID := range s.orgIDs {
-		campaignIDs, err := s.fetchCampaignIDs(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("failed to list campaigns for ad_groups (org %s): %w", orgID, err)
-		}
-		for _, cid := range campaignIDs {
-			err := s.paginate(ctx, orgID, fmt.Sprintf("/campaigns/%s/adgroups", cid),
-				opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd,
-				func(items []map[string]interface{}) error {
-					return emitPage("ad_groups", opts, results, items)
-				})
-			if err != nil {
-				return fmt.Errorf("failed to fetch ad_groups for campaign %s (org %s): %w", cid, orgID, err)
-			}
-		}
-	}
-	return nil
+	return s.readPerCampaign(ctx, "ad_groups", "/adgroups/query", opts, results)
 }
 
 func (s *AppleAdsSource) readAds(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[APPLEADS] reading ads")
-	for _, orgID := range s.orgIDs {
-		campaignIDs, err := s.fetchCampaignIDs(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("failed to list campaigns for ads (org %s): %w", orgID, err)
-		}
-		for _, cid := range campaignIDs {
-			err := s.paginate(ctx, orgID, fmt.Sprintf("/campaigns/%s/ads", cid),
-				opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd,
-				func(items []map[string]interface{}) error {
-					return emitPage("ads", opts, results, items)
-				})
-			if err != nil {
-				return fmt.Errorf("failed to fetch ads for campaign %s (org %s): %w", cid, orgID, err)
-			}
-		}
-	}
-	return nil
+	return s.readPerCampaign(ctx, "ads", "/ads/query", opts, results)
 }
 
 func (s *AppleAdsSource) readCreatives(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[APPLEADS] reading creatives")
-	for _, orgID := range s.orgIDs {
-		err := s.paginate(ctx, orgID, "/creatives", "", nil, nil,
-			func(items []map[string]interface{}) error {
-				if opts.IncrementalKey != "" && (opts.IntervalStart != nil || opts.IntervalEnd != nil) {
-					items = clientFilterInterval(items, opts.IncrementalKey, opts.IntervalStart, opts.IntervalEnd)
-				}
-				return emitPage("creatives", opts, results, items)
-			})
-		if err != nil {
-			return fmt.Errorf("failed to fetch creatives for org %s: %w", orgID, err)
+	for _, accountID := range s.orgIDs {
+		if err := s.queryWithDeleted(ctx, accountID, "/creatives/query", nil, s.emitFiltered("creatives", opts, results)); err != nil {
+			return fmt.Errorf("failed to fetch creatives for ad account %s: %w", accountID, err)
 		}
 	}
 	return nil
@@ -710,12 +668,15 @@ var granularityMinDays = map[string]int{
 }
 
 var reportEndpoints = map[string]struct {
-	base        string
+	path        string
 	perCampaign bool
+	idColumn    string
 }{
-	"campaign_reports": {base: "/reports/campaigns"},
-	"ad_group_reports": {base: "/reports/campaigns/%s/adgroups", perCampaign: true},
-	"ad_reports":       {base: "/reports/campaigns/%s/ads", perCampaign: true},
+	// Campaign reports take no campaignId filter and return the whole ad account.
+	"campaign_reports": {path: "/reports/apps/campaigns/query", idColumn: "campaignId"},
+	// Ad group and ad reports require a campaignId filter.
+	"ad_group_reports": {path: "/reports/apps/adgroups/query", perCampaign: true, idColumn: "adGroupId"},
+	"ad_reports":       {path: "/reports/apps/ads/query", perCampaign: true, idColumn: "adId"},
 }
 
 func (s *AppleAdsSource) readReport(ctx context.Context, table string, opts source.ReadOptions, rc reportTableConfig) (<-chan source.RecordBatchResult, error) {
@@ -740,18 +701,18 @@ func (s *AppleAdsSource) readReport(ctx context.Context, table string, opts sour
 		}
 
 		var tasks []reportTask
-		for _, orgID := range s.orgIDs {
+		for _, accountID := range s.orgIDs {
 			if !ep.perCampaign {
-				tasks = append(tasks, reportTask{orgID: orgID, endpoint: ep.base})
+				tasks = append(tasks, reportTask{orgID: accountID, endpoint: ep.path, idColumn: ep.idColumn})
 				continue
 			}
-			campaignIDs, err := s.fetchCampaignIDs(ctx, orgID)
+			campaignIDs, err := s.fetchCampaignIDs(ctx, accountID)
 			if err != nil {
-				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to list campaigns for %s report (org %s): %w", table, orgID, err)}
+				results <- source.RecordBatchResult{Err: fmt.Errorf("failed to list campaigns for %s report (ad account %s): %w", table, accountID, err)}
 				return
 			}
 			for _, cid := range campaignIDs {
-				tasks = append(tasks, reportTask{orgID: orgID, endpoint: fmt.Sprintf(ep.base, cid)})
+				tasks = append(tasks, reportTask{orgID: accountID, endpoint: ep.path, idColumn: ep.idColumn, filters: campaignFilter(cid)})
 			}
 		}
 
@@ -797,23 +758,117 @@ func reportDateRange(opts source.ReadOptions, granularity string) (time.Time, ti
 	return start, end, nil
 }
 
-func (s *AppleAdsSource) fetchReport(ctx context.Context, orgID, endpoint string, rc reportTableConfig, start, end time.Time, emit func([]map[string]interface{}) error) error {
-	type dateRange struct{ start, end time.Time }
-	var chunks []dateRange
-	if maxDays := granularityMaxDays[rc.granularity]; maxDays > 0 {
-		for cs := start; cs.Before(end); cs = cs.AddDate(0, 0, maxDays) {
-			ce := cs.AddDate(0, 0, maxDays)
-			if ce.After(end) {
-				ce = end
-			}
-			chunks = append(chunks, dateRange{cs, ce})
-		}
-	} else {
-		chunks = []dateRange{{start, end}}
+type dateRange struct{ start, end time.Time }
+
+// reportChunks splits [start, end] into windows the API accepts. Both ends of
+// a Platform API timeRange are inclusive, so a window of maxDays covers
+// start .. start+maxDays-1 and the next one begins the day after.
+func reportChunks(start, end time.Time, granularity string) []dateRange {
+	maxDays := granularityMaxDays[granularity]
+	if maxDays <= 0 {
+		return []dateRange{{start, end}}
 	}
+	var chunks []dateRange
+	for cs := start; !cs.After(end); cs = cs.AddDate(0, 0, maxDays) {
+		ce := cs.AddDate(0, 0, maxDays-1)
+		if ce.After(end) {
+			ce = end
+		}
+		chunks = append(chunks, dateRange{cs, ce})
+	}
+	return chunks
+}
 
-	for _, chunk := range chunks {
+func reportRequestBody(rc reportTableConfig, chunk dateRange, filters []map[string]interface{}, offset int) map[string]interface{} {
+	startDay := chunk.start.UTC().Format("2006-01-02")
+	endDay := chunk.end.UTC().Format("2006-01-02")
+	timeRange := map[string]interface{}{
+		"start":    startDay,
+		"end":      endDay,
+		"timeZone": "UTC",
+	}
+	// A one-day window must be sent without granularity; its figures then come
+	// back in totalMetrics only.
+	if rc.granularity != "" && startDay != endDay {
+		timeRange["granularity"] = rc.granularity
+	}
+	body := map[string]interface{}{
+		"timeRange": timeRange,
+		"pagination": map[string]interface{}{
+			"offset":   offset,
+			"pageSize": reportPageSize,
+		},
+	}
+	if len(filters) > 0 {
+		body["filters"] = filters
+	}
+	if len(rc.groupBy) > 0 {
+		body["groupBy"] = rc.groupBy
+	} else {
+		// Same as v5's returnRecordsWithNoMetrics; Apple rejects it together with groupBy.
+		body["options"] = map[string]interface{}{"includeRows": []string{"EMPTY_METRICS"}}
+	}
+	return body
+}
 
+type reportRow struct {
+	Metadata        map[string]interface{}   `json:"metadata"`
+	TotalMetrics    map[string]interface{}   `json:"totalMetrics"`
+	GranularMetrics []map[string]interface{} `json:"granularMetrics"`
+}
+
+// flattenReportRows turns report rows into one record per (entity, period).
+// Report metadata carries the entity's own id as `id`; it is copied to
+// idColumn so the primary keys stay campaignId / adGroupId / adId.
+func flattenReportRows(rows []reportRow, accountID, idColumn string, rc reportTableConfig, chunk dateRange) []map[string]interface{} {
+	singleDay := chunk.start.UTC().Format("2006-01-02") == chunk.end.UTC().Format("2006-01-02")
+	var out []map[string]interface{}
+	for _, row := range rows {
+		var metricsList []map[string]interface{}
+		switch {
+		case rc.granularity != "" && singleDay:
+			if row.TotalMetrics != nil {
+				m := make(map[string]interface{}, len(row.TotalMetrics)+1)
+				for k, v := range row.TotalMetrics {
+					m[k] = v
+				}
+				if _, ok := m["date"]; !ok {
+					m["date"] = chunk.start.UTC().Format("2006-01-02")
+				}
+				metricsList = []map[string]interface{}{m}
+			}
+		case rc.granularity != "":
+			metricsList = row.GranularMetrics
+		case row.TotalMetrics != nil:
+			metricsList = []map[string]interface{}{row.TotalMetrics}
+		}
+		for _, metrics := range metricsList {
+			flat := make(map[string]interface{})
+			for k, v := range row.Metadata {
+				flat[k] = v
+			}
+			for k, v := range metrics {
+				flat[k] = v
+			}
+			flat["orgId"] = accountID
+			if idColumn != "" {
+				if id, ok := row.Metadata["id"]; ok {
+					flat[idColumn] = id
+				}
+			}
+			for _, g := range rc.groupBy {
+				if flat[g] == nil {
+					flat[g] = ""
+				}
+			}
+			out = append(out, flat)
+		}
+	}
+	return out
+}
+
+func (s *AppleAdsSource) fetchReport(ctx context.Context, task reportTask, rc reportTableConfig, start, end time.Time, emit func([]map[string]interface{}) error) error {
+	for _, chunk := range reportChunks(start, end, rc.granularity) {
 		offset := 0
 		for {
 			select {
@@ -822,102 +877,45 @@ func (s *AppleAdsSource) fetchReport(ctx context.Context, orgID, endpoint string
 			default:
 			}
 
-			body := map[string]interface{}{
-				"startTime":                  chunk.start.Format("2006-01-02"),
-				"endTime":                    chunk.end.Format("2006-01-02"),
-				"timeZone":                   "UTC",
-				"returnRecordsWithNoMetrics": true,
-				"returnRowTotals":            rc.granularity == "",
-				"returnGrandTotals":          rc.granularity == "",
-				"selector": map[string]interface{}{
-					"pagination": map[string]interface{}{
-						"offset": offset,
-						"limit":  maxPageSize,
-					},
-					"orderBy": []map[string]interface{}{
-						{"field": "modificationTime", "sortOrder": "DESCENDING"},
-					},
-				},
-			}
-			if rc.granularity != "" {
-				body["granularity"] = rc.granularity
-			}
-			if len(rc.groupBy) > 0 {
-				body["groupBy"] = rc.groupBy
-			}
-
 			resp, err := s.client.R(ctx).
-				SetHeader(orgContextHeader, fmt.Sprintf("orgId=%s", orgID)).
+				SetHeader(contextHeader, accountContext(task.orgID)).
 				SetHeader("Content-Type", "application/json").
-				SetBody(body).
-				Post(endpoint)
+				SetBody(reportRequestBody(rc, chunk, task.filters, offset)).
+				Post(task.endpoint)
 			if err != nil {
-				return fmt.Errorf("POST %s (org %s) failed: %w", endpoint, orgID, err)
+				return fmt.Errorf("POST %s (ad account %s) failed: %w", task.endpoint, task.orgID, err)
 			}
 			if !resp.IsSuccess() {
-				return fmt.Errorf("POST %s (org %s) returned status %d: %s", endpoint, orgID, resp.StatusCode(), resp.String())
+				return fmt.Errorf("POST %s (ad account %s) returned status %d: %s", task.endpoint, task.orgID, resp.StatusCode(), resp.String())
 			}
 
+			// An empty report comes back as `result: {}` with no rows key.
 			var respBody struct {
-				Data struct {
-					ReportingDataResponse struct {
-						Row []struct {
-							Metadata    map[string]interface{}   `json:"metadata"`
-							Granularity []map[string]interface{} `json:"granularity"`
-							Total       map[string]interface{}   `json:"total"`
-						} `json:"row"`
-					} `json:"reportingDataResponse"`
-				} `json:"data"`
+				Result struct {
+					Rows []reportRow `json:"rows"`
+				} `json:"result"`
 				Pagination struct {
-					TotalResults int `json:"totalResults"`
-					StartIndex   int `json:"startIndex"`
-					ItemsPerPage int `json:"itemsPerPage"`
+					TotalCount *int `json:"totalCount"`
 				} `json:"pagination"`
 			}
 			if err := json.Unmarshal(resp.Body(), &respBody); err != nil {
-				return fmt.Errorf("failed to parse %s response: %w", endpoint, err)
+				return fmt.Errorf("failed to parse %s response: %w", task.endpoint, err)
 			}
 
-			var rows []map[string]interface{}
-			for _, row := range respBody.Data.ReportingDataResponse.Row {
-				var metricsList []map[string]interface{}
-				if len(row.Granularity) > 0 {
-					metricsList = row.Granularity
-				} else if row.Total != nil {
-					metricsList = []map[string]interface{}{row.Total}
-				}
-				for _, metrics := range metricsList {
-					flat := make(map[string]interface{})
-					for k, v := range row.Metadata {
-						flat[k] = v
-					}
-					for k, v := range metrics {
-						flat[k] = v
-					}
-					flat["orgId"] = orgID
-					for _, g := range rc.groupBy {
-						if flat[g] == nil {
-							flat[g] = ""
-						}
-					}
-					rows = append(rows, flat)
-				}
-			}
-
-			if len(rows) == 0 && len(respBody.Data.ReportingDataResponse.Row) == 0 {
+			got := respBody.Result.Rows
+			if len(got) == 0 {
 				break
 			}
-			if len(rows) > 0 {
+			if rows := flattenReportRows(got, task.orgID, task.idColumn, rc, chunk); len(rows) > 0 {
 				if err := emit(rows); err != nil {
 					return err
 				}
 			}
-			pageSize := len(respBody.Data.ReportingDataResponse.Row)
-			offset += pageSize
-			if respBody.Pagination.TotalResults > 0 && offset >= respBody.Pagination.TotalResults {
+			offset += len(got)
+			if total := respBody.Pagination.TotalCount; total != nil && offset >= *total {
 				break
 			}
-			if pageSize < maxPageSize {
+			if len(got) < reportPageSize {
 				break
 			}
 		}
@@ -928,6 +926,8 @@ func (s *AppleAdsSource) fetchReport(ctx context.Context, orgID, endpoint string
 type reportTask struct {
 	orgID    string
 	endpoint string
+	idColumn string
+	filters  []map[string]interface{}
 }
 
 func (s *AppleAdsSource) fetchReportsParallel(ctx context.Context, tasks []reportTask, rc reportTableConfig, start, end time.Time, label string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
@@ -961,7 +961,7 @@ func (s *AppleAdsSource) fetchReportsParallel(ctx context.Context, tasks []repor
 					return
 				default:
 				}
-				err := s.fetchReport(workerCtx, task.orgID, task.endpoint, rc, start, end,
+				err := s.fetchReport(workerCtx, task, rc, start, end,
 					func(items []map[string]interface{}) error {
 						return emitPage(label, opts, results, items)
 					})
