@@ -75,21 +75,39 @@ func TestProbeStopsAtAnAncestorOfTheOtherParentsTrustedState(t *testing.T) {
 	}
 }
 
-func TestProbeKeepsWalkingWhenTheAncestorCompareIsTruncated(t *testing.T) {
+func TestProbeChecksAncestorsOneByOneWhenTheCompareIsIncomplete(t *testing.T) {
 	f := ancestorRepo()
 	f.compareCap = 2
 	res := runFake(t, f, at(iStart), at(iEnd))
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
-	if !res.hasWarning("more commits than GitHub returns") {
-		t.Fatalf("warnings=%v, want the truncated-compare warning", res.warnings)
+	if len(res.warnings) != 0 {
+		t.Fatalf("warnings=%v, want none: an incomplete compare list falls back to exact checks", res.warnings)
 	}
-	if !strictlyTrusted(res, "Q") {
-		t.Fatal("without a usable ahead set the probe must keep walking past Q")
+	if strictlyTrusted(res, "Q") {
+		t.Fatal("Q is an ancestor of P1's trusted state; the per-commit check must stop the probe there")
+	}
+	if res.run.statusSets != 1 || f.calls["status"] == 0 {
+		t.Fatalf("status-mode sets=%d status calls=%d, want the per-commit check", res.run.statusSets, f.calls["status"])
 	}
 	if r := res.row(t, "S3"); r.step != oid("MX") {
 		t.Fatalf("S3 via %s, want MX", short(r.step))
+	}
+}
+
+func TestProbeLargeComparesAreNotPaged(t *testing.T) {
+	f := ancestorRepo()
+	run := newLandedRun(f, "main", at(iStart), at(iEnd), func(string, ...interface{}) {})
+	run.aheadLimit = 1
+	if _, err := run.collect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if run.statusSets != 1 {
+		t.Fatalf("status-mode sets=%d, want 1 (ahead_by 3 > limit 1)", run.statusSets)
+	}
+	if _, ok := run.trusts[1][oid("Q")]; ok {
+		t.Fatal("the per-commit check must still stop the probe at Q")
 	}
 }
 

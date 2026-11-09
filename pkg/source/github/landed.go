@@ -113,6 +113,8 @@ type landedRun struct {
 	ruleCs      map[string]trustInfo
 	restartWalk bool
 	searchLimit int
+	aheadLimit  int
+	statusSets  int
 	steps       []*chainStep
 	setFailures []string
 	// landedBy is an upper bound of the landing time of the walk's current position and of every
@@ -150,6 +152,7 @@ func newLandedRun(api landedAPI, branch string, start, end time.Time, warnf func
 		mergedPRs:   -1,
 		searched:    map[string][]ghPR{},
 		searchLimit: searchMaxResults,
+		aheadLimit:  aheadSetMaxCommits,
 
 		belowFloor:   map[string]bool{},
 		firstTrusted: map[string]probeHit{},
@@ -192,6 +195,9 @@ func (r *landedRun) collect(ctx context.Context) ([]*landedRow, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if r.statusSets > 0 {
+		config.Debug("[GITHUB] ancestor stop checked commits one by one at %d merges (compare too large to list)", r.statusSets)
 	}
 	if err := r.buildSteps(ctx, chain); err != nil {
 		return nil, err
@@ -1251,7 +1257,7 @@ func (r *landedRun) stepCommits(ctx context.Context, base, head string, mustMatc
 			continue
 		}
 		visited[h] = true
-		commits, ahead, fallback, err := r.compareAll(ctx, base, h)
+		commits, ahead, fallback, err := r.compareAll(ctx, base, h, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -1315,8 +1321,9 @@ func (r *landedRun) stepCommits(ctx context.Context, base, head string, mustMatc
 }
 
 // compareAll is every page of compare base...head: at most the newest 10,000 commits GitHub returns,
-// and ahead_by, which is never cut. noCommon reports unrelated histories.
-func (r *landedRun) compareAll(ctx context.Context, base, head string) ([]map[string]interface{}, int, bool, error) {
+// and ahead_by, which is never cut. noCommon reports unrelated histories. With limit > 0 it stops
+// after the first page when ahead_by is above limit.
+func (r *landedRun) compareAll(ctx context.Context, base, head string, limit int) ([]map[string]interface{}, int, bool, error) {
 	var commits []map[string]interface{}
 	ahead := 0
 	for page := 1; page <= compareMaxPages; page++ {
@@ -1331,7 +1338,7 @@ func (r *landedRun) compareAll(ctx context.Context, base, head string) ([]map[st
 			ahead = res.AheadBy
 		}
 		commits = append(commits, res.Commits...)
-		if len(res.Commits) < comparePageSize {
+		if len(res.Commits) < comparePageSize || limit > 0 && ahead > limit {
 			break
 		}
 	}

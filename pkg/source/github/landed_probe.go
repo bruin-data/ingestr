@@ -193,54 +193,79 @@ func (r *landedRun) probeStep(ctx context.Context, p *probeState, j int) error {
 	return nil
 }
 
-// boundBy is the index of a settled probe whose first trusted state A has cur as an ancestor (cur
-// is outside compare A...parent_j), or -1.
+// boundBy is the index of a settled probe whose first trusted state A has cur as an ancestor, or -1.
 func (r *landedRun) boundBy(ctx context.Context, p *probeState, j int, cur string) (int, error) {
 	for i := range p.parents {
 		if i == j || p.root[i] != i || !p.done[i] || p.res[i].oid == "" {
 			continue
 		}
-		ahead, ok, err := r.aheadSet(ctx, p.res[i].oid, p.parents[j])
+		a := p.res[i].oid
+		e, err := r.aheadSet(ctx, a, p.parents[j])
 		if err != nil {
 			return -1, err
 		}
-		if ok && !ahead[cur] {
-			return i, nil
+		switch e.mode {
+		case aheadBySet:
+			if !e.set[cur] {
+				return i, nil
+			}
+		case aheadByStatus:
+			st, err := r.status(ctx, cur, a)
+			if err != nil {
+				return -1, err
+			}
+			if st == "ahead" || st == "identical" {
+				return i, nil
+			}
 		}
 	}
 	return -1, nil
 }
 
+const aheadSetMaxCommits = 1000
+
+type aheadMode int
+
+const (
+	aheadNone aheadMode = iota
+	aheadBySet
+	aheadByStatus
+)
+
 type aheadEntry struct {
-	set map[string]bool
-	ok  bool
+	set  map[string]bool
+	mode aheadMode
 }
 
-// aheadSet is the commits reachable from head and not from base (compare base...head), cached for
-// the run. ok is false when compare cannot give the whole set (unrelated histories, or more than
-// the 10,000 commits compare returns): the probe then keeps walking (warning).
-func (r *landedRun) aheadSet(ctx context.Context, base, head string) (map[string]bool, bool, error) {
+// aheadSet tells, for the ancestor stop, which commits below parent head are not ancestors of base:
+// the compare base...head commit list when it has at most aheadLimit commits (a few pages), else
+// a per-commit compare against base (status mode, one call per probed commit, exact at any size).
+// Unrelated histories give no stop. Cached for the run.
+func (r *landedRun) aheadSet(ctx context.Context, base, head string) (aheadEntry, error) {
 	key := base + "..." + head
 	if e, ok := r.aheadSets[key]; ok {
-		return e.set, e.ok, nil
+		return e, nil
 	}
-	commits, ahead, noCommon, err := r.compareAll(ctx, base, head)
+	commits, ahead, noCommon, err := r.compareAll(ctx, base, head, r.aheadLimit)
 	if err != nil {
-		return nil, false, err
+		return aheadEntry{}, err
 	}
-	usable := !noCommon
-	set := map[string]bool{}
+	e := aheadEntry{mode: aheadBySet, set: map[string]bool{}}
 	for _, cm := range commits {
 		if sha, ok := cm["sha"].(string); ok {
-			set[sha] = true
+			e.set[sha] = true
 		}
 	}
-	if usable && len(set) < ahead {
-		r.warnf("commits: compare %s...%s has more commits than GitHub returns (%d of %d); the parent probe keeps walking instead of stopping early", short(base), short(head), len(set), ahead)
-		usable = false
+	switch {
+	case noCommon:
+		e = aheadEntry{mode: aheadNone}
+	case ahead > r.aheadLimit || len(e.set) < ahead:
+		e = aheadEntry{mode: aheadByStatus}
+		r.statusSets++
+		config.Debug("[GITHUB] compare %s...%s has %d commits; ancestor stop checks commits one by one", short(base), short(head), ahead)
 	}
-	r.aheadSets[key] = aheadEntry{set: set, ok: usable}
-	return set, usable, nil
+	r.aheadSets[key] = e
+	return e, nil
 }
 
 // prepareActivityFloor: in a repository with no merged PR, if B's activity log starts more
