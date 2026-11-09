@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/bruin-data/ingestr/internal/annotation"
@@ -89,6 +90,27 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 		}
 	}
 	return j.ApplyBatchTransformation(ctx, records)
+}
+
+// sourceIncrementalKeyForRead returns the incremental key as the source names it.
+// Config.IncrementalKey carries the destination name after naming conventions.
+func sourceIncrementalKeyForRead(job *IngestionJob) string {
+	if job.Config.IncrementalKey == "" {
+		return ""
+	}
+	sourceKey := job.Config.IncrementalKey
+	if job.SourceSchema != nil && job.SourceSchema.IncrementalKey != "" {
+		sourceKey = job.SourceSchema.IncrementalKey
+	} else if job.ColumnRenamer != nil && job.ColumnRenamer.HasRenames() {
+		for src, dst := range job.ColumnRenamer.Mapping() {
+			if dst == job.Config.IncrementalKey || strings.EqualFold(dst, job.Config.IncrementalKey) {
+				sourceKey = src
+				break
+			}
+		}
+	}
+	sourceKey, _ = resolveSchemaColumn(job.SourceSchema, sourceKey)
+	return sourceKey
 }
 
 // ApplyEvolution applies the pending schema evolution plan to the destination.

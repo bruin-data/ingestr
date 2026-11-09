@@ -98,7 +98,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 	records, err := job.GetRecords(readCtx, source.ReadOptions{
-		IncrementalKey:             job.Config.IncrementalKey,
+		IncrementalKey:             sourceIncrementalKeyForRead(job),
 		IntervalStart:              job.Config.IntervalStart,
 		PageSize:                   job.Config.PageSize,
 		MaxBatchBytes:              job.Config.MaxBatchBytes,
