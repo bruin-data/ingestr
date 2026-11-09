@@ -115,6 +115,7 @@ HubSpot source allows ingesting the following sources into separate tables:
 | [schemas](https://developers.hubspot.com/docs/reference/api/crm/objects/schemas#get-%2Fcrm-object-schemas%2Fv3%2Fschemas) | id | – | merge | Returns all object schemas that have been defined for your account. |
 | [pipelines](https://developers.hubspot.com/docs/reference/api/crm/pipelines) | object_type, pipeline_id | – | replace | Pipeline definitions across all pipelined object types. One row per pipeline. |
 | [pipeline_stages](https://developers.hubspot.com/docs/reference/api/crm/pipelines) | object_type, pipeline_id, stage_id | – | replace | Stage definitions for each pipeline. One row per stage.|
+| [campaign_metrics](https://developers.hubspot.com/docs/api-reference/latest/marketing/campaigns/reports/get-metrics) | campaign_id | – | replace | All-time totals per campaign: influenced contacts, new contacts (first/last touch) and sessions. Join to `campaigns` on `hs_object_id`. |
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
 
@@ -148,7 +149,7 @@ Use the format `property_history:<table>` as the `--source-table` value. An opti
 | property_history:campaigns            | hs_object_id, property_name, timestamp   | timestamp | merge        | Property change history for campaigns.                  |
 
 
-> **Note:** The `owners` and `schemas` tables do not have history variants.
+> **Note:** The `owners`, `schemas` and `campaign_metrics` tables do not have history variants.
 
 Custom objects also support history via `property_history:custom:<objectType>` (e.g., `property_history:custom:myObject`).
 
