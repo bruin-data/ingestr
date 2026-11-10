@@ -80,14 +80,6 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 	return nil
 }
 
-// mergeStagingInto merges the staging table into the target table by primary
-// key. A non-empty incrementalKey makes the per-PK dedup keep the row with the
-// highest value of that key (latest wins) instead of an arbitrary one.
-// hardDelete removes CDC-deleted rows instead of keeping tombstones.
-func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string, hardDelete bool) error {
-	return dest.MergeTable(ctx, mergeStagingOptions(dest, stagingTable, targetTable, primaryKeys, tableSchema, incrementalKey, incrementalPredicate, expectedIncarnation, hardDelete))
-}
-
 func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string, hardDelete bool) destination.MergeOptions {
 	return destination.MergeOptions{
 		StagingTable:           stagingTable,
