@@ -72,6 +72,9 @@ func (r *snapshotSpoolReader) cleanupRetiredSpools(ctx context.Context) error {
 	if err := commit.persist(ctx); err != nil {
 		return err
 	}
+	if err := errors.Join(source.ConnectorLeaseLoss(ctx), ctx.Err()); err != nil {
+		return err
+	}
 	r.state.Retired = pending
 	return nil
 }
