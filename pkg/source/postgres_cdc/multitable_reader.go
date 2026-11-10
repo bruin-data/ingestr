@@ -161,12 +161,28 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 				if !legacy {
 					waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				}
+				if len(r.snapshotResumes) > 0 {
+					retained, err := snapshotResumeWALAvailable(ctx, r.source.queryPool, slotName, minResumeLSN)
+					if err != nil {
+						_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
+						return
+					}
+					if !retained {
+						config.Debug("[CDC] Slot %s cannot replay snapshot resume boundary %s; replacing snapshots", slotName, minResumeLSN)
+						needsSnapshot = true
+					}
+				}
 				config.Debug("[CDC] Multi-table: resuming from LSN %s with per-table filtering", minResumeLSN)
 			}
 		}
 
 		var startLSN pglogrepl.LSN
 		if needsSnapshot {
+			r.snapshotResumes = nil
+			slotName = r.cdcConfig.SlotName
+			if slotName == "" {
+				slotName = generateMultiTableSlotName(r.cdcConfig.Publication, r.slotSuffix)
+			}
 			config.Debug("[CDC] Multi-table: performing full snapshot (some tables have no existing data)")
 			if err := r.executeSnapshot(ctx, results, opts); err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)})
@@ -306,7 +322,8 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 		}
 	}
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(snapshotParallelism(opts))
+	budget := newSnapshotReadBudget(r.source.queryPool, snapshotParallelism(opts))
+	g.SetLimit(cap(budget.slots))
 	for i := range tables {
 		table := tables[i]
 		tableInfo := &tables[i]
@@ -336,7 +353,7 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 			if progress, ok := resumes[table.Name]; ok {
 				resume = &progress
 			}
-			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, resume, results, opts); err != nil {
+			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, resume, results, opts, budget); err != nil {
 				return fmt.Errorf("failed to backfill table %s: %w", table.Name, err)
 			}
 			r.setSnapshotBoundary(table.Name, boundaries[table.Name])
@@ -716,6 +733,14 @@ func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
 			first = false
 		}
 	}
+	for tableName, progress := range r.snapshotResumes {
+		boundary, err := pglogrepl.ParseLSN(progress.Boundary)
+		if err != nil || boundary == 0 {
+			config.Debug("[CDC] Invalid snapshot resume boundary %q for %s; replacing snapshots", progress.Boundary, tableName)
+			return true, 0
+		}
+		minLSN = min(minLSN, boundary)
+	}
 
 	// Initialize processedLSNs from resumeLSNs
 	for tableName, lsnStr := range r.resumeLSNs {
@@ -776,11 +801,12 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	// the identical consistent point while the idle replication connection
 	// keeps the snapshot alive.
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(snapshotParallelism(opts))
+	budget := newSnapshotReadBudget(r.source.queryPool, snapshotParallelism(opts))
+	g.SetLimit(cap(budget.slots))
 	for _, table := range r.tables {
 		g.Go(func() error {
 			config.Debug("[CDC] Snapshotting table: %s", table.Name)
-			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, nil, results, opts); err != nil {
+			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, nil, results, opts, budget); err != nil {
 				return fmt.Errorf("failed to snapshot table %s: %w", table.Name, err)
 			}
 			// Initialize processed LSN for this table
@@ -832,12 +858,13 @@ func tableSchemaFingerprints(tables []source.SourceTableInfo) map[string]string 
 // streaming snapshot that the consumer persists state for reads keyed tables
 // in key order and reports its progress; resume continues one after its last
 // durable key.
-func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.SourceTableInfo, snapshotName string, lsn pglogrepl.LSN, resume *source.CDCSnapshotProgress, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.SourceTableInfo, snapshotName string, lsn pglogrepl.LSN, resume *source.CDCSnapshotProgress, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions, budget *snapshotReadBudget) error {
 	snapshot := &Snapshot{
 		source:      r.source,
 		tableName:   table.Name,
 		tableSchema: table.Schema,
 		cdcConfig:   r.cdcConfig,
+		readBudget:  budget,
 	}
 	if opts.Streaming && opts.CDCManagedState && opts.CDCSnapshotReplace {
 		snapshot.progressKeys = resumableSnapshotKeys(table)

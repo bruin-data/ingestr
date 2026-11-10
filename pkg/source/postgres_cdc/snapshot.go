@@ -32,6 +32,7 @@ type Snapshot struct {
 	cdcConfig   CDCConfig
 	slotName    string
 	typeMap     *pgtype.Map
+	readBudget  *snapshotReadBudget
 	// progressKeys makes the snapshot read in key order and follow every batch
 	// with a copy of progress naming its last key, so an interrupted snapshot
 	// can resume after its last durable key. resumeAfter holds that key's text
@@ -217,26 +218,51 @@ func (s *Snapshot) dropSlot(ctx context.Context) error {
 }
 
 func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
-	conn, err := s.source.queryPool.Acquire(ctx)
+	if len(s.progressKeys) > 0 {
+		return s.readSerialSnapshot(ctx, snapshotName, lsn, results, opts)
+	}
+	return s.ReadWithSnapshot(ctx, snapshotName, lsn, results, opts, nil, nil)
+}
+
+// ReadWithSnapshot reads (after, upper] from an existing exported snapshot.
+// Nil bounds scan the whole table. The caller keeps the exporting connection
+// idle and open until this returns, and owns completion and WAL orchestration.
+func (s *Snapshot) ReadWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, after, upper []string) error {
+	if err := s.source.requireSnapshotAllowed(); err != nil {
+		return err
+	}
+	if opts.CDCSnapshotReplace && (after != nil || upper != nil) {
+		return fmt.Errorf("a bounded snapshot cannot replace the whole table")
+	}
+	reader := *s
+	reader.progressKeys = resumableSnapshotKeys(source.SourceTableInfo{Schema: s.tableSchema, PrimaryKeys: s.tableSchema.PrimaryKeys})
+	return reader.readBoundedSnapshot(ctx, boundedSnapshotOptions{
+		name: snapshotName, boundary: lsn, after: after, upper: upper, read: opts, budget: s.readBudget,
+		started: func() error {
+			if opts.CDCSnapshotReplace {
+				return sendResult(ctx, results, source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)})
+			}
+			return nil
+		},
+	}, results)
+}
+
+func (s *Snapshot) readSerialSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
+	budget := s.readBudget
+	if budget == nil {
+		budget = newSnapshotReadBudget(s.source.queryPool, 1)
+	}
+	conn, err := budget.acquire(ctx, s.source.queryPool)
 	if err != nil {
 		return fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer budget.release(conn)
 
-	// Start transaction with REPEATABLE READ isolation level (required for snapshot import)
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.RepeatableRead,
-	})
+	tx, err := importSnapshot(ctx, conn, snapshotName)
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Set transaction snapshot
-	_, err = tx.Exec(ctx, fmt.Sprintf("SET TRANSACTION SNAPSHOT '%s'", snapshotName))
-	if err != nil {
-		return fmt.Errorf("failed to set transaction snapshot: %w", err)
-	}
+	defer rollbackSnapshot(tx)
 
 	config.Debug("[CDC] Reading snapshot data from %s", s.tableName)
 
@@ -577,22 +603,5 @@ func snapshotKeyTypes(ctx context.Context, tx pgx.Tx, table string, keys []strin
 // key columns' own types so the order matches ORDER BY. Keys are qualified by
 // a table alias: the text casts would otherwise make the names ambiguous.
 func keyedSnapshotQuery(columns []string, table string, keys, keyTypes, resumeAfter []string) (string, []any) {
-	const alias = "__ingestr_snapshot"
-	quotedKeys := make([]string, len(keys))
-	keyText := make([]string, len(keys))
-	for i, key := range keys {
-		quotedKeys[i] = alias + "." + quoteIdentifier(key)
-		keyText[i] = fmt.Sprintf("%s::text AS %s", quotedKeys[i], quoteIdentifier(fmt.Sprintf("__ingestr_key_%d", i)))
-	}
-	query := fmt.Sprintf("SELECT %s, %s FROM %s AS %s", strings.Join(columns, ", "), strings.Join(keyText, ", "), table, alias)
-	var args []any
-	if resumeAfter != nil {
-		params := make([]string, len(keys))
-		for i := range keys {
-			params[i] = fmt.Sprintf("$%d::text::%s", i+1, keyTypes[i])
-			args = append(args, resumeAfter[i])
-		}
-		query += fmt.Sprintf(" WHERE (%s) > (%s)", strings.Join(quotedKeys, ", "), strings.Join(params, ", "))
-	}
-	return query + " ORDER BY " + strings.Join(quotedKeys, ", "), args
+	return boundedSnapshotQuery(columns, table, keys, keyTypes, resumeAfter, nil)
 }
