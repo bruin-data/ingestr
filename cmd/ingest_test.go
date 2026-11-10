@@ -436,6 +436,7 @@ func clearCDCChunkedSnapshotEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"INGESTR_CDC_SNAPSHOT_CHUNKED", "INGESTR_CDC_SNAPSHOT_CHUNK_SIZE",
+		"INGESTR_CDC_SNAPSHOT_SPOOL", "INGESTR_CDC_WAL_SPOOL_DIR",
 		"INGESTR_CDC_SNAPSHOT_EXECUTION",
 		"INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "INGESTR_CDC_WAL_STAGING",
 		"INGESTR_CDC_WAL_BUFFER_BYTES", "INGESTR_CDC_SNAPSHOT_MODE", "INGESTR_CDC_START_LSN",
@@ -458,7 +459,7 @@ func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
 		{name: "disabled"},
 		{name: "enabled", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}},
 		{name: "wrong source", args: []string{"--cdc-snapshot-chunked"}, wantErr: "only supported for postgres+cdc"},
-		{name: "unknown staging", args: []string{"--cdc-wal-staging=disk"}, wantErr: "must be inmemory or destination"},
+		{name: "unknown staging", args: []string{"--cdc-wal-staging=invalid"}, wantErr: "must be memory, inmemory, destination, or disk"},
 		{name: "zero size", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-size=0"}, wantErr: "cdc-snapshot-chunk-size"},
 		{name: "zero timeout", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-timeout=0s"}, wantErr: "cdc-snapshot-chunk-timeout"},
 		{name: "zero buffer", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-wal-buffer-bytes=0"}, wantErr: "cdc-wal-buffer-bytes"},
@@ -602,4 +603,53 @@ func TestIngestConfigIntervals(t *testing.T) {
 			t.Fatalf("%s error = %v", flag, err)
 		}
 	}
+}
+
+func TestIngestConfigCDCSnapshotSpool(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		staging string
+		wantErr string
+	}{
+		{name: "default destination", staging: "destination"},
+		{name: "memory alias", args: []string{"--cdc-wal-staging=memory"}, staging: "inmemory"},
+		{name: "inmemory", args: []string{"--cdc-wal-staging=inmemory"}, staging: "inmemory"},
+		{name: "disk", args: []string{"--cdc-wal-staging=disk", "--cdc-wal-spool-dir=/spool"}, staging: "disk"},
+		{name: "disk missing directory", args: []string{"--cdc-wal-staging=disk"}, wantErr: "cdc-wal-spool-dir"},
+		{name: "chunked", args: []string{"--cdc-snapshot-chunked"}, wantErr: "cannot be combined"},
+		{name: "zero buffer", args: []string{"--cdc-wal-buffer-bytes=0"}, wantErr: "must be positive"},
+		{name: "zero interval", args: []string{"--stream", "--flush-interval=0s"}, wantErr: "must be positive"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-spool"}, tt.args...)
+			cfg, err := parseIngestConfig(t, args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.CDCSnapshotSpool || cfg.CDCWALStaging != tt.staging {
+				t.Fatalf("spool config = (%v, %q)", cfg.CDCSnapshotSpool, cfg.CDCWALStaging)
+			}
+		})
+	}
+	t.Run("environment", func(t *testing.T) {
+		t.Setenv("INGESTR_CDC_SNAPSHOT_SPOOL", "true")
+		t.Setenv("INGESTR_CDC_WAL_STAGING", "disk")
+		t.Setenv("INGESTR_CDC_WAL_SPOOL_DIR", "/persistent/spool")
+		cfg, err := parseIngestConfig(t, "--source-uri=postgres+cdc://localhost/db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.CDCSnapshotSpool || cfg.CDCWALStaging != "disk" || cfg.CDCWALSpoolDir != "/persistent/spool" {
+			t.Fatalf("spool config = %+v", cfg)
+		}
+	})
 }

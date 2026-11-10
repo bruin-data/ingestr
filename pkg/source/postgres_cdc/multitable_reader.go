@@ -94,6 +94,13 @@ func (r *MultiTableCDCReader) setSnapshotBoundary(tableName string, lsn pglogrep
 
 // Read starts reading CDC changes from all tables in the publication.
 func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	if opts.CDCSnapshotSpool != nil {
+		slot := r.cdcConfig.SlotName
+		if slot == "" {
+			slot = generateMultiTableSlotName(r.cdcConfig.Publication, r.slotSuffix)
+		}
+		return r.source.readSnapshotSpool(ctx, r.tables, slot, r.resumeLSNs, opts.ReadOptions, true)
+	}
 	if opts.CDCChunkedSnapshot != nil {
 		slot := r.cdcConfig.SlotName
 		if slot == "" {
