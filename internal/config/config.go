@@ -163,10 +163,12 @@ type IngestConfig struct {
 
 	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to auto
 	CDCChunkedSnapshot         bool
+	CDCSnapshotSpool           bool
 	CDCSnapshotExecution       string // parallel or serial
 	CDCSnapshotChunkSize       int
 	CDCSnapshotChunkTimeout    time.Duration
-	CDCWALStaging              string // inmemory or destination
+	CDCWALStaging              string // inmemory, destination, or disk
+	CDCWALSpoolDir             string
 	CDCWALBufferBytes          int64
 	CDCStartLSN                string // Bootstrap boundary for externally loaded PostgreSQL CDC targets
 	CDCResumeLSN               string // For CDC sources: resume from this LSN (auto-detected from destination)
@@ -329,6 +331,9 @@ func (c *IngestConfig) Validate() error {
 
 // ValidateCDCSnapshotMode also runs after loading the destination's saved policy.
 func (c *IngestConfig) ValidateCDCSnapshotMode() error {
+	if err := c.validateCDCSnapshotSpool(); err != nil {
+		return err
+	}
 	if err := c.validateCDCChunkedSnapshot(); err != nil {
 		return err
 	}
@@ -402,8 +407,17 @@ func (c *IngestConfig) validateCDCChunkedSnapshot() error {
 	if c.CDCSnapshotExecution != "" && c.CDCSnapshotExecution != "parallel" && c.CDCSnapshotExecution != "serial" {
 		return &ValidationError{Field: "cdc-snapshot-execution", Message: "must be parallel or serial"}
 	}
-	if c.CDCWALStaging != "" && c.CDCWALStaging != "inmemory" && c.CDCWALStaging != "destination" {
-		return &ValidationError{Field: "cdc-wal-staging", Message: "must be inmemory or destination"}
+	if c.CDCWALStaging == "memory" {
+		c.CDCWALStaging = "inmemory"
+	}
+	if c.CDCWALStaging != "" && c.CDCWALStaging != "inmemory" && c.CDCWALStaging != "destination" && c.CDCWALStaging != "disk" {
+		return &ValidationError{Field: "cdc-wal-staging", Message: "must be memory, inmemory, destination, or disk"}
+	}
+	if c.CDCWALStaging == "disk" && !c.CDCSnapshotSpool {
+		return &ValidationError{Field: "cdc-wal-staging", Message: "disk requires --cdc-snapshot-spool"}
+	}
+	if c.CDCWALSpoolDir != "" && (!c.CDCSnapshotSpool || c.CDCWALStaging != "disk") {
+		return &ValidationError{Field: "cdc-wal-spool-dir", Message: "requires --cdc-snapshot-spool and --cdc-wal-staging disk"}
 	}
 	if !c.CDCChunkedSnapshot {
 		return nil

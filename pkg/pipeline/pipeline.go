@@ -177,6 +177,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 			return err
 		}
 	}
+	if p.config.CDCSnapshotSpool {
+		if err := strategy.ValidateCDCSnapshotSpoolDestination(dest); err != nil {
+			return err
+		}
+	}
 
 	if err := validateReverseETLColumnOverrides(dest, p.config.Columns); err != nil {
 		return err
@@ -1570,6 +1575,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			return err
 		}
 	}
+	if p.config.CDCSnapshotSpool {
+		if err := strategy.ValidateCDCSnapshotSpoolDestination(p.dest); err != nil {
+			return err
+		}
+	}
 	if err := p.validateCDCChunkedSnapshotSource(ctx, src, tables); err != nil {
 		return err
 	}
@@ -2860,7 +2870,7 @@ func shouldWarnCDCStrategy(cfg *config.IngestConfig, resolvedStrategy config.Inc
 }
 
 func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.SourceTable) config.IncrementalStrategy {
-	if cfg.CDCChunkedSnapshot {
+	if cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool {
 		return config.StrategyMerge
 	}
 	var s config.IncrementalStrategy
@@ -3462,7 +3472,7 @@ func validateReverseETLOverrideColumns(columnsSpec string, sourceSchema *schema.
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {
-	if cfg.CDCChunkedSnapshot {
+	if cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool {
 		if err := cfg.Validate(); err != nil {
 			return err
 		}

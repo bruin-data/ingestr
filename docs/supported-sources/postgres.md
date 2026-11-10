@@ -45,6 +45,38 @@ Listing tables does not narrow the publication — `ingestr_publication` is shar
 
 CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. With the default snapshot reader, an interrupted first bootstrap without a saved stream position restarts its incomplete table snapshots. The multi-table reader can resume an incomplete keyed snapshot when the stream already has a saved position. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
 
+### Spooling normal snapshots
+
+Enable `--cdc-snapshot-spool` to capture the change stream while an initial or full-refresh normal snapshot copies, then apply those changes after copying. This is opt-in and supports single-table and multi-table selections. The normal snapshot read and direct destination loading path remain available. Omit `--stream` to catch up and exit, or include it to continue streaming. After this snapshot completes, streaming uses the ordinary reader; later schema-change and newly discovered table backfills use its existing snapshot behavior.
+
+```bash
+ingestr ingest \
+  --source-uri 'postgres+cdc://user:password@host/database?publication=my_pub' \
+  --source-table public.orders \
+  --dest-uri 'postgres://user:password@destination/warehouse' \
+  --dest-table public.orders \
+  --cdc-snapshot-spool \
+  --cdc-wal-staging destination
+```
+
+Choose storage with `--cdc-wal-staging`:
+
+| Storage | Source WAL during copying | Recovery storage |
+|---|---|---|
+| `destination` (default with spooling) | Acknowledged after captured changes are durable | Managed `cdc_snapshot_wal` table in the destination |
+| `disk` | Acknowledged after captured changes and their metadata are synced | Persistent local directory specified by `--cdc-wal-spool-dir` and destination-managed checkpoints |
+| `memory` or `inmemory` | Retained until changes are applied | Source WAL; volatile buffers are rebuilt after a restart |
+
+For disk storage, add `--cdc-wal-staging disk --cdc-wal-spool-dir /persistent/ingestr-spool`. Use a disk with enough capacity for all changes captured over the snapshot duration. The spool does not compact changes to the latest value per key. Destination storage uses destination capacity and adds writes during copying. `--cdc-wal-buffer-bytes` controls the buffering threshold, not the total durable spool size.
+
+Durable changes are retained until their destination application is checkpointed. Keep the destination staging namespace and, for disk storage, the same persistent directory across restarts. Changing the storage mode, directory, table selection, or source/destination identities during an incomplete spool is rejected; `--full-refresh` starts a new baseline. Disabling spooling while its checkpoint is incomplete is also rejected.
+
+Spooling requires non-null primary keys, a destination with CDC-aware keyed merges, table truncation, and managed CDC state. Omit `--incremental-strategy` or set it to `merge`. It cannot be combined with chunked snapshots, `--cdc-snapshot-mode never`, `--cdc-start-lsn`, SQL limits or excluded columns, incremental filters, interval bounds, or extraction partitioning.
+
+Spooling keeps capturing during destination backpressure, so durable storage lets the replication slot advance during copying. Finite runs stop capture after the copy and choose a fixed catch-up endpoint before replaying the spool; subsequent changes remain in source WAL for the next run. PostgreSQL's `restart_lsn` can still lag behind acknowledgments. The normal snapshot transaction remains open for the copy duration; spooling does not shorten it. Chunked snapshots address transaction duration separately.
+
+Environment variables are `INGESTR_CDC_SNAPSHOT_SPOOL`, `INGESTR_CDC_WAL_STAGING`, `INGESTR_CDC_WAL_SPOOL_DIR`, and `INGESTR_CDC_WAL_BUFFER_BYTES`.
+
 ### Large initial snapshots
 
 Enable `--cdc-snapshot-chunked` to read PostgreSQL CDC snapshots in bounded chunks, each in a separate transaction. This is opt-in; omitting the flag preserves the default snapshot reader. Rows are converted into pages of approximately 16 MiB, or the smaller `--batch-size` value (MiB), and spooled to temporary Arrow files. An explicit `--page-size` adds a row ceiling; without it, the byte target determines page size. For example, 50 KiB rows fill a page in roughly 330 rows. A single row can exceed the byte target. The chunk reader releases its source transaction before waiting for destination writes, limiting the snapshot horizon held by a slow load. Allow temporary disk space for up to two chunks; temporary files are removed when consumed or cancelled.

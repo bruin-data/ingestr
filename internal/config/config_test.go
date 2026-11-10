@@ -817,8 +817,8 @@ func TestIngestConfigValidateCDCChunkedSnapshot(t *testing.T) {
 		{name: "interval start", change: func(c *IngestConfig) { now := time.Now(); c.IntervalStart = &now }, wantErr: "interval-start"},
 		{name: "interval end", change: func(c *IngestConfig) { now := time.Now(); c.IntervalEnd = &now }, wantErr: "interval-end"},
 		{name: "partition", change: func(c *IngestConfig) { c.ExtractPartitionBy = "id" }, wantErr: "extract-partition-by"},
-		{name: "unknown staging", change: func(c *IngestConfig) { c.CDCWALStaging = "disk" }, wantErr: "must be inmemory or destination"},
-		{name: "unknown staging while disabled", change: func(c *IngestConfig) { c.CDCChunkedSnapshot = false; c.CDCWALStaging = "disk" }, wantErr: "must be inmemory or destination"},
+		{name: "unknown staging", change: func(c *IngestConfig) { c.CDCWALStaging = "invalid" }, wantErr: "must be memory, inmemory, destination, or disk"},
+		{name: "unknown staging while disabled", change: func(c *IngestConfig) { c.CDCChunkedSnapshot = false; c.CDCWALStaging = "invalid" }, wantErr: "must be memory, inmemory, destination, or disk"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := DefaultConfig()

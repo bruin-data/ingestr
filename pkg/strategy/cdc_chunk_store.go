@@ -338,20 +338,28 @@ func (s *cdcChunkStore) Identity(ctx context.Context) (string, error) {
 // by its saved chunk checkpoint, which stores progress separately from normal
 // snapshot progress events.
 func (m *CDCStateManager) ResumeChunkedSnapshot(ctx context.Context, sourceTable, destTable, incarnation, expectedIdentity string) error {
+	return m.resumeJournaledSnapshot(ctx, sourceTable, destTable, incarnation, expectedIdentity, "chunked")
+}
+
+func (m *CDCStateManager) ResumeSpoolSnapshot(ctx context.Context, sourceTable, destTable, incarnation, expectedIdentity string) error {
+	return m.resumeJournaledSnapshot(ctx, sourceTable, destTable, incarnation, expectedIdentity, "spooled")
+}
+
+func (m *CDCStateManager) resumeJournaledSnapshot(ctx context.Context, sourceTable, destTable, incarnation, expectedIdentity, mode string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.started || m.generation == 0 {
 		return fmt.Errorf("CDC state run has not started")
 	}
 	if expectedIdentity == "" || m.destTables[sourceTable] != destTable {
-		return fmt.Errorf("CDC chunked snapshot of %s has no resume identity for destination table %q", sourceTable, destTable)
+		return fmt.Errorf("CDC %s snapshot of %s has no resume identity for destination table %q", mode, sourceTable, destTable)
 	}
 	identity, raw, err := m.chunkSnapshotIdentity(ctx, sourceTable)
 	if err != nil {
 		return err
 	}
 	if identity != expectedIdentity || raw == "" {
-		return fmt.Errorf("CDC chunked snapshot source or destination changed before resuming %s", sourceTable)
+		return fmt.Errorf("CDC %s snapshot source or destination changed before resuming %s", mode, sourceTable)
 	}
 	m.boundDestinations[sourceTable] = cdcDestinationIncarnationDigest(raw)
 	m.boundRawDestinations[sourceTable] = raw

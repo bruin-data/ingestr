@@ -35,6 +35,14 @@ func NewCDCReader(src *PostgresCDCSource, tableName string, tableSchema *schema.
 }
 
 func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	if opts.CDCSnapshotSpool != nil {
+		slot := r.cdcConfig.SlotName
+		if slot == "" {
+			slot = generateSlotName(r.tableName, r.cdcConfig.Publication, opts.CDCSlotSuffix)
+		}
+		table := source.SourceTableInfo{Name: r.tableName, Schema: r.tableSchema, PrimaryKeys: r.tableSchema.PrimaryKeys}
+		return r.source.readSnapshotSpool(ctx, []source.SourceTableInfo{table}, slot, map[string]string{r.tableName: opts.CDCResumeLSN}, opts, false)
+	}
 	if opts.CDCChunkedSnapshot != nil {
 		slot := r.cdcConfig.SlotName
 		if slot == "" {

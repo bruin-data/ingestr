@@ -62,14 +62,22 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	if err != nil {
 		return err
 	}
-	if chunked != nil {
+	spool, err := e.snapshotSpoolOptions(job.Config, job.Destination)
+	if err != nil {
+		return err
+	}
+	if chunked != nil || spool != nil {
 		tableSchema, keys := job.SourceSchema, job.Config.PrimaryKeys
 		if tableSchema == nil {
 			tableSchema = job.Schema
 		} else {
 			keys = tableSchema.PrimaryKeys
 		}
-		if err := ValidateCDCChunkedSnapshotTable(job.Config.SourceTable, tableSchema, keys); err != nil {
+		validateTable := ValidateCDCChunkedSnapshotTable
+		if spool != nil {
+			validateTable = ValidateCDCSnapshotSpoolTable
+		}
+		if err := validateTable(job.Config.SourceTable, tableSchema, keys); err != nil {
 			return err
 		}
 	}
@@ -113,6 +121,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		CDCManagedState:            e.opts.StateManager != nil,
 		CDCSnapshotReplace:         st.isCDC && supportsCDCSnapshotReplace(job.Destination),
 		CDCChunkedSnapshot:         chunked,
+		CDCSnapshotSpool:           spool,
 		FullRefresh:                job.Config.FullRefresh,
 		Streaming:                  true,
 		FlushInterval:              job.Config.FlushInterval,
@@ -149,9 +158,17 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	if err != nil {
 		return err
 	}
-	if chunked != nil {
+	spool, err := e.snapshotSpoolOptions(job.Config, job.Destination)
+	if err != nil {
+		return err
+	}
+	if chunked != nil || spool != nil {
+		validateTable := ValidateCDCChunkedSnapshotTable
+		if spool != nil {
+			validateTable = ValidateCDCSnapshotSpoolTable
+		}
 		for _, table := range job.Tables {
-			if err := ValidateCDCChunkedSnapshotTable(table.Name, table.Schema, table.PrimaryKeys); err != nil {
+			if err := validateTable(table.Name, table.Schema, table.PrimaryKeys); err != nil {
 				return err
 			}
 		}
@@ -210,6 +227,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			CDCManagedState:     e.opts.StateManager != nil,
 			CDCSnapshotReplace:  (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
 			CDCChunkedSnapshot:  chunked,
+			CDCSnapshotSpool:    spool,
 			FullRefresh:         job.Config.FullRefresh,
 			Streaming:           true,
 			FlushInterval:       job.Config.FlushInterval,
@@ -833,6 +851,8 @@ func (l *flushLoop) resumeSnapshotReplacement(ctx context.Context, res source.Re
 	var err error
 	if l.cfg != nil && l.cfg.CDCChunkedSnapshot {
 		err = l.opts.StateManager.ResumeChunkedSnapshot(ctx, stateTable, st.destTable, st.incarnation, res.CDCChunkedSnapshotIdentity)
+	} else if l.cfg != nil && l.cfg.CDCSnapshotSpool {
+		err = l.opts.StateManager.ResumeSpoolSnapshot(ctx, stateTable, st.destTable, st.incarnation, res.CDCSnapshotSpoolIdentity)
 	} else {
 		err = l.opts.StateManager.ResumeSnapshot(ctx, stateTable, st.destTable, st.incarnation)
 	}

@@ -127,6 +127,7 @@ type ReadOptions struct {
 	CDCLegacySlotSuffix             string              // Optional: prior auto-slot suffix used only for upgrade resume
 	CDCManagedState                 bool                // Consumer persists CDCStateCommitTokens independently of destination rows
 	CDCChunkedSnapshot              *CDCChunkedSnapshotOptions
+	CDCSnapshotSpool                *CDCSnapshotSpoolOptions
 	CDCSnapshotReplace              bool // Consumer can apply a full-snapshot replacement boundary
 	CDCStableDataBatches            bool // Consumer requires source-stable CDC data-write identities
 	FullRefresh                     bool
@@ -177,7 +178,8 @@ type RecordBatchResult struct {
 	// durable stay in place, the snapshot resumes after them stamped with a
 	// newer position, and the completion token still names
 	// CDCSnapshotPosition.
-	CDCSnapshotResumed bool
+	CDCSnapshotResumed       bool
+	CDCSnapshotSpoolIdentity string
 	// CDCChunkedSnapshotIdentity carries the persisted source and physical
 	// destination identity on a resumed chunked snapshot marker.
 	CDCChunkedSnapshotIdentity string
