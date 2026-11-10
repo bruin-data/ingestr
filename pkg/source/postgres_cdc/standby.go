@@ -28,11 +28,15 @@ func (s *PostgresCDCSource) createLogicalSlot(ctx context.Context, conn *pgconn.
 		hint := time.AfterFunc(standbySlotHintAfter, s.warnStandbySlotWait)
 		defer hint.Stop()
 	}
-	return pglogrepl.CreateReplicationSlot(ctx, conn, name, "pgoutput", pglogrepl.CreateReplicationSlotOptions{
+	created, err := pglogrepl.CreateReplicationSlot(ctx, conn, name, "pgoutput", pglogrepl.CreateReplicationSlotOptions{
 		Temporary:      temporary,
 		SnapshotAction: "EXPORT_SNAPSHOT",
 		Mode:           pglogrepl.LogicalReplication,
 	})
+	if err == nil && !temporary {
+		s.setWALRetentionSlot(name)
+	}
+	return created, err
 }
 
 func (s *PostgresCDCSource) warnStandbySlotWait() {

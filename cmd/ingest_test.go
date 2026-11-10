@@ -407,7 +407,7 @@ func TestIngestConfigStream(t *testing.T) {
 		{name: "explicit replace is not default", args: []string{"--stream", "--incremental-strategy=replace"}, err: "not supported with --stream"},
 		{name: "explicit default interval requires stream", args: []string{"--flush-interval=30s"}, err: "only valid together with --stream"},
 		{name: "explicit default records requires stream", args: []string{"--flush-records=50000"}, err: "only valid together with --stream"},
-		{name: "metrics requires stream", args: []string{"--metrics-addr=:9090"}, err: "--metrics-addr is only valid"},
+		{name: "batch metrics", args: []string{"--metrics-addr=:9090"}, strategy: config.StrategyReplace, interval: 30 * time.Second, records: 50000},
 		{name: "zero interval", args: []string{"--stream", "--flush-interval=0s"}, err: "flush-interval"},
 		{name: "zero records", args: []string{"--stream", "--flush-records=0"}, err: "flush-records"},
 	} {

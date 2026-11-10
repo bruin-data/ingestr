@@ -79,6 +79,8 @@ Environment variables are `INGESTR_CDC_SNAPSHOT_SPOOL`, `INGESTR_CDC_WAL_STAGING
 
 ### Large initial snapshots
 
+To monitor WAL retention during an initial snapshot, set `--metrics-addr 127.0.0.1:6060` and scrape `/metrics`. The PostgreSQL slot metrics expose retained WAL, the remaining safe WAL allowance, the configured retention limit, and slot status during both batch and streaming runs. They query the primary or standby directly over SQL. See [monitoring metrics and alert examples](/commands/ingest.md#monitoring-a-stream).
+
 Enable `--cdc-snapshot-chunked` to read PostgreSQL CDC snapshots in bounded chunks, each in a separate transaction. This is opt-in; omitting the flag preserves the default snapshot reader. Rows are converted into pages of approximately 16 MiB, or the smaller `--batch-size` value (MiB), and spooled to temporary Arrow files. An explicit `--page-size` adds a row ceiling; without it, the byte target determines page size. For example, 50 KiB rows fill a page in roughly 330 rows. A single row can exceed the byte target. The chunk reader releases its source transaction before waiting for destination writes, limiting the snapshot horizon held by a slow load. Allow temporary disk space for up to two chunks; temporary files are removed when consumed or cancelled.
 
 Set `TMPDIR` to a disk-backed directory if your default temporary directory is memory-backed. A forcibly killed process can leave `ingestr-snapshot-chunk-*.arrow` files there; remove those files after the process stops.

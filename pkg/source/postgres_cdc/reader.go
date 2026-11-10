@@ -118,6 +118,7 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 			}
 			if exists {
 				slotName = resolvedSlot
+				r.source.setWALRetentionSlot(slotName)
 				if legacy {
 					r.source.markLegacySlotInUse(slotName)
 				}
