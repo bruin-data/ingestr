@@ -37,10 +37,12 @@ type ParquetDestination struct {
 	mu          sync.Mutex
 	schema      *schema.TableSchema
 	appendMode  bool
+
+	rowGroupByteLimit int64
 }
 
 func NewParquetDestination() *ParquetDestination {
-	return &ParquetDestination{}
+	return &ParquetDestination{rowGroupByteLimit: maxRowGroupBytes}
 }
 
 func (d *ParquetDestination) Schemes() []string {
@@ -329,10 +331,10 @@ func (d *ParquetDestination) copyExistingParquetIntoWriter(ctx context.Context, 
 }
 
 // writeBuffered coalesces small batches into a shared row group but starts a new one
-// once the buffered pages reach maxRowGroupBytes, since buffered row groups are held
+// once the buffered pages reach rowGroupByteLimit, since buffered row groups are held
 // entirely in memory until closed.
 func (d *ParquetDestination) writeBuffered(rec arrow.RecordBatch) error {
-	if d.writer.RowGroupTotalBytesWritten() >= maxRowGroupBytes {
+	if d.writer.RowGroupTotalBytesWritten() >= d.rowGroupByteLimit {
 		if err := d.writer.NewBufferedRowGroupChecked(); err != nil {
 			return err
 		}

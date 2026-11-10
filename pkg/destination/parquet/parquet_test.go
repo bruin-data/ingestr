@@ -31,8 +31,12 @@ func int64Batch(start, n int64) arrow.RecordBatch {
 
 func writeBatches(t *testing.T, path string, dropFirst bool, batches ...arrow.RecordBatch) {
 	t.Helper()
+	writeBatchesWith(t, NewParquetDestination(), path, dropFirst, batches...)
+}
+
+func writeBatchesWith(t *testing.T, d *ParquetDestination, path string, dropFirst bool, batches ...arrow.RecordBatch) {
+	t.Helper()
 	ctx := context.Background()
-	d := NewParquetDestination()
 	require.NoError(t, d.Connect(ctx, "parquet://"+path))
 	require.NoError(t, d.PrepareTable(ctx, destination.PrepareOptions{DropFirst: dropFirst}))
 
@@ -93,6 +97,27 @@ func TestWriteSplitsLargeOutputIntoBoundedRowGroups(t *testing.T) {
 	require.Equal(t, int64(5*batchRows), sum(sizes))
 	for _, s := range sizes {
 		require.LessOrEqual(t, s, int64(maxRowGroupRows))
+	}
+}
+
+func TestWriteSplitsRowGroupsAtByteLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.parquet")
+
+	const batchRows = 50_000
+	var batches []arrow.RecordBatch
+	for i := range int64(40) {
+		batches = append(batches, int64Batch(i*batchRows, batchRows))
+	}
+	d := NewParquetDestination()
+	d.rowGroupByteLimit = 2 << 20
+	writeBatchesWith(t, d, path, true, batches...)
+
+	sizes := rowGroupSizes(t, path)
+	require.Equal(t, int64(40*batchRows), sum(sizes))
+	require.Greater(t, len(sizes), 2)
+	for _, s := range sizes {
+		require.Less(t, s, int64(maxRowGroupRows))
+		require.Zero(t, s%batchRows)
 	}
 }
 
