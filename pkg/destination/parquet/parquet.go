@@ -22,6 +22,12 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
+const (
+	maxRowGroupRows  = 1 << 20
+	maxRowGroupBytes = 128 << 20
+	appendReadBatch  = 64 * 1024
+)
+
 type ParquetDestination struct {
 	filePath    string
 	tempPath    string
@@ -31,10 +37,12 @@ type ParquetDestination struct {
 	mu          sync.Mutex
 	schema      *schema.TableSchema
 	appendMode  bool
+
+	rowGroupByteLimit int64
 }
 
 func NewParquetDestination() *ParquetDestination {
-	return &ParquetDestination{}
+	return &ParquetDestination{rowGroupByteLimit: maxRowGroupBytes}
 }
 
 func (d *ParquetDestination) Schemes() []string {
@@ -152,7 +160,7 @@ func (d *ParquetDestination) WriteParallel(ctx context.Context, records <-chan s
 			shouldRelease = true
 		}
 
-		if err := d.writer.WriteBuffered(recordToWrite); err != nil {
+		if err := d.writeBuffered(recordToWrite); err != nil {
 			if shouldRelease {
 				recordToWrite.Release()
 			}
@@ -234,6 +242,7 @@ func (d *ParquetDestination) initWriter(ctx context.Context, arrowSchema *arrow.
 		parquet.WithCompression(compress.Codecs.Snappy),
 		parquet.WithDictionaryDefault(true),
 		parquet.WithDataPageSize(1024*1024), // 1MB page size
+		parquet.WithMaxRowGroupLength(maxRowGroupRows),
 	)
 
 	arrowProps := pqarrow.NewArrowWriterProperties(
@@ -276,26 +285,23 @@ func (d *ParquetDestination) copyExistingParquetIntoWriter(ctx context.Context, 
 		return fmt.Errorf("failed to open existing parquet reader: %w", err)
 	}
 
-	fr, err := pqarrow.NewFileReader(pr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	fr, err := pqarrow.NewFileReader(pr, pqarrow.ArrowReadProperties{BatchSize: appendReadBatch}, memory.DefaultAllocator)
 	if err != nil {
 		return fmt.Errorf("failed to create parquet arrow reader: %w", err)
 	}
 
-	tbl, err := fr.ReadTable(ctx)
+	rr, err := fr.GetRecordReader(ctx, nil, nil)
 	if err != nil {
-		return fmt.Errorf("failed to read existing parquet table: %w", err)
+		return fmt.Errorf("failed to read existing parquet file: %w", err)
 	}
-	defer tbl.Release()
+	defer rr.Release()
 
-	if !schemaEqualIgnoringMetadata(tbl.Schema(), expectedSchema) {
-		return fmt.Errorf("append schema mismatch: existing=%v new=%v", tbl.Schema(), expectedSchema)
+	if !schemaEqualIgnoringMetadata(rr.Schema(), expectedSchema) {
+		return fmt.Errorf("append schema mismatch: existing=%v new=%v", rr.Schema(), expectedSchema)
 	}
 
-	tr := array.NewTableReader(tbl, 1024*64)
-	defer tr.Release()
-
-	for tr.Next() {
-		rec := tr.RecordBatch()
+	for rr.Next() {
+		rec := rr.RecordBatch()
 		toWrite := rec
 		shouldRelease := false
 		if !rec.Schema().Equal(expectedSchema) && schemaEqualIgnoringMetadata(rec.Schema(), expectedSchema) {
@@ -307,7 +313,7 @@ func (d *ParquetDestination) copyExistingParquetIntoWriter(ctx context.Context, 
 			shouldRelease = true
 		}
 
-		if err := d.writer.WriteBuffered(toWrite); err != nil {
+		if err := d.writeBuffered(toWrite); err != nil {
 			if shouldRelease {
 				toWrite.Release()
 			}
@@ -317,11 +323,23 @@ func (d *ParquetDestination) copyExistingParquetIntoWriter(ctx context.Context, 
 			toWrite.Release()
 		}
 	}
-	if err := tr.Err(); err != nil {
+	if err := rr.Err(); err != nil {
 		return fmt.Errorf("failed to iterate existing parquet table: %w", err)
 	}
 
 	return nil
+}
+
+// writeBuffered coalesces small batches into a shared row group but starts a new one
+// once the buffered pages reach rowGroupByteLimit, since buffered row groups are held
+// entirely in memory until closed.
+func (d *ParquetDestination) writeBuffered(rec arrow.RecordBatch) error {
+	if d.writer.RowGroupTotalBytesWritten() >= d.rowGroupByteLimit {
+		if err := d.writer.NewBufferedRowGroupChecked(); err != nil {
+			return err
+		}
+	}
+	return d.writer.WriteBuffered(rec)
 }
 
 func (d *ParquetDestination) cleanupTempOnError() {
