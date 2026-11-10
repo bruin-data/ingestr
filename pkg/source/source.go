@@ -2,7 +2,11 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -240,21 +244,110 @@ type CDCStateCommitToken struct {
 	SnapshotPositions    map[string]string
 	SnapshotIncarnations map[string]string
 	SnapshotSchemas      map[string]string
-	// SnapshotProgress marks how far an in-progress, key-ordered snapshot is
-	// included in all preceding results, so a later run can resume it.
+	// SnapshotProgress contains complete immutable progress vectors covering
+	// all preceding results for each table. A single source coordinator emits
+	// cumulative vectors; consumers may retain only the latest per table.
 	SnapshotProgress map[string]CDCSnapshotProgress
 }
 
-// CDCSnapshotProgress locates a resumable key-ordered snapshot. Boundary is
-// the source position the snapshot replaces the table at; every row whose key
-// sorts at or below Key is durable. Key is a JSON array of the key columns'
-// text values. Incarnation and SchemaFingerprint identify the table shape the
-// snapshot reads, so a later run resumes only an unchanged table.
+// CDCSnapshotRangeProgress covers (After, Upper] in the source key ordering.
+// Nil bounds are open. Key is the last covered key, or nil before any rows.
+// Complete includes exhausted empty ranges; it does not complete the table.
+// Key values are serialized text, compared only in the source's native types.
+type CDCSnapshotRangeProgress struct {
+	ID       string   `json:"id"`
+	After    []string `json:"a,omitempty"`
+	Upper    []string `json:"u,omitempty"`
+	Key      []string `json:"k,omitempty"`
+	Complete bool     `json:"c,omitempty"`
+}
+
+func (r *CDCSnapshotRangeProgress) UnmarshalJSON(data []byte) error {
+	var encoded struct {
+		ID       string          `json:"id"`
+		After    json.RawMessage `json:"a"`
+		Upper    json.RawMessage `json:"u"`
+		Key      json.RawMessage `json:"k"`
+		Complete bool            `json:"c"`
+	}
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		return err
+	}
+	decoded := CDCSnapshotRangeProgress{ID: encoded.ID, Complete: encoded.Complete}
+	for _, tuple := range []struct {
+		encoded json.RawMessage
+		decoded *[]string
+	}{{encoded.After, &decoded.After}, {encoded.Upper, &decoded.Upper}, {encoded.Key, &decoded.Key}} {
+		if len(tuple.encoded) == 0 {
+			continue
+		}
+		value, err := decodeCDCSnapshotKey(tuple.encoded)
+		if err != nil {
+			return fmt.Errorf("invalid snapshot range key: %w", err)
+		}
+		*tuple.decoded = value
+	}
+	*r = decoded
+	return nil
+}
+
+func decodeCDCSnapshotKey(encoded []byte) ([]string, error) {
+	var values []*string
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		return nil, err
+	}
+	if values == nil {
+		return nil, nil
+	}
+	key := make([]string, len(values))
+	for i, value := range values {
+		if value == nil {
+			return nil, fmt.Errorf("snapshot keys cannot contain null")
+		}
+		key[i] = *value
+	}
+	return key, nil
+}
+
+// CDCSnapshotProgress locates a resumable snapshot attempt. Boundary is the
+// original replacement and WAL repair boundary; resumed reads may stamp rows
+// with a newer position. Attempt and range boundaries stay fixed across runs.
+// Incarnation and SchemaFingerprint identify the source table shape. Key is
+// the legacy JSON key array, used only when converting single-cursor progress.
 type CDCSnapshotProgress struct {
 	Boundary          string
 	Key               string
 	Incarnation       string
 	SchemaFingerprint string
+	Attempt           string
+	Ranges            []CDCSnapshotRangeProgress
+}
+
+// Clone gives a progress handoff independent ownership of all key slices.
+func (p CDCSnapshotProgress) Clone() CDCSnapshotProgress {
+	p.Ranges = slices.Clone(p.Ranges)
+	for i := range p.Ranges {
+		p.Ranges[i].After = slices.Clone(p.Ranges[i].After)
+		p.Ranges[i].Upper = slices.Clone(p.Ranges[i].Upper)
+		p.Ranges[i].Key = slices.Clone(p.Ranges[i].Key)
+	}
+	return p
+}
+
+// NormalizeLegacy converts a single durable cursor into a stable full-table
+// range. It never repartitions the completed prefix or changes its boundary.
+func (p CDCSnapshotProgress) NormalizeLegacy() (CDCSnapshotProgress, error) {
+	if len(p.Ranges) > 0 {
+		return p.Clone(), nil
+	}
+	key, err := decodeCDCSnapshotKey([]byte(p.Key))
+	if p.Attempt != "" || err != nil || len(key) == 0 {
+		return CDCSnapshotProgress{}, fmt.Errorf("invalid legacy snapshot progress key %q", p.Key)
+	}
+	identity, _ := json.Marshal([]string{p.Boundary, p.Incarnation, p.SchemaFingerprint})
+	p.Attempt = fmt.Sprintf("legacy-%x", sha256.Sum256(identity))
+	p.Ranges = []CDCSnapshotRangeProgress{{ID: "0", Key: key}}
+	return p, nil
 }
 
 // CDCStateProvider exposes the state produced by a completed batch CDC read.

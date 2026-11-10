@@ -7,16 +7,27 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (s *PostgresCDCSource) TableSchemaFingerprint(ctx context.Context, table string) (string, error) {
 	if s.queryPool == nil {
 		return "", fmt.Errorf("postgres CDC source is not connected")
 	}
+	return tableSchemaFingerprint(ctx, s.queryPool, table)
+}
+
+type tableMetadataQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func tableSchemaFingerprint(ctx context.Context, query tableMetadataQuerier, table string) (string, error) {
 	schemaName, tableName := parseTableName(table)
 	h := sha256.New()
 
-	rows, err := s.queryPool.Query(ctx, `
+	rows, err := query.Query(ctx, `
 		SELECT a.attnum, a.attname, a.atttypid::text, a.atttypmod,
 		       a.attnotnull, a.attidentity::text, a.attgenerated::text,
 		       a.attcollation::text,
@@ -64,7 +75,7 @@ func (s *PostgresCDCSource) TableSchemaFingerprint(ctx context.Context, table st
 		return "", fmt.Errorf("table %s not found or has no columns", table)
 	}
 
-	indexRows, err := s.queryPool.Query(ctx, `
+	indexRows, err := query.Query(ctx, `
 		SELECT i.indisprimary, i.indisreplident, i.indkey::text,
 		       pg_get_indexdef(i.indexrelid)
 		FROM pg_index i

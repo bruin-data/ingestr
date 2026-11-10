@@ -1143,7 +1143,7 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 				if l.pendingState.SnapshotProgress == nil {
 					l.pendingState.SnapshotProgress = make(map[string]source.CDCSnapshotProgress)
 				}
-				l.pendingState.SnapshotProgress[table] = progress
+				l.pendingState.SnapshotProgress[table] = progress.Clone()
 			}
 			if token.Position != "" && len(l.pendingTruncates) > 0 {
 				if l.pendingState.SnapshotPositions == nil {

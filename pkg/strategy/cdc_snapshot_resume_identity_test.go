@@ -1,11 +1,33 @@
 package strategy
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSnapshotResumeRejectsInvalidSavedProgressBeforeInvalidation(t *testing.T) {
+	dest := newCDCStateDestination()
+	manager := startProgress(t, dest)
+	entry, progress, ok := manager.latestSnapshotProgress("public.orders")
+	require.True(t, ok)
+	progress.Version = 99
+	progress.Sequence++
+	encoded, err := json.Marshal(progress)
+	require.NoError(t, err)
+	entry.EventID, entry.Position = "unsupported-snapshot-progress", string(encoded)
+	manager.entries = append(manager.entries, entry)
+	writesBefore := dest.cdcWrites
+	epochBefore := manager.snapshotEpochs["public.orders"]
+
+	err = manager.ResumeSnapshot(t.Context(), "public.orders", "raw.orders", "100")
+
+	require.ErrorContains(t, err, "no resumable progress")
+	require.Equal(t, writesBefore, dest.cdcWrites)
+	require.Equal(t, epochBefore, manager.snapshotEpochs["public.orders"])
+}
 
 func TestSnapshotResumeRejectsTargetChangeAfterDiscovery(t *testing.T) {
 	for _, change := range []string{"replaced", "missing"} {

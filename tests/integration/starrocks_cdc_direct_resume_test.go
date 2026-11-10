@@ -79,6 +79,11 @@ func (d *directSnapshotResumeStarRocks) WriteParallel(ctx context.Context, recor
 	if opts.Table == d.gate.table && opts.CDCSnapshot && d.gate.armed.Load() && d.gate.loads.Add(1) == 3 {
 		close(d.gate.blocked)
 		<-ctx.Done()
+		for result := range records {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
+		}
 		return ctx.Err()
 	}
 	return d.StarRocksDestination.WriteParallel(ctx, records, opts)
@@ -148,6 +153,7 @@ func TestStarRocksCDCDirectSnapshotResumesAfterRestart(t *testing.T) {
 	cfg.IncrementalStrategy = config.StrategyMerge
 	cfg.CDCDeleteBehavior = config.CDCDeleteHard
 	cfg.PageSize, cfg.FlushRecords = 1000, 1000
+	cfg.ExtractParallelism = 4
 	cfg.DestinationParallelism = 4
 	cfg.FlushInterval = time.Hour
 	cfg.NoLoadTimestamp, cfg.NoRunID = true, true
@@ -196,36 +202,95 @@ func TestStarRocksCDCDirectSnapshotResumesAfterRestart(t *testing.T) {
 		t.Fatal("replacement snapshot did not reach its third direct load")
 	}
 	var progress struct {
-		Boundary string `json:"b"`
-		Key      string `json:"k"`
+		Version  int                               `json:"v"`
+		Boundary string                            `json:"b"`
+		Attempt  string                            `json:"a"`
+		Ranges   []source.CDCSnapshotRangeProgress `json:"r"`
 	}
 	var status, position string
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT state_status, _cdc_lsn FROM "+stateDatabase+`.cdc_state
 		WHERE state_kind = 'snapshot_progress' AND source_table = ? ORDER BY recorded_at DESC LIMIT 1`, items).Scan(&status, &position))
 	require.Equal(t, "in_progress", status)
 	require.NoError(t, json.Unmarshal([]byte(position), &progress))
+	require.Equal(t, 2, progress.Version)
+	require.NotEmpty(t, progress.Attempt)
+	require.Len(t, progress.Ranges, 4)
 	require.Greater(t, progress.Boundary, initialStamp)
-	var keys []string
-	require.NoError(t, json.Unmarshal([]byte(progress.Key), &keys))
-	require.Len(t, keys, 1)
-	lastKey, err := strconv.Atoi(keys[0])
-	require.NoError(t, err)
-	require.Greater(t, lastKey, 0)
-	require.Less(t, lastKey, rowCount)
+	durableKeys := make(map[int]bool)
+	parseKey := func(key []string, unbounded int) int {
+		t.Helper()
+		if key == nil {
+			return unbounded
+		}
+		require.Len(t, key, 1)
+		value, err := strconv.Atoi(key[0])
+		require.NoError(t, err)
+		return value
+	}
+	for _, r := range progress.Ranges {
+		after, upper := parseKey(r.After, 0), parseKey(r.Upper, rowCount)
+		last := after
+		if r.Complete {
+			last = upper
+		} else if r.Key != nil {
+			last = parseKey(r.Key, after)
+		}
+		require.GreaterOrEqual(t, last, after)
+		require.LessOrEqual(t, last, upper)
+		for key := after + 1; key <= last; key++ {
+			require.False(t, durableKeys[key], "saved ranges must not overlap")
+			durableKeys[key] = true
+		}
+	}
+	require.GreaterOrEqual(t, len(durableKeys), 4)
+	require.Less(t, len(durableKeys), rowCount)
 	stop(cancel, done)
-	var firstStamp string
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT _cdc_lsn FROM "+items+" WHERE id = 1").Scan(&firstStamp))
-	require.Equal(t, progress.Boundary, firstStamp)
+	readStamps := func() map[int]string {
+		t.Helper()
+		rows, err := db.QueryContext(ctx, "SELECT id, _cdc_lsn FROM "+items)
+		require.NoError(t, err)
+		defer func() { _ = rows.Close() }()
+		stamps := make(map[int]string)
+		for rows.Next() {
+			var key int
+			var stamp string
+			require.NoError(t, rows.Scan(&key, &stamp))
+			stamps[key] = stamp
+		}
+		require.NoError(t, rows.Err())
+		return stamps
+	}
+	interruptedStamps := readStamps()
 	var rewritten int
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM "+items+" WHERE _cdc_lsn = ?", progress.Boundary).Scan(&rewritten))
-	require.GreaterOrEqual(t, rewritten, lastKey)
+	for key, stamp := range interruptedStamps {
+		if durableKeys[key] {
+			require.Equal(t, progress.Boundary, stamp, "progress must cover visible direct writes for key %d", key)
+		}
+		if stamp == progress.Boundary {
+			rewritten++
+		}
+	}
+	for key := range durableKeys {
+		require.Contains(t, interruptedStamps, key)
+	}
+	require.GreaterOrEqual(t, rewritten, len(durableKeys))
 	require.Less(t, rewritten, rowCount)
 	require.Zero(t, gate.snapshotMerges.Load(), "the interrupted replacement must use direct loads")
 
-	pgExec(fmt.Sprintf(`UPDATE %[1]s SET payload = 'updated-low' WHERE id = 2;
-		DELETE FROM %[1]s WHERE id = 3;
-		UPDATE %[1]s SET payload = 'updated-high' WHERE id = %[2]d;
-		DELETE FROM %[1]s WHERE id = %[3]d;`, items, rowCount-1, rowCount))
+	var behindCursor []int
+	for key := 1; key < rowCount-1 && len(behindCursor) < 4; key++ {
+		if durableKeys[key] {
+			behindCursor = append(behindCursor, key)
+		}
+	}
+	require.Len(t, behindCursor, 4)
+	probe, updatedKey, deletedKey, movedKey := behindCursor[0], behindCursor[1], behindCursor[2], behindCursor[3]
+	pgExec(fmt.Sprintf(`UPDATE %[1]s SET payload = 'updated-durable' WHERE id = %[2]d;
+		DELETE FROM %[1]s WHERE id = %[3]d;
+		UPDATE %[1]s SET id = 0, payload = 'moved-durable' WHERE id = %[4]d;
+		UPDATE %[1]s SET payload = 'updated-high' WHERE id = %[5]d;
+		DELETE FROM %[1]s WHERE id = %[6]d;`, items, updatedKey, deletedKey, movedKey, rowCount-1, rowCount))
+	cfg.ExtractParallelism = 2
 	cfg.FlushInterval = 100 * time.Millisecond
 	cancel, done = start()
 	pgExec("INSERT INTO " + items + " (id, payload) VALUES (900000001, 'during-resume')")
@@ -235,23 +300,29 @@ func TestStarRocksCDCDirectSnapshotResumesAfterRestart(t *testing.T) {
 			t.Fatalf("resumed pipeline stopped: %v", err)
 		default:
 		}
-		var total, added, inserted, deleted, updated int64
+		var total, added, inserted, deleted, updated, moved int64
 		err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*),
 			SUM(CASE WHEN extra = 'added' THEN 1 ELSE 0 END),
 			SUM(CASE WHEN id = 900000001 THEN 1 ELSE 0 END),
-			SUM(CASE WHEN id IN (3, %[2]d) THEN 1 ELSE 0 END),
-			SUM(CASE WHEN id = 2 AND payload = 'updated-low' OR id = %[3]d AND payload = 'updated-high' THEN 1 ELSE 0 END)
-			FROM %[1]s`, items, rowCount, rowCount-1)).Scan(&total, &added, &inserted, &deleted, &updated)
-		return err == nil && total == rowCount-1 && added == total && inserted == 1 && deleted == 0 && updated == 2
+			SUM(CASE WHEN id IN (%[2]d, %[3]d, %[4]d) THEN 1 ELSE 0 END),
+			SUM(CASE WHEN id = %[5]d AND payload = 'updated-durable' OR id = %[6]d AND payload = 'updated-high' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN id = 0 AND payload = 'moved-durable' THEN 1 ELSE 0 END)
+			FROM %[1]s`, items, deletedKey, movedKey, rowCount, updatedKey, rowCount-1)).Scan(&total, &added, &inserted, &deleted, &updated, &moved)
+		return err == nil && total == rowCount-1 && added == total && inserted == 1 && deleted == 0 && updated == 2 && moved == 1
 	}, 3*time.Minute, 200*time.Millisecond, "resumed direct snapshot did not converge")
 	stop(cancel, done)
 	require.Greater(t, gate.loads.Load(), int32(3), "the resumed snapshot must use direct loads")
 	require.Zero(t, gate.snapshotMerges.Load(), "snapshot replay must not fall back to a staged merge")
-	var lowStamp string
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT _cdc_lsn FROM "+items+" WHERE id = 1").Scan(&lowStamp))
-	require.Equal(t, firstStamp, lowStamp, "durable snapshot rows must survive without being rewritten")
+	resumedStamps := readStamps()
+	require.Equal(t, progress.Boundary, resumedStamps[probe], "durable snapshot rows must survive without being rewritten")
+	for key := range durableKeys {
+		if key == updatedKey || key == deletedKey || key == movedKey || key >= rowCount-1 {
+			continue
+		}
+		require.Equal(t, progress.Boundary, resumedStamps[key], "durable key %d must retain its original snapshot stamp", key)
+	}
 	var stamps, tombstones int
-	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf("SELECT count(DISTINCT _cdc_lsn) FROM %s WHERE id BETWEEN 4 AND %d", items, rowCount-2)).Scan(&stamps))
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(DISTINCT _cdc_lsn) FROM "+items+" WHERE payload = CONCAT('p', id)").Scan(&stamps))
 	require.Equal(t, 2, stamps, "unchanged rows must retain both interrupted and resumed snapshot positions")
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM "+items+" WHERE _cdc_deleted").Scan(&tombstones))
 	require.Zero(t, tombstones)

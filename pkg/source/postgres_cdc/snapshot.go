@@ -3,7 +3,6 @@ package postgres_cdc
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -26,19 +25,16 @@ import (
 )
 
 type Snapshot struct {
-	source      *PostgresCDCSource
-	tableName   string
-	tableSchema *schema.TableSchema
-	cdcConfig   CDCConfig
-	slotName    string
-	typeMap     *pgtype.Map
-	// progressKeys makes the snapshot read in key order and follow every batch
-	// with a copy of progress naming its last key, so an interrupted snapshot
-	// can resume after its last durable key. resumeAfter holds that key's text
-	// values when this snapshot continues an earlier one.
+	source       *PostgresCDCSource
+	tableName    string
+	tableSchema  *schema.TableSchema
+	cdcConfig    CDCConfig
+	slotName     string
+	typeMap      *pgtype.Map
+	readBudget   *snapshotReadBudget
 	progressKeys []string
 	progress     source.CDCSnapshotProgress
-	resumeAfter  []string
+	resuming     bool
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -217,125 +213,34 @@ func (s *Snapshot) dropSlot(ctx context.Context) error {
 }
 
 func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
-	conn, err := s.source.queryPool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	defer conn.Release()
-
-	// Start transaction with REPEATABLE READ isolation level (required for snapshot import)
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.RepeatableRead,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Set transaction snapshot
-	_, err = tx.Exec(ctx, fmt.Sprintf("SET TRANSACTION SNAPSHOT '%s'", snapshotName))
-	if err != nil {
-		return fmt.Errorf("failed to set transaction snapshot: %w", err)
-	}
-
-	config.Debug("[CDC] Reading snapshot data from %s", s.tableName)
-
-	// Build select query (excluding CDC columns as they don't exist in source)
-	sourceColumns := s.tableSchema.Columns[:sourceColumnCount(s.tableSchema)]
-	colNames := make([]string, len(sourceColumns))
-	for i, col := range sourceColumns {
-		colNames[i] = quoteIdentifier(col.Name)
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTableName(s.tableName))
-	var args []any
 	if len(s.progressKeys) > 0 {
-		keyTypes, err := snapshotKeyTypes(ctx, tx, s.tableName, s.progressKeys)
-		if err != nil {
-			return err
-		}
-		query, args = keyedSnapshotQuery(colNames, quoteTableName(s.tableName), s.progressKeys, keyTypes, s.resumeAfter)
+		return s.readProgressSnapshot(ctx, snapshotName, lsn, results, opts)
 	}
-	config.Debug("[CDC] Snapshot query: %s", query)
+	return s.ReadWithSnapshot(ctx, snapshotName, lsn, results, opts, nil, nil)
+}
 
-	// A replacement snapshot can run the same SELECT text after DDL changed a
-	// column OID. Describe it afresh so pgx cannot decode rows with the cached
-	// pre-DDL statement description.
-	description, err := tx.Conn().PgConn().Prepare(ctx, "", query, nil)
-	if err != nil {
-		return fmt.Errorf("failed to describe snapshot query: %w", err)
+// ReadWithSnapshot reads (after, upper] from an existing exported snapshot.
+// Nil bounds scan the whole table. The caller keeps the exporting connection
+// idle and open until this returns, and owns completion and WAL orchestration.
+func (s *Snapshot) ReadWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, after, upper []string) error {
+	if err := s.source.requireSnapshotAllowed(); err != nil {
+		return err
 	}
-	s.typeMap = tx.Conn().TypeMap()
-	formats := postgres.TextResultFormats(s.typeMap, description.Fields, sourceColumns, snapshotTextColumn)
-	for i := len(sourceColumns); i < len(formats); i++ {
-		formats[i] = pgx.TextFormatCode
+	if opts.CDCSnapshotReplace && (after != nil || upper != nil) {
+		return fmt.Errorf("a bounded snapshot cannot replace the whole table")
 	}
-	rows, err := tx.Query(ctx, query, append([]any{pgx.QueryExecModeDescribeExec, formats}, args...)...)
-	if err != nil {
-		return fmt.Errorf("failed to query: %w", err)
-	}
-	defer func() { rows.Close() }()
-
-	if opts.CDCSnapshotReplace {
-		// A snapshot is a complete replacement boundary. Consumers that opt in
-		// discard target rows left by an interrupted snapshot or a lost slot;
-		// a resumed snapshot instead keeps the rows its earlier run made durable.
-		marker := source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)}
-		if s.resumeAfter != nil {
-			marker.CDCSnapshotPosition, marker.CDCSnapshotResumed = s.progress.Boundary, true
-		}
-		if err := sendResult(ctx, results, marker); err != nil {
-			return err
-		}
-	}
-
-	batchSize := opts.PageSize
-	if batchSize <= 0 {
-		batchSize = 100000
-	}
-
-	lsnStr := FormatLSN(lsn)
-	syncedAt := time.Now().UTC()
-
-	// Build Arrow schema including CDC columns
-	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
-
-	batchNum := 0
-	var totalRows int64
-
-	for {
-		record, count, lastKey, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, len(s.progressKeys), batchSize, opts.MaxBatchBytes, lsnStr, syncedAt)
-		if err != nil {
-			return fmt.Errorf("failed to convert rows to batch: %w", err)
-		}
-
-		if count == 0 {
-			break
-		}
-
-		batchNum++
-		totalRows += count
-		config.Debug("[CDC] Snapshot batch %d: %d rows (total: %d)", batchNum, count, totalRows)
-
-		if err := sendResult(ctx, results, source.RecordBatchResult{Batch: record, CDCSnapshot: true}); err != nil {
-			return err
-		}
-		if lastKey != nil {
-			key, err := json.Marshal(lastKey)
-			if err != nil {
-				return fmt.Errorf("failed to encode snapshot progress key: %w", err)
+	reader := *s
+	reader.progressKeys = resumableSnapshotKeys(source.SourceTableInfo{Schema: s.tableSchema, PrimaryKeys: s.tableSchema.PrimaryKeys})
+	return reader.readBoundedSnapshot(ctx, boundedSnapshotOptions{
+		name: snapshotName, boundary: lsn, after: after, upper: upper, read: opts, budget: s.readBudget,
+		normalSnapshot: after == nil && upper == nil,
+		started: func() error {
+			if opts.CDCSnapshotReplace {
+				return sendResult(ctx, results, source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)})
 			}
-			progress := s.progress
-			progress.Key = string(key)
-			token := source.CDCStateCommitToken{SnapshotProgress: map[string]source.CDCSnapshotProgress{s.tableName: progress}}
-			if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: token}); err != nil {
-				return err
-			}
-		}
-	}
-
-	config.Debug("[CDC] Snapshot completed: %d rows in %d batches", totalRows, batchNum)
-	return nil
+			return nil
+		},
+	}, results)
 }
 
 // rowsToBatch converts up to batchSize rows. The last keyColumns values of
@@ -577,22 +482,5 @@ func snapshotKeyTypes(ctx context.Context, tx pgx.Tx, table string, keys []strin
 // key columns' own types so the order matches ORDER BY. Keys are qualified by
 // a table alias: the text casts would otherwise make the names ambiguous.
 func keyedSnapshotQuery(columns []string, table string, keys, keyTypes, resumeAfter []string) (string, []any) {
-	const alias = "__ingestr_snapshot"
-	quotedKeys := make([]string, len(keys))
-	keyText := make([]string, len(keys))
-	for i, key := range keys {
-		quotedKeys[i] = alias + "." + quoteIdentifier(key)
-		keyText[i] = fmt.Sprintf("%s::text AS %s", quotedKeys[i], quoteIdentifier(fmt.Sprintf("__ingestr_key_%d", i)))
-	}
-	query := fmt.Sprintf("SELECT %s, %s FROM %s AS %s", strings.Join(columns, ", "), strings.Join(keyText, ", "), table, alias)
-	var args []any
-	if resumeAfter != nil {
-		params := make([]string, len(keys))
-		for i := range keys {
-			params[i] = fmt.Sprintf("$%d::text::%s", i+1, keyTypes[i])
-			args = append(args, resumeAfter[i])
-		}
-		query += fmt.Sprintf(" WHERE (%s) > (%s)", strings.Join(quotedKeys, ", "), strings.Join(params, ", "))
-	}
-	return query + " ORDER BY " + strings.Join(quotedKeys, ", "), args
+	return boundedSnapshotQuery(columns, table, keys, keyTypes, resumeAfter, nil)
 }

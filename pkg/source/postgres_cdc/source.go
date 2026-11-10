@@ -325,9 +325,13 @@ func (s *PostgresCDCSource) TableIncarnation(ctx context.Context, table string) 
 	if s.queryPool == nil {
 		return "", fmt.Errorf("postgres CDC source is not connected")
 	}
+	return tableIncarnation(ctx, s.queryPool, table)
+}
+
+func tableIncarnation(ctx context.Context, query tableMetadataQuerier, table string) (string, error) {
 	schemaName, tableName := parseTableName(table)
 	var oid string
-	err := s.queryPool.QueryRow(ctx, `
+	err := query.QueryRow(ctx, `
 		SELECT c.oid::text
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -1648,14 +1652,23 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 		// a run without any resume position snapshots everything afresh.
 		for _, table := range tables {
 			resume, ok := opts.CDCSnapshotResumes[table.Name]
-			if !ok || resumeLSNs[table.Name] != "" || resumableSnapshotKeys(table) == nil ||
+			keys := resumableSnapshotKeys(table)
+			if !ok || resumeLSNs[table.Name] != "" || keys == nil ||
 				resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
+				continue
+			}
+			supported, err := snapshotRangeKeysSupported(ctx, s.queryPool, table.Name, keys)
+			if err != nil {
+				return nil, err
+			}
+			if !supported {
+				config.Debug("[CDC] Snapshot progress for %s uses unsupported range ordering; starting a fresh replacement", table.Name)
 				continue
 			}
 			if reader.snapshotResumes == nil {
 				reader.snapshotResumes = make(map[string]source.CDCSnapshotProgress)
 			}
-			reader.snapshotResumes[table.Name] = resume
+			reader.snapshotResumes[table.Name] = resume.Clone()
 		}
 	}
 	if opts.Streaming {
