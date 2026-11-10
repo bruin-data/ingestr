@@ -306,8 +306,25 @@ func (d *StarRocksDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
-		return err
+	if opts.CDCSnapshot {
+		if err := validateCDCSnapshotOptions(opts); err != nil {
+			return err
+		}
+		if err := d.validatePrimaryKey(ctx, "CDC snapshot target", opts.Table, opts.PrimaryKeys); err != nil {
+			return err
+		}
+		complete, err := d.CanWriteCDCSnapshot(ctx, opts.Table, opts.Schema, opts.CDCExpectedIncarnation)
+		if err != nil {
+			return err
+		}
+		if !complete {
+			return fmt.Errorf("StarRocks direct CDC snapshot requires every target column in the snapshot schema")
+		}
+	}
+	if !opts.CDCSnapshot {
+		if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
 	}
 	startTime := time.Now()
 	var totalRows, batchNum atomic.Int64
@@ -315,11 +332,14 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 	if parallelism <= 0 {
 		parallelism = 4
 	}
-	// Direct writes may upsert the same key across batches, so loads must
-	// finish in input order. Managed staging preserves duplicates for merging
-	// or receives input whose keys are guaranteed unique by the strategy.
-	if !opts.StagingTable {
+	// Snapshot loads conditionally upsert on CDC row order; other direct writes
+	// must finish in input order to preserve repeated-key updates.
+	if !opts.StagingTable && !opts.CDCSnapshot {
 		parallelism = 1
+	}
+	mergeCondition := ""
+	if opts.CDCSnapshot {
+		mergeCondition = cdcOrderColumn
 	}
 
 	db, table := splitDatabaseTable(opts.Table)
@@ -347,12 +367,27 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 						}
 						return result.Err
 					}
+					if opts.CDCSnapshot && result.Truncate {
+						if result.Batch != nil {
+							result.Batch.Release()
+						}
+						return fmt.Errorf("StarRocks CDC snapshot cannot contain TRUNCATE events")
+					}
 					if result.Batch == nil {
 						continue
 					}
+					batch := result.Batch
+					if opts.CDCSnapshot {
+						projected, err := prepareCDCSnapshotRecord(batch, opts)
+						batch.Release()
+						if err != nil {
+							return err
+						}
+						batch = projected
+					}
 					n := batchNum.Add(1)
-					rows, err := d.loadRecord(writeCtx, db, table, result.Batch)
-					result.Batch.Release()
+					rows, err := d.loadRecord(writeCtx, db, table, batch, mergeCondition)
+					batch.Release()
 					if err != nil {
 						return fmt.Errorf("failed to stream load batch %d: %w", n, err)
 					}
@@ -375,7 +410,7 @@ var maxStreamLoadJSONBytes = 90 << 20
 
 // loadRecord builds bounded JSON bodies one row at a time, retaining a body
 // until its load (including any FE redirect) completes.
-func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string, rec arrow.RecordBatch) (int64, error) {
+func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string, rec arrow.RecordBatch, mergeCondition string) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -390,7 +425,7 @@ func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string,
 		if rows == 0 {
 			return loaded, nil
 		}
-		if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, columns); err != nil {
+		if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, streamLoadOptions{columns: columns, mergeCondition: mergeCondition}); err != nil {
 			return loaded, err
 		}
 		loaded += rows
@@ -713,6 +748,7 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	var hasCDCOrderColumn bool
 	for rows.Next() {
 		var colName, dataType, columnType, isNullable string
 		var numPrecision, numScale, charMaxLen *int
@@ -720,6 +756,10 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 		if colName == syntheticSortKeyColumn {
+			continue
+		}
+		if strings.EqualFold(colName, cdcOrderColumn) {
+			hasCDCOrderColumn = true
 			continue
 		}
 		col := schema.Column{
@@ -744,6 +784,14 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close table schema: %w", err)
+	}
+	if hasCDCOrderColumn {
+		if err := d.validateCDCSnapshotOrderColumn(ctx, table); err != nil {
+			return nil, err
+		}
 	}
 	if len(columns) == 0 {
 		return nil, nil

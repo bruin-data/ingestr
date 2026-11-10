@@ -153,10 +153,13 @@ type RecordBatchResult struct {
 	CDCSnapshotChunkEnd *CDCSnapshotChunk
 	CDCChunkTiming      *CDCChunkTiming
 	CDCFlush            bool // Flush preceding data and acknowledge its commit token before reading further.
-	Batch               arrow.RecordBatch
-	Err                 error
-	TableName           string // Source table name for multi-table sources (empty for single-table)
-	Truncate            bool   // Empty the destination table before applying subsequent results
+	// CDCSnapshot identifies full snapshot row images without WAL changes,
+	// deletes, or unchanged TOAST values. It applies only to Batch.
+	CDCSnapshot bool
+	Batch       arrow.RecordBatch
+	Err         error
+	TableName   string // Source table name for multi-table sources (empty for single-table)
+	Truncate    bool   // Empty the destination table before applying subsequent results
 	// CDCWALTruncate distinguishes a replicated source TRUNCATE from the
 	// destination reset emitted before a replacement snapshot.
 	CDCWALTruncate bool

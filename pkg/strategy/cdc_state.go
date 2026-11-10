@@ -260,7 +260,7 @@ func (m *CDCStateManager) ResumeSnapshot(ctx context.Context, sourceTable, destT
 	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, false)
 }
 
-// InvalidateBatchSnapshot prevents resume while a fully staged replacement is
+// InvalidateBatchSnapshot prevents resume while a batch replacement is
 // applied. Keep the accepted snapshot and target binding so a successful WAL
 // truncate can be certified by a checkpoint-only commit token.
 func (m *CDCStateManager) InvalidateBatchSnapshot(ctx context.Context, sourceTable, destTable string) error {

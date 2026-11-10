@@ -189,16 +189,23 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}
 	// Generate staging table name
 	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "merge", job.Config.StagingDataset, job.Config.RunID)
-	output.Statusf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
+	isCDC := hasCDCColumns(job.Schema)
+	directSnapshot := isCDC && len(job.Config.PrimaryKeys) > 0 && directCDCSnapshotBatchEnabled(job.Config, job.Destination)
+	if !directSnapshot {
+		output.Statusf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
+	}
 	if job.CDCStateManager != nil {
 		dropStaleStagingTables(ctx, job.Destination, job.Config.DestTable, stagingTable)
 	}
-	isCDC := hasCDCColumns(job.Schema)
 	if isCDC {
 		warnIfCDCMergeUnsupported(job.Destination)
 	}
 
-	if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
+	prepare := prepareMergeTables
+	if directSnapshot {
+		prepare = prepareMergeTarget
+	}
+	if err := prepare(ctx, job.Destination, mergeTableParams{
 		DestTable:    job.Config.DestTable,
 		StagingTable: stagingTable,
 		Schema:       job.Schema,
@@ -266,6 +273,27 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
+	if directSnapshot {
+		if err := job.ApplyEvolution(ctx); err != nil {
+			cancelRead()
+			drainAndReleaseUntil(records, streamAbortDrainTimeout)
+			return fmt.Errorf("failed to apply schema evolution: %w", err)
+		}
+		writer := cdcSnapshotBatchWriter{
+			dest: job.Destination, cfg: job.Config, manager: job.CDCStateManager,
+			sourceTable: job.Config.SourceTable, expectedIncarnation: expectedIncarnation,
+			table: mergeTableParams{
+				DestTable: job.Config.DestTable, StagingTable: stagingTable,
+				Schema: job.Schema, PrimaryKeys: job.Config.PrimaryKeys, PartitionBy: job.Config.PartitionBy,
+				ClusterBy: job.Config.ClusterBy, IsCDC: true,
+			},
+		}
+		return writer.write(ctx, records, cancelRead)
+	}
+	var snapshotContent *cdcSnapshotBatchContent
+	if isCDC && destination.SupportsDirectCDCSnapshot(job.Destination) {
+		records, snapshotContent = trackCDCSnapshotBatchContent(readCtx, records, true)
+	}
 
 	// Write to staging table using parallel writes. Source TRUNCATE controls
 	// split the input into ordered segments and clear earlier staged changes.
@@ -326,7 +354,9 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate, expectedIncarnation, job.Config.HardDeletesCDC()); err != nil {
+	mergeOpts := mergeStagingOptions(job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate, expectedIncarnation, job.Config.HardDeletesCDC())
+	mergeOpts.CDCSnapshot = snapshotContent.onlySnapshot("")
+	if err := job.Destination.MergeTable(ctx, mergeOpts); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -367,6 +397,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	if anyTableHasCDC {
 		warnIfCDCMergeUnsupported(job.Destination)
 	}
+	directSnapshot := anyTableHasCDC && directCDCSnapshotBatchEnabled(job.Config, job.Destination)
 
 	stagingTables := make(map[string]string)
 	tableConfigs := make(map[string]destination.TableWriteConfig)
@@ -428,7 +459,11 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				dropStaleStagingTables(ctx, job.Destination, destTable, stagingTable)
 			}
 
-			if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
+			prepare := prepareMergeTables
+			if directSnapshot {
+				prepare = prepareMergeTarget
+			}
+			if err := prepare(ctx, job.Destination, mergeTableParams{
 				DestTable:    destTable,
 				StagingTable: stagingTable,
 				Schema:       ti.Schema,
@@ -505,6 +540,13 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
 	}
+	if directSnapshot {
+		return writeCDCSnapshotBatchTables(ctx, job, stagingTables, records, cancelRead)
+	}
+	var snapshotContent *cdcSnapshotBatchContent
+	if anyTableHasCDC && destination.SupportsDirectCDCSnapshot(job.Destination) {
+		records, snapshotContent = trackCDCSnapshotBatchContent(readCtx, records, false)
+	}
 
 	writeResult, err := multitable.WriteWithResult(ctx, job.Destination, records, destination.MultiTableWriteOptions{
 		TableConfigs:     tableConfigs,
@@ -568,8 +610,10 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 					return err
 				}
 			}
+			mergeOpts := mergeStagingOptions(job.Destination, stagingTable, job.GetDestTableName(tableInfo.Name), tableInfo.PrimaryKeys, tableInfo.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC())
+			mergeOpts.CDCSnapshot = snapshotContent.onlySnapshot(tableInfo.Name)
 			merges = append(merges, destination.CDCAtomicTableMerge{
-				Options:  mergeStagingOptions(job.Destination, stagingTable, job.GetDestTableName(tableInfo.Name), tableInfo.PrimaryKeys, tableInfo.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC()),
+				Options:  mergeOpts,
 				Truncate: writeResult.TruncatedTables[tableInfo.Name],
 			})
 		}
@@ -637,7 +681,9 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				mergeErrChan <- err
 				return
 			}
-			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC()); err != nil {
+			mergeOpts := mergeStagingOptions(job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC())
+			mergeOpts.CDCSnapshot = snapshotContent.onlySnapshot(ti.Name)
+			if err := job.Destination.MergeTable(ctx, mergeOpts); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return
 			}
