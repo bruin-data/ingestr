@@ -24,28 +24,6 @@ To ingest the repositories of a user or organization, leave out `repo` and use t
 ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max' --source-table 'repositories' --dest-uri duckdb:///github.duckdb --dest-table 'dest.repositories'
 ```
 
-### Commits from several repositories
-
-The `commits` table can read many repositories, of one or several owners, into one table. It works in three modes:
-
-| Mode | When | Repositories read | PK |
-| ---- | ---- | ----------------- | -- |
-| single | `repo` is set in the URI and the table is `commits` | the URI repository | `sha` |
-| list | the table is `commits:<repo>,<owner>/<repo>,...` | the listed repositories; the list overrides a `repo` in the URI | `repo`, `sha` |
-| all | `repo` is missing or empty in the URI and the table is `commits` | every repository the token can list for `owner` (see `repositories`), except forks; archived repositories are included | `repo`, `sha` |
-
-In list mode, an entry is either a repository name, read from the URI `owner`, or `<owner>/<repo>`, which can name any owner (`bruin`, `bruin-data/bruin` and `other-org/tool` can be mixed). `owner` is still required in the URI. Spaces, empty entries and repeated repositories are ignored, and names are case-insensitive. Each listed repository is looked up directly, so any repository the token can read works, including a private repository it collaborates on and a renamed repository under its old name. A listed fork is read. If a listed repository is not found or the token cannot read it, the run fails before any commit is read, naming every such repository.
-
-In all mode, ingestr prints how many repositories it reads and how many forks it skips. A repository that GitHub refuses to serve (not found, blocked, or forbidden for a reason other than a rate limit) is skipped with a warning; in single and list modes it fails the run.
-
-```sh
-ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=bruin-data' --source-table 'commits:bruin, ingestr, other-org/tool' --dest-uri duckdb:///github.duckdb --dest-table 'dest.commits'
-```
-
-Set `--dest-table` when the source table lists repositories; otherwise the destination table is named after the whole `commits:...` value.
-
-Every `commits` row has a `repo` column with the repository's `owner/name` as GitHub spells it (in single mode too, whatever the URI's casing). Single mode keeps `sha` as the primary key, so existing single-repository tables keep working and get `repo` filled in on their next run. List and all modes use `repo` and `sha`, since a commit can appear in more than one repository (e.g. a fork). To switch an existing single-repository table to list or all mode, run it once with `--full-refresh`: rows written before the `repo` column existed have no `repo` and would otherwise not match.
-
 ## Setting up a GitHub Integration
 
 To connect to GitHub, you need to create a Personal Access Token (PAT).
@@ -100,7 +78,7 @@ This is a sample command that will copy the data from the GitHub source to DuckD
 GitHub source allows ingesting the following sources into separate tables:
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `commits`       | `sha` (single repository) or `repo`, `sha` (list and all modes) | `committed_at` | merge | Retrieves commits on the default branch of one, several or all repositories of `owner` (see [Commits from several repositories](#commits-from-several-repositories)), with the repository in `repo`, including signature verification (`commit.verification`). `--interval-start`/`--interval-end` filter on the committer date, which `committed_at` mirrors. Commits pushed after their interval has already run are not picked up; use a lookback window. |
+| `commits`       | `sha` (single repository) or `repo`, `sha` (list and all modes) | `committed_at` | merge | Retrieves commits on the default branch of one, several or all repositories of `owner` (see [Reading commits from several repositories](#reading-commits-from-several-repositories)), with the repository in `repo`, including signature verification (`commit.verification`). `--interval-start`/`--interval-end` filter on the committer date, which `committed_at` mirrors. Commits pushed after their interval has already run are not picked up; use a lookback window. |
 | `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
 | `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
@@ -109,4 +87,47 @@ GitHub source allows ingesting the following sources into separate tables:
 
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
- 
+
+## Reading commits from several repositories
+
+The `commits` table can read many repositories, of one or several owners, into one table. Which repositories it reads depends on the URI's `repo` and on an optional comma-separated list appended to the table name:
+
+| Mode | Source table | Repositories read | PK |
+| ---- | ------------ | ----------------- | -- |
+| single | `commits`, URI has `repo` | the URI repository | `sha` |
+| list | `commits:<repo>,<owner>/<repo>,...` | the listed repositories; the list overrides a `repo` in the URI | `repo`, `sha` |
+| all | `commits`, URI has no `repo` (or an empty `repo=`) | every repository the token can list for `owner` (see `repositories`), except forks; archived repositories are included | `repo`, `sha` |
+
+Every row has a `repo` column with the repository's `owner/name` as GitHub spells it, whatever the casing in the URI or the list. List and all modes use `repo` and `sha` as the primary key, since a commit can appear in more than one repository (e.g. a fork).
+
+In list mode, an entry is either a repository name, read from the URI `owner`, or `<owner>/<repo>`, which can name any owner. `owner` is still required in the URI. Spaces, empty entries and repeated repositories are ignored, and names are case-insensitive. Each listed repository is looked up directly, so any repository the token can read works, including a private repository it collaborates on and a renamed repository under its old name. A listed fork is read. If a listed repository is not found or the token cannot read it, the run fails before any commit is read, naming every such repository.
+
+In all mode, ingestr prints how many repositories it reads and how many forks it skips. A repository that GitHub refuses to serve (not found, blocked, or forbidden for a reason other than a rate limit) is skipped with a warning; in single and list modes it fails the run.
+
+Examples:
+
+Fetch the commits of three repositories, two of them from the URI owner:
+
+```sh
+ingestr ingest \
+  --source-uri 'github://?access_token=ghp_test_1234&owner=bruin-data' \
+  --source-table 'commits:bruin, ingestr, other-org/tool' \
+  --dest-uri duckdb:///github.duckdb \
+  --dest-table 'dest.commits'
+```
+
+Fetch the commits of every repository of `bruin-data` except forks:
+
+```sh
+ingestr ingest \
+  --source-uri 'github://?access_token=ghp_test_1234&owner=bruin-data' \
+  --source-table 'commits' \
+  --dest-uri duckdb:///github.duckdb \
+  --dest-table 'dest.commits'
+```
+
+> [!NOTE]
+> Set `--dest-table` when the source table lists repositories; otherwise the destination table is named after the whole `commits:...` value.
+
+> [!WARNING]
+> Single mode keeps `sha` as the primary key, so existing single-repository tables keep working and get `repo` filled in on their next run. To switch an existing single-repository table to list or all mode, run it once with `--full-refresh`: rows written before the `repo` column existed have no `repo` and would otherwise not match.
