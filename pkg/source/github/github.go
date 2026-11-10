@@ -1109,18 +1109,33 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 
 var errEmptyRepository = errors.New("repository is empty")
 
-// readCommits reads the URI repo, or the listed repositories, or every repository of the owner
-// except forks when neither is given.
-func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, listedRepos []string) error {
-	if !s.readsManyRepos(listedRepos) {
-		_, err := s.readRepoCommits(ctx, opts, results, s.owner, s.repo)
-		return err
-	}
+// unavailableRepoError is a REST answer saying the repository can't be read with this token:
+// missing, blocked, or forbidden for a reason other than a rate limit.
+type unavailableRepoError struct {
+	error
+	status int
+}
 
+func repoUnavailable(resp *ingestrhttp.Response) bool {
+	switch resp.StatusCode() {
+	case http.StatusNotFound, http.StatusUnavailableForLegalReasons:
+		return true
+	case http.StatusForbidden:
+		return githubRateLimitKind(resp) == notRateLimited
+	}
+	return false
+}
+
+// readCommits reads the URI repo, or the listed repositories, or every repository of the owner
+// except forks when neither is given. In the last case a repository that can't be read is skipped
+// with a warning; the other cases fail on it.
+func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, listedRepos []string) error {
 	repos, err := s.resolveCommitRepos(ctx, listedRepos)
 	if err != nil {
 		return err
 	}
+	skipUnavailable := listedRepos == nil && s.repo == ""
+
 	sent := 0
 	for _, fullName := range repos {
 		repoOpts := opts
@@ -1130,20 +1145,23 @@ func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions,
 				break
 			}
 		}
-		owner, name, _ := strings.Cut(fullName, "/")
-		n, err := s.readRepoCommits(ctx, repoOpts, results, owner, name)
+		n, err := s.readRepoCommits(ctx, repoOpts, results, fullName)
+		sent += n
+		var unavailable unavailableRepoError
+		if skipUnavailable && errors.As(err, &unavailable) {
+			output.Warnf("\nWarning: skipping the commits of %s, GitHub answered %d\n", fullName, unavailable.status)
+			continue
+		}
 		if err != nil {
 			return err
 		}
-		sent += n
 	}
 	return nil
 }
 
 // readRepoCommits lists one repository's default-branch commits. GitHub applies since/until to
 // the committer date.
-func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, owner, name string) (int, error) {
-	fullName := owner + "/" + name
+func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName string) (int, error) {
 	config.Debug("[GITHUB] Reading commits for %s", fullName)
 
 	params := url.Values{}
@@ -1155,6 +1173,7 @@ func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOpti
 		params.Set("until", opts.IntervalEnd.UTC().Format(time.RFC3339))
 	}
 
+	owner, name, _ := strings.Cut(fullName, "/")
 	path := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(owner), url.PathEscape(name), params.Encode())
 	n, err := s.paginateREST(ctx, opts, results, path, "", "commits", commitFields, func(c map[string]interface{}) bool {
 		c["committed_at"] = committerDate(c)
@@ -1168,59 +1187,44 @@ func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOpti
 	return n, err
 }
 
-// resolveCommitRepos returns the full names to read: the listed owner/name repositories in their
-// order, forks included, or every repository of the URI owner except forks. Each owner's
-// repositories are listed once; a listed repository that its owner's listing doesn't contain, or
-// whose owner doesn't exist, fails the run before any commit is read.
+// resolveCommitRepos returns GitHub's full names of the repositories to read: the URI repo, the
+// listed owner/name repositories in their order, or every repository of the URI owner except forks.
 func (s *GithubSource) resolveCommitRepos(ctx context.Context, listedRepos []string) ([]string, error) {
-	if listedRepos == nil {
-		repos, err := s.listOwnerRepositories(ctx, s.owner)
-		if err != nil {
-			return nil, err
-		}
-		var all []string
-		for _, r := range repos {
-			if fork, _ := r["fork"].(bool); !fork {
-				all = append(all, repoFullName(s.owner, r))
-			}
-		}
-		return all, nil
+	switch {
+	case listedRepos != nil:
+		return s.lookupRepos(ctx, listedRepos)
+	case s.repo != "":
+		return s.lookupRepos(ctx, []string{s.owner + "/" + s.repo})
 	}
 
-	byFullName := make(map[string]map[string]interface{})
-	listedOwners := make(map[string]bool)
-	for _, fullName := range listedRepos {
-		owner, _, _ := strings.Cut(fullName, "/")
-		if listedOwners[strings.ToLower(owner)] {
-			continue
-		}
-		listedOwners[strings.ToLower(owner)] = true
-		repos, err := s.listOwnerRepositories(ctx, owner)
-		var notFound ownerNotFoundError
-		if errors.As(err, &notFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range repos {
-			name, _ := r["name"].(string)
-			key := strings.ToLower(owner + "/" + name)
-			if _, ok := byFullName[key]; !ok {
-				byFullName[key] = r
-			}
-		}
+	repos, forks, err := s.listOwnerRepoNames(ctx)
+	if err != nil {
+		return nil, err
 	}
+	output.Infof("[GITHUB] Reading the commits of %d repositories of %s (forks skipped: %d)\n", len(repos), s.owner, forks)
+	return repos, nil
+}
 
+// lookupRepos looks up each repository and returns GitHub's full names, following renames and
+// dropping repositories named twice. Repositories that are missing or not readable with this
+// token fail the run before any commit is read, all named at once.
+func (s *GithubSource) lookupRepos(ctx context.Context, fullNames []string) ([]string, error) {
 	var resolved, missing []string
-	for _, fullName := range listedRepos {
-		r, ok := byFullName[strings.ToLower(fullName)]
-		if !ok {
+	seen := make(map[string]bool)
+	for _, fullName := range fullNames {
+		canonical, found, err := s.lookupRepo(ctx, fullName)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			missing = append(missing, fullName)
 			continue
 		}
-		owner, _, _ := strings.Cut(fullName, "/")
-		resolved = append(resolved, repoFullName(owner, r))
+		if seen[strings.ToLower(canonical)] {
+			continue
+		}
+		seen[strings.ToLower(canonical)] = true
+		resolved = append(resolved, canonical)
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("github repositories not found or not accessible with this token: %s", strings.Join(missing, ", "))
@@ -1228,40 +1232,63 @@ func (s *GithubSource) resolveCommitRepos(ctx context.Context, listedRepos []str
 	return resolved, nil
 }
 
-// listOwnerRepositories collects the repositories the repositories table would read for owner,
-// once each.
-func (s *GithubSource) listOwnerRepositories(ctx context.Context, owner string) ([]map[string]interface{}, error) {
-	listings, err := s.repositoryListings(ctx, owner)
+func (s *GithubSource) lookupRepo(ctx context.Context, fullName string) (string, bool, error) {
+	owner, name, _ := strings.Cut(fullName, "/")
+	var repo struct {
+		FullName string `json:"full_name"`
+	}
+	resp, err := s.restClient.R(ctx).SetResult(&repo).Get(fmt.Sprintf("/repos/%s/%s", url.PathEscape(owner), url.PathEscape(name)))
 	if err != nil {
-		return nil, err
+		return "", false, fmt.Errorf("failed to look up github repository %s: %w", fullName, err)
+	}
+	if repoUnavailable(resp) {
+		return "", false, nil
+	}
+	if !resp.IsSuccess() || repo.FullName == "" {
+		return "", false, fmt.Errorf("failed to look up github repository %s with status %d: %s", fullName, resp.StatusCode(), resp.String())
+	}
+	return repo.FullName, true, nil
+}
+
+// listOwnerRepoNames lists the repositories the repositories table would read, once each, and
+// returns the full names of those that aren't forks with the number of forks left out.
+func (s *GithubSource) listOwnerRepoNames(ctx context.Context) ([]string, int, error) {
+	listings, err := s.repositoryListings(ctx)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	seen := make(map[interface{}]bool)
-	var repos []map[string]interface{}
+	var names []string
+	forks := 0
 	for _, l := range listings {
 		for nextURL := l.path; nextURL != ""; {
 			resp, err := s.restClient.R(ctx).Get(nextURL)
 			if err != nil {
-				return nil, fmt.Errorf("failed to list github repositories of %s: %w", owner, err)
+				return nil, 0, fmt.Errorf("failed to list github repositories of %s: %w", s.owner, err)
 			}
 			if !resp.IsSuccess() {
-				return nil, fmt.Errorf("failed to list github repositories of %s with status %d: %s", owner, resp.StatusCode(), resp.String())
+				return nil, 0, fmt.Errorf("failed to list github repositories of %s with status %d: %s", s.owner, resp.StatusCode(), resp.String())
 			}
 			items, err := decodeRESTItems(resp.Body(), l.itemsKey)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decode github repositories of %s: %w", owner, err)
+				return nil, 0, fmt.Errorf("failed to decode github repositories of %s: %w", s.owner, err)
 			}
 			for _, item := range items {
 				if (l.keep != nil && !l.keep(item)) || seen[item["id"]] {
 					continue
 				}
 				seen[item["id"]] = true
-				repos = append(repos, item)
+				if fork, _ := item["fork"].(bool); fork {
+					forks++
+					continue
+				}
+				names = append(names, repoFullName(s.owner, item))
 			}
 			nextURL = extractNextPageURL(resp.Header().Get("Link"))
 		}
 	}
-	return repos, nil
+	return names, forks, nil
 }
 
 func repoFullName(owner string, repo map[string]interface{}) string {
@@ -1283,7 +1310,7 @@ type restListing struct {
 func (s *GithubSource) readRepositories(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[GITHUB] Reading repositories for %s", s.owner)
 
-	listings, err := s.repositoryListings(ctx, s.owner)
+	listings, err := s.repositoryListings(ctx)
 	if err != nil {
 		return err
 	}
@@ -1322,7 +1349,7 @@ func (s *GithubSource) readRepositories(ctx context.Context, opts source.ReadOpt
 // repositoryListings picks the endpoints that cover the owner's repositories for this token:
 // org repos via /orgs, the token user's own via /user/repos, otherwise the public list, plus the
 // installation's repositories when the token is a GitHub App installation token.
-func (s *GithubSource) repositoryListings(ctx context.Context, ownerName string) ([]restListing, error) {
+func (s *GithubSource) repositoryListings(ctx context.Context) ([]restListing, error) {
 	params := url.Values{}
 	params.Set("per_page", strconv.Itoa(maxPageSize))
 
@@ -1330,21 +1357,17 @@ func (s *GithubSource) repositoryListings(ctx context.Context, ownerName string)
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	}
-	resp, err := s.restClient.R(ctx).SetResult(&owner).Get("/users/" + url.PathEscape(ownerName))
+	resp, err := s.restClient.R(ctx).SetResult(&owner).Get("/users/" + url.PathEscape(s.owner))
 	if err != nil {
-		return nil, fmt.Errorf("failed to look up github owner %s: %w", ownerName, err)
+		return nil, fmt.Errorf("failed to look up github owner %s: %w", s.owner, err)
 	}
 	if !resp.IsSuccess() {
-		err := fmt.Errorf("failed to look up github owner %s with status %d: %s", ownerName, resp.StatusCode(), resp.String())
-		if resp.StatusCode() == http.StatusNotFound {
-			return nil, ownerNotFoundError{err}
-		}
-		return nil, err
+		return nil, fmt.Errorf("failed to look up github owner %s with status %d: %s", s.owner, resp.StatusCode(), resp.String())
 	}
 
 	if owner.Type == "Organization" {
 		params.Set("type", "all")
-		return []restListing{{path: fmt.Sprintf("/orgs/%s/repos?%s", url.PathEscape(ownerName), params.Encode())}}, nil
+		return []restListing{{path: fmt.Sprintf("/orgs/%s/repos?%s", url.PathEscape(s.owner), params.Encode())}}, nil
 	}
 
 	login := ""
@@ -1361,7 +1384,7 @@ func (s *GithubSource) repositoryListings(ctx context.Context, ownerName string)
 	}
 
 	params.Set("type", "owner")
-	listings := []restListing{{path: fmt.Sprintf("/users/%s/repos?%s", url.PathEscape(ownerName), params.Encode())}}
+	listings := []restListing{{path: fmt.Sprintf("/users/%s/repos?%s", url.PathEscape(s.owner), params.Encode())}}
 
 	if s.apiKey != "" && login == "" {
 		installation, err := s.installationListing(ctx, owner.Login)
@@ -1376,9 +1399,6 @@ func (s *GithubSource) repositoryListings(ctx context.Context, ownerName string)
 	}
 	return listings, nil
 }
-
-// ownerNotFoundError is GitHub's 404 for an owner lookup: no user or organization by that name.
-type ownerNotFoundError struct{ error }
 
 // installationListing returns the installation's repositories owned by owner when the token is a
 // GitHub App installation token (only those can read /installation/repositories), else nil.
@@ -1465,7 +1485,11 @@ func (s *GithubSource) paginateREST(
 		}
 
 		if !httpResp.IsSuccess() {
-			return totalSent, fmt.Errorf("failed to fetch %s with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
+			err := fmt.Errorf("failed to fetch %s with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
+			if repoUnavailable(httpResp) {
+				return totalSent, unavailableRepoError{err, httpResp.StatusCode()}
+			}
+			return totalSent, err
 		}
 
 		items, err := decodeRESTItems(httpResp.Body(), itemsKey)
