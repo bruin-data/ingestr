@@ -31,13 +31,13 @@ The `commits` table can read many repositories of the same owner into one table.
 | Mode | When | Repositories read | PK |
 | ---- | ---- | ----------------- | -- |
 | single | `repo` is set in the URI and the table is `commits` | the URI repository | `sha` |
-| list | the table is `commits:<repo>,<repo>,...` | the listed repositories; the list overrides a `repo` in the URI | `repo`, `sha` |
+| list | the table is `commits:<repo>,<owner>/<repo>,...` | the listed repositories; the list overrides a `repo` in the URI | `repo`, `sha` |
 | all | `repo` is missing or empty in the URI and the table is `commits` | every repository the token can list for `owner` (see `repositories`), except forks; archived repositories are included | `repo`, `sha` |
 
-In list mode, names are matched case-insensitively against the owner's repositories; spaces around names, empty entries and repeated names are ignored. List names only, without the owner (`bruin`, not `bruin-data/bruin`). A listed fork is read. If a listed repository is not found or the token cannot access it, the run fails before any commit is read, naming every missing repository.
+In list mode, an entry is either a repository name, read from the URI `owner`, or `<owner>/<repo>`, which can name any owner the token can see (`bruin`, `bruin-data/bruin` and `other-org/tool` can be mixed). `owner` is still required in the URI. Each owner's repositories are listed once and names are matched case-insensitively; spaces, empty entries and repeated repositories are ignored. A listed fork is read. If a listed repository or its owner is not found, or the token cannot access it, the run fails before any commit is read, naming every missing repository.
 
 ```sh
-ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=bruin-data' --source-table 'commits:bruin, ingestr, cloud' --dest-uri duckdb:///github.duckdb --dest-table 'dest.commits'
+ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=bruin-data' --source-table 'commits:bruin, ingestr, other-org/tool' --dest-uri duckdb:///github.duckdb --dest-table 'dest.commits'
 ```
 
 Every `commits` row has a `repo` column with the repository's `owner/name`. Single mode keeps `sha` as the primary key, so existing single-repository tables are unaffected; list and all modes use `repo` and `sha`, since a commit can appear in more than one repository (e.g. a fork).
