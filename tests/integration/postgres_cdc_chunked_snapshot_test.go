@@ -223,6 +223,7 @@ func (f *chunkedCDCFixture) assertSlotCheckpoint(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotFinite(t *testing.T) {
+	t.Parallel()
 	for _, mode := range chunkedSnapshotModes() {
 		for _, multi := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/%s/multi=%t", mode.execution, mode.staging, multi), func(t *testing.T) {
@@ -248,6 +249,7 @@ func TestPostgresCDC_ChunkedSnapshotFinite(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
+	t.Parallel()
 	for _, mode := range chunkedSnapshotModes() {
 		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
 			f := newChunkedCDCFixture(t, mode.staging, false)
@@ -291,6 +293,7 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
+	t.Parallel()
 	for _, mode := range chunkedSnapshotModes() {
 		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
 			f := newChunkedCDCFixture(t, mode.staging, false)
@@ -318,6 +321,7 @@ func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotRejectsReplacedDestination(t *testing.T) {
+	t.Parallel()
 	f := newChunkedCDCFixture(t, "destination", false)
 	f.cfg.CDCSnapshotExecution = "parallel"
 	gate := f.gate(t)
@@ -337,6 +341,7 @@ func TestPostgresCDC_ChunkedSnapshotRejectsReplacedDestination(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotRejectsMissingUniqueIndex(t *testing.T) {
+	t.Parallel()
 	f := newChunkedCDCFixture(t, "inmemory", false)
 	_, err := f.src.Exec(f.ctx, "ALTER TABLE public.items DROP CONSTRAINT items_pkey")
 	require.NoError(t, err)
@@ -350,6 +355,7 @@ func TestPostgresCDC_ChunkedSnapshotRejectsMissingUniqueIndex(t *testing.T) {
 }
 
 func TestPostgresCDC_ChunkedSnapshotRequiresFullRowImages(t *testing.T) {
+	t.Parallel()
 	f := newChunkedCDCFixture(t, "inmemory", false)
 	_, err := f.src.Exec(f.ctx, "ALTER TABLE public.items REPLICA IDENTITY DEFAULT")
 	require.NoError(t, err)

@@ -20,6 +20,7 @@ import (
 )
 
 func TestStarRocksDestinationCDCHardDelete(t *testing.T) {
+	t.Parallel()
 	if testing.Short() || !containerWanted("starrocks") {
 		t.Skip("Docker StarRocks integration")
 	}

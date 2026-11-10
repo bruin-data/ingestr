@@ -19,6 +19,7 @@ import (
 )
 
 func TestCassandraSourceToDuckDB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -89,6 +90,7 @@ func TestCassandraSourceToDuckDB(t *testing.T) {
 }
 
 func TestCassandraDestinationReplaceAndMerge(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

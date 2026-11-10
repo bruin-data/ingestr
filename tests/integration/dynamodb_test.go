@@ -97,6 +97,7 @@ func cleanupDynamoDBTable(t *testing.T, ctx context.Context, client *dynamodb.Cl
 }
 
 func TestDynamoDB_Replace(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}

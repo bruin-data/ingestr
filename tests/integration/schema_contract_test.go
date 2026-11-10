@@ -23,6 +23,7 @@ const (
 // - Second load: try to add a new column (email) with freeze mode
 // - Expected: pipeline should fail with contract violation error
 func TestDestinations_SchemaContract_Freeze(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -131,6 +132,7 @@ func TestDestinations_SchemaContract_Freeze_TypeChange(t *testing.T) {
 
 // TestDestinations_SchemaContract_Evolve validates that evolve mode (default) allows schema changes.
 func TestDestinations_SchemaContract_Evolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -187,6 +189,7 @@ func TestDestinations_SchemaContract_Evolve(t *testing.T) {
 // - Allows new columns to be added
 // - Type widening changes are not applied (but pipeline succeeds with warning)
 func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -305,6 +308,7 @@ func TestDestinations_SchemaContract_DiscardValue_TypeChange(t *testing.T) {
 // - Schema evolution still applies new columns, but rows with those values are discarded
 // - Pipeline succeeds and older rows are preserved
 func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -369,6 +373,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 
 // TestDestinations_SchemaContract_DefaultIsEvolve validates that empty/default contract is evolve.
 func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

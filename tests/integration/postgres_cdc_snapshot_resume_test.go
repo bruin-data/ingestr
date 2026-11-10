@@ -34,6 +34,7 @@ type snapshotResumeTarget struct {
 // first run wrote keep its snapshot position, the rest carry a newer one, and
 // the target matches the source.
 func TestPostgresCDC_StreamingSnapshotResumesAfterRestart(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

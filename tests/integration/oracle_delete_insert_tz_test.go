@@ -20,6 +20,7 @@ import (
 // TestOracleDeleteInsertTimezoneAndDateBounds is the BRU-5586 regression: delete+insert
 // must stay idempotent under a non-UTC process timezone for DATE/TIMESTAMP/TIMESTAMPTZ keys.
 func TestOracleDeleteInsertTimezoneAndDateBounds(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
