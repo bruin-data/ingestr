@@ -120,7 +120,7 @@ func (d *parallelResumePostgres) WriteCDCState(ctx context.Context, records <-ch
 		forward <- result
 	}
 	close(forward)
-	if err := d.PostgresDestination.WriteParallel(ctx, forward, opts); err != nil {
+	if err := d.WriteParallel(ctx, forward, opts); err != nil {
 		return err
 	}
 	d.gate.mu.Lock()
