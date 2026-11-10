@@ -1,13 +1,12 @@
 # Parallel PostgreSQL snapshot contract
 
-Status: proposed WI-2 contract, pending agreement with the WI-1 engineer. This
-document describes the shared interface proposal; it does not assert that the
-interface or the benchmark acceptance criteria have been implemented.
+Status: approved shared WI-1/WI-2 contract. The implementation follows this
+progress and lifecycle contract; benchmark acceptance requires separate
+measurements on the shared stack.
 
 ## Shared progress representation
 
-Keep the existing `CDCSnapshotProgress` fields and add these fields in
-`pkg/source/source.go`:
+The shared progress types in `pkg/source/source.go` are:
 
 ```go
 type CDCSnapshotRangeProgress struct {
@@ -80,6 +79,13 @@ they never publish independently assembled table vectors. Completion of a high
 range cannot advance or complete a low range. A worker error cancels siblings and
 prevents table completion; every queued Arrow record is released or forwarded.
 
+Normal snapshot data batches set `RecordBatchResult.CDCSnapshot`. This identifies
+full snapshot row images with no WAL changes, deletes, or unchanged-TOAST values.
+The marker applies only to the batch; it does not certify range or table
+completion. WAL batches and the reusable bounded reader do not set it. WI-1 can
+use it to select full-image snapshot loading while retaining the same start,
+resume, progress, and durable-completion ordering.
+
 The existing latest-token-per-table aggregation in `pkg/strategy/streaming.go`
 is valid for these immutable cumulative vectors. The vector covers all prior
 results for that table, including those emitted by other workers. No merging of
@@ -131,8 +137,8 @@ resume followed by certification.
 | Files or behavior | Owner and coordination |
 | --- | --- |
 | `pkg/source/postgres_cdc/` range planning, bounded reader, scheduling, import lifetime, WAL validation | WI-2 |
-| `pkg/source/source.go` progress fields and comments | WI-2 after WI-1 agreement |
-| `pkg/strategy/cdc_snapshot_progress.go` and its regression tests | WI-2 after WI-1 agreement |
+| `pkg/source/source.go` progress fields and comments | WI-2 under the approved shared contract |
+| `pkg/strategy/cdc_snapshot_progress.go` and its regression tests | WI-2 under the approved shared contract |
 | `pkg/strategy/streaming.go` aggregation and snapshot lifecycle | Shared; cumulative vectors avoid changing aggregation behavior |
 | `pkg/destination/starrocks/` loading and destination workers | WI-1 |
 | Destination load durability, identity validation, and stale-row retirement | WI-1 preserves the existing contract |

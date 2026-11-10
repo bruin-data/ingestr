@@ -202,3 +202,44 @@ func TestSnapshotCoordinatorProgressFailureCancelsWorkers(t *testing.T) {
 		})
 	require.ErrorIs(t, err, wantErr)
 }
+
+func TestSnapshotCoordinatorPreservesFullImageFlag(t *testing.T) {
+	for _, normal := range []bool{false, true} {
+		t.Run(strconv.FormatBool(normal), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			results := make(chan source.RecordBatchResult, 1)
+			rows, _, err := coordinateSnapshotRanges(t.Context(), []snapshotRange{{ID: "0"}}, 1, results, nil,
+				func(ctx context.Context, index int, _ snapshotRange, updates chan<- snapshotRangeResult) error {
+					updates <- snapshotRangeResult{index: index, batch: coordinatorRecord(mem, 1), normalSnapshot: normal}
+					updates <- snapshotRangeResult{index: index, done: true, normalSnapshot: normal}
+					return nil
+				})
+			require.NoError(t, err)
+			require.EqualValues(t, 1, rows)
+			require.Len(t, results, 1, "range EOF must not emit a table completion event")
+			result := <-results
+			require.Equal(t, normal, result.CDCSnapshot)
+			require.Nil(t, result.CommitToken)
+			require.False(t, result.Truncate)
+			result.Batch.Release()
+		})
+	}
+}
+
+func TestSnapshotCoordinatorCompletedPlanDoesNotReadOrCompleteTable(t *testing.T) {
+	plan := []snapshotRange{{ID: "0", Upper: []string{"10"}, Complete: true}, {ID: "1", After: []string{"10"}, Complete: true}}
+	results := make(chan source.RecordBatchResult, 1)
+	rows, _, err := coordinateSnapshotRanges(t.Context(), plan, 4, results,
+		func(context.Context, []snapshotRange) error {
+			t.Error("an unchanged completed plan must not emit worker progress")
+			return nil
+		},
+		func(context.Context, int, snapshotRange, chan<- snapshotRangeResult) error {
+			t.Error("completed ranges must not acquire workers")
+			return nil
+		})
+	require.NoError(t, err)
+	require.Zero(t, rows)
+	require.Empty(t, results, "the caller owns table completion even when all ranges are already complete")
+}

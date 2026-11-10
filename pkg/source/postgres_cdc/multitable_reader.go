@@ -2,7 +2,7 @@ package postgres_cdc
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"sort"
@@ -330,8 +330,8 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 		table := tables[i]
 		tableInfo := &tables[i]
 		g.Go(func() error {
-			if resume, ok := resumes[table.Name]; ok {
-				output.Statusf("Resuming the interrupted snapshot of %s after key %s\n", table.Name, resume.Key)
+			if _, ok := resumes[table.Name]; ok {
+				output.Statusf("Resuming the interrupted snapshot of %s\n", table.Name)
 			} else {
 				output.Statusf("Backfilling new table %s before streaming its changes\n", table.Name)
 			}
@@ -856,10 +856,7 @@ func tableSchemaFingerprints(tables []source.SourceTableInfo) map[string]string 
 	return fingerprints
 }
 
-// snapshotTable reads all data from a single table using the snapshot. A
-// streaming snapshot that the consumer persists state for reads keyed tables
-// in key order and reports its progress; resume continues one after its last
-// durable key.
+// snapshotTable emits a table's ordered lifecycle and cumulative range progress.
 func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.SourceTableInfo, snapshotName string, lsn pglogrepl.LSN, resume *source.CDCSnapshotProgress, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions, budget *snapshotReadBudget) error {
 	snapshot := &Snapshot{
 		source:      r.source,
@@ -872,13 +869,19 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 		snapshot.progressKeys = resumableSnapshotKeys(table)
 	}
 	if len(snapshot.progressKeys) > 0 {
-		snapshot.progress = source.CDCSnapshotProgress{Boundary: FormatLSN(lsn), Incarnation: table.Incarnation, SchemaFingerprint: table.SchemaFingerprint}
+		snapshot.progress = source.CDCSnapshotProgress{
+			Boundary: FormatLSN(lsn), Incarnation: table.Incarnation,
+			SchemaFingerprint: table.SchemaFingerprint, Attempt: rand.Text(),
+		}
 		if resume != nil {
-			var key []string
-			if err := json.Unmarshal([]byte(resume.Key), &key); err != nil || len(key) != len(snapshot.progressKeys) {
-				return fmt.Errorf("invalid snapshot resume key %q for %s", resume.Key, table.Name)
+			if resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
+				return fmt.Errorf("snapshot of %s cannot resume: source identity changed", table.Name)
 			}
-			snapshot.progress.Boundary, snapshot.resumeAfter = resume.Boundary, key
+			progress, err := resume.NormalizeLegacy()
+			if err != nil {
+				return fmt.Errorf("invalid snapshot resume progress for %s: %w", table.Name, err)
+			}
+			snapshot.progress, snapshot.resuming = progress, true
 		}
 	} else if resume != nil {
 		return fmt.Errorf("snapshot of %s cannot resume: its keys are not resumable", table.Name)

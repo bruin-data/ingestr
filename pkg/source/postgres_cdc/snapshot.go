@@ -3,7 +3,6 @@ package postgres_cdc
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -26,20 +25,16 @@ import (
 )
 
 type Snapshot struct {
-	source      *PostgresCDCSource
-	tableName   string
-	tableSchema *schema.TableSchema
-	cdcConfig   CDCConfig
-	slotName    string
-	typeMap     *pgtype.Map
-	readBudget  *snapshotReadBudget
-	// progressKeys makes the snapshot read in key order and follow every batch
-	// with a copy of progress naming its last key, so an interrupted snapshot
-	// can resume after its last durable key. resumeAfter holds that key's text
-	// values when this snapshot continues an earlier one.
+	source       *PostgresCDCSource
+	tableName    string
+	tableSchema  *schema.TableSchema
+	cdcConfig    CDCConfig
+	slotName     string
+	typeMap      *pgtype.Map
+	readBudget   *snapshotReadBudget
 	progressKeys []string
 	progress     source.CDCSnapshotProgress
-	resumeAfter  []string
+	resuming     bool
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -219,7 +214,7 @@ func (s *Snapshot) dropSlot(ctx context.Context) error {
 
 func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
 	if len(s.progressKeys) > 0 {
-		return s.readSerialSnapshot(ctx, snapshotName, lsn, results, opts)
+		return s.readProgressSnapshot(ctx, snapshotName, lsn, results, opts)
 	}
 	return s.ReadWithSnapshot(ctx, snapshotName, lsn, results, opts, nil, nil)
 }
@@ -238,6 +233,7 @@ func (s *Snapshot) ReadWithSnapshot(ctx context.Context, snapshotName string, ls
 	reader.progressKeys = resumableSnapshotKeys(source.SourceTableInfo{Schema: s.tableSchema, PrimaryKeys: s.tableSchema.PrimaryKeys})
 	return reader.readBoundedSnapshot(ctx, boundedSnapshotOptions{
 		name: snapshotName, boundary: lsn, after: after, upper: upper, read: opts, budget: s.readBudget,
+		normalSnapshot: after == nil && upper == nil,
 		started: func() error {
 			if opts.CDCSnapshotReplace {
 				return sendResult(ctx, results, source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)})
@@ -245,123 +241,6 @@ func (s *Snapshot) ReadWithSnapshot(ctx context.Context, snapshotName string, ls
 			return nil
 		},
 	}, results)
-}
-
-func (s *Snapshot) readSerialSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
-	budget := s.readBudget
-	if budget == nil {
-		budget = newSnapshotReadBudget(s.source.queryPool, 1)
-	}
-	conn, err := budget.acquire(ctx, s.source.queryPool)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	defer budget.release(conn)
-
-	tx, err := importSnapshot(ctx, conn, snapshotName)
-	if err != nil {
-		return err
-	}
-	defer rollbackSnapshot(tx)
-
-	config.Debug("[CDC] Reading snapshot data from %s", s.tableName)
-
-	// Build select query (excluding CDC columns as they don't exist in source)
-	sourceColumns := s.tableSchema.Columns[:sourceColumnCount(s.tableSchema)]
-	colNames := make([]string, len(sourceColumns))
-	for i, col := range sourceColumns {
-		colNames[i] = quoteIdentifier(col.Name)
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTableName(s.tableName))
-	var args []any
-	if len(s.progressKeys) > 0 {
-		keyTypes, err := snapshotKeyTypes(ctx, tx, s.tableName, s.progressKeys)
-		if err != nil {
-			return err
-		}
-		query, args = keyedSnapshotQuery(colNames, quoteTableName(s.tableName), s.progressKeys, keyTypes, s.resumeAfter)
-	}
-	config.Debug("[CDC] Snapshot query: %s", query)
-
-	// A replacement snapshot can run the same SELECT text after DDL changed a
-	// column OID. Describe it afresh so pgx cannot decode rows with the cached
-	// pre-DDL statement description.
-	description, err := tx.Conn().PgConn().Prepare(ctx, "", query, nil)
-	if err != nil {
-		return fmt.Errorf("failed to describe snapshot query: %w", err)
-	}
-	s.typeMap = tx.Conn().TypeMap()
-	formats := postgres.TextResultFormats(s.typeMap, description.Fields, sourceColumns, snapshotTextColumn)
-	for i := len(sourceColumns); i < len(formats); i++ {
-		formats[i] = pgx.TextFormatCode
-	}
-	rows, err := tx.Query(ctx, query, append([]any{pgx.QueryExecModeDescribeExec, formats}, args...)...)
-	if err != nil {
-		return fmt.Errorf("failed to query: %w", err)
-	}
-	defer func() { rows.Close() }()
-
-	if opts.CDCSnapshotReplace {
-		// A snapshot is a complete replacement boundary. Consumers that opt in
-		// discard target rows left by an interrupted snapshot or a lost slot;
-		// a resumed snapshot instead keeps the rows its earlier run made durable.
-		marker := source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)}
-		if s.resumeAfter != nil {
-			marker.CDCSnapshotPosition, marker.CDCSnapshotResumed = s.progress.Boundary, true
-		}
-		if err := sendResult(ctx, results, marker); err != nil {
-			return err
-		}
-	}
-
-	batchSize := opts.PageSize
-	if batchSize <= 0 {
-		batchSize = 100000
-	}
-
-	lsnStr := FormatLSN(lsn)
-	syncedAt := time.Now().UTC()
-
-	// Build Arrow schema including CDC columns
-	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
-
-	batchNum := 0
-	var totalRows int64
-
-	for {
-		record, count, lastKey, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, len(s.progressKeys), batchSize, opts.MaxBatchBytes, lsnStr, syncedAt)
-		if err != nil {
-			return fmt.Errorf("failed to convert rows to batch: %w", err)
-		}
-
-		if count == 0 {
-			break
-		}
-
-		batchNum++
-		totalRows += count
-		config.Debug("[CDC] Snapshot batch %d: %d rows (total: %d)", batchNum, count, totalRows)
-
-		if err := sendResult(ctx, results, source.RecordBatchResult{Batch: record}); err != nil {
-			return err
-		}
-		if lastKey != nil {
-			key, err := json.Marshal(lastKey)
-			if err != nil {
-				return fmt.Errorf("failed to encode snapshot progress key: %w", err)
-			}
-			progress := s.progress
-			progress.Key = string(key)
-			token := source.CDCStateCommitToken{SnapshotProgress: map[string]source.CDCSnapshotProgress{s.tableName: progress}}
-			if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: token}); err != nil {
-				return err
-			}
-		}
-	}
-
-	config.Debug("[CDC] Snapshot completed: %d rows in %d batches", totalRows, batchNum)
-	return nil
 }
 
 // rowsToBatch converts up to batchSize rows. The last keyColumns values of

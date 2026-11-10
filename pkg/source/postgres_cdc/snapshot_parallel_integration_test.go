@@ -53,6 +53,7 @@ func collectParallelSnapshot(t *testing.T, ctx context.Context, snapshot *Snapsh
 		}
 		require.True(t, observed.started, "start marker must precede data and progress")
 		if result.Batch != nil {
+			require.Equal(t, opts.normalSnapshot, result.CDCSnapshot)
 			batch := result.Batch
 			for row := 0; row < int(batch.NumRows()); row++ {
 				keyNames := snapshot.progressKeys
@@ -74,6 +75,7 @@ func collectParallelSnapshot(t *testing.T, ctx context.Context, snapshot *Snapsh
 			batch.Release()
 		}
 		if ranges, ok := result.CommitToken.([]snapshotRange); ok {
+			require.False(t, result.CDCSnapshot, "the full-image flag applies only to data")
 			for i, r := range ranges {
 				if r.LastKey != nil && (len(opts.ranges) <= i || !equalSnapshotTestKey(r.LastKey, opts.ranges[i].LastKey)) {
 					require.True(t, seen[strings.Join(r.LastKey, "/")], "progress cannot precede its covered rows")
@@ -131,7 +133,7 @@ func TestParallelSnapshotReaderIntegration(t *testing.T) {
 			columns = append([]schema.Column{{Name: "tenant", DataType: schema.TypeString}}, columns...)
 			keys, table = []string{"tenant", "id"}, "public.composite_range_items"
 		}
-		return &Snapshot{source: &PostgresCDCSource{queryPool: pool}, tableName: table, tableSchema: addCDCColumns(&schema.TableSchema{Columns: columns}), progressKeys: keys}
+		return &Snapshot{source: &PostgresCDCSource{queryPool: pool}, tableName: table, tableSchema: addCDCColumns(&schema.TableSchema{Columns: columns, PrimaryKeys: keys}), progressKeys: keys}
 	}
 	options := func(t *testing.T, parallelism int) boundedSnapshotOptions {
 		return boundedSnapshotOptions{name: export(t), boundary: pglogrepl.LSN(42), read: source.ReadOptions{Parallelism: parallelism, PageSize: 1, MaxBatchBytes: 64}}
@@ -158,6 +160,50 @@ func TestParallelSnapshotReaderIntegration(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []string{"2", "9", "10", "100"}, observed.keys)
 		require.Len(t, observed.progress[0], 1)
+	})
+
+	t.Run("public reader tags whole snapshots but not bounded chunks", func(t *testing.T) {
+		for _, bounded := range []bool{false, true} {
+			t.Run(fmt.Sprint(bounded), func(t *testing.T) {
+				opts := options(t, 4)
+				opts.read.CDCSnapshotReplace = !bounded
+				var after, upper []string
+				if bounded {
+					after, upper = []string{"9"}, []string{"100"}
+				}
+				results := make(chan source.RecordBatchResult)
+				done := make(chan error, 1)
+				go func() {
+					done <- snapshot(false).ReadWithSnapshot(ctx, opts.name, opts.boundary, results, opts.read, after, upper)
+					close(results)
+				}()
+				var rows int64
+				var announced bool
+				for result := range results {
+					require.Nil(t, result.CommitToken, "the reusable reader must not complete the table")
+					if result.Truncate {
+						require.False(t, bounded)
+						require.False(t, result.CDCSnapshot)
+						require.Equal(t, FormatLSN(opts.boundary), result.CDCSnapshotPosition)
+						announced = true
+					}
+					if result.Batch != nil {
+						require.Equal(t, !bounded, result.CDCSnapshot)
+						if !bounded {
+							require.True(t, announced)
+						}
+						rows += result.Batch.NumRows()
+						result.Batch.Release()
+					}
+				}
+				require.NoError(t, <-done)
+				if bounded {
+					require.EqualValues(t, 2, rows)
+				} else {
+					require.EqualValues(t, 4, rows)
+				}
+			})
+		}
 	})
 
 	t.Run("unindexed keys use the serial fallback", func(t *testing.T) {

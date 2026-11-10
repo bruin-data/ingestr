@@ -32,18 +32,23 @@ the rows it covers, and table completion follows every range and forwarded
 result. Destination writes and replacement cleanup must succeed before
 completion becomes durable. See the [shared progress contract](../../docs/development/postgres-cdc-parallel-contract.md).
 
-Managed streaming backfills currently retain the serial reader and existing
-single-key durable progress. The proposed range-vector progress extension
-in the shared contract remains pending WI-1 agreement; this reader's private
-range coordinator is ready for that wiring. Under that proposal, a stable
-range plan and each range's durable key/completion survive restarts, and
-changing reader count changes scheduling without changing saved coverage.
+Managed streaming backfills persist a complete range-progress vector after
+the covered destination writes succeed. The stable plan, attempt identity,
+and each range's durable key/completion survive restarts. Changing reader
+count changes scheduling without changing saved coverage. A completed high
+range cannot skip unfinished low ranges, and all ranges being complete does
+not replace the separate durable table-completion event. Existing single-key
+progress resumes as one full-table range with its saved key.
 The original replacement boundary remains distinct from the newer export/read
 LSN used on resume; retained WAL must repair changes behind saved keys and
 completed ranges. An exported snapshot name itself cannot survive a process
 restart. Initial snapshots without a usable retained resume position can
 restart from scratch. Schema, source or destination identity mismatches and
 missing required WAL use the existing invalidation/replacement path.
+
+Normal snapshot data batches identify full images through `CDCSnapshot` for
+WI-1's loader. The reusable bounded reader leaves that marker unset; chunk
+adoption still requires its own orchestration and ordering work.
 
 `Snapshot.ReadWithSnapshot(ctx, name, lsn, results, opts, after, upper)` reads
 an existing export and optional outer bounds without owning the slot, WAL
@@ -87,6 +92,18 @@ INTEGRATION_BACKENDS=none go test -tags integration ./tests/integration \
 
 Neither a primary container result nor a skipped opt-in test establishes the
 RDS standby acceptance criterion.
+
+The PostgreSQL pipeline restart regression is
+`TestPostgresCDCParallelSnapshotDurableResume`. It injects a failure immediately
+after a real progress event becomes durable, restores a legal checkpoint from
+that event's exported image and stable range plan, then resumes with a changed
+reader count. Its cases cover a completed high range with unfinished low ranges,
+and an all-complete vector without table completion. Inserts, updates, deletes
+and key moves behind saved cursors must match every source key and payload after
+WAL catch-up. `TestPostgresCDC_StreamingSnapshotResumesAfterRestart` retains
+single-reader coverage against the PostgreSQL and StarRocks staged paths.
+Run the tagged integration and race suites in CI; the commands above describe
+the focused container and reserved-standby checks.
 
 ## Isolated reader: one versus four readers
 

@@ -51,22 +51,24 @@ func (b *snapshotReadBudget) release(conn *pgxpool.Conn) {
 }
 
 type boundedSnapshotOptions struct {
-	name     string
-	boundary pglogrepl.LSN
-	after    []string
-	upper    []string
-	ranges   []snapshotRange
-	read     source.ReadOptions
-	budget   *snapshotReadBudget
-	started  func() error
-	progress func(context.Context, []snapshotRange) error
+	normalSnapshot bool
+	name           string
+	boundary       pglogrepl.LSN
+	after          []string
+	upper          []string
+	ranges         []snapshotRange
+	read           source.ReadOptions
+	budget         *snapshotReadBudget
+	started        func() error
+	progress       func(context.Context, []snapshotRange) error
 }
 
 type snapshotRangeResult struct {
-	index   int
-	batch   arrow.RecordBatch
-	lastKey []string
-	done    bool
+	normalSnapshot bool
+	index          int
+	batch          arrow.RecordBatch
+	lastKey        []string
+	done           bool
 }
 
 func cloneSnapshotRanges(ranges []snapshotRange) []snapshotRange {
@@ -125,6 +127,9 @@ func (s *Snapshot) readBoundedSnapshot(ctx context.Context, opts boundedSnapshot
 	defer rollbackSnapshot(tx)
 	if _, err := tx.Exec(ctx, "LOCK TABLE "+quoteTableName(s.tableName)+" IN ACCESS SHARE MODE"); err != nil {
 		return fmt.Errorf("lock snapshot table: %w", err)
+	}
+	if err := s.validateProgressIdentity(ctx, tx); err != nil {
+		return err
 	}
 	ranges, keyTypes, err := s.prepareSnapshotRanges(ctx, tx, opts)
 	if err != nil {
@@ -258,7 +263,7 @@ func coordinateSnapshotWorkers(ctx context.Context, plan []snapshotRange, concur
 		if update.batch != nil {
 			rows += update.batch.NumRows()
 			start := time.Now()
-			forwardErr = sendResult(ctx, results, source.RecordBatchResult{Batch: update.batch})
+			forwardErr = sendResult(ctx, results, source.RecordBatchResult{Batch: update.batch, CDCSnapshot: update.normalSnapshot})
 			blocked += time.Since(start)
 			if forwardErr != nil {
 				cancel(forwardErr)
@@ -356,7 +361,7 @@ func (s *Snapshot) readSnapshotRange(ctx context.Context, tx pgx.Tx, opts bounde
 			return fmt.Errorf("decode snapshot range %s: %w", r.ID, err)
 		}
 		totalRows += count
-		update := snapshotRangeResult{index: index, batch: batch, lastKey: lastKey, done: count == 0}
+		update := snapshotRangeResult{index: index, batch: batch, lastKey: lastKey, done: count == 0, normalSnapshot: opts.normalSnapshot}
 		select {
 		case updates <- update:
 		case <-ctx.Done():

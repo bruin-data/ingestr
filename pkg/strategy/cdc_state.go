@@ -133,6 +133,7 @@ type CDCStateManager struct {
 	lateTargetRaw        map[string]string
 	snapshotEpochs       map[string]uint64
 	progressSequence     int64
+	progressGeneration   int64
 	entries              []destination.CDCStateEntry
 	generations          []int64
 	generationRuns       map[int64]map[string]struct{}
@@ -257,7 +258,29 @@ func (m *CDCStateManager) ResumeSnapshot(ctx context.Context, sourceTable, destT
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, false)
+	expectedDestination := ""
+	if entry, progress, ok := m.latestSnapshotProgress(sourceTable); ok && entry.Status == cdcStateStatusInProgress {
+		if entry.DestinationTable != destTable {
+			return fmt.Errorf("snapshot progress for %s belongs to destination %q, not %q", sourceTable, entry.DestinationTable, destTable)
+		}
+		_, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+		if err != nil {
+			return err
+		}
+		if !exists || current != progress.Destination {
+			return fmt.Errorf("CDC destination table %q was replaced before resuming its snapshot", destTable)
+		}
+		expectedDestination = progress.Destination
+	}
+	if err := m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, false); err != nil {
+		return err
+	}
+	if expectedDestination != "" {
+		// Rebinding must still match the target containing the saved ranges,
+		// including when no rows remain to write before table completion.
+		m.boundDestinations[sourceTable] = expectedDestination
+	}
+	return nil
 }
 
 // InvalidateBatchSnapshot prevents resume while a fully staged replacement is
@@ -291,7 +314,11 @@ func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, d
 	position := encodeCDCStatePositionWithSchema(zeroCDCPosition, incarnation, m.currentSchemas[sourceTable], epoch)
 	events := []cdcStateWriteEvent{m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, position)}
 	if resetProgress {
-		if reset, ok := m.snapshotProgressReset(sourceTable, destTable); ok {
+		reset, ok, err := m.snapshotProgressReset(sourceTable, destTable)
+		if err != nil {
+			return err
+		}
+		if ok {
 			events = append(events, reset)
 		}
 	}
@@ -1314,7 +1341,11 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 		position = encodeCDCStatePositionWithSchema(position, incarnation, schemaFingerprint, m.snapshotEpochs[sourceTable])
 		events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, destination.CDCStateStatusComplete, position))
 		if _, completed := token.SnapshotPositions[sourceTable]; completed {
-			if reset, ok := m.snapshotProgressReset(sourceTable, destTable); ok {
+			reset, ok, err := m.snapshotProgressReset(sourceTable, destTable)
+			if err != nil {
+				return err
+			}
+			if ok {
 				events = append(events, reset)
 			}
 		}
@@ -1323,7 +1354,11 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 			events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindDestination, m.generation, destination.CDCStateStatusComplete, destinationPosition))
 		}
 	}
-	events = append(events, m.snapshotProgressEvents(token)...)
+	progressEvents, err := m.snapshotProgressEvents(token)
+	if err != nil {
+		return err
+	}
+	events = append(events, progressEvents...)
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
 	}
