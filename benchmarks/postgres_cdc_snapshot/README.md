@@ -38,7 +38,9 @@ and each range's durable key/completion survive restarts. Changing reader
 count changes scheduling without changing saved coverage. A completed high
 range cannot skip unfinished low ranges, and all ranges being complete does
 not replace the separate durable table-completion event. Existing single-key
-progress resumes as one full-table range with its saved key.
+progress on tables with supported range ordering resumes as one full-table
+range with its saved key. Saved progress on unsupported tables, including
+partitioned roots, restarts a full replacement at a new boundary.
 The original replacement boundary remains distinct from the newer export/read
 LSN used on resume; retained WAL must repair changes behind saved keys and
 completed ranges. An exported snapshot name itself cannot survive a process

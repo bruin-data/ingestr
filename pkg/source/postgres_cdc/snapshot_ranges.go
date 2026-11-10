@@ -63,9 +63,9 @@ func snapshotRangePredicate(keys, keyTypes, after, upper []string) (string, []an
 	return " WHERE " + strings.Join(predicates, " AND "), args
 }
 
-// snapshotRangeKeysSupported checks the same operators and collations used by
-// row comparison, without querying rows outside the imported snapshot.
-func snapshotRangeKeysSupported(ctx context.Context, tx pgx.Tx, table string, keys []string) (bool, error) {
+// snapshotRangeKeysSupported checks unique ordering in PostgreSQL catalogs.
+// Range planning repeats this check inside the imported snapshot.
+func snapshotRangeKeysSupported(ctx context.Context, query snapshotResumeSlotQuerier, table string, keys []string) (bool, error) {
 	if len(keys) == 0 {
 		return false, nil
 	}
@@ -77,7 +77,7 @@ func snapshotRangeKeysSupported(ctx context.Context, tx pgx.Tx, table string, ke
 		seen[key] = true
 	}
 	var supported bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (
+	err := query.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM pg_index i
 		JOIN pg_class c ON c.oid = i.indrelid
 		JOIN pg_class idx ON idx.oid = i.indexrelid

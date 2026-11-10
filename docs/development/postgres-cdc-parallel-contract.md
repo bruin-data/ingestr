@@ -103,10 +103,14 @@ authorize an acknowledgement of WAL that has not been applied.
 
 `pkg/strategy/cdc_snapshot_progress.go` writes vector events as format version 2,
 including the attempt and full range vector. It continues decoding version 1
-single-key events. Version 1 resumes as one full-table range with the existing
-last key, preserving its original replacement boundary; it is not repartitioned
-around that key. This keeps existing durable rows and WAL reconciliation
-semantics. New serial reads may use a one-range vector.
+single-key events. On tables with supported range ordering, version 1 resumes as
+one full-table range with the existing last key, preserving its original
+replacement boundary; it is not repartitioned around that key. This keeps
+existing durable rows and WAL reconciliation semantics. Saved progress on a
+table with unsupported range ordering, including a partitioned root, is rejected
+before selecting the backfill boundary. That table starts a full replacement
+with the new export boundary and a replacement marker rather than a resume
+marker. New serial reads may use a one-range vector.
 
 An initial plan or an empty-range completion is persistable without a top-level
 key. The state manager keeps the newest complete vector per table; pruning must
