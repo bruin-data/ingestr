@@ -116,6 +116,7 @@ func TestChunkRefreshRecoversAfterSlotResetBeforeBootstrapCheckpoint(t *testing.
 		require.NoError(t, result.Err)
 		if result.Truncate {
 			require.False(t, result.CDCSnapshotResumed)
+			require.Empty(t, result.CDCChunkedSnapshotIdentity)
 			reset = true
 		}
 		sink.apply(t, result)

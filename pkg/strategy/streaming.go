@@ -830,7 +830,13 @@ func (l *flushLoop) resumeSnapshotReplacement(ctx context.Context, res source.Re
 	if l.opts.StateManager == nil || stateTable == "" || !st.isCDC || st.stagingTable == "" || len(st.primaryKeys) == 0 {
 		return fmt.Errorf("source resumed the snapshot of %q, which needs a keyed CDC merge with destination-managed state", res.TableName)
 	}
-	if err := l.opts.StateManager.ResumeSnapshot(ctx, stateTable, st.destTable, st.incarnation); err != nil {
+	var err error
+	if l.cfg != nil && l.cfg.CDCChunkedSnapshot {
+		err = l.opts.StateManager.ResumeChunkedSnapshot(ctx, stateTable, st.destTable, st.incarnation, res.CDCChunkedSnapshotIdentity)
+	} else {
+		err = l.opts.StateManager.ResumeSnapshot(ctx, stateTable, st.destTable, st.incarnation)
+	}
+	if err != nil {
 		return fmt.Errorf("failed to resume CDC snapshot state for %s: %w", stateTable, err)
 	}
 	if err := l.opts.StateManager.BindDestinationIncarnation(ctx, stateTable, st.destTable); err != nil {

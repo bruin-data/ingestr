@@ -174,6 +174,9 @@ type RecordBatchResult struct {
 	// newer position, and the completion token still names
 	// CDCSnapshotPosition.
 	CDCSnapshotResumed bool
+	// CDCChunkedSnapshotIdentity carries the persisted source and physical
+	// destination identity on a resumed chunked snapshot marker.
+	CDCChunkedSnapshotIdentity string
 
 	// CommitToken is an opaque, cumulative position marker for streaming mode.
 	// Committing a token via StreamCommitter acknowledges everything emitted up
