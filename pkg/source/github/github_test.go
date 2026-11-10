@@ -99,6 +99,9 @@ func TestGithubReadCommits(t *testing.T) {
 
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveRepoLookup(w, r) {
+			return
+		}
 		if r.URL.Path != "/repos/o/r/commits" {
 			t.Errorf("path=%s want /repos/o/r/commits", r.URL.Path)
 		}
@@ -138,7 +141,7 @@ func TestGithubReadCommits(t *testing.T) {
 	results := make(chan source.RecordBatchResult, 8)
 	go func() {
 		defer close(results)
-		if err := s.readCommits(context.Background(), source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}, results); err != nil {
+		if err := s.readCommits(context.Background(), source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}, results, nil); err != nil {
 			results <- source.RecordBatchResult{Err: err}
 		}
 	}()
@@ -174,6 +177,9 @@ func TestGithubReadCommits(t *testing.T) {
 
 func TestGithubReadCommitsMissingCommitterDate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveRepoLookup(w, r) {
+			return
+		}
 		if q := r.URL.Query(); q.Has("since") || q.Has("until") {
 			t.Errorf("unexpected interval params without an interval: %s", r.URL.RawQuery)
 		}
@@ -192,7 +198,7 @@ func TestGithubReadCommitsMissingCommitterDate(t *testing.T) {
 		restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL)),
 	}
 	results := make(chan source.RecordBatchResult, 1)
-	if err := s.readCommits(context.Background(), source.ReadOptions{}, results); err != nil {
+	if err := s.readCommits(context.Background(), source.ReadOptions{}, results, nil); err != nil {
 		t.Fatal(err)
 	}
 	close(results)
@@ -216,6 +222,9 @@ func TestGithubReadCommitsMissingCommitterDate(t *testing.T) {
 
 func TestGithubReadCommitsEmptyRepository(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveRepoLookup(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"message":"Git Repository is empty.","documentation_url":"https://docs.github.com/rest/commits/commits#list-commits","status":"409"}`))
@@ -228,7 +237,7 @@ func TestGithubReadCommitsEmptyRepository(t *testing.T) {
 		restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL)),
 	}
 	results := make(chan source.RecordBatchResult, 1)
-	if err := s.readCommits(context.Background(), source.ReadOptions{}, results); err != nil {
+	if err := s.readCommits(context.Background(), source.ReadOptions{}, results, nil); err != nil {
 		t.Fatalf("empty repository should read as zero rows, got: %v", err)
 	}
 	close(results)
@@ -245,6 +254,18 @@ type cannedResponse struct {
 }
 
 func epoch(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+
+var repoOR = cannedResponse{200, nil, `{"full_name":"o/r"}`}
+
+// serveRepoLookup answers the repository lookup single mode makes before reading commits.
+func serveRepoLookup(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/repos/o/r" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"full_name":"o/r"}`))
+	return true
+}
 
 // The exact bodies GitHub returned live for the two GraphQL primary-limit cases: no points left
 // (x-ratelimit-remaining 0) and a query costing more than the points left (remaining stayed at 98).
@@ -419,7 +440,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // options, auth and URI parsing under test are the production wiring.
 func connectToFake(t *testing.T, f *fakeGitHub) (*GithubSource, *httptest.Server) {
 	t.Helper()
-	srv := httptest.NewServer(f)
+	return connectURIToFake(t, f, "github://?access_token=test-token&owner=o&repo=r")
+}
+
+func connectURIToFake(t *testing.T, h http.Handler, uri string) (*GithubSource, *httptest.Server) {
+	t.Helper()
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
 	prevREST, prevGraphQL := restApiBaseUrl, graphqlBaseUrl
@@ -431,7 +457,7 @@ func connectToFake(t *testing.T, f *fakeGitHub) (*GithubSource, *httptest.Server
 	t.Cleanup(func() { retryWait, secondaryRateLimitWait = prevRetryWait, prevSecondaryWait })
 
 	s := NewGitHubSource()
-	if err := s.Connect(context.Background(), "github://?access_token=test-token&owner=o&repo=r"); err != nil {
+	if err := s.Connect(context.Background(), uri); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
@@ -449,7 +475,7 @@ func captureOutput(t *testing.T) *bytes.Buffer {
 
 func readTable(t *testing.T, s *GithubSource, ctx context.Context, table string) (int64, error) {
 	t.Helper()
-	results, err := s.read(ctx, table, source.ReadOptions{})
+	results, err := s.read(ctx, table, nil, source.ReadOptions{})
 	if err != nil {
 		return 0, err
 	}
@@ -586,6 +612,7 @@ func TestGithubRESTQuotaRunsOutMidRun(t *testing.T) {
 	s, srv := connectToFake(t, f)
 	page2 := srv.URL + "/repos/o/r/commits?page=2&per_page=100"
 	f.rest = []cannedResponse{
+		repoOR,
 		{200, map[string]string{"Link": "<" + page2 + `>; rel="next"`}, `[{"sha":"a","commit":{"committer":{"date":"2026-01-02T00:00:00Z"}}}]`},
 		restQuotaSpent(),
 		{200, nil, `[{"sha":"b","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
@@ -595,7 +622,7 @@ func TestGithubRESTQuotaRunsOutMidRun(t *testing.T) {
 	if err != nil || rows != 2 {
 		t.Fatalf("rows=%d err=%v, want both commits", rows, err)
 	}
-	if len(f.restPaths) != 3 || f.restPaths[1] != f.restPaths[2] {
+	if len(f.restPaths) != 4 || f.restPaths[2] != f.restPaths[3] {
 		t.Fatalf("rest requests=%q, want page 2 retried", f.restPaths)
 	}
 	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o/r") {
@@ -658,6 +685,7 @@ func TestGithubRateLimitRetriesRunOut(t *testing.T) {
 func TestGithubRetryAfter429KeepsTheMinimumWait(t *testing.T) {
 	logs := captureOutput(t)
 	f := &fakeGitHub{rest: []cannedResponse{
+		repoOR,
 		{429, map[string]string{"Retry-After": "0"}, `{"message":"You have exceeded a secondary rate limit."}`},
 		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
 	}}
@@ -680,6 +708,7 @@ func TestGithubRetryAfter429KeepsTheMinimumWait(t *testing.T) {
 func TestGithubRetryAfter503IsLogged(t *testing.T) {
 	logs := captureOutput(t)
 	f := &fakeGitHub{rest: []cannedResponse{
+		repoOR,
 		{503, map[string]string{"Retry-After": "0"}, `{"message":"Service unavailable"}`},
 		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
 	}}
@@ -750,6 +779,7 @@ func TestGithubSecondaryLimitWaitDoubles(t *testing.T) {
 	logs := captureOutput(t)
 	secondary := cannedResponse{403, nil, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`}
 	f := &fakeGitHub{rest: []cannedResponse{
+		repoOR,
 		secondary, secondary, secondary,
 		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
 	}}
@@ -1003,7 +1033,7 @@ func connectOwnerToFake(t *testing.T, f *fakeGitHub) (*GithubSource, *httptest.S
 
 func readRepositoryIDs(t *testing.T, s *GithubSource, opts source.ReadOptions) ([]int64, []string, error) {
 	t.Helper()
-	results, err := s.read(context.Background(), "repositories", opts)
+	results, err := s.read(context.Background(), "repositories", nil, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1210,5 +1240,566 @@ func TestGithubRepositoriesKeepsDeclaredColumnsWhenNull(t *testing.T) {
 	sch, err := table.GetSchema(context.Background())
 	if err != nil || len(sch.Columns) != len(want) {
 		t.Fatalf("schema=%v err=%v, want the %d declared columns for an owner without repositories", sch, err, len(want))
+	}
+}
+
+// commitsFake serves organizations and users whose repository listings span two pages, per-repo
+// lookups (case-insensitive, with renames answered by a redirect to /repositories/{id}), and
+// per-repository commit lists keyed by GitHub's owner/name. It records every request path.
+type commitsFake struct {
+	t       *testing.T
+	mu      sync.Mutex
+	paths   []string
+	orgs    map[string][]map[string]interface{}
+	users   map[string][]map[string]interface{}
+	hidden  []map[string]interface{}
+	renamed map[string]int
+	lookup  map[string]int
+	blocked map[string]int
+	commits map[string][]string
+	empty   map[string]bool
+}
+
+func listedRepo(id int, owner, name string, fork, archived bool) map[string]interface{} {
+	return map[string]interface{}{"id": id, "name": name, "full_name": owner + "/" + name, "fork": fork, "archived": archived, "owner": map[string]interface{}{"login": owner}}
+}
+
+func (f *commitsFake) findRepo(match func(map[string]interface{}) bool) map[string]interface{} {
+	for _, group := range []map[string][]map[string]interface{}{f.orgs, f.users, {"": f.hidden}} {
+		for _, repos := range group {
+			for _, r := range repos {
+				if match(r) {
+					return r
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func writeStatus(w http.ResponseWriter, status int) {
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, `{"message":"status %d","status":"%d"}`, status, status)
+}
+
+func (f *commitsFake) serveListing(w http.ResponseWriter, r *http.Request, repos []map[string]interface{}) {
+	half := len(repos) / 2
+	if r.URL.Query().Get("page") == "" {
+		w.Header().Set("Link", "<"+restApiBaseUrl+r.URL.Path+"?page=2>; rel=\"next\"")
+		_ = json.NewEncoder(w).Encode(repos[:half])
+		return
+	}
+	_ = json.NewEncoder(w).Encode(repos[half:])
+}
+
+func (f *commitsFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.paths = append(f.paths, r.URL.Path)
+	f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+
+	switch {
+	case r.URL.Path == "/user":
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": "me"})
+	case len(parts) == 2 && parts[0] == "users":
+		owner := strings.ToLower(parts[1])
+		switch {
+		case f.orgs[owner] != nil:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": owner, "type": "Organization"})
+		case f.users[owner] != nil:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"login": owner, "type": "User"})
+		default:
+			writeStatus(w, http.StatusNotFound)
+		}
+	case len(parts) == 3 && parts[0] == "orgs" && parts[2] == "repos":
+		f.serveListing(w, r, f.orgs[strings.ToLower(parts[1])])
+	case len(parts) == 3 && parts[0] == "users" && parts[2] == "repos":
+		if got := r.URL.Query().Get("type"); got != "owner" && r.URL.Query().Get("page") == "" {
+			f.t.Errorf("user listing type=%q want owner", got)
+		}
+		f.serveListing(w, r, f.users[strings.ToLower(parts[1])])
+	case len(parts) == 2 && parts[0] == "repositories":
+		id, _ := strconv.Atoi(parts[1])
+		if repo := f.findRepo(func(r map[string]interface{}) bool { return r["id"] == id }); repo != nil {
+			_ = json.NewEncoder(w).Encode(repo)
+			return
+		}
+		writeStatus(w, http.StatusNotFound)
+	case len(parts) == 3 && parts[0] == "repos":
+		key := strings.ToLower(parts[1] + "/" + parts[2])
+		if status, ok := f.lookup[key]; ok {
+			writeStatus(w, status)
+			return
+		}
+		if id, ok := f.renamed[key]; ok {
+			w.Header().Set("Location", restApiBaseUrl+"/repositories/"+strconv.Itoa(id))
+			writeStatus(w, http.StatusMovedPermanently)
+			return
+		}
+		if repo := f.findRepo(func(r map[string]interface{}) bool { return strings.EqualFold(r["full_name"].(string), key) }); repo != nil {
+			_ = json.NewEncoder(w).Encode(repo)
+			return
+		}
+		writeStatus(w, http.StatusNotFound)
+	case len(parts) == 4 && parts[0] == "repos" && parts[3] == "commits":
+		fullName := parts[1] + "/" + parts[2]
+		if status, ok := f.blocked[fullName]; ok {
+			writeStatus(w, status)
+			return
+		}
+		if f.empty[fullName] {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"Git Repository is empty.","status":"409"}`))
+			return
+		}
+		shas, ok := f.commits[fullName]
+		if !ok {
+			f.t.Errorf("unexpected commits request for %s", fullName)
+			writeStatus(w, http.StatusNotFound)
+			return
+		}
+		page := make([]map[string]interface{}, 0, len(shas))
+		for _, sha := range shas {
+			page = append(page, map[string]interface{}{
+				"sha":    sha,
+				"commit": map[string]interface{}{"committer": map[string]interface{}{"date": "2026-11-02T10:00:00Z"}},
+			})
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	default:
+		f.t.Errorf("unexpected path %s", r.URL.Path)
+		writeStatus(w, http.StatusNotFound)
+	}
+}
+
+func (f *commitsFake) requests(match func(string) bool) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, p := range f.paths {
+		if match(p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (f *commitsFake) commitRequests() []string {
+	return f.requests(func(p string) bool { return strings.HasSuffix(p, "/commits") })
+}
+
+func (f *commitsFake) listingRequests() []string {
+	return f.requests(func(p string) bool {
+		return strings.HasPrefix(p, "/users") || strings.HasPrefix(p, "/user") || strings.HasPrefix(p, "/orgs")
+	})
+}
+
+func newCommitsFake(t *testing.T) *commitsFake {
+	return &commitsFake{
+		t: t,
+		orgs: map[string][]map[string]interface{}{
+			"o": {
+				listedRepo(1, "o", "r", false, false),
+				listedRepo(2, "o", "ingestr", false, false),
+				listedRepo(3, "o", "old", false, true),
+				listedRepo(4, "o", "forked", true, false),
+				listedRepo(5, "o", "Bruin", false, false),
+				listedRepo(2, "o", "ingestr", false, false),
+			},
+			"other": {
+				listedRepo(10, "other", "tool", false, false),
+				listedRepo(11, "other", "Lib", true, false),
+			},
+		},
+		users: map[string][]map[string]interface{}{
+			"u": {
+				listedRepo(20, "u", "app", false, false),
+				listedRepo(21, "u", "fork", true, false),
+			},
+		},
+		hidden:  []map[string]interface{}{listedRepo(30, "u", "secret", false, false)},
+		renamed: map[string]int{},
+		lookup:  map[string]int{},
+		blocked: map[string]int{},
+		commits: map[string][]string{
+			"o/r":        {"r1"},
+			"o/ingestr":  {"i1", "i2"},
+			"o/old":      {"o1"},
+			"o/forked":   {"f1"},
+			"o/Bruin":    {"b1", "b2"},
+			"other/tool": {"t1"},
+			"other/Lib":  {"l1"},
+			"u/app":      {"a1"},
+			"u/secret":   {"s1"},
+		},
+		empty: map[string]bool{},
+	}
+}
+
+type commitRow struct{ repo, sha string }
+
+func readCommitRows(t *testing.T, s *GithubSource, tableName string, opts source.ReadOptions) (source.SourceTable, []commitRow, int, error) {
+	t.Helper()
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: tableName})
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	results, err := table.Read(context.Background(), opts)
+	if err != nil {
+		return table, nil, 0, err
+	}
+	var rows []commitRow
+	batches := 0
+	var readErr error
+	for res := range results {
+		if res.Err != nil {
+			readErr = res.Err
+			continue
+		}
+		batches++
+		repoCol := res.Batch.Column(res.Batch.Schema().FieldIndices("repo")[0]).(*array.String)
+		shaCol := res.Batch.Column(res.Batch.Schema().FieldIndices("sha")[0]).(*array.String)
+		for i := 0; i < int(res.Batch.NumRows()); i++ {
+			rows = append(rows, commitRow{repoCol.Value(i), shaCol.Value(i)})
+		}
+		res.Batch.Release()
+	}
+	return table, rows, batches, readErr
+}
+
+func TestGithubCommitsTableName(t *testing.T) {
+	cases := []struct {
+		name    string
+		base    string
+		repos   []string
+		wantErr string
+	}{
+		{name: "commits", base: "commits"},
+		{name: "commits:a", base: "commits", repos: []string{"o/a"}},
+		{name: "commits:agent-runner, bruin,  ingestr ", base: "commits", repos: []string{"o/agent-runner", "o/bruin", "o/ingestr"}},
+		{name: "commits:a,,b, ,", base: "commits", repos: []string{"o/a", "o/b"}},
+		{name: "commits:Bruin, bruin,BRUIN, a", base: "commits", repos: []string{"o/Bruin", "o/a"}},
+		{name: "commits:bruin, o/Bruin, O/bruin", base: "commits", repos: []string{"o/bruin"}},
+		{name: "commits:other/tool, x , other / lib,Other/Tool", base: "commits", repos: []string{"other/tool", "o/x", "other/lib"}},
+		{name: "commits:", wantErr: "lists no repositories"},
+		{name: "commits: , ", wantErr: "lists no repositories"},
+		{name: "commits:a, x/b/c", wantErr: `invalid repository "x/b/c"`},
+		{name: "commits:/b", wantErr: `invalid repository "/b"`},
+		{name: "commits:x/ ", wantErr: `invalid repository "x/"`},
+		{name: "issues:x", base: "issues:x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, repos, err := parseTableName(tc.name, "o")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if base != tc.base || fmt.Sprint(repos) != fmt.Sprint(tc.repos) {
+				t.Fatalf("base=%q repos=%q, want %q %q", base, repos, tc.base, tc.repos)
+			}
+		})
+	}
+
+	s := NewGitHubSource()
+	if err := s.Connect(context.Background(), "github://?owner=o&repo=r"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	for _, name := range []string{"issues:x", "repositories:x", "commits:", "commits:a/b/c"} {
+		if _, err := s.GetTable(context.Background(), source.TableRequest{Name: name}); err == nil {
+			t.Errorf("GetTable(%q) should fail", name)
+		}
+	}
+}
+
+func TestGithubCommitsSingleRepo(t *testing.T) {
+	for _, uriRepo := range []string{"r", "R"} {
+		t.Run(uriRepo, func(t *testing.T) {
+			captureOutput(t)
+			f := newCommitsFake(t)
+			s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=O&repo="+uriRepo)
+
+			table, rows, _, err := readCommitRows(t, s, "commits", source.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pks := table.PrimaryKeys(); fmt.Sprint(pks) != "[sha]" {
+				t.Fatalf("primary keys=%v want [sha]", pks)
+			}
+			if table.Strategy() != config.StrategyMerge || table.IncrementalKey() != "committed_at" {
+				t.Fatalf("strategy=%q incremental key=%q", table.Strategy(), table.IncrementalKey())
+			}
+			if fmt.Sprint(rows) != "[{o/r r1}]" {
+				t.Fatalf("rows=%v, want GitHub's name in repo", rows)
+			}
+			if got := fmt.Sprint(f.paths); got != "[/repos/O/"+uriRepo+" /repos/o/r/commits]" {
+				t.Fatalf("requests=%s, want one lookup and the commits", got)
+			}
+		})
+	}
+}
+
+func TestGithubCommitsSingleRepoNotFound(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o&repo=nope")
+
+	_, _, _, err := readCommitRows(t, s, "commits", source.ReadOptions{})
+	if err == nil || err.Error() != "github repositories not found or not accessible with this token: o/nope" {
+		t.Fatalf("err=%v", err)
+	}
+	if reqs := f.commitRequests(); len(reqs) != 0 {
+		t.Fatalf("commits were requested: %v", reqs)
+	}
+}
+
+func TestGithubCommitsListedRepos(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o&repo=r")
+
+	table, rows, _, err := readCommitRows(t, s, "commits: bruin, forked,INGESTR", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pks := table.PrimaryKeys(); fmt.Sprint(pks) != "[repo sha]" {
+		t.Fatalf("primary keys=%v want [repo sha]", pks)
+	}
+	sch, err := table.GetSchema(context.Background())
+	if err != nil || fmt.Sprint(sch.PrimaryKeys) != "[repo sha]" {
+		t.Fatalf("schema primary keys=%v err=%v", sch, err)
+	}
+	if got := fmt.Sprint(f.commitRequests()); got != "[/repos/o/Bruin/commits /repos/o/forked/commits /repos/o/ingestr/commits]" {
+		t.Fatalf("commit requests=%s", got)
+	}
+	if reqs := f.listingRequests(); len(reqs) != 0 {
+		t.Fatalf("list mode listed owners: %v", reqs)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/Bruin b1} {o/Bruin b2} {o/forked f1} {o/ingestr i1} {o/ingestr i2}]" {
+		t.Fatalf("rows=%s", got)
+	}
+}
+
+func TestGithubCommitsListedReposOfSeveralOwners(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o&repo=r")
+
+	table, rows, _, err := readCommitRows(t, s, "commits: bruin, other/tool, O/ingestr, Other/lib, o/Bruin", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pks := table.PrimaryKeys(); fmt.Sprint(pks) != "[repo sha]" {
+		t.Fatalf("primary keys=%v want [repo sha]", pks)
+	}
+	if reqs := f.listingRequests(); len(reqs) != 0 {
+		t.Fatalf("list mode listed owners: %v", reqs)
+	}
+	if got := fmt.Sprint(f.commitRequests()); got != "[/repos/o/Bruin/commits /repos/other/tool/commits /repos/o/ingestr/commits /repos/other/Lib/commits]" {
+		t.Fatalf("commit requests=%s", got)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/Bruin b1} {o/Bruin b2} {other/tool t1} {o/ingestr i1} {o/ingestr i2} {other/Lib l1}]" {
+		t.Fatalf("rows=%s", got)
+	}
+}
+
+func TestGithubCommitsUnknownOwnerFailsBeforeReading(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+
+	_, rows, batches, err := readCommitRows(t, s, "commits:bruin, ghost/x, other/nope, dacc, other/tool", source.ReadOptions{})
+	want := "github repositories not found or not accessible with this token: ghost/x, other/nope, o/dacc"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err=%v want %q", err, want)
+	}
+	if batches != 0 || len(rows) != 0 {
+		t.Fatalf("got %d batches with %d rows before failing", batches, len(rows))
+	}
+	if reqs := f.commitRequests(); len(reqs) != 0 {
+		t.Fatalf("commits were requested before failing: %v", reqs)
+	}
+}
+
+func TestGithubCommitsAllRepos(t *testing.T) {
+	cases := []struct {
+		uri, wantRequests, wantRows, wantLog string
+	}{
+		{
+			uri:          "github://?access_token=test-token&owner=o",
+			wantRequests: "[/repos/o/r/commits /repos/o/ingestr/commits /repos/o/old/commits /repos/o/Bruin/commits]",
+			wantRows:     "[{o/r r1} {o/ingestr i1} {o/ingestr i2} {o/old o1} {o/Bruin b1} {o/Bruin b2}]",
+			wantLog:      "Reading the commits of 4 repositories of o (forks skipped: 1)",
+		},
+		{
+			uri:          "github://?access_token=test-token&owner=o&repo=",
+			wantRequests: "[/repos/o/r/commits /repos/o/ingestr/commits /repos/o/old/commits /repos/o/Bruin/commits]",
+			wantRows:     "[{o/r r1} {o/ingestr i1} {o/ingestr i2} {o/old o1} {o/Bruin b1} {o/Bruin b2}]",
+			wantLog:      "Reading the commits of 4 repositories of o (forks skipped: 1)",
+		},
+		{
+			uri:          "github://?access_token=test-token&owner=u",
+			wantRequests: "[/repos/u/app/commits]",
+			wantRows:     "[{u/app a1}]",
+			wantLog:      "Reading the commits of 1 repositories of u (forks skipped: 1)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.uri, func(t *testing.T) {
+			logs := captureOutput(t)
+			f := newCommitsFake(t)
+			s, _ := connectURIToFake(t, f, tc.uri)
+
+			table, rows, _, err := readCommitRows(t, s, "commits", source.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pks := table.PrimaryKeys(); fmt.Sprint(pks) != "[repo sha]" {
+				t.Fatalf("primary keys=%v want [repo sha]", pks)
+			}
+			if got := fmt.Sprint(f.commitRequests()); got != tc.wantRequests {
+				t.Fatalf("commit requests=%s, want every repository but the forks, once: %s", got, tc.wantRequests)
+			}
+			if got := fmt.Sprint(rows); got != tc.wantRows {
+				t.Fatalf("rows=%s want %s", got, tc.wantRows)
+			}
+			if !strings.Contains(logs.String(), tc.wantLog) {
+				t.Fatalf("missing %q in output: %q", tc.wantLog, logs.String())
+			}
+		})
+	}
+}
+
+func TestGithubCommitsAllReposSkipsUnreadableRepos(t *testing.T) {
+	logs := captureOutput(t)
+	f := newCommitsFake(t)
+	f.blocked["o/ingestr"] = http.StatusForbidden
+	f.blocked["o/old"] = http.StatusUnavailableForLegalReasons
+	f.blocked["o/Bruin"] = http.StatusNotFound
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+
+	_, rows, _, err := readCommitRows(t, s, "commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/r r1}]" {
+		t.Fatalf("rows=%s", got)
+	}
+	for _, want := range []string{
+		"Warning: skipping the commits of o/ingestr, GitHub answered 403",
+		"Warning: skipping the commits of o/old, GitHub answered 451",
+		"Warning: skipping the commits of o/Bruin, GitHub answered 404",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("missing %q in output: %q", want, logs.String())
+		}
+	}
+}
+
+func TestGithubCommitsUnreadableRepoFailsOtherModes(t *testing.T) {
+	cases := []struct{ name, uri, table string }{
+		{name: "all mode on a server error", uri: "github://?access_token=test-token&owner=o", table: "commits"},
+		{name: "list mode", uri: "github://?access_token=test-token&owner=o", table: "commits:r,old"},
+		{name: "single mode", uri: "github://?access_token=test-token&owner=o&repo=old", table: "commits"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captureOutput(t)
+			f := newCommitsFake(t)
+			if tc.name == "all mode on a server error" {
+				f.blocked["o/old"] = http.StatusBadGateway
+			} else {
+				f.blocked["o/old"] = http.StatusUnavailableForLegalReasons
+			}
+			s, _ := connectURIToFake(t, f, tc.uri)
+
+			_, _, _, err := readCommitRows(t, s, tc.table, source.ReadOptions{})
+			if err == nil || !strings.Contains(err.Error(), "failed to fetch commits with status") {
+				t.Fatalf("err=%v, want the commits request to fail the run", err)
+			}
+		})
+	}
+}
+
+func TestGithubCommitsListedReposTheTokenCanRead(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	f.renamed["o/bruin-old"] = 5
+	f.lookup["other/blocked"] = http.StatusUnavailableForLegalReasons
+	f.lookup["other/sso"] = http.StatusForbidden
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+
+	_, _, _, err := readCommitRows(t, s, "commits:bruin-old, u/secret, other/blocked, other/sso", source.ReadOptions{})
+	want := "github repositories not found or not accessible with this token: other/blocked, other/sso"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err=%v want %q", err, want)
+	}
+
+	f = newCommitsFake(t)
+	f.renamed["o/bruin-old"] = 5
+	s, _ = connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+	_, rows, _, err := readCommitRows(t, s, "commits:bruin-old, u/secret, Bruin", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/Bruin b1} {o/Bruin b2} {u/secret s1}]" {
+		t.Fatalf("rows=%s, want the renamed repo under its new name once and the collaborator repo", got)
+	}
+}
+
+func TestGithubCommitsUnknownRepoFailsBeforeReading(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+
+	_, rows, batches, err := readCommitRows(t, s, "commits:bruin, dacc, ingestr, foo", source.ReadOptions{})
+	want := "github repositories not found or not accessible with this token: o/dacc, o/foo"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err=%v want %q", err, want)
+	}
+	if batches != 0 || len(rows) != 0 {
+		t.Fatalf("got %d batches with %d rows before failing", batches, len(rows))
+	}
+	if reqs := f.commitRequests(); len(reqs) != 0 {
+		t.Fatalf("commits were requested before failing: %v", reqs)
+	}
+}
+
+func TestGithubCommitsEmptyRepoInList(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	f.empty["o/old"] = true
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+
+	_, rows, _, err := readCommitRows(t, s, "commits:old,ingestr", source.ReadOptions{})
+	if err != nil {
+		t.Fatalf("an empty repository should read as zero rows, got: %v", err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/ingestr i1} {o/ingestr i2}]" {
+		t.Fatalf("rows=%s", got)
+	}
+}
+
+func TestGithubCommitsLimitSpansRepos(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+
+	_, rows, _, err := readCommitRows(t, s, "commits:ingestr,bruin,r", source.ReadOptions{Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/ingestr i1} {o/ingestr i2} {o/Bruin b1}]" {
+		t.Fatalf("rows=%s", got)
+	}
+	if got := fmt.Sprint(f.commitRequests()); got != "[/repos/o/ingestr/commits /repos/o/Bruin/commits]" {
+		t.Fatalf("commit requests=%s, want none after the limit", got)
 	}
 }
