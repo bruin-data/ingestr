@@ -80,6 +80,7 @@ func TestNATS_ToSQLite(t *testing.T) {
 }
 
 func TestNATS_CancellationInterruptsFetch(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

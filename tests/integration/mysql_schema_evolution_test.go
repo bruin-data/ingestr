@@ -15,6 +15,7 @@ import (
 )
 
 func TestMySQLMergeWidensStringPrimaryKeyToIndexableLength(t *testing.T) {
+	t.Parallel()
 	if mysqlDest.uri == "" {
 		t.Skip("shared mysql destination container not available")
 	}

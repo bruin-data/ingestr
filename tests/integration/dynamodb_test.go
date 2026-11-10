@@ -131,6 +131,7 @@ func TestDynamoDB_Replace(t *testing.T) {
 }
 
 func TestDynamoDB_Append(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
