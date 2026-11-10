@@ -277,7 +277,7 @@ func parseIngestConfig(t *testing.T, args ...string) (*config.IngestConfig, erro
 
 func clearIngestMappingEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"EXTRACT_PARALLELISM", "BATCH_SIZE", "INCREMENTAL_STRATEGY", "INTERVAL_START", "INTERVAL_END"} {
+	for _, key := range []string{"EXTRACT_PARALLELISM", "DESTINATION_PARALLELISM", "BATCH_SIZE", "INCREMENTAL_STRATEGY", "INTERVAL_START", "INTERVAL_END"} {
 		for _, prefix := range []string{"", "INGESTR_"} {
 			name := prefix + key
 			t.Setenv(name, "")
@@ -299,18 +299,26 @@ func TestIngestConfigParallelism(t *testing.T) {
 	for _, tt := range []struct {
 		name                            string
 		args                            []string
-		env                             string
+		env                             map[string]string
 		extract, destination, effective int
 	}{
 		{name: "implicit default", extract: 5, effective: 8},
 		{name: "explicit default", args: []string{"--extract-parallelism=5"}, extract: 5, destination: 5, effective: 5},
 		{name: "override", args: []string{"--extract-parallelism=3"}, extract: 3, destination: 3, effective: 3},
-		{name: "environment default", env: "5", extract: 5, destination: 5, effective: 5},
-		{name: "flag beats environment", env: "9", args: []string{"--extract-parallelism=2"}, extract: 2, destination: 2, effective: 2},
+		{name: "environment default", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "5"}, extract: 5, destination: 5, effective: 5},
+		{name: "flag beats environment", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "9"}, args: []string{"--extract-parallelism=2"}, extract: 2, destination: 2, effective: 2},
+		{name: "destination only", args: []string{"--destination-parallelism=3"}, extract: 5, destination: 3, effective: 3},
+		{name: "independent parallelism", args: []string{"--extract-parallelism=2", "--destination-parallelism=8"}, extract: 2, destination: 8, effective: 8},
+		{name: "independent parallelism reversed flags", args: []string{"--destination-parallelism=2", "--extract-parallelism=8"}, extract: 8, destination: 2, effective: 2},
+		{name: "destination environment", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "3"}, extract: 5, destination: 3, effective: 3},
+		{name: "destination environment alias", env: map[string]string{"DESTINATION_PARALLELISM": "3"}, extract: 5, destination: 3, effective: 3},
+		{name: "destination environment overrides extract flag", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "8"}, args: []string{"--extract-parallelism=2"}, extract: 2, destination: 8, effective: 8},
+		{name: "destination flag overrides extract environment", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "2"}, args: []string{"--destination-parallelism=8"}, extract: 2, destination: 8, effective: 8},
+		{name: "destination flag beats environment", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "9"}, args: []string{"--destination-parallelism=3"}, extract: 5, destination: 3, effective: 3},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.env != "" {
-				t.Setenv("INGESTR_EXTRACT_PARALLELISM", tt.env)
+			for name, value := range tt.env {
+				t.Setenv(name, value)
 			}
 			cfg, err := parseIngestConfig(t, tt.args...)
 			if err != nil {
@@ -320,6 +328,26 @@ func TestIngestConfigParallelism(t *testing.T) {
 				t.Fatalf("parallelism = (%d, %d, %d), want (%d, %d, %d)", cfg.ExtractParallelism, cfg.DestinationParallelism, cfg.EffectiveDestinationParallelism(), tt.extract, tt.destination, tt.effective)
 			}
 		})
+	}
+}
+
+func TestIngestConfigDestinationParallelismRejectsNonPositive(t *testing.T) {
+	clearIngestMappingEnv(t)
+	for _, input := range []string{"flag", "INGESTR_DESTINATION_PARALLELISM", "DESTINATION_PARALLELISM"} {
+		for _, value := range []string{"0", "-1"} {
+			t.Run(input+"="+value, func(t *testing.T) {
+				args := []string{"--extract-parallelism=2"}
+				if input == "flag" {
+					args = append(args, "--destination-parallelism="+value)
+				} else {
+					t.Setenv(input, value)
+				}
+				_, err := parseIngestConfig(t, args...)
+				if err == nil || !strings.Contains(err.Error(), "destination-parallelism must be positive") {
+					t.Fatalf("error = %v, want destination-parallelism must be positive", err)
+				}
+			})
+		}
 	}
 }
 

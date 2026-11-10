@@ -211,6 +211,12 @@ func IngestCommand() *cli.Command {
 				Value:   config.DefaultExtractParallelism,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
 			},
+			&cli.IntFlag{
+				Name:        "destination-parallelism",
+				Usage:       "The number of parallel jobs to run for writing data to the destination; overrides extract-parallelism for writes",
+				DefaultText: "destination-specific",
+				Sources:     cli.EnvVars("DESTINATION_PARALLELISM", "INGESTR_DESTINATION_PARALLELISM"),
+			},
 			&cli.StringFlag{
 				Name:    "extract-partition-by",
 				Usage:   "The source date/time or integer column used to split bounded extraction into parallel windows",
@@ -449,7 +455,12 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
-	if c.IsSet("extract-parallelism") {
+	cfg.DestinationParallelism = int(c.Int("destination-parallelism"))
+	if c.IsSet("destination-parallelism") {
+		if cfg.DestinationParallelism <= 0 {
+			return &config.ValidationError{Field: "destination-parallelism", Message: "must be positive"}
+		}
+	} else if c.IsSet("extract-parallelism") {
 		cfg.DestinationParallelism = cfg.ExtractParallelism
 	}
 	cfg.ExtractPartitionBy = c.String("extract-partition-by")

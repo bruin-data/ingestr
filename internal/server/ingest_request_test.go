@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -95,5 +96,44 @@ func TestRunJobRequestIngestArgs(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args mismatch\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestRunJobRequestDestinationParallelism(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "independent parallelism",
+			body: `{"extractParallelism":2,"destinationParallelism":8}`,
+			want: []string{"--extract-parallelism=2", "--destination-parallelism=8", "--yes"},
+		},
+		{
+			name: "omitted destination parallelism",
+			body: `{"extractParallelism":2}`,
+			want: []string{"--extract-parallelism=2", "--yes"},
+		},
+		{
+			name: "explicit zero reaches CLI validation",
+			body: `{"destinationParallelism":0}`,
+			want: []string{"--destination-parallelism=0", "--yes"},
+		},
+		{
+			name: "negative parallelism reaches CLI validation",
+			body: `{"destinationParallelism":-1}`,
+			want: []string{"--destination-parallelism=-1", "--yes"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var req RunJobRequest
+			if err := json.Unmarshal([]byte(tt.body), &req); err != nil {
+				t.Fatal(err)
+			}
+			if got := req.IngestArgs(); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("args mismatch\n got: %#v\nwant: %#v", got, tt.want)
+			}
+		})
 	}
 }
