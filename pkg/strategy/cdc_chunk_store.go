@@ -330,8 +330,40 @@ func (s *cdcChunkStore) Identity(ctx context.Context) (string, error) {
 	m := s.manager
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	identity, _, err := m.chunkSnapshotIdentity(ctx, "")
+	return identity, err
+}
+
+// ResumeChunkedSnapshot binds a resumed snapshot to the physical target covered
+// by its saved chunk checkpoint, which stores progress separately from normal
+// snapshot progress events.
+func (m *CDCStateManager) ResumeChunkedSnapshot(ctx context.Context, sourceTable, destTable, incarnation, expectedIdentity string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.started || m.generation == 0 {
+		return fmt.Errorf("CDC state run has not started")
+	}
+	if expectedIdentity == "" || m.destTables[sourceTable] != destTable {
+		return fmt.Errorf("CDC chunked snapshot of %s has no resume identity for destination table %q", sourceTable, destTable)
+	}
+	identity, raw, err := m.chunkSnapshotIdentity(ctx, sourceTable)
+	if err != nil {
+		return err
+	}
+	if identity != expectedIdentity || raw == "" {
+		return fmt.Errorf("CDC chunked snapshot source or destination changed before resuming %s", sourceTable)
+	}
+	m.boundDestinations[sourceTable] = cdcDestinationIncarnationDigest(raw)
+	m.boundRawDestinations[sourceTable] = raw
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, false)
+}
+
+// chunkSnapshotIdentity captures the aggregate identity and the requested
+// target's raw incarnation from the same physical identity observation.
+// The caller holds m.mu.
+func (m *CDCStateManager) chunkSnapshotIdentity(ctx context.Context, sourceTable string) (string, string, error) {
 	if len(m.destTables) == 0 {
-		return "", fmt.Errorf("CDC snapshot identity requires registered tables")
+		return "", "", fmt.Errorf("CDC snapshot identity requires registered tables")
 	}
 	tables := make([]string, 0, len(m.destTables))
 	for table := range m.destTables {
@@ -339,17 +371,21 @@ func (s *cdcChunkStore) Identity(ctx context.Context) (string, error) {
 	}
 	sort.Strings(tables)
 	identity := [][]string{{"1", m.connectorID}}
+	var target string
 	for _, table := range tables {
-		physical, exists, err := m.currentDestinationIncarnation(ctx, table)
+		raw, physical, exists, err := m.destinationIncarnationForTable(ctx, m.destTables[table])
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if !exists || physical == "" {
-			return "", fmt.Errorf("CDC snapshot destination %q has no physical identity", m.destTables[table])
+			return "", "", fmt.Errorf("CDC snapshot destination %q has no physical identity", m.destTables[table])
+		}
+		if table == sourceTable {
+			target = raw
 		}
 		identity = append(identity, []string{table, m.currentIncarnations[table], m.currentSchemas[table], m.destTables[table], physical})
 	}
 	encoded, _ := json.Marshal(identity)
 	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), target, nil
 }

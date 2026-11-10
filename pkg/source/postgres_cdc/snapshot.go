@@ -317,7 +317,7 @@ func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, ls
 		totalRows += count
 		config.Debug("[CDC] Snapshot batch %d: %d rows (total: %d)", batchNum, count, totalRows)
 
-		if err := sendResult(ctx, results, source.RecordBatchResult{Batch: record}); err != nil {
+		if err := sendResult(ctx, results, source.RecordBatchResult{Batch: record, CDCSnapshot: true}); err != nil {
 			return err
 		}
 		if lastKey != nil {

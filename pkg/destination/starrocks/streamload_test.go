@@ -56,7 +56,7 @@ func TestStreamLoadHTTPS(t *testing.T) {
 	}))
 	defer server.Close()
 	loader := newTestStreamLoader(t, server)
-	require.NoError(t, loader.load(t.Context(), "db", "table", "label", []byte(body), "id"))
+	require.NoError(t, loader.load(t.Context(), "db", "table", "label", []byte(body), streamLoadOptions{columns: "id"}))
 }
 
 func TestStreamLoadHTTPSRejectsUntrustedCertificate(t *testing.T) {
@@ -66,7 +66,7 @@ func TestStreamLoadHTTPSRejectsUntrustedCertificate(t *testing.T) {
 	defer server.Close()
 	loader := newTestStreamLoader(t, server)
 	loader.client.Transport = nil
-	err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "id")
+	err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), streamLoadOptions{columns: "id"})
 	var certErr x509.UnknownAuthorityError
 	require.ErrorAs(t, err, &certErr)
 }
@@ -117,7 +117,7 @@ func TestStreamLoadRequiresCompleteVisibleLoad(t *testing.T) {
 					return tc.waitErr
 				}
 			}
-			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "id")
+			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), streamLoadOptions{columns: "id"})
 			if tc.want == "" {
 				require.NoError(t, err)
 			} else {
@@ -159,7 +159,7 @@ func TestStreamLoadRedirectPreservesPayloadAndAuthentication(t *testing.T) {
 			}))
 			defer frontend.Close()
 			loader := newTestStreamLoader(t, frontend)
-			require.NoError(t, loader.load(t.Context(), "db", "table", "label", []byte(body), "id"))
+			require.NoError(t, loader.load(t.Context(), "db", "table", "label", []byte(body), streamLoadOptions{columns: "id"}))
 		})
 	}
 }
@@ -176,7 +176,7 @@ func TestStreamLoadHTTPSRejectsPlaintextRedirect(t *testing.T) {
 	}))
 	defer frontend.Close()
 	loader := newTestStreamLoader(t, frontend)
-	err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "id")
+	err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), streamLoadOptions{columns: "id"})
 	require.ErrorContains(t, err, "refuses non-HTTPS URL")
 	require.Zero(t, requests.Load())
 }
@@ -214,7 +214,7 @@ func TestLoadRecordSplitsOversizedBodies(t *testing.T) {
 	defer ids.Release()
 	rec := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil), []arrow.Array{ids}, 5)
 	defer rec.Release()
-	rows, err := d.loadRecord(t.Context(), "db", "table", rec)
+	rows, err := d.loadRecord(t.Context(), "db", "table", rec, "")
 	require.NoError(t, err)
 	require.EqualValues(t, 5, rows)
 	require.Greater(t, len(bodies), 1)
@@ -224,7 +224,7 @@ func TestLoadRecordSplitsOversizedBodies(t *testing.T) {
 	require.Equal(t, []string{`[{"id":1},{"id":2},{"id":3},{"id":4}]`, `[{"id":5}]`}, bodies)
 
 	maxStreamLoadJSONBytes = 5
-	_, err = d.loadRecord(t.Context(), "db", "table", rec)
+	_, err = d.loadRecord(t.Context(), "db", "table", rec, "")
 	require.ErrorContains(t, err, "single row")
 }
 
@@ -259,7 +259,7 @@ func TestStreamLoadFailureIncludesErrorLogFromReachableHost(t *testing.T) {
 				errorURL = strings.Replace(server.URL, "https://", "http://", 1) + "/api/_load_error_log?file=x"
 			}
 			loader := newTestStreamLoader(t, server)
-			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "")
+			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), streamLoadOptions{})
 			require.ErrorContains(t, err, "too many filtered rows: Error: Value length is beyond the capacity. column=v; second line")
 		})
 	}
@@ -301,7 +301,7 @@ func TestStreamLoadHTTPSOnlyFetchesSecureErrorLogFallback(t *testing.T) {
 			}))
 			defer frontend.Close()
 			loader := newTestStreamLoader(t, frontend)
-			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), "id")
+			err := loader.load(t.Context(), "db", "table", "label", []byte(`[{"id":1}]`), streamLoadOptions{columns: "id"})
 			require.EqualValues(t, 1, rewrittenRequests.Load())
 			if https {
 				require.EqualValues(t, 1, fallbackRequests.Load())

@@ -47,6 +47,14 @@ func runStreamLoadTest(t *testing.T, records <-chan source.RecordBatchResult, me
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	d := &StarRocksDestination{loader: &streamLoader{endpoint: "http://starrocks", client: &http.Client{Transport: transport}}}
+	if opts.CDCSnapshot {
+		validated, mock := newVisibilityTestDestination(t)
+		expectSnapshotPrimaryKey(mock, "PRIMARY_KEYS", opts.PrimaryKeys...)
+		expectSnapshotColumns(mock, append(opts.Schema.ColumnNames(), cdcOrderColumn)...)
+		expectSnapshotSchemaChange(mock, "", "")
+		expectSnapshotOrderColumn(mock, "largeint", cdcOrderRenderedExpression)
+		d.db = validated.db
+	}
 	done := make(chan error, 1)
 	finished := make(chan struct{})
 	go func() {
