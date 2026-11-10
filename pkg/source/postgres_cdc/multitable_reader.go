@@ -155,9 +155,6 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 				needsSnapshot = true
 			} else {
 				slotName = resolvedSlot
-				if legacy {
-					r.source.markLegacySlotInUse(slotName)
-				}
 				if !legacy {
 					waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				}
@@ -172,7 +169,12 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 						needsSnapshot = true
 					}
 				}
-				config.Debug("[CDC] Multi-table: resuming from LSN %s with per-table filtering", minResumeLSN)
+				if !needsSnapshot {
+					if legacy {
+						r.source.markLegacySlotInUse(slotName)
+					}
+					config.Debug("[CDC] Multi-table: resuming from LSN %s with per-table filtering", minResumeLSN)
+				}
 			}
 		}
 
