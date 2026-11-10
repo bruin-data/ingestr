@@ -264,11 +264,12 @@ func TestCDCSnapshotBatchCancellationAfterLoadDoesNotRetire(t *testing.T) {
 
 func TestCDCSnapshotBatchResumedSnapshotKeepsEarlierRows(t *testing.T) {
 	loop, base, _ := softReplacementLoop(t)
+	persistResumedSnapshotProgress(t, loop, base)
 	base.maxLSN = softSnapshotBoundary
 	dest := &directBatchSnapshotDestination{softReplaceDestination: base}
 	marker := softMarker()
 	marker.CDCSnapshotResumed = true
-	job := directSnapshotBatchJob(dest, mustClosedRecords(marker, directSnapshotBatch(t, "", 2)))
+	job := directSnapshotBatchJob(dest, mustClosedRecords(marker, directSnapshotBatch(t, "", 7)))
 	job.CDCStateManager = loop.opts.StateManager
 	require.NoError(t, (&MergeStrategy{}).Execute(t.Context(), job))
 	require.False(t, dest.targetTruncated())

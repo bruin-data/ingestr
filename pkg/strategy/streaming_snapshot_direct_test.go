@@ -75,6 +75,7 @@ func TestStreamingDirectSnapshotRetiresBeforeCompletion(t *testing.T) {
 			loop.cfg.DestinationParallelism = 3
 			var records <-chan source.RecordBatchResult
 			if resumed {
+				persistResumedSnapshotProgress(t, loop, dest.softReplaceDestination)
 				records = resumedSnapshotRecords(t)
 			} else {
 				records = softReplacementRecords(t, softMarker(), softSnapshotBoundary)
