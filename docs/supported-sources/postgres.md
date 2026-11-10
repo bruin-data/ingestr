@@ -73,7 +73,7 @@ Durable changes are retained until their destination application is checkpointed
 
 Spooling requires non-null primary keys, a destination with CDC-aware keyed merges, table truncation, and managed CDC state. Omit `--incremental-strategy` or set it to `merge`. It cannot be combined with chunked snapshots, `--cdc-snapshot-mode never`, `--cdc-start-lsn`, SQL limits or excluded columns, incremental filters, interval bounds, or extraction partitioning.
 
-Spooling keeps capturing during destination backpressure, so durable storage lets the replication slot advance during copying. PostgreSQL's `restart_lsn` can still lag behind acknowledgments. The normal snapshot transaction remains open for the copy duration; spooling does not shorten it. Chunked snapshots address transaction duration separately.
+Spooling keeps capturing during destination backpressure, so durable storage lets the replication slot advance during copying. Finite runs stop capture after the copy and choose a fixed catch-up endpoint before replaying the spool; subsequent changes remain in source WAL for the next run. PostgreSQL's `restart_lsn` can still lag behind acknowledgments. The normal snapshot transaction remains open for the copy duration; spooling does not shorten it. Chunked snapshots address transaction duration separately.
 
 Environment variables are `INGESTR_CDC_SNAPSHOT_SPOOL`, `INGESTR_CDC_WAL_STAGING`, `INGESTR_CDC_WAL_SPOOL_DIR`, and `INGESTR_CDC_WAL_BUFFER_BYTES`.
 

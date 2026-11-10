@@ -115,6 +115,29 @@ func (r *snapshotSpoolReader) run(ctx context.Context, slot string, resumes map[
 		}
 	}
 	refresh := r.opts.FullRefresh && (r.options.RefreshID == "" || state == nil || state.RefreshID != r.options.RefreshID)
+	if state != nil && state.Complete && !refresh {
+		positions, sameIdentity, err := r.completedSpoolPositions(ctx, state, slot, resumes)
+		if err != nil {
+			return err
+		}
+		if sameIdentity {
+			r.state = state
+			if err := r.cleanupRetiredSpools(ctx); err != nil {
+				return err
+			}
+		}
+		// Ordinary CDC state can cover schema evolution after bootstrap. Keep
+		// the completed journal only for retirement, not as a resume fallback.
+		r.state = nil
+		available, err := r.resumeAvailable(ctx, slot, positions)
+		if err != nil {
+			return err
+		}
+		if available {
+			return r.continueRead(ctx, positions)
+		}
+		refresh = true
+	}
 	if state != nil && !refresh {
 		if state.Slot != slot || state.Mode != r.options.WALStaging || state.Directory != directory || len(state.Tables) != len(r.tables) {
 			return fmt.Errorf("normal snapshot spool configuration changed; restore its settings or use --full-refresh")
@@ -134,20 +157,6 @@ func (r *snapshotSpoolReader) run(ctx context.Context, slot string, resumes map[
 				return fmt.Errorf("normal snapshot spool source or destination identity changed; use --full-refresh")
 			}
 		}
-	}
-	if state != nil && state.Complete && !refresh {
-		r.state = state
-		if err := r.cleanupRetiredSpools(ctx); err != nil {
-			return err
-		}
-		available, err := r.resumeAvailable(ctx, slot, resumes)
-		if err != nil {
-			return err
-		}
-		if available {
-			return r.continueRead(ctx, resumes)
-		}
-		refresh = true
 	}
 	// A connector with a complete baseline can use the ordinary reader until
 	// it needs another snapshot. An unfinished journal always takes precedence.
@@ -219,6 +228,7 @@ func (r *snapshotSpoolReader) run(ctx context.Context, slot string, resumes map[
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, r.repl.Close(ctx)) }()
+	r.repl.standbyBarrierProbes = true
 	if err := r.repl.Start(ctx); err != nil {
 		return err
 	}
@@ -262,17 +272,17 @@ func (r *snapshotSpoolReader) run(ctx context.Context, slot string, resumes map[
 	if err := r.cleanupRetiredSpools(runCtx); err != nil {
 		return err
 	}
-	// Capture remains independent of destination backpressure during both the
-	// copy and journal replay. Hand back the decoder only when replay catches it.
-	for {
-		if err := r.replay(runCtx); err != nil {
-			return err
-		}
-		r.journalMu.Lock()
-		caughtUp := r.state.Consumed == r.journal.manifest.Tail
-		r.journalMu.Unlock()
-		if caughtUp {
-			break
+	if r.options.Continuous {
+		for {
+			if err := r.replay(runCtx); err != nil {
+				return err
+			}
+			r.journalMu.Lock()
+			caughtUp := r.state.Consumed == r.journal.manifest.Tail
+			r.journalMu.Unlock()
+			if caughtUp {
+				break
+			}
 		}
 	}
 	close(stop)
@@ -280,10 +290,19 @@ func (r *snapshotSpoolReader) run(ctx context.Context, slot string, resumes map[
 	if captureErr != nil {
 		return captureErr
 	}
+	var barrier batchBarrier
+	if !r.options.Continuous {
+		// Freeze the finite run's endpoint before destination backpressure can
+		// turn journal replay into an unbounded chase of new source changes.
+		barrier, err = r.source.beginBatchBarrier(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	if err := r.replay(ctx); err != nil {
 		return err
 	}
-	if err := r.catchUp(ctx); err != nil {
+	if err := r.catchUp(ctx, barrier); err != nil {
 		return err
 	}
 	state.Complete = true
@@ -301,6 +320,34 @@ func (r *snapshotSpoolReader) run(ctx context.Context, slot string, resumes map[
 		return err
 	}
 	return r.continueRead(ctx, nil)
+}
+
+func (r *snapshotSpoolReader) completedSpoolPositions(ctx context.Context, state *snapshotSpoolState, slot string, resumes map[string]string) (map[string]string, bool, error) {
+	identity, err := r.options.Store.Identity(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	sameIdentity := state.Identity != "" && state.Identity == identity && state.Slot == slot && len(state.Tables) == len(r.tables)
+	positions := make(map[string]string, len(r.tables))
+	for _, table := range r.tables {
+		positions[table.Name] = resumes[table.Name]
+		if !r.multi && resumeMetadataChanged(r.opts.CDCResumeIncarnation, r.opts.CDCResumeSchemaFingerprint, table.Incarnation, table.SchemaFingerprint) {
+			positions[table.Name] = ""
+			sameIdentity = false
+		}
+		progress, ok := state.Tables[table.Name]
+		if !ok || progress.Incarnation != table.Incarnation || progress.SchemaFingerprint != table.SchemaFingerprint {
+			sameIdentity = false
+		}
+	}
+	if sameIdentity {
+		for name, position := range positions {
+			if position == "" {
+				positions[name] = FormatLSN(state.Applied)
+			}
+		}
+	}
+	return positions, sameIdentity, nil
 }
 
 func allSnapshotSpoolTablesResumed(tables []source.SourceTableInfo, positions map[string]string) bool {

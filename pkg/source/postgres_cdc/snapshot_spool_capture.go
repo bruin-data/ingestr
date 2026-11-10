@@ -170,10 +170,13 @@ func (r *snapshotSpoolReader) accumulatorResults(ctx context.Context, flush func
 	return err
 }
 
-func (r *snapshotSpoolReader) catchUp(ctx context.Context) error {
-	barrier, err := r.source.beginBatchBarrier(ctx)
-	if err != nil {
-		return err
+func (r *snapshotSpoolReader) catchUp(ctx context.Context, barrier batchBarrier) error {
+	if !barrier.active() {
+		var err error
+		barrier, err = r.source.beginBatchBarrier(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	r.repl.barrierNonce, r.repl.barrierTarget = barrier.nonce, barrier.target
 	r.repl.barrierSeen, r.repl.barrierLSN = false, 0
