@@ -16,13 +16,31 @@ URI parameters:
 
 - `access_token` (required for `issues`, `pull_requests` and `stargazers`): Access Token used for authentication with the GitHub API
 - `owner` (required): Refers to the owner of the repository (a user or an organization)
-- `repo` (required for every table except `repositories`): Refers to the name of the repository
+- `repo` (required for every table except `repositories` and `commits`): Refers to the name of the repository
 
 To ingest the repositories of a user or organization, leave out `repo` and use the `repositories` table (`repo` is ignored for this table):
 
 ```sh
 ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=max' --source-table 'repositories' --dest-uri duckdb:///github.duckdb --dest-table 'dest.repositories'
 ```
+
+### Commits from several repositories
+
+The `commits` table can read many repositories of the same owner into one table. It works in three modes:
+
+| Mode | When | Repositories read | PK |
+| ---- | ---- | ----------------- | -- |
+| single | `repo` is set in the URI and the table is `commits` | the URI repository | `sha` |
+| list | the table is `commits:<repo>,<repo>,...` | the listed repositories; the list overrides a `repo` in the URI | `repo`, `sha` |
+| all | `repo` is missing or empty in the URI and the table is `commits` | every repository the token can list for `owner` (see `repositories`), except forks; archived repositories are included | `repo`, `sha` |
+
+In list mode, names are matched case-insensitively against the owner's repositories; spaces around names, empty entries and repeated names are ignored. List names only, without the owner (`bruin`, not `bruin-data/bruin`). A listed fork is read. If a listed repository is not found or the token cannot access it, the run fails before any commit is read, naming every missing repository.
+
+```sh
+ingestr ingest --source-uri 'github://?access_token=ghp_test_1234&owner=bruin-data' --source-table 'commits:bruin, ingestr, cloud' --dest-uri duckdb:///github.duckdb --dest-table 'dest.commits'
+```
+
+Every `commits` row has a `repo` column with the repository's `owner/name`. Single mode keeps `sha` as the primary key, so existing single-repository tables are unaffected; list and all modes use `repo` and `sha`, since a commit can appear in more than one repository (e.g. a fork).
 
 
 ## Setting up a GitHub Integration
@@ -79,7 +97,7 @@ This is a sample command that will copy the data from the GitHub source to DuckD
 GitHub source allows ingesting the following sources into separate tables:
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `commits`       | `sha` | `committed_at` | merge | Retrieves commits on the default branch, including signature verification (`commit.verification`). `--interval-start`/`--interval-end` filter on the committer date, which `committed_at` mirrors. Commits pushed after their interval has already run are not picked up; use a lookback window. |
+| `commits`       | `sha` (single repository) or `repo`, `sha` (list and all modes) | `committed_at` | merge | Retrieves commits on the default branch of one, several or all repositories of `owner` (see [Commits from several repositories](#commits-from-several-repositories)), with the repository in `repo`, including signature verification (`commit.verification`). `--interval-start`/`--interval-end` filter on the committer date, which `committed_at` mirrors. Commits pushed after their interval has already run are not picked up; use a lookback window. |
 | `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
 | `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
