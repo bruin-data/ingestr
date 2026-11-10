@@ -22,10 +22,13 @@ import (
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 var errParallelResumeCrash = errors.New("injected crash after snapshot progress persistence")
+
+const parallelResumeSourceTable = "items"
 
 type parallelResumeCheckpoint struct {
 	Version  int                               `json:"v"`
@@ -95,7 +98,7 @@ func (d *parallelResumePostgres) WriteCDCState(ctx context.Context, records <-ch
 		ids, tables, kinds := column("event_id"), column("source_table"), column("state_kind")
 		statuses, positions := column("state_status"), column("_cdc_lsn")
 		for row := 0; row < int(result.Batch.NumRows()); row++ {
-			if tables.Value(row) != "public.items" || kinds.Value(row) != "snapshot_progress" || statuses.Value(row) != "in_progress" {
+			if tables.Value(row) != parallelResumeSourceTable || kinds.Value(row) != "snapshot_progress" || statuses.Value(row) != "in_progress" {
 				continue
 			}
 			var progress parallelResumeCheckpoint
@@ -222,15 +225,14 @@ func TestPostgresCDCParallelSnapshotDurableResume(t *testing.T) {
 				}
 			}
 			stop, done := start()
-			require.Eventually(t, func() bool {
+			require.EventuallyWithT(t, func(collect *assert.CollectT) {
 				running(done)
 				var count, completed int
-				err := dst.QueryRow(ctx, "SELECT count(*) FROM landing.items").Scan(&count)
-				if err != nil || count != totalRows {
-					return false
-				}
-				err = dst.QueryRow(ctx, `SELECT count(*) FROM _bruin_staging.cdc_state WHERE source_table = 'public.items' AND state_kind = 'snapshot' AND state_status = 'complete'`).Scan(&completed)
-				return err == nil && completed > 0
+				require.NoError(collect, dst.QueryRow(ctx, "SELECT count(*) FROM landing.items").Scan(&count))
+				require.Equal(collect, totalRows, count)
+				require.NoError(collect, dst.QueryRow(ctx, `SELECT count(*) FROM _bruin_staging.cdc_state
+					WHERE source_table = $1 AND state_kind = 'snapshot' AND state_status = 'complete'`, parallelResumeSourceTable).Scan(&completed))
+				require.Positive(collect, completed, "initial snapshot completion must be durable")
 			}, 2*time.Minute, 20*time.Millisecond)
 			var initialStamp string
 			require.NoError(t, dst.QueryRow(ctx, "SELECT _cdc_lsn FROM landing.items WHERE id = 6").Scan(&initialStamp))
@@ -251,8 +253,8 @@ func TestPostgresCDCParallelSnapshotDurableResume(t *testing.T) {
 			require.NotEmpty(t, event.progress.Attempt)
 			var interruptedStatus string
 			require.NoError(t, dst.QueryRow(ctx, `SELECT state_status FROM _bruin_staging.cdc_state
-				WHERE source_table = 'public.items' AND state_kind = 'snapshot'
-				ORDER BY state_generation DESC, recorded_at DESC LIMIT 1`).Scan(&interruptedStatus))
+				WHERE source_table = $1 AND state_kind = 'snapshot'
+				ORDER BY state_generation DESC, recorded_at DESC LIMIT 1`, parallelResumeSourceTable).Scan(&interruptedStatus))
 			require.NotEqual(t, "complete", interruptedStatus, "persisted range progress must not complete the table")
 			var raw map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal([]byte(event.position), &raw))
@@ -332,8 +334,8 @@ func TestPostgresCDCParallelSnapshotDurableResume(t *testing.T) {
 				}
 				var status string
 				err = dst.QueryRow(ctx, `SELECT state_status FROM _bruin_staging.cdc_state
-					WHERE source_table = 'public.items' AND state_kind = 'snapshot_progress'
-					ORDER BY state_generation DESC, recorded_at DESC LIMIT 1`).Scan(&status)
+					WHERE source_table = $1 AND state_kind = 'snapshot_progress'
+					ORDER BY state_generation DESC, recorded_at DESC LIMIT 1`, parallelResumeSourceTable).Scan(&status)
 				return err == nil && status == "complete"
 			}, 2*time.Minute, 20*time.Millisecond, "WAL must repair changes behind unfinished and completed range cursors")
 			stop()

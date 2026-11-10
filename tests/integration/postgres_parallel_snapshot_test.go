@@ -288,7 +288,9 @@ func checkParallelSnapshotImports(t *testing.T, ctx context.Context, primaryURI,
 	require.NoError(t, err)
 	defer func() { _ = late.Rollback(context.Background()) }()
 	_, err = late.Exec(ctx, fmt.Sprintf("SET TRANSACTION SNAPSHOT '%s'", snapshot.SnapshotName))
-	require.ErrorContains(t, err, "invalid snapshot identifier")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "42704", pgErr.Code, "a closed exporter must leave no importable snapshot")
 	require.Equal(t, map[int64]string{1: "one", 2: "changed", 8: "four", 9: "new"}, readRows(tx))
 	require.NoError(t, tx.Rollback(ctx))
 	require.NoError(t, late.Rollback(ctx))
