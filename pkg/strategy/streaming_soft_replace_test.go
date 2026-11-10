@@ -320,8 +320,22 @@ func resumedSnapshotRecords(t *testing.T) chan source.RecordBatchResult {
 	return records
 }
 
+func persistResumedSnapshotProgress(t *testing.T, loop *flushLoop, dest *softReplaceDestination) {
+	t.Helper()
+	manager := loop.opts.StateManager
+	require.NoError(t, manager.InvalidateSnapshot(t.Context(), "public.items", "raw.items", "100"))
+	require.NoError(t, manager.BindDestinationIncarnation(t.Context(), "public.items", "raw.items"))
+	require.NoError(t, manager.Persist(t.Context(), source.CDCStateCommitToken{
+		SnapshotProgress: map[string]source.CDCSnapshotProgress{
+			"public.items": {Boundary: softSnapshotBoundary, Key: `["6"]`, Incarnation: "100"},
+		},
+	}))
+	dest.resetOrder()
+}
+
 func TestStreamingResumedSnapshotKeepsRowsAndRetiresAtOriginalBoundary(t *testing.T) {
 	loop, dest, st := softReplacementLoop(t)
+	persistResumedSnapshotProgress(t, loop, dest)
 	// Rows the interrupted run made durable carry positions at and beyond the
 	// boundary; a fresh replacement would fall back to truncating them.
 	dest.maxLSN = "00000000/00000099"
@@ -346,6 +360,7 @@ func resumedSnapshotPosition(t *testing.T, dest *softReplaceDestination) string 
 
 func TestStreamingResumedSnapshotWithoutSoftReplaceKeepsRows(t *testing.T) {
 	loop, dest, _ := softReplacementLoop(t)
+	persistResumedSnapshotProgress(t, loop, dest)
 	dest.soft = false
 
 	require.NoError(t, loop.run(t.Context(), resumedSnapshotRecords(t)))

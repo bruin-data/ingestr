@@ -42,6 +42,10 @@ type WriteOptions struct {
 	Schema      *schema.TableSchema
 	PrimaryKeys []string
 	Parallelism int
+	// CDCSnapshot guarantees complete snapshot row images with unique keys,
+	// without WAL changes, tombstones, or unchanged TOAST markers. Only set
+	// for a CDCSnapshotWriter.
+	CDCSnapshot bool
 
 	// Reverse-ETL fields. Strategy names the write behavior (merge/update/
 	// delete/append/replace) so an API destination can pick the right endpoint;

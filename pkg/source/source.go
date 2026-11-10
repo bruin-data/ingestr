@@ -157,10 +157,10 @@ type RecordBatchResult struct {
 	CDCSnapshotChunkEnd *CDCSnapshotChunk
 	CDCChunkTiming      *CDCChunkTiming
 	CDCFlush            bool // Flush preceding data and acknowledge its commit token before reading further.
-	Batch               arrow.RecordBatch
 	// CDCSnapshot identifies full snapshot row images without WAL changes,
 	// deletes, or unchanged TOAST values. It applies only to Batch.
 	CDCSnapshot bool
+	Batch       arrow.RecordBatch
 	Err         error
 	TableName   string // Source table name for multi-table sources (empty for single-table)
 	Truncate    bool   // Empty the destination table before applying subsequent results
@@ -178,6 +178,9 @@ type RecordBatchResult struct {
 	// newer position, and the completion token still names
 	// CDCSnapshotPosition.
 	CDCSnapshotResumed bool
+	// CDCChunkedSnapshotIdentity carries the persisted source and physical
+	// destination identity on a resumed chunked snapshot marker.
+	CDCChunkedSnapshotIdentity string
 
 	// CommitToken is an opaque, cumulative position marker for streaming mode.
 	// Committing a token via StreamCommitter acknowledges everything emitted up

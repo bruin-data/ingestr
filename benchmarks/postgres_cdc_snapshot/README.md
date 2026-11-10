@@ -245,5 +245,5 @@ establish those results. Fill the following from retained run artifacts:
 | RDS PostgreSQL 17 shared logical-slot export, delayed fourth importer | Awaiting the opt-in run on the actual standby. |
 | One-reader source throughput and CPU/peak memory | Awaiting the shared benchmark dataset. |
 | Four-reader source throughput ≥150 MB/s | Awaiting the shared benchmark dataset. |
-| WI-1 + WI-2 ≥3,000 rows/s through destination visibility | Awaiting combined branch and shared benchmark stack. |
+| WI-1 + WI-2 ≥3,000 rows/s through destination visibility | Awaiting the shared benchmark stack and combined acceptance run. |
 | Source/target equality after WAL catch-up and restart | Awaiting combined run; automated regression tests are separate evidence. |

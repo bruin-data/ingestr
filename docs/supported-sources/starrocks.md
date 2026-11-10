@@ -175,6 +175,14 @@ ingestr ingest \
 
 The first run takes a snapshot; subsequent runs resume and catch up before exiting. Add `--stream --flush-interval 5s --flush-records 10000` for continuous ingestion; `--flush-interval` bounds how long a change waits before it is loaded, even under a steady stream of changes. Use `--full-refresh` to replace the mirror from a fresh snapshot.
 
+Normal PostgreSQL snapshots using the keyed merge strategy can load complete rows directly into the target through conditional Stream Load. These loads use `--destination-parallelism` and become visible as batches finish, without a snapshot staging copy or final merge. Progress is saved only after the corresponding loads are visible, and rows missing from a replacement snapshot are retired before completion is recorded.
+
+StarRocks does not accept the VARCHAR `_cdc_lsn` as a conditional-load column. ingestr adds an internal generated LARGEINT column, `__ingestr_cdc_order`, derived from the full position, including the transaction-local sequence, and uses it as `merge_condition`. Equal positions can be replayed; older snapshot rows cannot replace newer WAL changes, including changes at the same base LSN. The generated value stays synchronized across loads, WAL merges, and retirement. Adding it to an existing target requires a one-time schema change and backfill before direct loads start. [Generated columns](https://docs.starrocks.io/docs/sql-reference/sql-statements/generated_columns/) require StarRocks 3.1 or later for shared-nothing clusters and 3.5 or later for shared-data clusters.
+
+Older servers, targets with retained destination-only columns, masks, column overrides, and incremental predicates retain the staged path. Snapshot-only staged data uses the smaller snapshot merge query. Non-streaming `--full-refresh` retains the replace strategy. WAL changes continue through the CDC merge so partial TOAST updates and deletes keep their existing behavior.
+
+Before downgrading to an ingestr version without this feature, stop affected CDC jobs, drop `__ingestr_cdc_order` from their targets, and wait for those schema changes to finish. Older versions do not exclude the generated column from their writes.
+
 To replicate all tables in a publication, omit `--source-table` and `--dest-table`. Tables are created in the database from the destination URI; add `dest_schema=<database>` to the source URI to use a different one. Use `--cdc-table-naming table` to retain source table names, or leave the default to prefix names with their source schema. A comma-separated `--source-table` selects a subset. See [Multi-table CDC](/getting-started/cdc.md#multi-table-cdc).
 
 Deletes remain in keyed tables as tombstones. Query the current mirror with:

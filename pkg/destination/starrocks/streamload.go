@@ -59,12 +59,17 @@ type streamLoadResponse struct {
 	ErrorURL             string `json:"ErrorURL"`
 }
 
+type streamLoadOptions struct {
+	columns        string
+	mergeCondition string
+}
+
 // load streams a JSON-array body into db.table, following the FE -> BE redirect
 // manually so the Authorization header and body survive the hop.
-func (s *streamLoader) load(ctx context.Context, db, table, label string, body []byte, columns string) error {
+func (s *streamLoader) load(ctx context.Context, db, table, label string, body []byte, opts streamLoadOptions) error {
 	url := fmt.Sprintf("%s/api/%s/%s/_stream_load", s.endpoint, neturl.PathEscape(db), neturl.PathEscape(table))
 
-	resp, err := s.put(ctx, url, label, columns, body)
+	resp, err := s.put(ctx, url, label, opts, body)
 	if err != nil {
 		return err
 	}
@@ -75,7 +80,7 @@ func (s *streamLoader) load(ctx context.Context, db, table, label string, body [
 		if loc == "" {
 			return fmt.Errorf("stream load redirect without a Location header")
 		}
-		if resp, err = s.put(ctx, loc, label, columns, body); err != nil {
+		if resp, err = s.put(ctx, loc, label, opts, body); err != nil {
 			return err
 		}
 		loadedVia = loc
@@ -130,7 +135,7 @@ func (s *streamLoader) newRequest(ctx context.Context, method, url string, body 
 	return req, nil
 }
 
-func (s *streamLoader) put(ctx context.Context, url, label, columns string, body []byte) (*http.Response, error) {
+func (s *streamLoader) put(ctx context.Context, url, label string, opts streamLoadOptions, body []byte) (*http.Response, error) {
 	req, err := s.newRequest(ctx, http.MethodPut, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -142,8 +147,11 @@ func (s *streamLoader) put(ctx context.Context, url, label, columns string, body
 	req.Header.Set("label", label)
 	req.Header.Set("strict_mode", "true")
 	req.Header.Set("max_filter_ratio", "0")
-	if columns != "" {
-		req.Header.Set("columns", columns)
+	if opts.columns != "" {
+		req.Header.Set("columns", opts.columns)
+	}
+	if opts.mergeCondition != "" {
+		req.Header.Set("merge_condition", opts.mergeCondition)
 	}
 	return s.client.Do(req)
 }

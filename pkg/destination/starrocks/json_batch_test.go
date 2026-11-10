@@ -236,7 +236,7 @@ func TestLoadRecordSplitsBinaryRowsAndStopsAfterFailure(t *testing.T) {
 				}
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"Status":"Success","NumberLoadedRows":1,"NumberTotalRows":1}`))}, nil
 			})}}}
-			n, err := d.loadRecord(t.Context(), "db", "table", rec)
+			n, err := d.loadRecord(t.Context(), "db", "table", rec, "")
 			if failAt > 0 {
 				require.ErrorIs(t, err, loadErr)
 				require.EqualValues(t, failAt-1, n)

@@ -202,7 +202,11 @@ func TestStreamingResumedCompletedRangesRejectReplacedTarget(t *testing.T) {
 			marker := softMarker()
 			marker.CDCSnapshotResumed = true
 			err = loop.processResult(t.Context(), marker)
-			require.ErrorContains(t, err, "replaced", "a completed range plan cannot certify a target that lost the rows it covers")
+			if phase == "before resumed marker" {
+				require.ErrorContains(t, err, "changed before resuming its snapshot")
+			} else {
+				require.ErrorContains(t, err, "replaced during its snapshot")
+			}
 			require.Empty(t, dest.retireCalls)
 			require.False(t, dest.targetTruncated())
 			require.Empty(t, resumedSnapshotPosition(t, dest))
