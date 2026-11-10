@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -134,6 +135,7 @@ var repoEventFields = []schema.Column{
 
 var commitFields = []schema.Column{
 	{Name: "sha", DataType: schema.TypeString, Nullable: false},
+	{Name: "repo", DataType: schema.TypeString, Nullable: false},
 	{Name: "committed_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 	{Name: "node_id", DataType: schema.TypeString, Nullable: true},
 	{Name: "commit", DataType: schema.TypeJSON, Nullable: true},
@@ -448,19 +450,25 @@ func (s *GithubSource) Close(ctx context.Context) error {
 }
 
 func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	tableName := req.Name
+	tableName, listedRepos, err := parseTableName(req.Name)
+	if err != nil {
+		return nil, err
+	}
 
 	if !isValidTable(tableName) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
 	}
 
-	if s.repo == "" && tableName != "repositories" {
-		return nil, fmt.Errorf("repo parameter is required in URI for table %s (only repositories can be read with owner alone)", tableName)
+	if s.repo == "" && tableName != "repositories" && tableName != "commits" {
+		return nil, fmt.Errorf("repo parameter is required in URI for table %s (only repositories and commits can be read with owner alone)", tableName)
 	}
 
 	tableSchema, err := s.getSchema(ctx, tableName)
 	if err != nil {
 		return nil, err
+	}
+	if tableName == "commits" && s.readsManyRepos(listedRepos) {
+		tableSchema.PrimaryKeys = []string{"repo", "sha"}
 	}
 
 	// Default strategy is replace; repo_events and commits use merge with incremental loading
@@ -486,9 +494,43 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 			return tableSchema, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, opts)
+			return s.read(ctx, tableName, listedRepos, opts)
 		},
 	}, nil
+}
+
+// parseTableName splits "commits:<repo>,<repo>" into the table and its repository names: trimmed,
+// without empty entries or case-insensitive duplicates. Other tables keep their full name, so a
+// ":" suffix fails the table check.
+func parseTableName(name string) (string, []string, error) {
+	base, args, ok := strings.Cut(name, ":")
+	if !ok || base != "commits" {
+		return name, nil, nil
+	}
+
+	var repos []string
+	seen := make(map[string]bool)
+	for _, r := range strings.Split(args, ",") {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[strings.ToLower(r)] {
+			continue
+		}
+		if strings.Contains(r, "/") {
+			return "", nil, fmt.Errorf("invalid repository %q in table %s: list repository names without the owner, they are read under the URI owner", r, name)
+		}
+		seen[strings.ToLower(r)] = true
+		repos = append(repos, r)
+	}
+	if len(repos) == 0 {
+		return "", nil, fmt.Errorf("table %s lists no repositories, use commits:<repo>,<repo>", name)
+	}
+	return base, repos, nil
+}
+
+// readsManyRepos reports whether commits come from a repository list or from every repository of
+// the owner, rather than from the URI repo alone.
+func (s *GithubSource) readsManyRepos(listedRepos []string) bool {
+	return listedRepos != nil || s.repo == ""
 }
 
 func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
@@ -525,7 +567,7 @@ func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.Tab
 	}, nil
 }
 
-func (s *GithubSource) read(ctx context.Context, table string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *GithubSource) read(ctx context.Context, table string, listedRepos []string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	if !isValidTable(table) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", table, strings.Join(supportedTables, ", "))
 	}
@@ -541,7 +583,7 @@ func (s *GithubSource) read(ctx context.Context, table string, opts source.ReadO
 		var err error
 		switch table {
 		case "commits":
-			err = s.readCommits(ctx, opts, results)
+			err = s.readCommits(ctx, opts, results, listedRepos)
 		case "issues":
 			err = s.readIssues(ctx, opts, results)
 		case "pull_requests":
@@ -1056,9 +1098,44 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 	return nil
 }
 
-// readCommits lists default-branch commits. GitHub applies since/until to the committer date.
-func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
-	config.Debug("[GITHUB] Reading commits for %s/%s", s.owner, s.repo)
+var errEmptyRepository = errors.New("repository is empty")
+
+// readCommits reads the URI repo, or the listed repositories, or every repository of the owner
+// except forks when neither is given.
+func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, listedRepos []string) error {
+	if !s.readsManyRepos(listedRepos) {
+		_, err := s.readRepoCommits(ctx, opts, results, s.owner, s.repo)
+		return err
+	}
+
+	repos, err := s.resolveCommitRepos(ctx, listedRepos)
+	if err != nil {
+		return err
+	}
+	sent := 0
+	for _, fullName := range repos {
+		repoOpts := opts
+		if opts.Limit > 0 {
+			repoOpts.Limit = opts.Limit - sent
+			if repoOpts.Limit <= 0 {
+				break
+			}
+		}
+		owner, name, _ := strings.Cut(fullName, "/")
+		n, err := s.readRepoCommits(ctx, repoOpts, results, owner, name)
+		if err != nil {
+			return err
+		}
+		sent += n
+	}
+	return nil
+}
+
+// readRepoCommits lists one repository's default-branch commits. GitHub applies since/until to
+// the committer date.
+func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, owner, name string) (int, error) {
+	fullName := owner + "/" + name
+	config.Debug("[GITHUB] Reading commits for %s", fullName)
 
 	params := url.Values{}
 	params.Set("per_page", strconv.Itoa(maxPageSize))
@@ -1069,12 +1146,101 @@ func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions,
 		params.Set("until", opts.IntervalEnd.UTC().Format(time.RFC3339))
 	}
 
-	path := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(s.owner), url.PathEscape(s.repo), params.Encode())
-	_, err := s.paginateREST(ctx, opts, results, path, "", "commits", commitFields, func(c map[string]interface{}) bool {
+	path := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(owner), url.PathEscape(name), params.Encode())
+	n, err := s.paginateREST(ctx, opts, results, path, "", "commits", commitFields, func(c map[string]interface{}) bool {
 		c["committed_at"] = committerDate(c)
+		c["repo"] = fullName
 		return true
 	})
-	return err
+	if errors.Is(err, errEmptyRepository) {
+		config.Debug("[GITHUB] %s has no commits yet", fullName)
+		return n, nil
+	}
+	return n, err
+}
+
+// resolveCommitRepos lists the owner's repositories once and returns the full names to read: the
+// listed names in their order, forks included, or every repository except forks. A listed name
+// that the listing doesn't contain fails the run before any commit is read.
+func (s *GithubSource) resolveCommitRepos(ctx context.Context, listedRepos []string) ([]string, error) {
+	repos, err := s.listOwnerRepositories(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if listedRepos == nil {
+		var all []string
+		for _, r := range repos {
+			if fork, _ := r["fork"].(bool); !fork {
+				all = append(all, repoFullName(s.owner, r))
+			}
+		}
+		return all, nil
+	}
+
+	byName := make(map[string]map[string]interface{}, len(repos))
+	for _, r := range repos {
+		name, _ := r["name"].(string)
+		if _, ok := byName[strings.ToLower(name)]; !ok {
+			byName[strings.ToLower(name)] = r
+		}
+	}
+	var resolved, missing []string
+	for _, name := range listedRepos {
+		r, ok := byName[strings.ToLower(name)]
+		if !ok {
+			missing = append(missing, s.owner+"/"+name)
+			continue
+		}
+		resolved = append(resolved, repoFullName(s.owner, r))
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("github repositories not found or not accessible with this token: %s", strings.Join(missing, ", "))
+	}
+	return resolved, nil
+}
+
+// listOwnerRepositories collects the repositories the repositories table would read, once each.
+func (s *GithubSource) listOwnerRepositories(ctx context.Context) ([]map[string]interface{}, error) {
+	listings, err := s.repositoryListings(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[interface{}]bool)
+	var repos []map[string]interface{}
+	for _, l := range listings {
+		for nextURL := l.path; nextURL != ""; {
+			resp, err := s.restClient.R(ctx).Get(nextURL)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list github repositories of %s: %w", s.owner, err)
+			}
+			if !resp.IsSuccess() {
+				return nil, fmt.Errorf("failed to list github repositories of %s with status %d: %s", s.owner, resp.StatusCode(), resp.String())
+			}
+			items, err := decodeRESTItems(resp.Body(), l.itemsKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode github repositories of %s: %w", s.owner, err)
+			}
+			for _, item := range items {
+				if (l.keep != nil && !l.keep(item)) || seen[item["id"]] {
+					continue
+				}
+				seen[item["id"]] = true
+				repos = append(repos, item)
+			}
+			nextURL = extractNextPageURL(resp.Header().Get("Link"))
+		}
+	}
+	return repos, nil
+}
+
+func repoFullName(owner string, repo map[string]interface{}) string {
+	if fullName, _ := repo["full_name"].(string); fullName != "" {
+		return fullName
+	}
+	name, _ := repo["name"].(string)
+	return owner + "/" + name
 }
 
 type restListing struct {
@@ -1259,8 +1425,7 @@ func (s *GithubSource) paginateREST(
 		}
 
 		if table == "commits" && isEmptyRepository(httpResp) {
-			config.Debug("[GITHUB] %s has no commits yet", s.target())
-			break
+			return totalSent, errEmptyRepository
 		}
 
 		if !httpResp.IsSuccess() {
