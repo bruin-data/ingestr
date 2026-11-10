@@ -280,26 +280,32 @@ func TestPostgresCDCParallelSnapshotDurableResume(t *testing.T) {
 					r.Key = []string{fmt.Sprint(lowCursor)}
 				}
 			}
-			// Restore a legal crash checkpoint from the real plan and exported
-			// image. The payloads are unchanged by the replacement-triggering DDL;
-			// only covered target rows receive its durable snapshot boundary.
+			// PostgreSQL truncates the target at the replacement boundary. Restore
+			// the unchanged snapshot rows certified by this crash checkpoint.
 			tx, err := dst.Begin(ctx)
 			require.NoError(t, err)
 			defer func() { _ = tx.Rollback(context.Background()) }()
-			_, err = tx.Exec(ctx, "UPDATE landing.items SET _cdc_lsn = $1", initialStamp)
+			_, err = tx.Exec(ctx, "DELETE FROM landing.items")
 			require.NoError(t, err)
-			where := "id <= $2 OR id > $3"
+			certifiedRows := lowCursor + int64(totalRows) - highAfter
 			if allComplete {
-				where = "$2::bigint <= $3::bigint"
+				certifiedRows = int64(totalRows)
 			}
-			_, err = tx.Exec(ctx, "UPDATE landing.items SET _cdc_lsn = $1 WHERE "+where, saved.Boundary, lowCursor, highAfter)
+			restored, err := tx.Exec(ctx, `
+				INSERT INTO landing.items (id, payload, _cdc_lsn, _cdc_deleted, _cdc_synced_at)
+				SELECT id, 'payload-' || id, $1, false, clock_timestamp()
+				FROM generate_series(1, $2::bigint) AS snapshot_rows(id)
+				WHERE $5::boolean OR id <= $3 OR id > $4
+			`, saved.Boundary, totalRows, lowCursor, highAfter, allComplete)
 			require.NoError(t, err)
+			require.Equal(t, certifiedRows, restored.RowsAffected(), "every certified snapshot row must exist before resume")
 			raw["r"], err = json.Marshal(saved.Ranges)
 			require.NoError(t, err)
 			position, err := json.Marshal(raw)
 			require.NoError(t, err)
-			_, err = tx.Exec(ctx, "UPDATE _bruin_staging.cdc_state SET _cdc_lsn = $1 WHERE event_id = $2", string(position), event.id)
+			checkpoint, err := tx.Exec(ctx, "UPDATE _bruin_staging.cdc_state SET _cdc_lsn = $1 WHERE event_id = $2", string(position), event.id)
 			require.NoError(t, err)
+			require.EqualValues(t, 1, checkpoint.RowsAffected())
 			require.NoError(t, tx.Commit(ctx))
 
 			_, err = src.Exec(ctx, fmt.Sprintf(`
@@ -321,22 +327,24 @@ func TestPostgresCDCParallelSnapshotDurableResume(t *testing.T) {
 			require.NoError(t, err)
 			want, err := parallelResumeRows(ctx, src, "public.items")
 			require.NoError(t, err)
-			require.Eventually(t, func() bool {
+			require.EventuallyWithT(t, func(collect *assert.CollectT) {
 				running(done)
 				actual, err := parallelResumeRows(ctx, dst, "landing.items")
-				if err != nil || len(actual) != len(want) {
-					return false
-				}
+				require.NoError(collect, err)
+				assert.Equal(collect, len(want), len(actual), "source and destination row counts must match")
 				for id, payload := range want {
-					if actual[id] != payload {
-						return false
+					actualPayload, exists := actual[id]
+					if !assert.True(collect, exists, "source key %d is missing from the destination", id) ||
+						!assert.Equal(collect, payload, actualPayload, "payload differs for source key %d", id) {
+						break
 					}
 				}
 				var status string
 				err = dst.QueryRow(ctx, `SELECT state_status FROM _bruin_staging.cdc_state
 					WHERE source_table = $1 AND state_kind = 'snapshot_progress'
 					ORDER BY state_generation DESC, recorded_at DESC LIMIT 1`, parallelResumeSourceTable).Scan(&status)
-				return err == nil && status == "complete"
+				require.NoError(collect, err)
+				assert.Equal(collect, "complete", status, "resumed snapshot progress must be durably retired")
 			}, 2*time.Minute, 20*time.Millisecond, "WAL must repair changes behind unfinished and completed range cursors")
 			stop()
 			select {
