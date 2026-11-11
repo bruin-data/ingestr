@@ -1936,8 +1936,9 @@ func TestPostgresCDC_StreamingSchemaEvolution_DuckDB(t *testing.T) {
 		return status, err
 	}
 
+	// Read-only: a read-write open replays and truncates the running writer's WAL.
 	require.Eventually(t, func() bool {
-		db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", duckdbPath))
+		db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s;access_mode=read_only", duckdbPath))
 		if err != nil {
 			return false
 		}
@@ -2689,6 +2690,12 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 				if streaming {
 					liveSchemaChange := cfg
 					liveSchemaChange.Stream = true
+					// The previous run's walsender can still hold the slot, which would satisfy
+					// the active check below before this stream has validated its baseline.
+					require.Eventually(t, func() bool {
+						var active bool
+						return pool.QueryRow(ctx, `SELECT active FROM pg_replication_slots WHERE slot_name='external_slot'`).Scan(&active) == nil && !active
+					}, 15*time.Second, 100*time.Millisecond)
 					streamCtx, stop := context.WithCancel(ctx)
 					defer stop()
 					done := make(chan error, 1)
