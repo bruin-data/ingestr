@@ -68,6 +68,7 @@ func mongodbCDCURI(t *testing.T, baseURI, database string, params map[string]str
 }
 
 func TestMongoDBCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -137,6 +138,7 @@ func TestMongoDBCDC_SnapshotAndIncremental_SQLite(t *testing.T) {
 }
 
 func TestMongoDBCDC_MultiTableSQLite(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -185,6 +187,7 @@ func TestMongoDBCDC_MultiTableSQLite(t *testing.T) {
 }
 
 func TestMongoDBCDC_ZeroSchemaSampleSQLite(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

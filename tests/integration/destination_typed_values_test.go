@@ -32,6 +32,7 @@ import (
 // distinguish a decimal from a float or a timestamp from a string. Each type has
 // an interior NULL so an off-by-one validity bitmap cannot hide behind counts.
 func TestDestinations_TypedValues(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

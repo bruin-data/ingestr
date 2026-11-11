@@ -85,6 +85,7 @@ func createEmptyMSSQLCTItemsTable(t *testing.T, ctx context.Context, db *sql.DB)
 }
 
 func TestMSSQLChangeTracking_SnapshotAndIncremental_DuckDB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -166,6 +167,7 @@ func TestMSSQLChangeTracking_SnapshotAndIncremental_DuckDB(t *testing.T) {
 }
 
 func TestMSSQLChangeTracking_EmptyTableSnapshot_DuckDB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -224,6 +226,7 @@ func TestMSSQLChangeTracking_EmptyTableSnapshot_DuckDB(t *testing.T) {
 // table's tracking. Either isolation path must fail the run instead of
 // committing a partial change set and advancing the cursor past the hole.
 func TestMSSQLChangeTracking_CursorInvalidatedMidRead_DuckDB(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

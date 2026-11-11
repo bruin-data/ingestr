@@ -96,6 +96,7 @@ func insertMySQLCDCItems(t *testing.T, ctx context.Context, db *sql.DB, startID 
 }
 
 func TestMySQLCDC_SnapshotAndIncremental_MySQL(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -177,6 +178,7 @@ func TestMySQLCDC_SnapshotAndIncremental_MySQL(t *testing.T) {
 }
 
 func TestMySQLCDC_FullRefreshAndIncremental_PostgresSnakeCase(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -257,6 +259,7 @@ func TestMySQLCDC_FullRefreshAndIncremental_PostgresSnakeCase(t *testing.T) {
 }
 
 func TestMySQLCDC_SingleTableRenamedColumns_Postgres(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

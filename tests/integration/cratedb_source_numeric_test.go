@@ -16,6 +16,7 @@ import (
 )
 
 func TestCrateDBSourceKeepsNumericsAndNullElements(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
