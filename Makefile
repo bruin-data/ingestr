@@ -14,6 +14,7 @@ LICENSE_AUDIT_NEW_STATUS ?= needs-review
 LINT_MERGE_BASE ?= origin/main
 GCI_VERSION ?= v0.14.0
 GOFUMPT_VERSION ?= v0.11.0
+GOTESTSUM_VERSION ?= v1.13.0
 # Pinned, not @latest. v2.12.x made its cache checkout-independent, but cached
 # diagnostics still contain absolute paths from the checkout that produced
 # them. That makes shared-cache results unsafe across worktrees. Re-test before
@@ -34,6 +35,11 @@ LINT_CONCURRENCY ?= 4
 LINT_TIMEOUT ?= 10m
 LINT_INTEGRATION_FLAGS ?= --build-tags=integration
 TEST_CONCURRENCY ?= 4
+# gotestsum output format for `make test-integration`. The default prints one
+# line per package plus each failing test as it happens, then reprints every
+# failure's output together at the bottom, which keeps the CI log short. For the
+# full firehose locally: make test-integration TEST_INTEGRATION_FORMAT=standard-verbose
+TEST_INTEGRATION_FORMAT ?= pkgname-and-test-fails
 REGISTRY_OUTPUT := internal/registry/imports/imports.gen.go
 REGISTRY_INPUTS := cmd/genregistry/main.go pkg/source pkg/destination $(wildcard pkg/source/* pkg/destination/*)
 export INGESTR_DISABLE_TELEMETRY := true
@@ -129,7 +135,7 @@ test-python:
 
 test-integration: generate
 	@echo "$(OK_COLOR)==> Running integration tests$(NO_COLOR)"
-	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go test -tags integration -v -p "$(TEST_CONCURRENCY)" -parallel 8 -timeout 20m ./tests/integration/... ./pkg/...
+	@if [ -f test.env ]; then . ./test.env; fi && $(TEST_ENV) go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION) --format "$(TEST_INTEGRATION_FORMAT)" --format-hide-empty-pkg --hide-summary=skipped -- -tags integration -p "$(TEST_CONCURRENCY)" -parallel 8 -timeout 20m ./tests/integration/... ./pkg/...
 
 # Integration tests that need no Docker: container-backed tests skip themselves
 # when no Docker provider is available (see requireDocker), leaving the
