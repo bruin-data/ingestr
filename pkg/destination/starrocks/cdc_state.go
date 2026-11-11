@@ -292,6 +292,24 @@ func (d *StarRocksDestination) validatePrimaryKey(ctx context.Context, role, tab
 	return nil
 }
 
+func (d *StarRocksDestination) validateAppendTable(ctx context.Context, table string, mustExist bool) error {
+	model, _, err := d.tableLayout(ctx, table)
+	if err != nil {
+		return err
+	}
+	if model == "" && !mustExist {
+		return nil
+	}
+	if !strings.EqualFold(model, "DUP_KEYS") {
+		found := model
+		if found == "" {
+			found = "non-OLAP object"
+		}
+		return fmt.Errorf("StarRocks append target %s requires a DUPLICATE KEY table; found %s. Drop or rename the existing table so append can recreate it as DUPLICATE KEY", table, found)
+	}
+	return nil
+}
+
 var (
 	_ destination.CDCStateTablePreparer        = (*StarRocksDestination)(nil)
 	_ destination.CDCStatePositionMigrator     = (*StarRocksDestination)(nil)

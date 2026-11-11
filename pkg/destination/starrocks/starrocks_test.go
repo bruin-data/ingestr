@@ -58,10 +58,10 @@ func newSQLiteWithPrimaryKey(t *testing.T, model string, keys ...string) *sql.DB
 	t.Cleanup(func() { _ = db.Close() })
 	db.SetMaxOpenConns(1)
 	_, err = db.Exec(`ATTACH ':memory:' AS information_schema;
-		CREATE TABLE information_schema.tables_config (TABLE_SCHEMA TEXT, TABLE_NAME TEXT, TABLE_MODEL TEXT);
+		CREATE TABLE information_schema.tables_config (TABLE_SCHEMA TEXT, TABLE_NAME TEXT, TABLE_MODEL TEXT, DISTRIBUTE_KEY TEXT);
 		CREATE TABLE information_schema.columns (TABLE_SCHEMA TEXT, TABLE_NAME TEXT, COLUMN_NAME TEXT, COLUMN_KEY TEXT, ORDINAL_POSITION INTEGER)`)
 	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO information_schema.tables_config VALUES ('', 'target', ?)`, model)
+	_, err = db.Exec(`INSERT INTO information_schema.tables_config VALUES ('', 'target', ?, '')`, model)
 	require.NoError(t, err)
 	for i, key := range keys {
 		_, err = db.Exec(`INSERT INTO information_schema.columns VALUES ('', 'target', ?, 'PRI', ?)`, key, i)
@@ -542,4 +542,74 @@ func TestBatchAlterColumnTypesSQL(t *testing.T) {
 	})
 	require.Equal(t, "ALTER TABLE `db`.`t` MODIFY COLUMN `a` BIGINT KEY NULL, MODIFY COLUMN `b` VARCHAR(200) NULL", got)
 	require.Empty(t, d.BatchAlterColumnTypesSQL("`db`.`t`", nil))
+}
+
+func TestValidateAppendTableRejectsNonDuplicateKeyTarget(t *testing.T) {
+	for _, model := range []string{"PRIMARY_KEYS", "UNIQUE_KEYS", "AGG_KEYS"} {
+		d := &StarRocksDestination{db: newSQLiteWithPrimaryKey(t, model, "id")}
+		err := d.validateAppendTable(context.Background(), "target", true)
+		require.ErrorContains(t, err, "requires a DUPLICATE KEY table")
+		require.ErrorContains(t, err, model)
+	}
+	dup := &StarRocksDestination{db: newSQLiteWithPrimaryKey(t, "DUP_KEYS")}
+	require.NoError(t, dup.validateAppendTable(context.Background(), "target", true))
+}
+
+func TestRenderStarRocksEvolutionSkipsRedundantStandaloneNullability(t *testing.T) {
+	oldA := schema.Column{Name: "a", DataType: schema.TypeInt32, Nullable: false}
+	oldB := schema.Column{Name: "b", DataType: schema.TypeString, MaxLength: 40, Nullable: false}
+	oldC := schema.Column{Name: "c", DataType: schema.TypeTimestampTZ, Nullable: false}
+
+	d := &Dialect{
+		current: map[string]schema.Column{
+			"a": oldA,
+			"b": oldB,
+			"c": {Name: "c", DataType: schema.TypeTimestamp, Nullable: false},
+		},
+		columns: map[string]schema.Column{
+			"a": {Name: "a", DataType: schema.TypeInt64, Nullable: true},
+			"b": {Name: "b", DataType: schema.TypeString, MaxLength: 200, Nullable: false},
+			"c": {Name: "c", DataType: schema.TypeTimestamp, Nullable: true},
+		},
+		sortKeys: map[string]bool{"a": true},
+	}
+
+	stmts, _, err := renderStarRocksEvolution(d, "`db`.`t`", &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "a", OldColumn: &oldA, NewColumn: schema.Column{Name: "a", DataType: schema.TypeInt64, Nullable: true}},
+			{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "a", OldColumn: &oldA, NewColumn: schema.Column{Name: "a", DataType: schema.TypeInt64, Nullable: true}},
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "b", OldColumn: &oldB, NewColumn: schema.Column{Name: "b", DataType: schema.TypeString, MaxLength: 200, Nullable: false}},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"ALTER TABLE `db`.`t` MODIFY COLUMN `a` BIGINT KEY NULL, MODIFY COLUMN `b` VARCHAR(200) NOT NULL",
+	}, stmts)
+
+	singleStmts, _, err := renderStarRocksEvolution(d, "`db`.`t`", &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "a", OldColumn: &oldA, NewColumn: schema.Column{Name: "a", DataType: schema.TypeInt64, Nullable: true}},
+			{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "a", OldColumn: &oldA, NewColumn: schema.Column{Name: "a", DataType: schema.TypeInt64, Nullable: true}},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"ALTER TABLE `db`.`t` MODIFY COLUMN `a` BIGINT KEY NULL",
+	}, singleStmts)
+
+	sameTypeStmts, _, err := renderStarRocksEvolution(d, "`db`.`t`", &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "c", OldColumn: &oldC, NewColumn: schema.Column{Name: "c", DataType: schema.TypeTimestamp, Nullable: true}},
+			{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "c", OldColumn: &oldC, NewColumn: schema.Column{Name: "c", DataType: schema.TypeTimestamp, Nullable: true}},
+			{Type: schemaevolution.ChangeWidenType, ColumnName: "b", OldColumn: &oldB, NewColumn: schema.Column{Name: "b", DataType: schema.TypeString, MaxLength: 200, Nullable: false}},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"ALTER TABLE `db`.`t` MODIFY COLUMN `c` DATETIME NULL",
+		"ALTER TABLE `db`.`t` MODIFY COLUMN `b` VARCHAR(200) NOT NULL",
+	}, sameTypeStmts)
 }

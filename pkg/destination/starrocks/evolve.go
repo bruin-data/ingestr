@@ -290,16 +290,11 @@ func (d *StarRocksDestination) ApplySchemaEvolution(ctx context.Context, table s
 			}
 		}
 	}
-	statements, warnings, err := destination.RenderEvolution(dialect, d.tableRef(table), comparison)
+	statements, warnings, err := renderStarRocksEvolution(dialect, d.tableRef(table), comparison)
 	if err != nil {
 		return nil, fmt.Errorf("%w; rerun with --full-refresh to rebuild the table", err)
 	}
-	executed := make(map[string]bool, len(statements))
 	for _, statement := range statements {
-		if executed[statement] {
-			continue
-		}
-		executed[statement] = true
 		prior, err := d.showStatus(ctx, d.schemaChangeQuery(table))
 		if err != nil {
 			return warnings, fmt.Errorf("read previous StarRocks schema change: %w", err)
@@ -312,6 +307,46 @@ func (d *StarRocksDestination) ApplySchemaEvolution(ctx context.Context, table s
 		}
 	}
 	return warnings, nil
+}
+
+func renderStarRocksEvolution(dialect *Dialect, table string, comparison *schemaevolution.SchemaComparison) ([]string, []string, error) {
+	statements, warnings, err := destination.RenderEvolution(dialect, table, comparison)
+	if err != nil || comparison == nil {
+		return statements, warnings, err
+	}
+	batchedTypeCols := make(map[string]bool)
+	for _, change := range comparison.Changes {
+		if change.Type != schemaevolution.ChangeWidenType && change.Type != schemaevolution.ChangeOverrideType {
+			continue
+		}
+		if change.OldColumn != nil && dialect.TypeName(*change.OldColumn) == dialect.TypeName(change.NewColumn) {
+			continue
+		}
+		batchedTypeCols[strings.ToLower(change.ColumnName)] = true
+	}
+	if len(batchedTypeCols) > 0 {
+		filtered := *comparison
+		filtered.Changes = make([]schemaevolution.SchemaChange, 0, len(comparison.Changes))
+		for _, change := range comparison.Changes {
+			if batchedTypeCols[strings.ToLower(change.ColumnName)] &&
+				(change.Type == schemaevolution.ChangeRelaxNullability || change.Type == schemaevolution.ChangeRemoveColumn) {
+				continue
+			}
+			filtered.Changes = append(filtered.Changes, change)
+		}
+		filtered.HasChanges = len(filtered.Changes) > 0
+		statements, _ = destination.BuildMigration(dialect, table, &filtered)
+	}
+	out := make([]string, 0, len(statements))
+	seen := make(map[string]bool, len(statements))
+	for _, stmt := range statements {
+		if seen[stmt] {
+			continue
+		}
+		seen[stmt] = true
+		out = append(out, stmt)
+	}
+	return out, warnings, nil
 }
 
 // An override that turns a non-string column into a string carries the

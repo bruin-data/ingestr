@@ -224,8 +224,9 @@ func (d *StarRocksDestination) prepareTable(ctx context.Context, opts destinatio
 		}
 	}
 
+	isAppend := strings.EqualFold(opts.Strategy, string(config.StrategyAppend))
 	primaryKeys := dedupePrimaryKeys(opts.PrimaryKeys)
-	if strings.EqualFold(opts.Strategy, string(config.StrategyAppend)) {
+	if isAppend {
 		primaryKeys = nil
 	}
 
@@ -246,6 +247,9 @@ func (d *StarRocksDestination) prepareTable(ctx context.Context, opts destinatio
 			config.LogFailedQuery(createSQL, err)
 			return fmt.Errorf("failed to create table: %w", err)
 		}
+	}
+	if isAppend || (opts.CDCMode && len(primaryKeys) == 0 && !opts.DropFirst && !exclusive) {
+		return d.validateAppendTable(ctx, opts.Table, opts.Schema != nil)
 	}
 	if opts.RequirePrimaryKeyMatch && len(primaryKeys) > 0 {
 		return d.validatePrimaryKey(ctx, "CDC target", opts.Table, primaryKeys)

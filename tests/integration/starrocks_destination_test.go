@@ -268,23 +268,23 @@ func TestStarRocksDestinationCorrectness(t *testing.T) {
 		initSchema := &schema.TableSchema{
 			Columns: []schema.Column{
 				{Name: "id", DataType: schema.TypeInt64},
-				{Name: "c1", DataType: schema.TypeInt16, Nullable: true},
+				{Name: "c1", DataType: schema.TypeInt16, Nullable: false},
 				{Name: "c2", DataType: schema.TypeString, MaxLength: 10, Nullable: true},
 			},
 		}
-		require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
-			Table:       "batch_evolve",
-			Schema:      initSchema,
-			PrimaryKeys: []string{"id"},
-			DropFirst:   true,
-		}))
+		execEventually(t, db, "CREATE TABLE "+appDB+`.batch_evolve (
+			id BIGINT NOT NULL,
+			c1 SMALLINT NOT NULL,
+			c2 VARCHAR(40) NULL
+		) PRIMARY KEY (id) DISTRIBUTED BY HASH (id) PROPERTIES ('replication_num' = '1')`)
 
-		oldC1 := schema.Column{Name: "c1", DataType: schema.TypeInt16, Nullable: true}
+		oldC1 := schema.Column{Name: "c1", DataType: schema.TypeInt16, Nullable: false}
 		oldC2 := schema.Column{Name: "c2", DataType: schema.TypeString, MaxLength: 40, Nullable: true}
 		_, err := dest.ApplySchemaEvolution(ctx, "batch_evolve", &schemaevolution.SchemaComparison{
 			HasChanges: true,
 			Changes: []schemaevolution.SchemaChange{
 				{Type: schemaevolution.ChangeWidenType, ColumnName: "c1", OldColumn: &oldC1, NewColumn: schema.Column{Name: "c1", DataType: schema.TypeInt64, Nullable: true}},
+				{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "c1", OldColumn: &oldC1, NewColumn: schema.Column{Name: "c1", DataType: schema.TypeInt64, Nullable: true}},
 				{Type: schemaevolution.ChangeWidenType, ColumnName: "c2", OldColumn: &oldC2, NewColumn: schema.Column{Name: "c2", DataType: schema.TypeString, MaxLength: 200, Nullable: true}},
 			},
 		})
@@ -297,7 +297,11 @@ func TestStarRocksDestinationCorrectness(t *testing.T) {
 			jobCount++
 		}
 		require.NoError(t, rows.Close())
-		require.Equal(t, 1, jobCount, "two column widenings must batch into a single StarRocks schema change job")
+		require.Equal(t, 1, jobCount, "widen+nullability relaxation alongside another widening must execute in a single StarRocks schema change job")
+
+		var c1Nullable string
+		require.NoError(t, db.QueryRow("SELECT IS_NULLABLE FROM information_schema.columns WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'batch_evolve' AND COLUMN_NAME = 'c1'", appDB).Scan(&c1Nullable))
+		require.Equal(t, "YES", c1Nullable)
 
 		require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
 			Table:     "abort_staging",
@@ -363,5 +367,32 @@ func TestStarRocksDestinationCorrectness(t *testing.T) {
 			PrimaryKeys:         []string{"id"},
 		}).Run(ctx)
 		require.ErrorContains(t, err, "requires PRIMARY KEY (id)")
+	})
+
+	t.Run("append rejects existing primary-key target table without overwriting rows", func(t *testing.T) {
+		execEventually(t, db, "CREATE TABLE "+appDB+`.pk_append_target (id BIGINT NOT NULL, name VARCHAR(100))
+			PRIMARY KEY(id) DISTRIBUTED BY HASH(id) PROPERTIES ('replication_num'='1')`)
+		_, err := db.Exec("INSERT INTO " + appDB + ".pk_append_target VALUES (1, 'original')")
+		require.NoError(t, err)
+
+		srcPath := filepath.Join(t.TempDir(), "a.duckdb")
+		src := openDuckDBForTest(t, srcPath)
+		execDuckDB(t, src, "CREATE TABLE src (id BIGINT PRIMARY KEY, name VARCHAR(100))")
+		execDuckDB(t, src, "INSERT INTO src VALUES (1, 'overwritten')")
+		require.NoError(t, src.Close())
+
+		err = pipeline.New(&config.IngestConfig{
+			SourceURI:           fmt.Sprintf("duckdb:///%s", srcPath),
+			SourceTable:         "main.src",
+			DestURI:             destURIWithDB,
+			DestTable:           "pk_append_target",
+			IncrementalStrategy: config.StrategyAppend,
+			PrimaryKeys:         []string{"id"},
+		}).Run(ctx)
+		require.ErrorContains(t, err, "requires a DUPLICATE KEY table; found PRIMARY_KEYS")
+
+		var current string
+		require.NoError(t, db.QueryRow("SELECT name FROM "+appDB+".pk_append_target WHERE id = 1").Scan(&current))
+		require.Equal(t, "original", current)
 	})
 }
