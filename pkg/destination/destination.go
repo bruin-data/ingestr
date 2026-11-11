@@ -46,6 +46,9 @@ type WriteOptions struct {
 	// without WAL changes, tombstones, or unchanged TOAST markers. Only set
 	// for a CDCSnapshotWriter.
 	CDCSnapshot bool
+	// CDCSnapshotProgress persists a cumulative snapshot cursor only after all
+	// preceding rows are committed and query-visible. It must not acknowledge WAL.
+	CDCSnapshotProgress func(context.Context, source.CDCStateCommitToken) error
 
 	// Reverse-ETL fields. Strategy names the write behavior (merge/update/
 	// delete/append/replace) so an API destination can pick the right endpoint;

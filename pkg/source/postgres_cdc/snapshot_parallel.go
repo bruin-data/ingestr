@@ -253,6 +253,7 @@ func coordinateSnapshotWorkers(ctx context.Context, plan []snapshotRange, concur
 	var rows int64
 	var blocked time.Duration
 	var forwardErr error
+	lastProgress := time.Now()
 	for update := range updates {
 		if forwardErr != nil || ctx.Err() != nil {
 			if update.batch != nil {
@@ -274,8 +275,16 @@ func coordinateSnapshotWorkers(ctx context.Context, plan []snapshotRange, concur
 			ranges[update.index].LastKey = slices.Clone(update.lastKey)
 		}
 		ranges[update.index].Complete = update.done
-		if progress != nil {
+		if progress != nil && (len(plan) <= max(concurrency, 1) || update.done || time.Since(lastProgress) >= time.Second) {
 			if err := progress(ctx, cloneSnapshotRanges(ranges)); err != nil {
+				forwardErr = err
+				cancel(err)
+				continue
+			}
+			lastProgress = time.Now()
+		}
+		if update.done && update.normalSnapshot {
+			if err := sendResult(ctx, results, source.RecordBatchResult{CDCSnapshotRangeEnd: true}); err != nil {
 				forwardErr = err
 				cancel(err)
 			}

@@ -720,13 +720,12 @@ func diffNewTables(current []source.SourceTableInfo, eligible map[string]struct{
 // determineResumeStrategy determines if we need a full snapshot or can resume.
 // Returns (needsSnapshot, minLSN).
 //
-// Only requires that at least one table has a resume LSN. Tables missing from
-// the resume map (created since the previous run, or empty ever since the
-// original snapshot) are backfilled via a temporary-slot snapshot before
-// streaming starts; see tablesWithoutResumeState.
+// A completed table cursor or interrupted snapshot boundary establishes the
+// replay position. Tables without completed cursors are backfilled through a
+// temporary-slot snapshot before replay; see tablesWithoutResumeState.
 func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
-	if len(r.resumeLSNs) == 0 {
-		return true, 0 // No resume LSNs = full snapshot
+	if len(r.resumeLSNs) == 0 && len(r.snapshotResumes) == 0 {
+		return true, 0
 	}
 
 	// Find minimum LSN across tables that have resume data.
@@ -749,7 +748,10 @@ func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
 			config.Debug("[CDC] Invalid snapshot resume boundary %q for %s; replacing snapshots", progress.Boundary, tableName)
 			return true, 0
 		}
-		minLSN = min(minLSN, boundary)
+		if first || boundary < minLSN {
+			minLSN = boundary
+			first = false
+		}
 	}
 
 	// Initialize processedLSNs from resumeLSNs
@@ -873,7 +875,7 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 		cdcConfig:   r.cdcConfig,
 		readBudget:  budget,
 	}
-	if opts.Streaming && opts.CDCManagedState && opts.CDCSnapshotReplace {
+	if (opts.Streaming || opts.CDCSnapshotProgress) && opts.CDCManagedState && opts.CDCSnapshotReplace {
 		snapshot.progressKeys = resumableSnapshotKeys(table)
 	}
 	if len(snapshot.progressKeys) > 0 {

@@ -56,6 +56,9 @@ func TestSnapshotTableRangeProgress(t *testing.T) {
 		var events []source.RecordBatchResult
 		for result := range results {
 			require.Equal(t, table.Name, result.TableName)
+			if result.CDCSnapshotRangeEnd {
+				continue
+			}
 			if result.Batch != nil {
 				require.True(t, result.CDCSnapshot)
 				require.NotEmpty(t, events, "replacement marker must precede data")

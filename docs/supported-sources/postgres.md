@@ -25,6 +25,8 @@ The same URI structure can be used both for sources and destinations. You can re
 
 The `postgres+cdc://` scheme reads changes through PostgreSQL logical replication instead of querying tables: an initial snapshot of each table followed by every insert, update, and delete, applied to the destination with the `merge` strategy. It requires `wal_level=logical` on the source and a user with the `REPLICATION` privilege.
 
+Normal snapshots with supported non-null unique keys divide the table into a queue of ranges shared by `--extract-parallelism` readers. Planning uses the estimated row count, targets 16 ranges per reader or more when ranges would exceed roughly 75,000 rows, and caps the plan at 1,024 ranges. Small tables use fewer ranges. Readers take another range as soon as they finish, reducing the time spent waiting for the last reader. Saved range boundaries remain unchanged on resume, including when the reader count changes.
+
 ```plaintext
 postgres+cdc://<username>:<password>@<host>:<port>/<database-name>?publication=<name>&slot=<name>&discover_interval=<duration>&state_id=<id>
 ```

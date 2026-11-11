@@ -56,7 +56,7 @@ func (s *Snapshot) readProgressSnapshot(ctx context.Context, name string, lsn pg
 			})
 		},
 		progress: func(ctx context.Context, ranges []snapshotRange) error {
-			current := progress.Clone()
+			current := progress
 			current.Key = ""
 			current.Ranges = snapshotRangesToProgress(ranges)
 			return sendResult(ctx, results, source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{

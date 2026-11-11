@@ -113,11 +113,3 @@ func TestSnapshotResumeInvalidBoundaryReplacesSnapshot(t *testing.T) {
 		})
 	}
 }
-
-func TestInitialSnapshotProgressDoesNotEnableResume(t *testing.T) {
-	reader := NewMultiTableCDCReader(nil, nil, CDCConfig{}, nil, "")
-	reader.snapshotResumes = map[string]source.CDCSnapshotProgress{"public.items": {Boundary: "0/20", Key: `["900"]`}}
-	needsSnapshot, start := reader.determineResumeStrategy()
-	require.True(t, needsSnapshot)
-	require.Zero(t, start)
-}

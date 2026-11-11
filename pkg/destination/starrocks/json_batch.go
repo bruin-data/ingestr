@@ -93,10 +93,24 @@ func (e *jsonBatchEncoder) next(ctx context.Context) ([]byte, int64, error) {
 	}
 	e.body.reset()
 	e.body.writeByte('[')
+	rows, err := e.appendTo(ctx, &e.body)
+	if err != nil {
+		return nil, 0, err
+	}
+	e.body.writeByte(']')
+	return e.body.data, rows, e.body.err
+}
+
+// appendTo fills an open JSON array, allowing successive Arrow pages to share
+// a request without allocating and copying an encoded body for every page.
+func (e *jsonBatchEncoder) appendTo(ctx context.Context, body *boundedJSONBuffer) (int64, error) {
+	if e.initErr != nil {
+		return 0, e.initErr
+	}
 	var rows int64
 	for e.nextRow < e.record.NumRows() {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 		if !e.pending {
 			e.row.reset()
@@ -112,29 +126,28 @@ func (e *jsonBatchEncoder) next(ctx context.Context) ([]byte, int64, error) {
 			e.row.writeByte('}')
 			if e.row.err != nil {
 				if errors.Is(e.row.err, errJSONBodyLimit) {
-					return nil, 0, fmt.Errorf("a single row (row %d) exceeds the %d-byte Stream Load limit", e.nextRow+1, e.body.limit)
+					return 0, fmt.Errorf("a single row (row %d) exceeds the %d-byte Stream Load limit", e.nextRow+1, body.limit)
 				}
-				return nil, 0, e.row.err
+				return 0, e.row.err
 			}
 		}
 		separator := 0
-		if rows > 0 {
+		if len(body.data) > 1 {
 			separator = 1
 		}
-		if len(e.row.data)+separator+1 > e.body.limit-len(e.body.data) {
+		if len(e.row.data)+separator+1 > body.limit-len(body.data) {
 			e.pending = true
 			break
 		}
-		if rows > 0 {
-			e.body.writeByte(',')
+		if separator != 0 {
+			body.writeByte(',')
 		}
-		e.body.write(e.row.data)
+		body.write(e.row.data)
 		e.pending = false
 		e.nextRow++
 		rows++
 	}
-	e.body.writeByte(']')
-	return e.body.data, rows, e.body.err
+	return rows, body.err
 }
 
 type boundedJSONBuffer struct {

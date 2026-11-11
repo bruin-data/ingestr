@@ -44,6 +44,19 @@ func validateSnapshotRanges(ctx context.Context, tx pgx.Tx, table string, keys, 
 	if err != nil {
 		return err
 	}
+	const maxParams = 8192
+	rangesPerQuery := max(1, maxParams/(3*len(keys)))
+	for len(ranges) > 0 {
+		count := min(rangesPerQuery, len(ranges))
+		if err := validateSnapshotRangeOrdering(ctx, tx, table, keys, keyTypes, collations, ranges[:count]); err != nil {
+			return err
+		}
+		ranges = ranges[count:]
+	}
+	return nil
+}
+
+func validateSnapshotRangeOrdering(ctx context.Context, tx pgx.Tx, table string, keys, keyTypes, collations []string, ranges []snapshotRange) error {
 	var args []any
 	var predicates []string
 	tuple := func(values []string) string {
