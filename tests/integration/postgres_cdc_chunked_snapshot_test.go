@@ -262,9 +262,12 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 			var copied int
 			require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT count(*) FROM public.items").Scan(&copied))
 			require.Equal(t, 2, copied)
-			var openSnapshots int
-			require.NoError(t, f.src.QueryRow(f.ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend' AND backend_xmin IS NOT NULL`).Scan(&openSnapshots))
-			require.Zero(t, openSnapshots, "destination backpressure must not retain a source snapshot")
+			// A statement still in flight holds backend_xmin briefly; a retained
+			// snapshot would never clear while the destination is blocked.
+			require.Eventually(t, func() bool {
+				var openSnapshots int
+				return f.src.QueryRow(f.ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend' AND backend_xmin IS NOT NULL`).Scan(&openSnapshots) == nil && openSnapshots == 0
+			}, 10*time.Second, 100*time.Millisecond, "destination backpressure must not retain a source snapshot")
 			_, err := f.src.Exec(f.ctx, `
 				UPDATE public.items SET amount = amount + 1000 WHERE id IN (1, 3, 11);
 				DELETE FROM public.items WHERE id IN (2, 4, 12);
