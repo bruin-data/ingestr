@@ -15,8 +15,10 @@ github://?access_token=<access_token>&owner=<owner>&repo=<repo>
 URI parameters:
 
 - `access_token` (required for `issues`, `pull_requests` and `stargazers`): Access Token used for authentication with the GitHub API
-- `owner` (required): Refers to the owner of the repository (a user or an organization)
-- `repo` (required for every table except `repositories` and `commits`): Refers to the name of the repository
+- `owner` (required for every table except `commits` with a repository list): Refers to the owner of the repository (a user or an organization)
+- `repo` (required for every table except `repositories` and `commits`): Refers to the name of the repository, without the owner (e.g. `ingestr`, not `bruin-data/ingestr`). `repo` needs `owner`.
+
+Without `owner`, only `commits` with a repository list can be read, and every entry of the list needs its owner: `commits:<owner>/<repo>` or `commits:<owner>/*` (see [Reading commits from several repositories](#reading-commits-from-several-repositories)). `repositories` needs `owner`; `issues`, `pull_requests`, `stargazers` and `repo_events` need both `owner` and `repo`.
 
 To ingest the repositories of a user or organization, leave out `repo` and use the `repositories` table (`repo` is ignored for this table):
 
@@ -95,14 +97,20 @@ The `commits` table can read many repositories, of one or several owners, into o
 | Mode | Source table | Repositories read | PK |
 | ---- | ------------ | ----------------- | -- |
 | single | `commits`, URI has `repo` | the URI repository | `sha` |
-| list | `commits:<repo>,<owner>/<repo>,...` | the listed repositories; the list overrides a `repo` in the URI | `repo`, `sha` |
-| all | `commits`, URI has no `repo` (or an empty `repo=`) | every repository the token can list for `owner` (see `repositories`), except forks; archived repositories are included | `repo`, `sha` |
+| list | `commits:<repo>,<owner>/<repo>,<owner>/*,...` | the listed repositories, and every repository of each `<owner>/*` except forks; the list overrides a `repo` in the URI | `repo`, `sha` |
+| all | `commits`, URI has `owner` and no `repo` (or an empty `repo=`) | every repository the token can list for `owner` (see `repositories`), except forks; archived repositories are included | `repo`, `sha` |
 
 Every row has a `repo` column with the repository's `owner/name` as GitHub spells it, whatever the casing in the URI or the list. List and all modes use `repo` and `sha` as the primary key, since a commit can appear in more than one repository (e.g. a fork).
 
-In list mode, an entry is either a repository name, read from the URI `owner`, or `<owner>/<repo>`, which can name any owner. `owner` is still required in the URI. Spaces, empty entries and repeated repositories are ignored, and names are case-insensitive. Each listed repository is looked up directly, so any repository the token can read works, including a private repository it collaborates on and a renamed repository under its old name. A listed fork is read. If a listed repository is not found or the token cannot read it, the run fails before any commit is read, naming every such repository.
+In list mode, an entry is one of:
 
-In all mode, ingestr prints how many repositories it reads and how many forks it skips. A repository that GitHub refuses to serve (not found, blocked, or forbidden for a reason other than a rate limit) is skipped with a warning; in single and list modes it fails the run.
+- `<repo>`: a repository of the URI `owner`. Without `owner` in the URI, the run fails before reading anything.
+- `<owner>/<repo>`: a repository of any owner.
+- `<owner>/*`: every repository of `<owner>` the token can list (as for the `repositories` table), except forks.
+
+Any other form, such as `<owner>/`, `*` or `<owner>/bruin-*`, fails the run before reading anything. Spaces, empty entries and repeated entries are ignored, and names are case-insensitive. Each repository named with `<repo>` or `<owner>/<repo>` is looked up directly, so any repository the token can read works, including a private repository it collaborates on and a renamed repository under its old name. A named fork is read. If a named repository is not found or the token cannot read it, the run fails before any commit is read, naming every such repository. The named repositories are read first, in the order written, then the repositories of each `<owner>/*`, in the order written. A repository that is both named and matched by `<owner>/*` is read once, as a named repository.
+
+For all mode and each `<owner>/*`, ingestr prints how many repositories it reads and how many forks it skips. A repository found this way that GitHub refuses to serve (not found, blocked, or forbidden for a reason other than a rate limit) is skipped with a warning; a named repository or the single-mode repository fails the run instead.
 
 Examples:
 
@@ -112,6 +120,16 @@ Fetch the commits of three repositories, two of them from the URI owner:
 ingestr ingest \
   --source-uri 'github://?access_token=ghp_test_1234&owner=bruin-data' \
   --source-table 'commits:bruin, ingestr, other-org/tool' \
+  --dest-uri duckdb:///github.duckdb \
+  --dest-table 'dest.commits'
+```
+
+Fetch the commits of every repository of `bruin-data` except forks, plus one repository of another owner, with a URI without `owner`:
+
+```sh
+ingestr ingest \
+  --source-uri 'github://?access_token=ghp_test_1234' \
+  --source-table 'commits:bruin-data/*, other-org/tool' \
   --dest-uri duckdb:///github.duckdb \
   --dest-table 'dest.commits'
 ```
