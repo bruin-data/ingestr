@@ -96,6 +96,10 @@ type PostgresCDCSource struct {
 	// lag tracks the server's WAL head for replication-lag reporting.
 	lag *lagState
 
+	walRetentionMu     sync.RWMutex
+	walRetentionSlot   string
+	walRetentionConfig *pgx.ConnConfig
+
 	// keepalive coordinates a goroutine that periodically pings the
 	// walsender with a WALWritePosition-only standby update during the
 	// destination-write phase. Without it, a write that outlasts
@@ -138,6 +142,7 @@ func NewPostgresCDCSource() *PostgresCDCSource {
 
 var (
 	_ source.LagReporter                    = (*PostgresCDCSource)(nil)
+	_ source.WALRetentionReporter           = (*PostgresCDCSource)(nil)
 	_ source.CDCStateProvider               = (*PostgresCDCSource)(nil)
 	_ source.ConnectorLeaser                = (*PostgresCDCSource)(nil)
 	_ source.ConnectorIdentityProvider      = (*PostgresCDCSource)(nil)
@@ -234,6 +239,7 @@ func (s *PostgresCDCSource) Schemes() []string {
 }
 
 func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
+	s.resetWALRetention()
 	cdcConfig, normalizedURI, err := parseURIConfig(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse CDC config: %w", err)
@@ -310,6 +316,9 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.standby = standby
 	s.generatedColumns.Clear()
 	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, database, cdcConfig)
+	s.walRetentionMu.Lock()
+	s.walRetentionConfig = pgConfig.ConnConfig.Copy()
+	s.walRetentionMu.Unlock()
 
 	return nil
 }
@@ -427,6 +436,7 @@ func (s *PostgresCDCSource) reconnectReplication(ctx context.Context) error {
 }
 
 func (s *PostgresCDCSource) Close(ctx context.Context) error {
+	s.resetWALRetention()
 	var errs []error
 
 	// Stop the keepalive goroutine first so it does not race the connection

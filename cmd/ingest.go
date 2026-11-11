@@ -340,7 +340,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "metrics-addr",
-				Usage:   "Serve streaming metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Usage:   "Serve ingestion metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060",
 				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
 			},
 			&cli.StringFlag{
@@ -511,10 +511,6 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
-	}
-	metricsAddr := c.String("metrics-addr")
-	if !cfg.Stream && metricsAddr != "" {
-		return fmt.Errorf("--metrics-addr is only valid together with --stream")
 	}
 	// In streaming mode the source decides the default strategy (merge for CDC,
 	// append for brokers); only treat the strategy as a user override when the

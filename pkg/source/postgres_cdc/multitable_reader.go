@@ -162,6 +162,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 				needsSnapshot = true
 			} else {
 				slotName = resolvedSlot
+				r.source.setWALRetentionSlot(slotName)
 				if !legacy {
 					waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				}

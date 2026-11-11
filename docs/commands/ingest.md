@@ -55,7 +55,7 @@ ingestr ingest \
 - `--refresh-id TEXT`: An opaque, globally unique operation ID for `--full-refresh --stream`. Reuse this ID across process restarts; use a new ID for each requested refresh. Can also be set with `INGESTR_REFRESH_ID`.
 - `--flush-interval`: In streaming mode, flush buffered records to the destination at least this often. Defaults to `30s`. Only valid with `--stream`.
 - `--flush-records`: In streaming mode, flush when this many records have been buffered. Defaults to `50000`. Only valid with `--stream`.
-- `--metrics-addr`: In streaming mode, serve replication lag and throughput metrics over HTTP on this address (e.g. `127.0.0.1:6060`). Disabled unless set. Only valid with `--stream`. See [Monitoring a stream](#monitoring-a-stream) below.
+- `--metrics-addr`: Serve PostgreSQL slot WAL retention, replication lag, and streaming throughput metrics over HTTP on this address (e.g. `127.0.0.1:6060`). Disabled unless set. Available during batch and streaming runs. See [Monitoring a stream](#monitoring-a-stream) below.
 - `--debug`: Enables debug logging. Some destinations print generated SQL in debug logs; parameterized queries may show placeholders such as `$1`, `?`, `@p1`, or `@p2` for values bound separately by the database driver.
 
 The `interval-start` and `interval-end` options support various datetime formats. When both are provided, `interval-start` must be earlier than `interval-end`. Here are some examples:
@@ -134,7 +134,7 @@ Without `--refresh-id`, every process invocation with `--full-refresh` requests 
 
 ### Monitoring a stream
 
-Passing `--metrics-addr` starts a small HTTP server for the lifetime of the stream that exposes [Prometheus](https://prometheus.io/docs/instrumenting/exposition_formats/) metrics at `/metrics`. It is off unless the flag is set, and the address is bound before ingestion starts, so a port conflict fails immediately rather than half-way through a run. Only ingestr's own metrics are served — the Go runtime and process collectors are deliberately excluded.
+Passing `--metrics-addr` starts a small HTTP server for the lifetime of the ingestion run that exposes [Prometheus](https://prometheus.io/docs/instrumenting/exposition_formats/) metrics at `/metrics`. It is off unless the flag is set, and the address is bound before ingestion starts, so a port conflict fails immediately rather than half-way through a run. Only ingestr's own metrics are served — the Go runtime and process collectors are deliberately excluded. PostgreSQL slot WAL metrics are available during the initial snapshot and subsequent replication, including batch runs without `--stream`.
 
 ```bash
 ingestr ingest \
@@ -151,6 +151,11 @@ ingestr publishes:
 | Metric | Meaning |
 |---|---|
 | `ingestr_replication_*{source}` | Replication lag for the current source (see below). Absent when the source cannot report lag. |
+| `ingestr_replication_slot_retained_wal_bytes{source,slot}` | WAL distance from the PostgreSQL slot's `restart_lsn` to the server WAL head; on a standby, uses the received WAL position. |
+| `ingestr_replication_slot_safe_wal_bytes{source,slot}` | Additional WAL bytes PostgreSQL reports can be written before the slot risks losing required WAL. Omitted when PostgreSQL returns NULL, including unlimited retention and lost slots. |
+| `ingestr_replication_slot_max_wal_keep_bytes{source,slot}` | Configured `max_slot_wal_keep_size` in bytes. `-1` means unlimited retention. |
+| `ingestr_replication_slot_wal_status{source,slot,status}` | `1` for the current PostgreSQL `wal_status`: `reserved`, `extended`, `unreserved`, or `lost`. Only the current status is emitted. |
+| `ingestr_replication_slot_collection_success{source,slot}` | `1` when the slot query succeeds on this scrape, `0` when it fails or the selected slot is missing. Other slot readings are omitted on failure. |
 | `ingestr_stream_rows_synced_total` | Cumulative rows written **and** confirmed durable since the process started. |
 | `ingestr_stream_bytes_synced_total` | Cumulative logical Arrow payload bytes written **and** confirmed durable since the process started. |
 | `ingestr_stream_flush_cycles_total` | Number of completed flush cycles. |
@@ -167,11 +172,22 @@ The byte counters use the Arrow record-batch buffers ingestr hands to the destin
 
 The `ingestr_replication_*` series carry a `source` label and depend on the engine, because "lag" is not the same quantity everywhere:
 
-- **Postgres** (`postgres+cdc`) reports `ingestr_replication_bytes_behind`: the distance between the server's WAL head and the position ingestr has confirmed durable. This is the same number as `pg_current_wal_lsn() - confirmed_flush_lsn` for the replication slot, so it is what predicts unbounded WAL growth on the source. It is the value to alert on.
+- **Postgres** (`postgres+cdc`) reports `ingestr_replication_bytes_behind`: the distance between the server's WAL head and the position ingestr has confirmed durable. This measures consumer progress while streaming. To monitor source WAL retention, use the slot metrics: `restart_lsn` can lag behind acknowledged progress, and slot metrics also work during snapshots.
 - **MongoDB** (`mongodb+cdc`) reports `ingestr_replication_seconds_behind`: the gap between the server's `operationTime` and the cluster time of the last processed change event. Both clocks are server-side, so an idle collection converges to zero instead of drifting upward.
 - **SQL Server** (`mssql+cdc`) reports `ingestr_replication_seconds_behind`: the change time between the processed LSN and the capture watermark, via `sys.fn_cdc_map_lsn_to_time`. SQL Server's `binary(10)` LSNs are ordered but their difference is not a log distance, so no `bytes_behind` is published.
 
 Fields that an engine cannot express are omitted rather than reported as a misleading zero. Postgres, for instance, has no per-LSN timestamp, so it publishes no `ingestr_replication_seconds_behind`. Message-broker sources report no replication series at all.
+
+PostgreSQL slot metrics query `pg_replication_slots` directly over SQL on each scrape, using a separate connection so snapshot workers occupying the regular query pool do not block monitoring. No slot queries run when the metrics are not scraped. The metrics collector gives each query a three-second deadline. The `source` label is `postgres_cdc`; the `slot` label identifies the persistent slot actually used by this run, including resumed legacy slots. Temporary snapshot slots are excluded. Slot metrics are absent until a slot is selected. PostgreSQL versions before 13 omit the unavailable WAL budget and status fields.
+
+For a finite budget, this PromQL expression selects slots with less than half of the configured allowance remaining:
+
+```promql
+ingestr_replication_slot_safe_wal_bytes
+  < (ingestr_replication_slot_max_wal_keep_bytes > 0) / 2
+```
+
+Also alert on `ingestr_replication_slot_wal_status{status="unreserved"} == 1` and collection failures (`ingestr_replication_slot_collection_success == 0`). `extended` means required WAL is still retained; `unreserved` means required WAL is at risk of removal; `lost` means the slot is already unusable. With unlimited retention, monitor retained WAL and database disk capacity instead of a budget percentage. These metrics provide observations for external alerting; they do not estimate snapshot completion time or automatically stop ingestion. See PostgreSQL's [`pg_replication_slots` documentation](https://www.postgresql.org/docs/17/view-pg-replication-slots.html).
 
 ## General flags
 

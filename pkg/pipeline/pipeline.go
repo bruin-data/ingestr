@@ -145,6 +145,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
+	if wr, ok := src.(source.WALRetentionReporter); ok {
+		metrics.SetWALRetentionReporter(wr)
+		defer metrics.SetWALRetentionReporter(nil)
+	}
+
 	if usesStreamingExecutor(p.config) {
 		ss, ok := src.(source.StreamingSource)
 		if !ok || !ss.SupportsStreaming() {
