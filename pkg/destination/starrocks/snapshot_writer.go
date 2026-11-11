@@ -89,7 +89,7 @@ type snapshotWindow struct {
 type snapshotWindowPart struct {
 	mu          sync.Mutex
 	tx          *streamLoadTransaction
-	columns     string
+	options     streamLoadOptions
 	replay      [][]byte
 	failed      error
 	terminalErr error
@@ -121,12 +121,11 @@ func (s *snapshotWriter) newWindow(id int64) *snapshotWindow {
 	return window
 }
 
-func (s *snapshotWriter) begin(ctx context.Context, columns string) (*streamLoadTransaction, error) {
+func (s *snapshotWriter) begin(ctx context.Context, opts streamLoadOptions) (*streamLoadTransaction, error) {
 	start := time.Now()
 	defer since(&s.stats.begin, start)
-	return s.dest.loader.beginTransaction(ctx, s.database, s.table, s.dest.nextLabel(s.table), streamLoadOptions{
-		columns: columns, mergeCondition: cdcOrderColumn,
-	})
+	opts.mergeCondition = cdcOrderColumn
+	return s.dest.loader.beginTransaction(ctx, s.database, s.table, s.dest.nextLabel(s.table), opts)
 }
 
 func (d *StarRocksDestination) writeSnapshot(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -522,7 +521,7 @@ func (s *snapshotWriter) retry(ctx context.Context, part *snapshotWindowPart, ca
 		}
 		delay = min(delay*2, s.limits.retryMaximum)
 		cause = s.withPermit(retryCtx, func() error {
-			tx, err := s.begin(retryCtx, part.columns)
+			tx, err := s.begin(retryCtx, part.options)
 			part.tx = tx
 			if err != nil {
 				return err
@@ -586,7 +585,8 @@ type snapshotLoadWorker struct {
 	sealRequests chan<- struct{}
 	loads        chan snapshotLoad
 	body         boundedJSONBuffer
-	columns      string
+	options      streamLoadOptions
+	hasOptions   bool
 	lastRow      time.Time
 }
 
@@ -596,7 +596,7 @@ type snapshotLoad struct {
 	window  *snapshotWindow
 	part    *snapshotWindowPart
 	body    []byte
-	columns string
+	options streamLoadOptions
 	release bool
 }
 
@@ -716,19 +716,24 @@ func (w *snapshotLoadWorker) queue(ctx context.Context, request snapshotLoad) er
 
 func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch, sequence int64, commands <-chan snapshotWriteCommand) error {
 	s := w.writer
-	encoder := newJSONBatchEncoder(batch, s.limits.requestBytes)
-	validated := 0
-	for _, v := range encoder.validated {
-		if v {
-			validated++
+	encoder, opts := newStreamLoadBatchEncoder(batch, s.limits.requestBytes)
+	if encoder.initErr != nil {
+		return fmt.Errorf("encode StarRocks snapshot batch: %w", encoder.initErr)
+	}
+	if batch.NumRows() > 0 {
+		validated := 0
+		for _, v := range encoder.validated {
+			if v {
+				validated++
+			}
 		}
+		s.stats.validatedJSONColumns.Store(int64(validated))
+		if w.hasOptions && w.options != opts {
+			return fmt.Errorf("StarRocks snapshot columns changed while loading %s", s.table)
+		}
+		w.options = opts
+		w.hasOptions = true
 	}
-	s.stats.validatedJSONColumns.Store(int64(validated))
-	columns := columnsHeader(batch.Schema(), encoder.binaryColumns())
-	if w.columns != "" && w.columns != columns {
-		return fmt.Errorf("StarRocks snapshot columns changed while loading %s", s.table)
-	}
-	w.columns = columns
 	flushPage := false
 	for encoder.nextRow < batch.NumRows() {
 		if err := w.beforeRequest(ctx, commands, sequence, &flushPage); err != nil {
@@ -825,7 +830,7 @@ func (w *snapshotLoadWorker) flush(ctx context.Context) error {
 	if failed != nil {
 		return nil
 	}
-	return w.queue(ctx, snapshotLoad{window: window, part: part, body: body, columns: w.columns})
+	return w.queue(ctx, snapshotLoad{window: window, part: part, body: body, options: w.options})
 }
 
 // load sends a request into its window part's transaction. A request refused
@@ -839,7 +844,7 @@ func (w *snapshotLoadWorker) load(ctx context.Context, request snapshotLoad) err
 		return nil
 	}
 	err := s.withPermit(ctx, func() error {
-		tx, err := w.transaction(ctx, part, request.columns)
+		tx, err := w.transaction(ctx, part, request.options)
 		if err != nil {
 			return err
 		}
@@ -870,12 +875,12 @@ func (w *snapshotLoadWorker) load(ctx context.Context, request snapshotLoad) err
 	return nil
 }
 
-func (w *snapshotLoadWorker) transaction(ctx context.Context, part *snapshotWindowPart, columns string) (*streamLoadTransaction, error) {
+func (w *snapshotLoadWorker) transaction(ctx context.Context, part *snapshotWindowPart, opts streamLoadOptions) (*streamLoadTransaction, error) {
 	part.mu.Lock()
 	defer part.mu.Unlock()
 	if part.tx == nil {
-		part.columns = columns
-		tx, err := w.writer.begin(ctx, columns)
+		part.options = opts
+		tx, err := w.writer.begin(ctx, opts)
 		part.tx = tx
 		if err != nil {
 			return nil, err

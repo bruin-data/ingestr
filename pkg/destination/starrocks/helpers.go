@@ -82,12 +82,23 @@ func columnsHeader(sc *arrow.Schema, binaryCols []string) string {
 		return ""
 	}
 	fields := sc.Fields()
+	lastColumn := make(map[string]int, len(fields))
+	for i, f := range fields {
+		lastColumn[f.Name] = i
+	}
 	parts := make([]string, 0, len(fields)+len(binaryCols))
-	for _, f := range fields {
-		parts = append(parts, quoteColumn(f.Name))
+	for i, f := range fields {
+		if lastColumn[f.Name] == i {
+			parts = append(parts, quoteColumn(f.Name))
+		}
 	}
 	// Hex keeps empty values non-NULL; from_base64('') returns NULL.
+	seenBin := make(map[string]bool, len(binaryCols))
 	for _, name := range binaryCols {
+		if seenBin[name] {
+			continue
+		}
+		seenBin[name] = true
 		parts = append(parts, fmt.Sprintf("%s=to_binary(%s, 'hex')", quoteColumn(name), quoteColumn(name)))
 	}
 	return strings.Join(parts, ", ")
@@ -112,6 +123,19 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx)
 	case *array.Int64:
 		return a.Value(idx)
+	case *array.Uint8:
+		return a.Value(idx)
+	case *array.Uint16:
+		return a.Value(idx)
+	case *array.Uint32:
+		return a.Value(idx)
+	case *array.Uint64:
+		return a.Value(idx)
+	case *array.Float16:
+		if v := a.Value(idx).Float32(); !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
+			return v
+		}
+		return nil
 	case *array.Float32:
 		// Keep float32 so JSON uses its shortest 32-bit form (0.1, not
 		// 0.10000000149011612).
@@ -131,10 +155,19 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return hex.EncodeToString(a.Value(idx))
 	case *array.LargeBinary:
 		return hex.EncodeToString(a.Value(idx))
+	case *array.FixedSizeBinary:
+		return hex.EncodeToString(a.Value(idx))
 	case *array.Date32:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Date64:
 		return a.Value(idx).ToTime().Format("2006-01-02")
+	case *array.Time32:
+		micros := int64(a.Value(idx)) * 1_000
+		if a.DataType().(*arrow.Time32Type).Unit == arrow.Second {
+			micros = int64(a.Value(idx)) * 1_000_000
+		}
+		secs := micros / 1_000_000
+		return fmt.Sprintf("%02d:%02d:%02d.%06d", secs/3600, (secs%3600)/60, secs%60, micros%1_000_000)
 	case *array.Time64:
 		micros := int64(a.Value(idx))
 		if a.DataType().(*arrow.Time64Type).Unit == arrow.Nanosecond {
@@ -153,6 +186,9 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		start, end := a.ValueOffsets(idx)
 		return listElements(a.ListValues(), int(start), int(end))
 	case *array.LargeList:
+		start, end := a.ValueOffsets(idx)
+		return listElements(a.ListValues(), int(start), int(end))
+	case *array.FixedSizeList:
 		start, end := a.ValueOffsets(idx)
 		return listElements(a.ListValues(), int(start), int(end))
 	case array.ExtensionArray:
@@ -175,6 +211,9 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 // listElements converts an Arrow list slice into a Go slice so it serializes as
 // a JSON array (not a quoted string) into a StarRocks JSON column.
 func listElements(values arrow.Array, start, end int) []interface{} {
+	if ext, ok := values.(array.ExtensionArray); ok && ext.DataType().(arrow.ExtensionType).ExtensionName() != schema.JSONExtensionName {
+		return listElements(ext.Storage(), start, end)
+	}
 	out := make([]interface{}, 0, end-start)
 	for j := start; j < end; j++ {
 		// Binary inside JSON gets no to_binary transform; keep base64 as other
@@ -186,6 +225,11 @@ func listElements(values arrow.Array, start, end int) []interface{} {
 				continue
 			}
 		case *array.LargeBinary:
+			if !b.IsNull(j) {
+				out = append(out, base64.StdEncoding.EncodeToString(b.Value(j)))
+				continue
+			}
+		case *array.FixedSizeBinary:
 			if !b.IsNull(j) {
 				out = append(out, base64.StdEncoding.EncodeToString(b.Value(j)))
 				continue

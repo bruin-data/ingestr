@@ -284,7 +284,7 @@ func (d *StarRocksDestination) validatePrimaryKey(ctx context.Context, role, tab
 			out[i] = strings.ToLower(col)
 		}
 		slices.Sort(out)
-		return out
+		return slices.Compact(out)
 	}
 	if !strings.EqualFold(model, "PRIMARY_KEYS") || !slices.Equal(normalize(actual), normalize(keys)) {
 		return fmt.Errorf("StarRocks %s %s requires PRIMARY KEY (%s); found %s (%s). If the key changed, rerun with --full-refresh to rebuild the table", role, table, strings.Join(keys, ", "), model, strings.Join(actual, ", "))

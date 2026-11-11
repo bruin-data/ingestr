@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -81,10 +82,139 @@ func validatedJSONField(field arrow.Field) bool {
 	return ok && value == "true"
 }
 
+func isBinaryArrowType(dt arrow.DataType) bool {
+	if ext, ok := dt.(arrow.ExtensionType); ok {
+		if ext.ExtensionName() == schema.JSONExtensionName {
+			return false
+		}
+		return isBinaryArrowType(ext.StorageType())
+	}
+	switch dt.ID() {
+	case arrow.BINARY, arrow.LARGE_BINARY, arrow.FIXED_SIZE_BINARY:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSimpleStreamLoadField(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 && !isAlpha {
+			return false
+		}
+		if !isAlpha && !isDigit {
+			return false
+		}
+	}
+	return true
+}
+
+func newStreamLoadBatchEncoder(record arrow.RecordBatch, limit int) (*jsonBatchEncoder, streamLoadOptions) {
+	if record.NumRows() == 0 {
+		return newJSONBatchEncoder(record, limit), streamLoadOptions{}
+	}
+	fields := record.Schema().Fields()
+	lastColumn := make(map[string]int, len(fields))
+	for i, field := range fields {
+		lastColumn[field.Name] = i
+	}
+	allSimple := true
+	var survivingBinary []string
+	for i, field := range fields {
+		if lastColumn[field.Name] != i {
+			continue
+		}
+		if strings.Contains(field.Name, "`") {
+			return &jsonBatchEncoder{
+				record:  record,
+				initErr: fmt.Errorf("StarRocks cannot load column %q: column names containing a backtick are not supported", field.Name),
+			}, streamLoadOptions{}
+		}
+		if !isSimpleStreamLoadField(field.Name) {
+			allSimple = false
+		}
+		if isBinaryArrowType(field.Type) {
+			survivingBinary = append(survivingBinary, field.Name)
+		}
+	}
+	if allSimple {
+		return newJSONBatchEncoder(record, limit), streamLoadOptions{
+			columns: columnsHeader(record.Schema(), survivingBinary),
+		}
+	}
+
+	encoder := &jsonBatchEncoder{
+		record: record,
+		body:   boundedJSONBuffer{limit: limit},
+		row:    boundedJSONBuffer{limit: max(0, limit-2)},
+	}
+	for i, field := range fields {
+		if lastColumn[field.Name] == i {
+			encoder.columns = append(encoder.columns, i)
+		}
+	}
+	slices.SortFunc(encoder.columns, func(a, b int) int {
+		return strings.Compare(fields[a].Name, fields[b].Name)
+	})
+	prefix := "_c"
+	for {
+		conflict := false
+		for _, col := range encoder.columns {
+			if strings.HasPrefix(strings.ToLower(fields[col].Name), prefix) {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			break
+		}
+		prefix += "_"
+	}
+
+	encodedKeys := boundedJSONBuffer{limit: encoder.row.limit}
+	offsets := make([]int, len(encoder.columns)+1)
+	jsonPathParts := make([]string, len(encoder.columns))
+	slotDecls := make([]string, len(encoder.columns))
+	colMappings := make([]string, len(encoder.columns))
+	for i, col := range encoder.columns {
+		slot := prefix + strconv.Itoa(i)
+		encodedKeys.writeQuoted(slot)
+		if encodedKeys.err != nil {
+			encoder.initErr = fmt.Errorf("column names cannot fit in a single row within the %d-byte Stream Load limit: %w", limit, encodedKeys.err)
+			return encoder, streamLoadOptions{}
+		}
+		offsets[i+1] = len(encodedKeys.data)
+		jsonPathParts[i] = `"$.` + slot + `"`
+		slotDecls[i] = slot
+		quoted := quoteColumn(fields[col].Name)
+		if isBinaryArrowType(fields[col].Type) {
+			colMappings[i] = fmt.Sprintf("%s=to_binary(%s, 'hex')", quoted, slot)
+		} else {
+			colMappings[i] = fmt.Sprintf("%s=%s", quoted, slot)
+		}
+	}
+	encoder.keys = make([][]byte, len(encoder.columns))
+	encoder.validated = make([]bool, len(encoder.columns))
+	for i, col := range encoder.columns {
+		encoder.keys[i] = encodedKeys.data[offsets[i]:offsets[i+1]]
+		encoder.validated[i] = validatedJSONField(fields[col])
+	}
+	return encoder, streamLoadOptions{
+		columns:   strings.Join(append(slotDecls, colMappings...), ", "),
+		jsonpaths: "[" + strings.Join(jsonPathParts, ",") + "]",
+	}
+}
+
 func (e *jsonBatchEncoder) binaryColumns() []string {
 	var names []string
 	for _, field := range e.record.Schema().Fields() {
-		if id := field.Type.ID(); id == arrow.BINARY || id == arrow.LARGE_BINARY {
+		if isBinaryArrowType(field.Type) {
 			names = append(names, field.Name)
 		}
 	}
@@ -310,10 +440,15 @@ func (b *boundedJSONBuffer) writeValue(arr arrow.Array, row int, nested bool) {
 		b.writeBinary(a.Value(row), nested)
 	case *array.LargeBinary:
 		b.writeBinary(a.Value(row), nested)
+	case *array.FixedSizeBinary:
+		b.writeBinary(a.Value(row), nested)
 	case *array.List:
 		start, end := a.ValueOffsets(row)
 		b.writeList(a.ListValues(), int(start), int(end))
 	case *array.LargeList:
+		start, end := a.ValueOffsets(row)
+		b.writeList(a.ListValues(), int(start), int(end))
+	case *array.FixedSizeList:
 		start, end := a.ValueOffsets(row)
 		b.writeList(a.ListValues(), int(start), int(end))
 	case array.ExtensionArray:

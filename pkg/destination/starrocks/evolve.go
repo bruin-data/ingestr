@@ -41,7 +41,7 @@ func (*Dialect) AddColumnSQL(table string, col schema.Column) string {
 	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s NULL", table, quoteColumn(col.Name), MapDataTypeToStarRocks(col))
 }
 
-func (d *Dialect) AlterColumnTypeSQL(table, name string, col schema.Column) string {
+func (d *Dialect) modifyColumnClause(name string, col schema.Column) string {
 	if planned, ok := d.columns[strings.ToLower(name)]; ok {
 		col = planned
 	}
@@ -52,8 +52,39 @@ func (d *Dialect) AlterColumnTypeSQL(table, name string, col schema.Column) stri
 	if col.IsPrimaryKey || !col.Nullable {
 		nullable = " NOT NULL"
 	}
-	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s%s%s", table, quoteColumn(name), mapStarRocksType(col), d.keySuffix(name), nullable)
+	return fmt.Sprintf("MODIFY COLUMN %s %s%s%s", quoteColumn(name), mapStarRocksType(col), d.keySuffix(name), nullable)
 }
+
+func (d *Dialect) AlterColumnTypeSQL(table, name string, col schema.Column) string {
+	clause := d.modifyColumnClause(name, col)
+	if clause == "" {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s %s", table, clause)
+}
+
+func (d *Dialect) BatchAlterColumnTypesSQL(table string, cols []schema.Column) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	clauses := make([]string, 0, len(cols))
+	seen := make(map[string]bool, len(cols))
+	for _, col := range cols {
+		key := strings.ToLower(col.Name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		clause := d.modifyColumnClause(col.Name, col)
+		if clause == "" {
+			return ""
+		}
+		clauses = append(clauses, clause)
+	}
+	return fmt.Sprintf("ALTER TABLE %s %s", table, strings.Join(clauses, ", "))
+}
+
+var _ destination.BatchColumnTypeAlterer = (*Dialect)(nil)
 
 // canModifyColumnType mirrors the MODIFY COLUMN conversions StarRocks 3.3
 // accepts; everything else fails with "Can not change X to Y".
@@ -263,7 +294,12 @@ func (d *StarRocksDestination) ApplySchemaEvolution(ctx context.Context, table s
 	if err != nil {
 		return nil, fmt.Errorf("%w; rerun with --full-refresh to rebuild the table", err)
 	}
+	executed := make(map[string]bool, len(statements))
 	for _, statement := range statements {
+		if executed[statement] {
+			continue
+		}
+		executed[statement] = true
 		prior, err := d.showStatus(ctx, d.schemaChangeQuery(table))
 		if err != nil {
 			return warnings, fmt.Errorf("read previous StarRocks schema change: %w", err)

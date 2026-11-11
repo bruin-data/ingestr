@@ -16,6 +16,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/destination/redshift"
 	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
+	"github.com/bruin-data/ingestr/pkg/destination/starrocks"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +37,8 @@ func TestDestinationWritersReleaseBatchAttachedToError(t *testing.T) {
 		{name: "sqlite", dest: sqlite.NewSQLiteDestination(), write: writeParallel},
 		{name: "oracle", dest: oracle.NewOracleDestination(), write: writeParallel},
 		{name: "redshift", dest: redshift.NewRedshiftDestination(), write: writeParallel},
+		{name: "starrocks serial", dest: starrocks.NewStarRocksDestination(), write: writeSerial},
+		{name: "starrocks parallel", dest: starrocks.NewStarRocksDestination(), opts: destination.WriteOptions{StagingTable: true, Parallelism: 2}, write: writeParallel},
 	}
 
 	for _, testCase := range testCases {

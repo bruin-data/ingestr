@@ -456,3 +456,90 @@ func TestRendersExistingColumnType(t *testing.T) {
 	d.frozen = true
 	require.False(t, d.rendersExisting("amt"))
 }
+
+func TestParseConnectionConfig(t *testing.T) {
+	cfg, err := parseConnectionConfig("starrocks://root:secret@[::1]:9030/catalog/analytics?http_port=8031&replication_num=2&ssl=true")
+	require.NoError(t, err)
+	require.Equal(t, "analytics", cfg.database)
+	require.Equal(t, "2", cfg.replicationNum)
+	require.Equal(t, "root:secret@tcp([::1]:9030)/?parseTime=true&interpolateParams=true&tls=true", cfg.dsn)
+	require.Equal(t, "http://[::1]:8031", cfg.loader.endpoint)
+
+	for _, bad := range []string{
+		"starrocks://root@localhost:99999/db",
+		"starrocks://root@localhost:9030/db?http_port=0",
+		"starrocks://root@localhost:9030/db?replication_num=0",
+		"starrocks://root@localhost:9030/db?replication_num=abc",
+		"starrocks://root@localhost:9030/db?replication_num=1\";--",
+	} {
+		_, err := parseConnectionConfig(bad)
+		require.Error(t, err, bad)
+	}
+}
+
+func TestReplaceStagingPolicyTargetsDestinationDatabase(t *testing.T) {
+	d := &StarRocksDestination{database: "analytics"}
+	policy := d.ReplaceStagingPolicy()
+	require.Equal(t, destination.ReplaceStagingTargetSchema, policy.DefaultPlacement)
+	require.Equal(t, "analytics", policy.DefaultTargetSchema)
+}
+
+func TestResolveAndDedupePrimaryKeys(t *testing.T) {
+	cols := []schema.Column{
+		{Name: "UserID", DataType: schema.TypeInt64},
+		{Name: "Payload", DataType: schema.TypeBinary},
+	}
+	resolved, err := resolvePrimaryKeys(cols, dedupePrimaryKeys([]string{"userid", "UserID"}))
+	require.NoError(t, err)
+	require.Equal(t, []string{"UserID"}, resolved)
+
+	_, err = resolvePrimaryKeys(cols, []string{"missing"})
+	require.ErrorContains(t, err, "not found")
+
+	_, err = resolvePrimaryKeys(cols, []string{"Payload"})
+	require.ErrorContains(t, err, "non-keyable")
+
+	d := &StarRocksDestination{}
+	sqlText := d.buildCreateTableSQL("db.t", cols, []string{"UserID", "userid"})
+	require.Equal(t, 1, strings.Count(sqlText, "`UserID` BIGINT NOT NULL"))
+	require.Contains(t, sqlText, "PRIMARY KEY (`UserID`)")
+}
+
+func TestMergeTableSkipsDedupWindowWhenStagingPrimaryKeysUnique(t *testing.T) {
+	db := newSQLiteWithPrimaryKey(t, "PRIMARY_KEYS", "id")
+	_, err := db.Exec(`CREATE TABLE staging (id INTEGER, value TEXT);
+		CREATE TABLE target (id INTEGER PRIMARY KEY, value TEXT);
+		INSERT INTO staging VALUES (1, 'one'), (2, 'two')`)
+	require.NoError(t, err)
+	d := &StarRocksDestination{db: db}
+	require.NoError(t, d.MergeTable(context.Background(), destination.MergeOptions{
+		StagingTable:             "staging",
+		TargetTable:              "target",
+		PrimaryKeys:              []string{"id", "ID"},
+		Columns:                  []string{"id", "value"},
+		StagingPrimaryKeysUnique: true,
+	}))
+	var count int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM target").Scan(&count))
+	require.Equal(t, 2, count)
+}
+
+func TestBatchAlterColumnTypesSQL(t *testing.T) {
+	d := &Dialect{
+		current: map[string]schema.Column{
+			"a": {Name: "a", DataType: schema.TypeInt32, Nullable: false},
+			"b": {Name: "b", DataType: schema.TypeString, MaxLength: 40, Nullable: true},
+		},
+		columns: map[string]schema.Column{
+			"a": {Name: "a", DataType: schema.TypeInt64, Nullable: true},
+			"b": {Name: "b", DataType: schema.TypeString, MaxLength: 200, Nullable: true},
+		},
+		sortKeys: map[string]bool{"a": true},
+	}
+	got := d.BatchAlterColumnTypesSQL("`db`.`t`", []schema.Column{
+		{Name: "a", DataType: schema.TypeInt64},
+		{Name: "b", DataType: schema.TypeString, MaxLength: 200},
+	})
+	require.Equal(t, "ALTER TABLE `db`.`t` MODIFY COLUMN `a` BIGINT KEY NULL, MODIFY COLUMN `b` VARCHAR(200) NULL", got)
+	require.Empty(t, d.BatchAlterColumnTypesSQL("`db`.`t`", nil))
+}
