@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -225,4 +226,60 @@ func TestCDCSnapshotBatchRejectsTargetReplacementBeforeSnapshot(t *testing.T) {
 	require.Empty(t, dest.retireCalls)
 	_, ok := persistedStreamingSnapshotProgress(t, dest.softReplaceDestination)
 	require.False(t, ok)
+}
+
+func TestCDCSnapshotBatchStagingFailureKeepsInitialPlan(t *testing.T) {
+	writer, dest := newProgressBatchSnapshotWriter(t)
+	dest.requiresSnapshotMerge = true
+	writer.dest = dest.directBatchSnapshotDestination
+	initial := snapshotRangeProgress()
+	later := initial.Clone()
+	later.Ranges[0].Key = []string{"1"}
+	interrupted := errors.New("snapshot interrupted before staging merge")
+	records := mustClosedRecords(softMarker(), snapshotRangeProgressResult(initial), directSnapshotBatch(t, "", 1),
+		snapshotRangeProgressResult(later), source.RecordBatchResult{Err: interrupted})
+	require.ErrorIs(t, writer.write(t.Context(), records, func() {}), interrupted)
+	require.Len(t, dest.writeCalls, 1)
+	require.True(t, dest.writeCalls[0].StagingTable)
+	require.Nil(t, dest.writeCalls[0].CDCSnapshotProgress)
+	require.Empty(t, dest.mergeCalls)
+	durable, ok := persistedStreamingSnapshotProgress(t, dest.softReplaceDestination)
+	require.True(t, ok)
+	require.Equal(t, initial, durable, "rows loaded only to staging must be read again after restart")
+}
+
+func TestCDCSnapshotProgressThousandRangesFitsExpandedStateColumn(t *testing.T) {
+	for _, composite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("composite=%v", composite), func(t *testing.T) {
+			writer, _ := newProgressBatchSnapshotWriter(t)
+			progress := snapshotRangeProgress()
+			progress.Ranges = make([]source.CDCSnapshotRangeProgress, 1024)
+			key := func(i int) []string {
+				if composite {
+					return []string{fmt.Sprintf("%08x-1234-1234-1234-123456789abc", i), "12345678-1234-1234-1234-123456789abc"}
+				}
+				return []string{fmt.Sprintf("%d", int64(9_000_000_000_000_000_000)+int64(i))}
+			}
+			for i := range progress.Ranges {
+				r := source.CDCSnapshotRangeProgress{ID: fmt.Sprint(i), Key: key(i + 1), Complete: true}
+				if i > 0 {
+					r.After = key(i)
+				}
+				if i < len(progress.Ranges)-1 {
+					r.Upper = key(i + 1)
+				}
+				progress.Ranges[i] = r
+			}
+			event, err := writer.manager.snapshotProgressEvent("public.items", "raw.items", cdcStateStatusInProgress, cdcSnapshotProgressState{
+				Boundary: progress.Boundary, Attempt: progress.Attempt, Incarnation: progress.Incarnation, SchemaFingerprint: progress.SchemaFingerprint,
+				Destination: "physical-target", Ranges: progress.Ranges,
+			})
+			require.NoError(t, err)
+			require.Greater(t, len(event.entry.Position), 65533)
+			require.Less(t, len(event.entry.Position), 1<<20)
+			decoded, valid := decodeCDCSnapshotProgress(event.entry)
+			require.True(t, valid)
+			require.Equal(t, progress, decoded.progress())
+		})
+	}
 }

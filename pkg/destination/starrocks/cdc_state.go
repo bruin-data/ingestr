@@ -3,6 +3,7 @@ package starrocks
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -138,6 +139,62 @@ func (d *StarRocksDestination) PrepareCDCStateTable(ctx context.Context, table s
 	return err
 }
 
+func (d *StarRocksDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
+	database, name := d.tableParts(table)
+	inspect := func() (int64, string, error) {
+		var kind, nullable string
+		var length sql.NullInt64
+		err := d.db.QueryRowContext(ctx, "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE FROM information_schema.columns WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+			database, name, destination.CDCLSNColumn).Scan(&kind, &length, &nullable)
+		if errors.Is(err, sql.ErrNoRows) {
+			return maxVarcharBytes, "", nil
+		}
+		if err != nil {
+			return 0, "", fmt.Errorf("inspect StarRocks CDC state position column: %w", err)
+		}
+		if !strings.EqualFold(kind, "varchar") && !strings.EqualFold(kind, "char") {
+			return 0, "", fmt.Errorf("StarRocks CDC state position column must be a string, found %s", kind)
+		}
+		return length.Int64, nullable, nil
+	}
+	length, nullable, err := inspect()
+	if err != nil || length >= maxVarcharBytes {
+		return err
+	}
+	previous, err := d.showStatus(ctx, d.schemaChangeQuery(table))
+	if err != nil {
+		return fmt.Errorf("read previous StarRocks CDC state schema change: %w", err)
+	}
+	if state := previous["State"]; state != "" && state != "FINISHED" && state != "CANCELLED" {
+		if err := d.waitForSchemaChange(ctx, table, ""); err != nil {
+			return err
+		}
+		length, nullable, err = inspect()
+		if err != nil || length >= maxVarcharBytes {
+			return err
+		}
+	}
+	nullability := " NOT NULL"
+	if strings.EqualFold(nullable, "YES") {
+		nullability = " NULL"
+	}
+	query := fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s VARCHAR(%d)%s", d.tableRef(table), quoteColumn(destination.CDCLSNColumn), maxVarcharBytes, nullability)
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
+		return fmt.Errorf("widen StarRocks CDC state position column: %w", err)
+	}
+	if err := d.waitForSchemaChange(ctx, table, previous["JobId"]); err != nil {
+		return err
+	}
+	length, _, err = inspect()
+	if err != nil {
+		return err
+	}
+	if length < maxVarcharBytes {
+		return fmt.Errorf("StarRocks CDC state position column remains %d bytes after widening; need %d bytes", length, maxVarcharBytes)
+	}
+	return nil
+}
+
 func (d *StarRocksDestination) LoadCDCState(ctx context.Context, table, connectorID string) ([]destination.CDCStateEntry, error) {
 	rows, err := d.db.QueryContext(ctx, "SELECT DISTINCT event_id, source_table, destination_table, state_kind, state_generation, state_status, _cdc_lsn FROM "+d.tableRef(table)+" WHERE connector_id = ?", connectorID)
 	if err != nil {
@@ -237,6 +294,7 @@ func (d *StarRocksDestination) validatePrimaryKey(ctx context.Context, role, tab
 
 var (
 	_ destination.CDCStateTablePreparer        = (*StarRocksDestination)(nil)
+	_ destination.CDCStatePositionMigrator     = (*StarRocksDestination)(nil)
 	_ destination.CDCStateReader               = (*StarRocksDestination)(nil)
 	_ destination.CDCStateFenceReader          = (*StarRocksDestination)(nil)
 	_ destination.CDCStatePruner               = (*StarRocksDestination)(nil)
