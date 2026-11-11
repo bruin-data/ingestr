@@ -528,6 +528,8 @@ type streamTableState struct {
 	softReplace                 *pendingSoftReplace
 	snapshotRows                int64
 	snapshotBytes               uint64
+	snapshotWindowOpen          bool
+	snapshotWindowAfter         []string
 }
 
 // pendingSoftReplace is a snapshot replacement applied without emptying the

@@ -24,6 +24,9 @@ type CDCSnapshotChunk struct {
 	Timing *CDCChunkTiming
 	// OrderedIntegerKeys certifies source key ordering is signed integer order.
 	OrderedIntegerKeys bool
+	// DeferMerge stages a serial chunk and leaves it unmerged. The consumer
+	// must not acknowledge progress for a deferred chunk.
+	DeferMerge bool
 }
 
 // CDCChunkedSnapshotOptions enables short, resumable PostgreSQL snapshot reads.
@@ -37,4 +40,7 @@ type CDCChunkedSnapshotOptions struct {
 	Continuous     bool
 	RefreshID      string
 	Store          CDCChunkStore
+	// FlushRecords is the serial staging window. Zero merges and checkpoints
+	// every chunk. Parallel execution ignores it.
+	FlushRecords int64
 }

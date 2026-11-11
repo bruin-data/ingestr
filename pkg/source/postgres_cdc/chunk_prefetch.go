@@ -87,8 +87,8 @@ func closeChunkSpool(spool *os.File) error {
 	return errors.Join(spool.Close(), os.Remove(spool.Name()))
 }
 
-func (r *chunkReader) emitChunk(ctx context.Context, table source.SourceTableInfo, prefetch *chunkPrefetch, read chunkReadResult, timing *source.CDCChunkTiming) error {
-	metadata := &source.CDCSnapshotChunk{After: prefetch.after, Last: read.chunk.LastKey, Timing: timing, OrderedIntegerKeys: chunkKeysOrderedIntegers(table)}
+func (r *chunkReader) emitChunk(ctx context.Context, table source.SourceTableInfo, prefetch *chunkPrefetch, read chunkReadResult, timing *source.CDCChunkTiming, deferMerge bool) error {
+	metadata := &source.CDCSnapshotChunk{After: prefetch.after, Last: read.chunk.LastKey, Timing: timing, OrderedIntegerKeys: chunkKeysOrderedIntegers(table), DeferMerge: deferMerge}
 	if err := r.emit(ctx, source.RecordBatchResult{TableName: table.Name, CDCSnapshotChunk: metadata}); err != nil {
 		return err
 	}

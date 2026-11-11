@@ -45,20 +45,21 @@ func (s *PostgresCDCSource) ValidateCDCChunkedSnapshot(ctx context.Context, tabl
 }
 
 type chunkReader struct {
-	source   *PostgresCDCSource
-	tables   []source.SourceTableInfo
-	opts     source.ReadOptions
-	options  *source.CDCChunkedSnapshotOptions
-	state    *chunkBootstrapState
-	journal  *chunkJournal
-	repl     *MultiTableReplicator
-	accum    *batchAccumulator
-	results  chan<- source.RecordBatchResult
-	multi    bool
-	pending  []DecodedChanges
-	bytes    int64
-	prefetch *chunkPrefetch
-	walRange *chunkWALRange
+	source           *PostgresCDCSource
+	tables           []source.SourceTableInfo
+	opts             source.ReadOptions
+	options          *source.CDCChunkedSnapshotOptions
+	state            *chunkBootstrapState
+	journal          *chunkJournal
+	repl             *MultiTableReplicator
+	accum            *batchAccumulator
+	results          chan<- source.RecordBatchResult
+	multi            bool
+	pending          []DecodedChanges
+	bytes            int64
+	prefetch         *chunkPrefetch
+	serialWindowRows int64
+	walRange         *chunkWALRange
 }
 
 func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.SourceTableInfo, slot string, resumes map[string]string, opts source.ReadOptions, multi bool) (<-chan source.RecordBatchResult, error) {
@@ -289,7 +290,7 @@ func (r *chunkReader) copyChunk(ctx context.Context, table source.SourceTableInf
 		return read.err
 	}
 	timing := &source.CDCChunkTiming{}
-	if err := r.emitChunk(ctx, table, prefetch, read, timing); err != nil {
+	if err := r.emitChunk(ctx, table, prefetch, read, timing, false); err != nil {
 		return err
 	}
 	r.walRange = newChunkWALRange(table, read.chunk)

@@ -78,5 +78,6 @@ func (e *StreamingExecutor) chunkedSnapshotOptions(cfg *config.IngestConfig, des
 		Continuous:     cfg.Stream,
 		RefreshID:      refreshID,
 		Store:          e.opts.StateManager.ChunkStore(),
+		FlushRecords:   e.opts.FlushRecords,
 	}, nil
 }
