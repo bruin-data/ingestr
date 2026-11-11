@@ -8,7 +8,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-var decimalPrecisionRegex = regexp.MustCompile(`(?i)(?:decimal|numeric)\((\d+)(?:,\s*(\d+))?\)`)
+// Anchored so that ENUM and SET member labels such as 'decimal(6,2)' do not match.
+var decimalPrecisionRegex = regexp.MustCompile(`(?i)^(?:unsigned\s+)?(?:decimal|numeric)\((\d+)(?:,\s*(\d+))?\)`)
 
 // MapMySQLToDataType maps MySQL type names to internal DataType.
 func MapMySQLToDataType(mysqlType string) (schema.DataType, int, int, schema.DataType) {
@@ -109,5 +110,95 @@ func MapMySQLToDataType(mysqlType string) (schema.DataType, int, int, schema.Dat
 
 	default:
 		return schema.TypeString, 0, 0, schema.TypeUnknown
+	}
+}
+
+var mysqlSpatialTypes = map[string]bool{
+	"GEOMETRY": true, "POINT": true, "LINESTRING": true, "POLYGON": true,
+	"MULTIPOINT": true, "MULTILINESTRING": true, "MULTIPOLYGON": true,
+	"GEOMCOLLECTION": true, "GEOMETRYCOLLECTION": true,
+}
+
+func isMySQLSpatialType(columnType string) bool {
+	baseType, _, _ := strings.Cut(strings.ToUpper(strings.TrimSpace(columnType)), "(")
+	baseType, _, _ = strings.Cut(baseType, " ")
+	return mysqlSpatialTypes[baseType]
+}
+
+// parseMySQLEnumSetMembers returns the members declared by an ENUM or SET
+// COLUMN_TYPE. MySQL renders each member as a quoted literal, doubling quotes
+// and backslash-escaping NUL, newline, carriage return and backslash.
+func parseMySQLEnumSetMembers(columnType string) (members []string, isSet bool, ok bool) {
+	columnType = strings.TrimSpace(columnType)
+	open := strings.IndexByte(columnType, '(')
+	if open < 0 || !strings.HasSuffix(columnType, ")") {
+		return nil, false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(columnType[:open])) {
+	case "enum":
+	case "set":
+		isSet = true
+	default:
+		return nil, false, false
+	}
+	body := columnType[open+1 : len(columnType)-1]
+
+	for i := 0; i < len(body); {
+		if body[i] != '\'' {
+			return nil, false, false
+		}
+		i++
+		var member strings.Builder
+		closed := false
+		for i < len(body) {
+			c := body[i]
+			switch {
+			case c == '\'' && i+1 < len(body) && body[i+1] == '\'':
+				member.WriteByte('\'')
+				i += 2
+			case c == '\'':
+				closed = true
+				i++
+			case c == '\\' && i+1 < len(body):
+				member.WriteByte(unescapeMySQLLiteralByte(body[i+1]))
+				i += 2
+			default:
+				member.WriteByte(c)
+				i++
+			}
+			if closed {
+				break
+			}
+		}
+		if !closed {
+			return nil, false, false
+		}
+		members = append(members, member.String())
+		if i < len(body) {
+			if body[i] != ',' || i+1 == len(body) {
+				return nil, false, false
+			}
+			i++
+		}
+	}
+	return members, isSet, true
+}
+
+func unescapeMySQLLiteralByte(c byte) byte {
+	switch c {
+	case '0':
+		return 0
+	case 'n':
+		return '\n'
+	case 'r':
+		return '\r'
+	case 't':
+		return '\t'
+	case 'b':
+		return '\b'
+	case 'Z':
+		return 0x1a
+	default:
+		return c
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -165,6 +166,106 @@ func TestMapMySQLToDataTypeUnsignedWidening(t *testing.T) {
 		if scale != 0 {
 			t.Errorf("MapMySQLToDataType(%q) scale = %d, want 0", tc.columnType, scale)
 		}
+	}
+}
+
+func TestMapMySQLToDataTypeIgnoresTypeNamesInsideMembers(t *testing.T) {
+	cases := []struct {
+		columnType    string
+		want          schema.DataType
+		wantPrecision int
+		wantScale     int
+	}{
+		{"enum('decimal(6,2)','other')", schema.TypeString, 0, 0},
+		{"set('numeric(10)','x')", schema.TypeString, 0, 0},
+		{"decimal(6,2)", schema.TypeDecimal, 6, 2},
+		{"decimal(10,2) unsigned", schema.TypeDecimal, 10, 2},
+		{"NUMERIC(12)", schema.TypeDecimal, 12, 0},
+	}
+	for _, tc := range cases {
+		dt, precision, scale, _ := MapMySQLToDataType(tc.columnType)
+		if dt != tc.want || precision != tc.wantPrecision || scale != tc.wantScale {
+			t.Errorf("MapMySQLToDataType(%q) = %v(%d,%d), want %v(%d,%d)", tc.columnType, dt, precision, scale, tc.want, tc.wantPrecision, tc.wantScale)
+		}
+	}
+}
+
+func TestParseMySQLEnumSetMembers(t *testing.T) {
+	cases := []struct {
+		columnType string
+		want       []string
+		wantSet    bool
+	}{
+		// COLUMN_TYPE renderings captured from MySQL 8.4.
+		{`enum('','a''b','back\\slash','comma,v','ünï','Trail','x)y')`, []string{"", "a'b", `back\slash`, "comma,v", "ünï", "Trail", "x)y"}, false},
+		{"enum('nl\\nx','tab\tx','q\"x','bs\\\\','pct%_','z\\0z')", []string{"nl\nx", "tab\tx", `q"x`, `bs\`, "pct%_", "z\x00z"}, false},
+		{"set('red','gr''een','blue')", []string{"red", "gr'een", "blue"}, true},
+		{"SET('a')", []string{"a"}, true},
+		{"enum('')", []string{""}, false},
+	}
+	for _, tc := range cases {
+		got, isSet, ok := parseMySQLEnumSetMembers(tc.columnType)
+		if !ok || isSet != tc.wantSet || !slices.Equal(got, tc.want) {
+			t.Errorf("parseMySQLEnumSetMembers(%q) = %q, set=%v, ok=%v; want %q, set=%v", tc.columnType, got, isSet, ok, tc.want, tc.wantSet)
+		}
+	}
+
+	for _, columnType := range []string{"varchar(10)", "bit(3)", "enum", "enum('a'", "enum('a)", "enum('a',)", "enum(a)", "enum('a' 'b')"} {
+		if got, _, ok := parseMySQLEnumSetMembers(columnType); ok {
+			t.Errorf("parseMySQLEnumSetMembers(%q) = %q, want rejection", columnType, got)
+		}
+	}
+}
+
+func TestGetMySQLSchemaCarriesBinlogDecodingMetadata(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+COLUMN_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
+		WithArgs("app", "items").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"COLUMN_NAME", "COLUMN_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH",
+		}).
+			AddRow("id", "int", "NO", int64(10), int64(0), nil).
+			AddRow("status", "enum('','it''s')", "YES", nil, nil, int64(4)).
+			AddRow("tags", "set('red','blue')", "YES", nil, nil, int64(8)).
+			AddRow("flags", "bit(9)", "YES", int64(9), nil, nil).
+			AddRow("location", "point", "YES", nil, nil, nil).
+			AddRow("shape", "geomcollection", "YES", nil, nil, nil))
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.KEY_COLUMN_USAGE").
+		WithArgs("app", "items").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("id"))
+
+	got, err := getMySQLSchema(context.Background(), db, "app", "items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]schema.Column{}
+	for _, col := range got.Columns {
+		byName[col.Name] = col
+	}
+	if col := byName["status"]; col.DataType != schema.TypeString || !slices.Equal(col.EnumValues, []string{"", "it's"}) || col.SetValues != nil {
+		t.Errorf("status column = %+v", col)
+	}
+	if col := byName["tags"]; col.DataType != schema.TypeString || !slices.Equal(col.SetValues, []string{"red", "blue"}) || col.EnumValues != nil {
+		t.Errorf("tags column = %+v", col)
+	}
+	if col := byName["flags"]; col.DataType != schema.TypeBinary || col.Precision != 9 {
+		t.Errorf("flags column = %+v", col)
+	}
+	for _, name := range []string{"location", "shape"} {
+		if col := byName[name]; col.DataType != schema.TypeString || !col.Spatial {
+			t.Errorf("%s column = %+v", name, col)
+		}
+	}
+	if col := byName["id"]; col.Spatial || col.EnumValues != nil || col.SetValues != nil {
+		t.Errorf("id column = %+v", col)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 
