@@ -35,9 +35,10 @@ type MultiTableCDCReader struct {
 	initialInvalidations []source.CDCSnapshotInvalidation
 	// snapshotResumes holds interrupted snapshots of tables without resume
 	// state; the startup backfill continues them instead of starting over.
-	snapshotResumes map[string]source.CDCSnapshotProgress
-	mu              sync.RWMutex // protects processedLSNs and snapshotBoundaries
-	slotSuffix      string
+	snapshotResumes      map[string]source.CDCSnapshotProgress
+	legacySlotCandidates []string
+	mu                   sync.RWMutex // protects processedLSNs and snapshotBoundaries
+	slotSuffix           string
 }
 
 func NewMultiTableCDCReader(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, resumeLSNs map[string]string, slotSuffix string) *MultiTableCDCReader {
@@ -54,6 +55,30 @@ func NewMultiTableCDCReader(src *PostgresCDCSource, tables []source.SourceTableI
 		coverageMissing:    make(map[string]struct{}),
 		slotSuffix:         slotSuffix,
 	}
+}
+
+func (r *MultiTableCDCReader) setSnapshotResumes(ctx context.Context, resumes map[string]source.CDCSnapshotProgress) error {
+	for _, table := range r.tables {
+		resume, ok := resumes[table.Name]
+		keys := resumableSnapshotKeys(table)
+		if !ok || r.resumeLSNs[table.Name] != "" || keys == nil ||
+			resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
+			continue
+		}
+		supported, err := snapshotRangeKeysSupported(ctx, r.source.queryPool, table.Name, keys)
+		if err != nil {
+			return err
+		}
+		if !supported {
+			config.Debug("[CDC] Snapshot progress for %s uses unsupported range ordering; starting a fresh replacement", table.Name)
+			continue
+		}
+		if r.snapshotResumes == nil {
+			r.snapshotResumes = make(map[string]source.CDCSnapshotProgress)
+		}
+		r.snapshotResumes[table.Name] = resume.Clone()
+	}
+	return nil
 }
 
 // reconcileTableKeys folds each table's effective merge keys into its schema so
@@ -145,7 +170,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 
 		// If resume strategy says no snapshot needed, verify the slot actually exists
 		if !needsSnapshot {
-			var slotCandidates []string
+			slotCandidates := append([]string(nil), r.legacySlotCandidates...)
 			if r.cdcConfig.SlotName == "" && opts.CDCLegacySlotSuffix != "" {
 				candidate := generateLegacyMultiTableSlotName(r.cdcConfig.Publication, opts.CDCLegacySlotSuffix)
 				if legacySlotNameUnambiguous(candidate, opts.CDCLegacySlotSuffix) {
@@ -720,13 +745,12 @@ func diffNewTables(current []source.SourceTableInfo, eligible map[string]struct{
 // determineResumeStrategy determines if we need a full snapshot or can resume.
 // Returns (needsSnapshot, minLSN).
 //
-// Only requires that at least one table has a resume LSN. Tables missing from
-// the resume map (created since the previous run, or empty ever since the
-// original snapshot) are backfilled via a temporary-slot snapshot before
-// streaming starts; see tablesWithoutResumeState.
+// A completed table cursor or interrupted snapshot boundary establishes the
+// replay position. Tables without completed cursors are backfilled through a
+// temporary-slot snapshot before replay; see tablesWithoutResumeState.
 func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
-	if len(r.resumeLSNs) == 0 {
-		return true, 0 // No resume LSNs = full snapshot
+	if len(r.resumeLSNs) == 0 && len(r.snapshotResumes) == 0 {
+		return true, 0
 	}
 
 	// Find minimum LSN across tables that have resume data.
@@ -749,7 +773,10 @@ func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
 			config.Debug("[CDC] Invalid snapshot resume boundary %q for %s; replacing snapshots", progress.Boundary, tableName)
 			return true, 0
 		}
-		minLSN = min(minLSN, boundary)
+		if first || boundary < minLSN {
+			minLSN = boundary
+			first = false
+		}
 	}
 
 	// Initialize processedLSNs from resumeLSNs
@@ -873,7 +900,7 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 		cdcConfig:   r.cdcConfig,
 		readBudget:  budget,
 	}
-	if opts.Streaming && opts.CDCManagedState && opts.CDCSnapshotReplace {
+	if (opts.Streaming || opts.CDCSnapshotProgress) && opts.CDCManagedState && opts.CDCSnapshotReplace {
 		snapshot.progressKeys = resumableSnapshotKeys(table)
 	}
 	if len(snapshot.progressKeys) > 0 {

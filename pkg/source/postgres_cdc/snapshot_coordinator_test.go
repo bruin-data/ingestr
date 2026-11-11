@@ -208,7 +208,7 @@ func TestSnapshotCoordinatorPreservesFullImageFlag(t *testing.T) {
 		t.Run(strconv.FormatBool(normal), func(t *testing.T) {
 			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 			defer mem.AssertSize(t, 0)
-			results := make(chan source.RecordBatchResult, 1)
+			results := make(chan source.RecordBatchResult, 2)
 			rows, _, err := coordinateSnapshotRanges(t.Context(), []snapshotRange{{ID: "0"}}, 1, results, nil,
 				func(ctx context.Context, index int, _ snapshotRange, updates chan<- snapshotRangeResult) error {
 					updates <- snapshotRangeResult{index: index, batch: coordinatorRecord(mem, 1), normalSnapshot: normal}
@@ -217,14 +217,75 @@ func TestSnapshotCoordinatorPreservesFullImageFlag(t *testing.T) {
 				})
 			require.NoError(t, err)
 			require.EqualValues(t, 1, rows)
-			require.Len(t, results, 1, "range EOF must not emit a table completion event")
+			wantResults := 1
+			if normal {
+				wantResults++
+			}
+			require.Len(t, results, wantResults)
 			result := <-results
 			require.Equal(t, normal, result.CDCSnapshot)
 			require.Nil(t, result.CommitToken)
 			require.False(t, result.Truncate)
 			result.Batch.Release()
+			if normal {
+				boundary := <-results
+				require.True(t, boundary.CDCSnapshotRangeEnd)
+				require.False(t, boundary.CDCSnapshot)
+				require.Nil(t, boundary.Batch)
+				require.Nil(t, boundary.CommitToken, "range EOF must not emit a table completion event")
+			}
 		})
 	}
+}
+
+func TestSnapshotCoordinatorManyRangesKeepsProgressAndCompletion(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	plan := make([]snapshotRange, 64)
+	for i := range plan {
+		plan[i].ID = strconv.Itoa(i)
+	}
+	results := make(chan source.RecordBatchResult, len(plan)*4)
+	var vectors [][]snapshotRange
+	rows, _, err := coordinateSnapshotRanges(t.Context(), plan, 4, results,
+		func(_ context.Context, ranges []snapshotRange) error {
+			vectors = append(vectors, ranges)
+			return nil
+		},
+		func(_ context.Context, index int, _ snapshotRange, updates chan<- snapshotRangeResult) error {
+			for key := range 3 {
+				updates <- snapshotRangeResult{index: index, batch: coordinatorRecord(mem, int64(index*3+key)), lastKey: []string{strconv.Itoa(key)}, normalSnapshot: true}
+			}
+			updates <- snapshotRangeResult{index: index, done: true, normalSnapshot: true}
+			return nil
+		})
+	require.NoError(t, err)
+	require.EqualValues(t, len(plan)*3, rows)
+	require.GreaterOrEqual(t, len(vectors), len(plan))
+	require.Less(t, len(vectors), len(plan)*3, "large plans must not clone their progress for every batch")
+	last := vectors[len(vectors)-1]
+	for _, r := range last {
+		require.True(t, r.Complete)
+		require.Equal(t, []string{"2"}, r.LastKey)
+	}
+	completed := 0
+	for _, r := range vectors[0] {
+		if r.Complete {
+			completed++
+		}
+	}
+	require.Less(t, completed, len(plan), "later updates must not change earlier vectors")
+	close(results)
+	boundaries := 0
+	for result := range results {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+		if result.CDCSnapshotRangeEnd {
+			boundaries++
+		}
+	}
+	require.Equal(t, len(plan), boundaries)
 }
 
 func TestSnapshotCoordinatorCompletedPlanDoesNotReadOrCompleteTable(t *testing.T) {

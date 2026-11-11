@@ -138,7 +138,7 @@ type MultiTableIngestionJob struct {
 	TableDestNames map[string]string // source table → dest table mapping
 	Tracker        progress.Tracker
 	CDCResumeLSNs  map[string]string // Per-table CDC resume LSNs: source table → max LSN already processed
-	// CDCSnapshotResumes lists interrupted snapshots streaming can continue.
+	// CDCSnapshotResumes lists interrupted snapshots the consumer can continue.
 	CDCSnapshotResumes map[string]source.CDCSnapshotProgress
 	EvolutionPlans     map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
 	CDCStateManager    *CDCStateManager

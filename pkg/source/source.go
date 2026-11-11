@@ -128,8 +128,10 @@ type ReadOptions struct {
 	CDCManagedState                 bool                // Consumer persists CDCStateCommitTokens independently of destination rows
 	CDCChunkedSnapshot              *CDCChunkedSnapshotOptions
 	CDCSnapshotSpool                *CDCSnapshotSpoolOptions
-	CDCSnapshotReplace              bool // Consumer can apply a full-snapshot replacement boundary
-	CDCStableDataBatches            bool // Consumer requires source-stable CDC data-write identities
+	CDCSnapshotReplace              bool                 // Consumer can apply a full-snapshot replacement boundary
+	CDCSnapshotProgress             bool                 // Consumer checkpoints committed snapshot ranges during a finite run
+	CDCSnapshotResume               *CDCSnapshotProgress // Durable range progress for a single-table snapshot
+	CDCStableDataBatches            bool                 // Consumer requires source-stable CDC data-write identities
 	FullRefresh                     bool
 	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
 	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
@@ -161,10 +163,13 @@ type RecordBatchResult struct {
 	// CDCSnapshot identifies full snapshot row images without WAL changes,
 	// deletes, or unchanged TOAST values. It applies only to Batch.
 	CDCSnapshot bool
-	Batch       arrow.RecordBatch
-	Err         error
-	TableName   string // Source table name for multi-table sources (empty for single-table)
-	Truncate    bool   // Empty the destination table before applying subsequent results
+	// CDCSnapshotRangeEnd flushes buffered snapshot requests without requiring
+	// a transaction commit or acknowledging source progress.
+	CDCSnapshotRangeEnd bool
+	Batch               arrow.RecordBatch
+	Err                 error
+	TableName           string // Source table name for multi-table sources (empty for single-table)
+	Truncate            bool   // Empty the destination table before applying subsequent results
 	// CDCWALTruncate distinguishes a replicated source TRUNCATE from the
 	// destination reset emitted before a replacement snapshot.
 	CDCWALTruncate bool

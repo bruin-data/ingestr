@@ -25,6 +25,8 @@ The same URI structure can be used both for sources and destinations. You can re
 
 The `postgres+cdc://` scheme reads changes through PostgreSQL logical replication instead of querying tables: an initial snapshot of each table followed by every insert, update, and delete, applied to the destination with the `merge` strategy. It requires `wal_level=logical` on the source and a user with the `REPLICATION` privilege.
 
+Normal snapshots with supported non-null unique keys divide the table into a queue of ranges shared by `--extract-parallelism` readers. Planning uses the estimated row count, targets 16 ranges per reader or more when ranges would exceed roughly 75,000 rows, and caps the plan at 1,024 ranges. Small tables use fewer ranges. Readers take another range as soon as they finish, reducing the time spent waiting for the last reader. Saved range boundaries remain unchanged on resume, including when the reader count changes.
+
 ```plaintext
 postgres+cdc://<username>:<password>@<host>:<port>/<database-name>?publication=<name>&slot=<name>&discover_interval=<duration>&state_id=<id>
 ```
@@ -43,7 +45,7 @@ Without `--source-table`, CDC runs in multi-table mode and replicates every tabl
 
 Listing tables does not narrow the publication — `ingestr_publication` is shared by every managed run against the database — so PostgreSQL still sends the other tables' changes and ingestr discards them. Supply your own `publication=` to control what the WAL carries. A subset also gets its own replication slot and CDC state, so changing the list starts a fresh snapshot; see [Multi-table CDC](/getting-started/cdc#multi-table-cdc).
 
-CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. With the default snapshot reader, an interrupted first bootstrap without a saved stream position restarts its incomplete table snapshots. The multi-table reader can resume an incomplete keyed snapshot when the stream already has a saved position. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
+CDC progress is stored in a shared `cdc_state` event table and `cdc_targets` ownership registry in the destination's managed staging namespace (`_bruin_staging` by default, or the destination-specific staging placement). Rows are isolated by connector and source-table identity, so multiple connectors can safely share both tables. Resume never relies on the maximum `_cdc_lsn` in a user table. Normal keyed snapshots can resume saved ranges when the destination checkpoints committed rows and the original replication slot retains the WAL needed to repair changes behind their cursors. Direct StarRocks loads support this during finite single-table and multi-table runs, including an interrupted first snapshot. Without usable range progress or retained WAL, the incomplete snapshot starts again. PostgreSQL `TRUNCATE` events replace the affected destination table before later rows from the same transaction are applied.
 
 ### Spooling normal snapshots
 

@@ -1761,7 +1761,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				cdcResumeLSNs[table.Name] = resumeLSN
 				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
 			} else {
-				if p.config.Stream && resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
+				if (p.config.Stream || destination.SupportsDirectCDCSnapshot(p.dest)) && resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
 					resume, ok, err := cdcStateManager.SnapshotResume(ctx, table.Name)
 					if err != nil {
 						return err

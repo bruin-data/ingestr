@@ -56,7 +56,7 @@ func srStressContainer(t *testing.T, ctx context.Context) (dsn, uri string) {
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "starrocks/allin1-ubuntu:3.3-latest",
-			ExposedPorts: []string{"9030/tcp", "8040/tcp"},
+			ExposedPorts: []string{"9030/tcp", "8030/tcp", "8040/tcp"},
 			Cmd: []string{"/bin/sh", "-c", "echo 'storage_flood_stage_usage_percent=99' >> /data/deploy/starrocks/be/conf/be.conf && " +
 				"echo 'storage_flood_stage_left_capacity_bytes=104857600' >> /data/deploy/starrocks/be/conf/be.conf && " +
 				"cd /data/deploy && ./entrypoint.sh"},
@@ -70,10 +70,13 @@ func srStressContainer(t *testing.T, ctx context.Context) (dsn, uri string) {
 	require.NoError(t, err)
 	port, err := container.MappedPort(ctx, "9030")
 	require.NoError(t, err)
-	httpPort, err := container.MappedPort(ctx, "8040")
+	fePort, err := container.MappedPort(ctx, "8030")
 	require.NoError(t, err)
-	return fmt.Sprintf("root@tcp(%s:%s)/", host, port.Port()),
-		fmt.Sprintf("starrocks://root@%s:%s/?http_port=%s&replication_num=1", host, port.Port(), httpPort.Port())
+	bePort, err := container.MappedPort(ctx, "8040")
+	require.NoError(t, err)
+	dsn, uri, closeProxy := proxyStarRocksPorts(t, host, port.Port(), fePort.Port(), bePort.Port())
+	t.Cleanup(closeProxy)
+	return dsn, uri
 }
 
 // srStressOpenDB connects to StarRocks and drops the databases a previous run

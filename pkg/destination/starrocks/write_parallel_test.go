@@ -48,6 +48,11 @@ func runStreamLoadTest(t *testing.T, records <-chan source.RecordBatchResult, me
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	d := &StarRocksDestination{loader: &streamLoader{endpoint: "http://starrocks", client: &http.Client{Transport: transport}}}
 	if opts.CDCSnapshot {
+		limits := defaultSnapshotWriteLimits(max(1, opts.Parallelism))
+		limits.requestTarget = 1
+		d.snapshotLimits = &limits
+		d.loader.waitForPublish = func(context.Context, string, int64) error { return nil }
+		d.loader.client.Transport = snapshotLoadTestTransport(transport)
 		validated, mock := newVisibilityTestDestination(t)
 		expectSnapshotPrimaryKey(mock, "PRIMARY_KEYS", opts.PrimaryKeys...)
 		expectSnapshotColumns(mock, append(opts.Schema.ColumnNames(), cdcOrderColumn)...)
@@ -81,6 +86,25 @@ func runStreamLoadTest(t *testing.T, records <-chan source.RecordBatchResult, me
 		}
 	})
 	return ctx, cancel, done
+}
+
+func snapshotLoadTestTransport(load parallelLoadTransport) parallelLoadTransport {
+	return func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/api/transaction/load" {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"Status":"OK","TxnId":42,"NumberLoadedRows":0,"NumberTotalRows":0,"NumberFilteredRows":0,"NumberUnselectedRows":0}`))}, nil
+		}
+		response, err := load(r)
+		if err != nil {
+			return response, err
+		}
+		body, err := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		response.Body = io.NopCloser(strings.NewReader(strings.ReplaceAll(string(body), `"Status":"Success"`, `"Status":"OK"`)))
+		return response, nil
+	}
 }
 
 func TestWriteParallelDirectLoadsPreserveDuplicateKeyOrder(t *testing.T) {

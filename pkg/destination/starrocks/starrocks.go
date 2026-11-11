@@ -39,6 +39,7 @@ type StarRocksDestination struct {
 	replicationNum     string // empty => use the cluster default
 	labelCounter       int64
 	legacyLoadMetadata atomic.Bool
+	snapshotLimits     *snapshotWriteLimits
 
 	swapMu sync.Mutex
 	// preparedSwaps maps cross-database staging tables to the copies that
@@ -320,11 +321,10 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 		if !complete {
 			return fmt.Errorf("StarRocks direct CDC snapshot requires every target column in the snapshot schema")
 		}
+		return d.writeSnapshot(ctx, records, opts)
 	}
-	if !opts.CDCSnapshot {
-		if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
-			return err
-		}
+	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+		return err
 	}
 	startTime := time.Now()
 	var totalRows, batchNum atomic.Int64
@@ -332,14 +332,9 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 	if parallelism <= 0 {
 		parallelism = 4
 	}
-	// Snapshot loads conditionally upsert on CDC row order; other direct writes
-	// must finish in input order to preserve repeated-key updates.
-	if !opts.StagingTable && !opts.CDCSnapshot {
+	// Direct writes must finish in input order to preserve repeated-key updates.
+	if !opts.StagingTable {
 		parallelism = 1
-	}
-	mergeCondition := ""
-	if opts.CDCSnapshot {
-		mergeCondition = cdcOrderColumn
 	}
 
 	db, table := splitDatabaseTable(opts.Table)
@@ -367,26 +362,12 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 						}
 						return result.Err
 					}
-					if opts.CDCSnapshot && result.Truncate {
-						if result.Batch != nil {
-							result.Batch.Release()
-						}
-						return fmt.Errorf("StarRocks CDC snapshot cannot contain TRUNCATE events")
-					}
 					if result.Batch == nil {
 						continue
 					}
 					batch := result.Batch
-					if opts.CDCSnapshot {
-						projected, err := prepareCDCSnapshotRecord(batch, opts)
-						batch.Release()
-						if err != nil {
-							return err
-						}
-						batch = projected
-					}
 					n := batchNum.Add(1)
-					rows, err := d.loadRecord(writeCtx, db, table, batch, mergeCondition)
+					rows, err := d.loadRecord(writeCtx, db, table, batch, "")
 					batch.Release()
 					if err != nil {
 						return fmt.Errorf("failed to stream load batch %d: %w", n, err)

@@ -275,6 +275,26 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 
 		// Append source column values
 		for i, buf := range raw[:len(columns)] {
+			if columns[i].DataType == schema.TypeJSON && (fields[i].DataTypeOID == pgtype.JSONOID || fields[i].DataTypeOID == pgtype.JSONBOID) {
+				if buf == nil {
+					builders[i].AppendNull()
+				} else {
+					if fields[i].DataTypeOID == pgtype.JSONBOID && fields[i].Format == pgx.BinaryFormatCode {
+						if len(buf) < 2 || buf[0] != 1 {
+							return nil, 0, nil, fmt.Errorf("invalid binary JSONB in snapshot column %q", columns[i].Name)
+						}
+						buf = buf[1:]
+					}
+					// PostgreSQL validates the JSON; Arrow copies it before pgx can
+					// reuse the row buffer, without decoding or re-encoding it.
+					storage := builders[i].(*array.ExtensionBuilder).StorageBuilder().(*array.StringBuilder)
+					storage.BinaryBuilder.Append(buf)
+				}
+				if maxBatchBytes > 0 {
+					accBytes += int64(len(buf)) + 8
+				}
+				continue
+			}
 			val, err := snapshotValue(typeMap, fields[i], buf, columns[i])
 			var converted any
 			if err == nil {
