@@ -250,6 +250,15 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		CDCManagedState:                 job.CDCStateManager != nil,
 		FullRefresh:                     job.Config.FullRefresh,
 	}
+	if directSnapshot && job.CDCStateManager != nil && !job.Config.FullRefresh && readOpts.CDCResumeLSN == "" {
+		resume, ok, err := job.CDCStateManager.SnapshotResume(ctx, job.Config.SourceTable)
+		if err != nil {
+			return fmt.Errorf("read snapshot progress for %s: %w", job.Config.SourceTable, err)
+		}
+		if ok {
+			readOpts.CDCSnapshotResume = &resume
+		}
+	}
 
 	// The read context is cancelable so a staging-write failure stops the
 	// source goroutine instead of leaving it parked on a channel send after

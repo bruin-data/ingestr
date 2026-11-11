@@ -51,6 +51,13 @@ func (r *CDCReader) Read(ctx context.Context, opts source.ReadOptions) (<-chan s
 		table := source.SourceTableInfo{Name: r.tableName, Schema: r.tableSchema, PrimaryKeys: r.tableSchema.PrimaryKeys}
 		return r.source.readChunked(ctx, []source.SourceTableInfo{table}, slot, map[string]string{r.tableName: opts.CDCResumeLSN}, opts, false)
 	}
+	if !opts.Streaming && opts.CDCSnapshotProgress && opts.CDCManagedState && opts.CDCSnapshotReplace {
+		reader, err := r.finiteSnapshotReader(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		return reader.Read(ctx, source.MultiTableReadOptions{ReadOptions: opts})
+	}
 	results := make(chan source.RecordBatchResult, 8)
 
 	go func() {

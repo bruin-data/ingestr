@@ -128,9 +128,10 @@ type ReadOptions struct {
 	CDCManagedState                 bool                // Consumer persists CDCStateCommitTokens independently of destination rows
 	CDCChunkedSnapshot              *CDCChunkedSnapshotOptions
 	CDCSnapshotSpool                *CDCSnapshotSpoolOptions
-	CDCSnapshotReplace              bool // Consumer can apply a full-snapshot replacement boundary
-	CDCSnapshotProgress             bool // Consumer checkpoints committed snapshot ranges during a finite run
-	CDCStableDataBatches            bool // Consumer requires source-stable CDC data-write identities
+	CDCSnapshotReplace              bool                 // Consumer can apply a full-snapshot replacement boundary
+	CDCSnapshotProgress             bool                 // Consumer checkpoints committed snapshot ranges during a finite run
+	CDCSnapshotResume               *CDCSnapshotProgress // Durable range progress for a single-table snapshot
+	CDCStableDataBatches            bool                 // Consumer requires source-stable CDC data-write identities
 	FullRefresh                     bool
 	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
 	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens

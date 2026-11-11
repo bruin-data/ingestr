@@ -1675,25 +1675,8 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, resumeLSNs, opts.CDCSlotSuffix)
 	reader.initialInvalidations = invalidations
 	if opts.Streaming || opts.CDCSnapshotProgress {
-		for _, table := range tables {
-			resume, ok := opts.CDCSnapshotResumes[table.Name]
-			keys := resumableSnapshotKeys(table)
-			if !ok || resumeLSNs[table.Name] != "" || keys == nil ||
-				resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
-				continue
-			}
-			supported, err := snapshotRangeKeysSupported(ctx, s.queryPool, table.Name, keys)
-			if err != nil {
-				return nil, err
-			}
-			if !supported {
-				config.Debug("[CDC] Snapshot progress for %s uses unsupported range ordering; starting a fresh replacement", table.Name)
-				continue
-			}
-			if reader.snapshotResumes == nil {
-				reader.snapshotResumes = make(map[string]source.CDCSnapshotProgress)
-			}
-			reader.snapshotResumes[table.Name] = resume.Clone()
+		if err := reader.setSnapshotResumes(ctx, opts.CDCSnapshotResumes); err != nil {
+			return nil, err
 		}
 	}
 	if opts.Streaming {
