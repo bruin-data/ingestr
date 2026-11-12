@@ -195,6 +195,33 @@ func (tx *streamLoadTransaction) rollback(ctx context.Context) error {
 	return nil
 }
 
+// confirmAborted permits replay only when the transaction cannot publish rows.
+func (tx *streamLoadTransaction) confirmAborted(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if tx == nil || tx.id <= 0 || tx.committed {
+		return false, nil
+	}
+	if tx.closed {
+		return true, nil
+	}
+	if tx.loader.transactionState == nil {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	state, err := tx.loader.transactionState(ctx, tx.database, tx.id)
+	if err != nil {
+		return false, fmt.Errorf("verify StarRocks transaction %d abort: %w", tx.id, err)
+	}
+	if state != "ABORTED" {
+		return false, nil
+	}
+	tx.closed = true
+	return true, nil
+}
+
 func (response streamLoadTransactionResponse) checkRows() error {
 	if response.NumberLoadedRows == nil || response.NumberTotalRows == nil || response.NumberFilteredRows == nil || response.NumberUnselectedRows == nil {
 		return fmt.Errorf("StarRocks transaction prepare returned incomplete row counts")

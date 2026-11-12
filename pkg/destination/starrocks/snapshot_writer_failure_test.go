@@ -119,6 +119,67 @@ func TestSnapshotWriterEncodingFailurePreventsCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSnapshotWriterClosedJobsPreventsUnsealedCheckpoint(t *testing.T) {
+	d, server := newSnapshotTestDestination(t)
+	limits := *d.snapshotLimits
+	limits.idleInterval = time.Hour
+	opts := snapshotWriteOptions(1)
+	checkpoints := 0
+	opts.CDCSnapshotProgress = func(context.Context, source.CDCStateCommitToken) error {
+		checkpoints++
+		return nil
+	}
+	writer := &snapshotWriter{
+		dest: d, database: "db", table: "events", opts: opts, limits: limits, workers: 1,
+		stats: &snapshotWriteStats{},
+	}
+	window := writer.newWindow(0)
+	worker := &snapshotLoadWorker{
+		writer: writer, window: window, sealRequests: make(chan struct{}, 1),
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	jobs := make(chan snapshotWriteJob, 1)
+	commands := make(chan snapshotWriteCommand, 1)
+	completed := make(chan int64, 1)
+	done := make(chan error, 1)
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	jobs <- snapshotWriteJob{
+		sequence: 1, result: source.RecordBatchResult{Batch: snapshotFailurePage(mem, 1, "buffered tail"), CDCSnapshot: true},
+	}
+	go func() { done <- worker.run(ctx, jobs, commands, completed) }()
+	select {
+	case sequence := <-completed:
+		require.EqualValues(t, 1, sequence)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	window.token = &source.CDCStateCommitToken{
+		SnapshotProgress: map[string]source.CDCSnapshotProgress{"events": {Boundary: "1"}},
+	}
+	close(jobs)
+	var workerErr error
+	select {
+	case workerErr = <-done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	require.NoError(t, ctx.Err(), "the coordinator can close jobs before the outer errgroup cancels its context")
+	require.Greater(t, len(worker.body.data), 1, "the completed page must still have unflushed rows")
+	assert.Error(t, workerErr, "stopping before the final seal must fail the worker")
+	commitErr := writer.commitWindow(ctx, window)
+	if commitErr == nil {
+		require.NoError(t, writer.checkpointWindow(ctx, window))
+	}
+	assert.Error(t, commitErr, "closing jobs must not certify an unsealed window")
+	if workerErr != nil {
+		assert.ErrorIs(t, commitErr, workerErr)
+	}
+	assert.Zero(t, checkpoints, "progress must not cover the completed page's unflushed tail")
+	assert.Zero(t, server.commits)
+	mem.AssertSize(t, 0)
+}
+
 func snapshotFailurePage(mem memory.Allocator, id int64, value string) arrow.RecordBatch {
 	builder := array.NewRecordBuilder(mem, snapshotWriteOptions(1).Schema.ToArrowSchema())
 	defer builder.Release()

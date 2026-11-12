@@ -35,6 +35,25 @@ func TestSnapshotWriterRecoversExpiredWindowOnlyAfterConfirmedAbort(t *testing.T
 				var mu sync.Mutex
 				lifetimes := make(map[string]*lifetime)
 				expired, stateChecks := 0, 0
+				visibleTransactions := make(map[int64]bool)
+				d.loader.waitForPublish = func(_ context.Context, _ string, id int64) error {
+					server.mu.Lock()
+					defer server.mu.Unlock()
+					for _, tx := range server.transactions {
+						if tx.id != id {
+							continue
+						}
+						if !tx.committed || tx.rolledBack {
+							return fmt.Errorf("transaction %d cannot be visible: committed=%t rolled_back=%t", id, tx.committed, tx.rolledBack)
+						}
+						if !visibleTransactions[id] {
+							visibleTransactions[id] = true
+							server.visible++
+						}
+						return nil
+					}
+					return fmt.Errorf("transaction %d is unknown", id)
+				}
 				// Model the timeouts requested by begin; StarRocks removes expired
 				// transactions from its load endpoint but retains their ABORTED state.
 				d.loader.client.Transport = parallelLoadTransport(func(r *http.Request) (*http.Response, error) {
@@ -110,13 +129,20 @@ func TestSnapshotWriterRecoversExpiredWindowOnlyAfterConfirmedAbort(t *testing.T
 				opts.CDCSnapshotProgress = func(context.Context, source.CDCStateCommitToken) error {
 					server.mu.Lock()
 					defer server.mu.Unlock()
-					var committed []int64
+					var committed, visible []int64
 					for _, tx := range server.transactions {
 						if tx.committed {
 							committed = append(committed, tx.rows...)
 						}
+						if visibleTransactions[tx.id] {
+							require.True(t, tx.committed)
+							require.False(t, tx.rolledBack)
+							visible = append(visible, tx.rows...)
+						}
 					}
 					require.ElementsMatch(t, []int64{0, 1}, committed)
+					require.ElementsMatch(t, []int64{0, 1}, visible, "a checkpoint must cover rows from visible transactions")
+					require.Len(t, visibleTransactions, server.commits)
 					require.Equal(t, server.commits, server.visible)
 					checkpoints++
 					return nil

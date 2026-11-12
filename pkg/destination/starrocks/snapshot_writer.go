@@ -475,37 +475,44 @@ func (s *snapshotWriter) commitPart(ctx context.Context, window *snapshotWindow,
 	return s.retry(ctx, part, cause)
 }
 
-// retry replays a window part refused for version pressure in a new
-// transaction, backing off and halving load concurrency between attempts.
+// retry replays a window part refused for version pressure or confirmed aborted.
 func (s *snapshotWriter) retry(ctx context.Context, part *snapshotWindowPart, cause error) (retErr error) {
-	if !isStreamLoadVersionPressure(cause) {
-		return cause
-	}
 	retryCtx, cancel := context.WithTimeout(ctx, s.limits.retryTimeout)
 	defer cancel()
+	reason := "transaction retries"
+	if isStreamLoadVersionPressure(cause) {
+		reason = "version pressure"
+	}
 	defer func() {
 		if retryCtx.Err() != nil {
 			if ctx.Err() != nil {
 				retErr = ctx.Err()
 			} else {
-				retErr = fmt.Errorf("StarRocks snapshot version pressure exceeded %s: %w", s.limits.retryTimeout, errors.Join(cause, retryCtx.Err()))
+				retErr = fmt.Errorf("StarRocks snapshot %s exceeded %s: %w", reason, s.limits.retryTimeout, errors.Join(cause, retryCtx.Err()))
 			}
 		}
 	}()
 	deadline, _ := retryCtx.Deadline()
 	delay := s.limits.retryInitial
-	for isStreamLoadVersionPressure(cause) {
-		s.stats.versionPressures.Add(1)
-		s.limiter.reduce()
+	for {
+		if isStreamLoadVersionPressure(cause) {
+			s.stats.versionPressures.Add(1)
+			s.limiter.reduce()
+		} else {
+			aborted, err := part.tx.confirmAborted(retryCtx)
+			if err != nil || !aborted {
+				return errors.Join(cause, err)
+			}
+		}
 		if part.tx != nil && !part.tx.closed {
 			if err := part.tx.rollback(retryCtx); err != nil {
 				return fmt.Errorf("rollback rejected StarRocks snapshot transaction: %w (load error: %v)", err, cause)
 			}
 		}
 		if time.Until(deadline) < delay {
-			return fmt.Errorf("StarRocks snapshot version pressure exceeded %s: %w", s.limits.retryTimeout, cause)
+			return fmt.Errorf("StarRocks snapshot %s exceeded %s: %w", reason, s.limits.retryTimeout, cause)
 		}
-		config.Debug("[STARROCKS] Snapshot load for %s hit version pressure; retrying transaction in %s", s.table, delay)
+		config.Debug("[STARROCKS] Snapshot transaction for %s failed (%v); retrying in %s", s.table, cause, delay)
 		timer := time.NewTimer(delay)
 		select {
 		case <-retryCtx.Done():
@@ -532,7 +539,6 @@ func (s *snapshotWriter) retry(ctx context.Context, part *snapshotWindowPart, ca
 			return nil
 		}
 	}
-	return cause
 }
 
 func (s *snapshotWriter) rollbackOpen(ctx context.Context) {
@@ -605,6 +611,9 @@ func (w *snapshotLoadWorker) run(ctx context.Context, jobs <-chan snapshotWriteJ
 	})
 	err := group.Wait()
 	if w.window != nil {
+		if err == nil {
+			err = fmt.Errorf("StarRocks snapshot worker stopped before sealing its window")
+		}
 		// Releasing a failed worker must not certify its unflushed rows.
 		w.window.parts[w.id].terminalErr = err
 		w.window.open.Done()
@@ -844,15 +853,20 @@ func (w *snapshotLoadWorker) load(ctx context.Context, request snapshotLoad) err
 		return nil
 	}
 	if !isStreamLoadVersionPressure(err) {
-		return err
+		aborted, abortErr := part.tx.confirmAborted(ctx)
+		if abortErr != nil || !aborted {
+			return errors.Join(err, abortErr)
+		}
 	}
 	part.mu.Lock()
 	if part.failed == nil {
 		part.failed = err
 	}
 	part.mu.Unlock()
-	s.limiter.reduce()
-	config.Debug("[STARROCKS] Snapshot load for %s hit version pressure; window %d will be replayed at commit", s.table, window.id)
+	if isStreamLoadVersionPressure(err) {
+		s.limiter.reduce()
+	}
+	config.Debug("[STARROCKS] Snapshot load for %s failed (%v); window %d will be replayed at commit", s.table, err, window.id)
 	return nil
 }
 
