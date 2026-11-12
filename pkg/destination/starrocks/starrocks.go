@@ -134,6 +134,7 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	d.legacyLoadMetadata.Store(false)
 	d.loader = loader
 	d.loader.waitForPublish = d.waitForPublish
+	d.loader.transactionState = d.transactionState
 	config.Debug("[STARROCKS] Connected (database: %s, stream_load: %s)", d.database, loader.endpoint)
 	return nil
 }
