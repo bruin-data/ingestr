@@ -377,7 +377,10 @@ func (s *OdooSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 			go func() {
 				defer close(results)
 				if err := s.readModel(ctx, plan, opts, results); err != nil {
-					results <- source.RecordBatchResult{Err: err}
+					select {
+					case results <- source.RecordBatchResult{Err: err}:
+					case <-ctx.Done():
+					}
 				}
 			}()
 			return results, nil
@@ -422,7 +425,12 @@ func (s *OdooSource) readModel(ctx context.Context, plan *tablePlan, opts source
 		if err != nil {
 			return fmt.Errorf("odoo: failed to convert %s to Arrow: %w", plan.model, err)
 		}
-		results <- source.RecordBatchResult{Batch: record}
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		}
 		batch = nil
 		accBytes = 0
 		return nil
@@ -437,6 +445,7 @@ func (s *OdooSource) readModel(ctx context.Context, plan *tablePlan, opts source
 		default:
 		}
 
+		pageStart := lastID
 		domain := append([]interface{}{[]interface{}{"id", ">", lastID}}, filter...)
 		raw, err := s.client.call(ctx, plan.model, "search_read", map[string]interface{}{
 			"domain":  domain,
@@ -487,55 +496,40 @@ func (s *OdooSource) readModel(ctx context.Context, plan *tablePlan, opts source
 		}
 
 		// Some models (mail.message, ir.attachment) drop rows the user cannot access after the SQL limit,
-		// so a short or empty page does not mean the end; ask how many accessible rows remain.
-		next, err := s.nextAccessibleID(ctx, plan, lastID, filter, len(rows) == 0)
+		// so a short or empty page does not mean the end; ask whether accessible rows remain.
+		more, err := s.hasAccessibleAfter(ctx, plan, lastID, filter)
 		if err != nil {
 			return err
 		}
-		if next == 0 {
+		if !more {
 			break
 		}
-		lastID = next - 1
+		// The SQL limit covered at least pageSize matching ids after pageStart, and every accessible one among
+		// them came back, so the cursor can skip past that window even when the page was empty.
+		lastID = max(lastID, pageStart+int64(pageSize))
 	}
 
 	config.Debug("[ODOO] %s complete: %d row(s)", plan.model, total)
 	return nil
 }
 
-// nextAccessibleID returns 0 when no accessible row remains after lastID. Otherwise it returns lastID+1, or,
-// when needID is set because a whole page was filtered out, the smallest accessible id after lastID.
-func (s *OdooSource) nextAccessibleID(ctx context.Context, plan *tablePlan, lastID int64, filter []interface{}, needID bool) (int64, error) {
+func (s *OdooSource) hasAccessibleAfter(ctx context.Context, plan *tablePlan, lastID int64, filter []interface{}) (bool, error) {
 	domain := append([]interface{}{[]interface{}{"id", ">", lastID}}, filter...)
-	kwargs := map[string]interface{}{"domain": domain, "context": map[string]interface{}{"active_test": false}}
-	raw, err := s.client.call(ctx, plan.model, "search_count", kwargs)
+	raw, err := s.client.call(ctx, plan.model, "search_count", map[string]interface{}{
+		"domain":  domain,
+		"context": map[string]interface{}{"active_test": false},
+	})
 	if err != nil {
-		return 0, fmt.Errorf("odoo: failed to count remaining %s records: %w", plan.model, err)
+		return false, fmt.Errorf("odoo: failed to count remaining %s records: %w", plan.model, err)
 	}
 	var remaining int64
 	if err := decodeJSON(raw, &remaining); err != nil {
-		return 0, fmt.Errorf("odoo: failed to parse %s record count: %w", plan.model, err)
+		return false, fmt.Errorf("odoo: failed to parse %s record count: %w", plan.model, err)
 	}
-	if remaining == 0 {
-		return 0, nil
+	if remaining > 0 {
+		config.Debug("[ODOO] %s: short page after id %d but %d accessible row(s) remain", plan.model, lastID, remaining)
 	}
-	config.Debug("[ODOO] %s: short page after id %d but %d accessible row(s) remain", plan.model, lastID, remaining)
-	if !needID {
-		return lastID + 1, nil
-	}
-
-	kwargs["order"] = "id asc"
-	raw, err = s.client.call(ctx, plan.model, "search", kwargs)
-	if err != nil {
-		return 0, fmt.Errorf("odoo: failed to search remaining %s records: %w", plan.model, err)
-	}
-	var ids []int64
-	if err := decodeJSON(raw, &ids); err != nil {
-		return 0, fmt.Errorf("odoo: failed to parse %s record ids: %w", plan.model, err)
-	}
-	if len(ids) == 0 || ids[0] <= lastID {
-		return 0, fmt.Errorf("odoo: %s reported %d remaining row(s) after id %d but returned none", plan.model, remaining, lastID)
-	}
-	return ids[0], nil
+	return remaining > 0, nil
 }
 
 // coerce converts a search_read value to the column's Go type. Odoo sends false for every empty

@@ -192,8 +192,6 @@ func fakeJSON2(t *testing.T, total int, hidden map[int]bool, domains *[][]interf
 			_ = json.NewEncoder(w).Encode(rows)
 		case "/json/2/res.partner/search_count":
 			_ = json.NewEncoder(w).Encode(len(visibleAfter(after, 0)))
-		case "/json/2/res.partner/search":
-			_ = json.NewEncoder(w).Encode(visibleAfter(after, 0))
 		default:
 			http.NotFound(w, r)
 		}
@@ -204,7 +202,7 @@ func TestReadPagesByIDKeyset(t *testing.T) {
 	t.Parallel()
 
 	var domains [][]interface{}
-	srv := fakeJSON2(t, 12, map[int]bool{5: true, 7: true, 8: true, 9: true}, &domains)
+	srv := fakeJSON2(t, 15, map[int]bool{5: true, 7: true, 8: true, 9: true, 10: true, 11: true, 12: true}, &domains)
 	defer srv.Close()
 
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -230,12 +228,12 @@ func TestReadPagesByIDKeyset(t *testing.T) {
 		col := r.Batch.Column(0).(*array.Int64)
 		ids = append(ids, col.Int64Values()...)
 	}
-	assert.Equal(t, []int64{1, 2, 3, 4, 6, 10, 11, 12}, ids, "a short page (4, 6) and an empty page (7-9 hidden) must not end the read")
+	assert.Equal(t, []int64{1, 2, 3, 4, 6, 13, 14, 15}, ids, "a short page (4, 6) and two empty pages (7-12 hidden) must not end the read")
 
 	var afters []float64
 	for _, d := range domains {
 		afters = append(afters, d[0].([]interface{})[2].(float64))
 		assert.Equal(t, []interface{}{"write_date", ">=", "2025-12-31 21:00:00"}, d[1], "the interval is sent in UTC")
 	}
-	assert.Equal(t, []float64{0, 3, 6, 9, 12}, afters)
+	assert.Equal(t, []float64{0, 3, 6, 9, 12, 15}, afters, "each hidden window is skipped by one page")
 }
