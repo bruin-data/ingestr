@@ -229,7 +229,7 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 				pendingProgress = pendingProgress[1:]
 			}
 		}
-		recordProgress := func(result source.RecordBatchResult) {
+		recordProgress := func(result source.RecordBatchResult) error {
 			token, hasToken := result.CommitToken.(source.CDCStateCommitToken)
 			if ptr, ok := result.CommitToken.(*source.CDCStateCommitToken); ok && ptr != nil {
 				token, hasToken = *ptr, true
@@ -244,10 +244,12 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 				for _, command := range commands {
 					select {
 					case command <- snapshotWriteCommand{sequence: dispatched}:
-					default:
+					case <-writeCtx.Done():
+						return writeCtx.Err()
 					}
 				}
 			}
+			return nil
 		}
 		defer func() {
 			if pending != nil {
@@ -340,7 +342,9 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 				dispatched = job.sequence
 				activePages++
 				pending = nil
-				recordProgress(job.result)
+				if err := recordProgress(job.result); err != nil {
+					return err
+				}
 			case result, ok := <-receive:
 				since(&s.stats.recvWait, recvStart)
 				if !ok {
@@ -358,8 +362,8 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 				}
 				if result.Batch != nil {
 					pending = &snapshotWriteJob{result: result, sequence: dispatched + 1}
-				} else {
-					recordProgress(result)
+				} else if err := recordProgress(result); err != nil {
+					return err
 				}
 			}
 		}
