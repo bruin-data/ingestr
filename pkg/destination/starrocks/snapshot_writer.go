@@ -346,7 +346,9 @@ func (s *snapshotWriter) commitPart(ctx context.Context, window *snapshotWindow,
 	}
 	cause := part.failed
 	if cause == nil {
-		cause = s.withPermit(ctx, func() error { return part.tx.commit(ctx) })
+		// Commits wait for publication; holding a load permit meanwhile would
+		// stall the loads of the next window.
+		cause = part.tx.commit(ctx)
 		if cause == nil {
 			s.stats.transactions.Add(1)
 			config.Debug("[STARROCKS] Committed snapshot window %d transaction %d (label %s) for %s.%s: %d requests, %d bytes",
