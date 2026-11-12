@@ -359,3 +359,53 @@ func TestSnapshotWriterMemoryBudget(t *testing.T) {
 		require.GreaterOrEqual(t, limits.transactionBytes, limits.requestBytes)
 	}
 }
+
+func TestSnapshotWriterCommitsNextWindowWhileEarlierAwaitsVisibility(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		d, server := newSnapshotTestDestination(t)
+		d.snapshotLimits.requestTarget, d.snapshotLimits.transactionBytes = 1, 1
+		release := make(chan struct{})
+		var publishing atomic.Int64
+		d.loader.waitForPublish = func(ctx context.Context, _ string, _ int64) error {
+			publishing.Add(1)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			server.mu.Lock()
+			defer server.mu.Unlock()
+			server.visible++
+			return nil
+		}
+		mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		records := make(chan source.RecordBatchResult, 4)
+		for id := range 3 {
+			records <- source.RecordBatchResult{Batch: snapshotLoadBatch(mem, int64(id), false, "[]"), CDCSnapshot: true}
+		}
+		records <- source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{SnapshotProgress: map[string]source.CDCSnapshotProgress{"events": {Boundary: "1"}}}}
+		close(records)
+		opts := snapshotWriteOptions(1)
+		var callbacks atomic.Int64
+		opts.CDCSnapshotProgress = func(context.Context, source.CDCStateCommitToken) error {
+			server.mu.Lock()
+			defer server.mu.Unlock()
+			require.Equal(t, server.commits, server.visible, "progress waits until every committed window is visible")
+			callbacks.Add(1)
+			return nil
+		}
+		done := make(chan error, 1)
+		go func() { done <- d.writeSnapshot(t.Context(), records, opts) }()
+		synctest.Wait()
+		server.mu.Lock()
+		require.GreaterOrEqual(t, server.commits, 2, "windows commit while earlier ones await visibility")
+		require.Zero(t, server.visible)
+		server.mu.Unlock()
+		require.EqualValues(t, 1, publishing.Load(), "visibility is awaited in commit order")
+		require.Zero(t, callbacks.Load())
+		close(release)
+		require.NoError(t, <-done)
+		require.EqualValues(t, 1, callbacks.Load())
+		mem.AssertSize(t, 0)
+	})
+}

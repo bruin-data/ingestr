@@ -52,6 +52,7 @@ func defaultSnapshotWriteLimits(workers int) snapshotWriteLimits {
 
 type snapshotWriteStats struct {
 	recvWait, dispatchWait, sealWait, commit, persist         atomic.Int64
+	txPrepare, txCommit, txPublish, visibleWait               atomic.Int64
 	idle, prepare, encode, load, loadWait, permitWait, begin  atomic.Int64
 	windows, loads, loadBytes, transactions, versionPressures atomic.Int64
 	validatedJSONColumns                                      atomic.Int64
@@ -61,9 +62,10 @@ func since(counter *atomic.Int64, start time.Time) { counter.Add(int64(time.Sinc
 
 func (s *snapshotWriteStats) report(table string, elapsed time.Duration) {
 	d := func(c *atomic.Int64) time.Duration { return time.Duration(c.Load()).Round(time.Millisecond) }
-	config.Debug("[STARROCKS] Snapshot writer stats table=%s elapsed=%s coordinator: recv_wait=%s dispatch_wait=%s seal_wait=%s windows=%d validated_json_columns=%d; committer: commit=%s persist=%s transactions=%d version_pressure=%d; workers(sum): idle=%s prepare=%s encode=%s load_wait=%s; loaders(sum): load=%s (%d, %d MB) permit_wait=%s begin=%s",
+	config.Debug("[STARROCKS] Snapshot writer stats table=%s elapsed=%s coordinator: recv_wait=%s dispatch_wait=%s seal_wait=%s windows=%d validated_json_columns=%d; committer: commit=%s (prepare=%s commit=%s) transactions=%d version_pressure=%d; checkpointer: visible_wait=%s (publish=%s) persist=%s; workers(sum): idle=%s prepare=%s encode=%s load_wait=%s; loaders(sum): load=%s (%d, %d MB) permit_wait=%s begin=%s",
 		table, elapsed.Round(time.Millisecond), d(&s.recvWait), d(&s.dispatchWait), d(&s.sealWait), s.windows.Load(), s.validatedJSONColumns.Load(),
-		d(&s.commit), d(&s.persist), s.transactions.Load(), s.versionPressures.Load(),
+		d(&s.commit), d(&s.txPrepare), d(&s.txCommit), s.transactions.Load(), s.versionPressures.Load(),
+		d(&s.visibleWait), d(&s.txPublish), d(&s.persist),
 		d(&s.idle), d(&s.prepare), d(&s.encode), d(&s.loadWait), d(&s.load), s.loads.Load(), s.loadBytes.Load()>>20, d(&s.permitWait), d(&s.begin))
 }
 
@@ -156,9 +158,11 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 	commands := make([]chan snapshotWriteCommand, s.workers)
 	sealRequests := make(chan struct{}, 1)
 	sealed := make(chan *snapshotWindow, 1)
-	// One window may be committing while the next one fills.
+	// One window may be committing while the next one fills; committed windows
+	// wait for visibility before their progress is recorded.
 	commitSlot := make(chan struct{}, 1)
-	committerDone := make(chan struct{})
+	checkpoints := make(chan *snapshotWindow, 4)
+	checkpointerDone := make(chan struct{})
 	current := s.newWindow(0)
 	for i := range commands {
 		commands[i] = make(chan snapshotWriteCommand, 1)
@@ -166,7 +170,7 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 		group.Go(func() error { return worker.run(writeCtx, jobs, commands[i]) })
 	}
 	group.Go(func() error {
-		defer close(committerDone)
+		defer close(checkpoints)
 		for {
 			select {
 			case <-writeCtx.Done():
@@ -178,7 +182,28 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 				if err := s.commitWindow(writeCtx, window); err != nil {
 					return err
 				}
+				select {
+				case checkpoints <- window:
+				case <-writeCtx.Done():
+					return writeCtx.Err()
+				}
 				<-commitSlot
+			}
+		}
+	})
+	group.Go(func() error {
+		defer close(checkpointerDone)
+		for {
+			select {
+			case <-writeCtx.Done():
+				return writeCtx.Err()
+			case window, ok := <-checkpoints:
+				if !ok {
+					return nil
+				}
+				if err := s.checkpointWindow(writeCtx, window); err != nil {
+					return err
+				}
 			}
 		}
 	})
@@ -256,7 +281,7 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 					}
 					close(sealed)
 					select {
-					case <-committerDone:
+					case <-checkpointerDone:
 						return nil
 					case <-writeCtx.Done():
 						return writeCtx.Err()
@@ -303,8 +328,8 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 	return group.Wait()
 }
 
-// commitWindow commits a sealed window once every worker has flushed into it,
-// then records the progress that its rows cover.
+// commitWindow commits a sealed window once every worker has flushed into it.
+// Its request bodies are released once StarRocks accepts the commit.
 func (s *snapshotWriter) commitWindow(ctx context.Context, window *snapshotWindow) error {
 	released := make(chan struct{})
 	go func() {
@@ -325,6 +350,36 @@ func (s *snapshotWriter) commitWindow(ctx context.Context, window *snapshotWindo
 		return err
 	}
 	since(&s.stats.commit, start)
+	for _, part := range window.parts {
+		part.replay = nil
+		if part.tx != nil {
+			s.stats.txPrepare.Add(int64(part.tx.prepareTime))
+			s.stats.txCommit.Add(int64(part.tx.commitTime))
+		}
+	}
+	return nil
+}
+
+// checkpointWindow waits until a committed window is visible, then records the
+// progress that its rows cover. Windows arrive in commit order.
+func (s *snapshotWriter) checkpointWindow(ctx context.Context, window *snapshotWindow) error {
+	start := time.Now()
+	group, visibleCtx := errgroup.WithContext(ctx)
+	for _, part := range window.parts {
+		if part.tx != nil && part.tx.committed && !part.tx.closed {
+			group.Go(func() error {
+				if err := part.tx.awaitVisible(visibleCtx, nil); err != nil {
+					return err
+				}
+				s.stats.txPublish.Add(int64(part.tx.publishTime))
+				return nil
+			})
+		}
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	since(&s.stats.visibleWait, start)
 	if window.token != nil && s.opts.CDCSnapshotProgress != nil {
 		start := time.Now()
 		if err := s.dest.checkCDCIncarnation(ctx, s.opts.Table, s.opts.CDCExpectedIncarnation); err != nil {
@@ -335,9 +390,6 @@ func (s *snapshotWriter) commitWindow(ctx context.Context, window *snapshotWindo
 		}
 		since(&s.stats.persist, start)
 	}
-	for _, part := range window.parts {
-		part.replay = nil
-	}
 	return nil
 }
 
@@ -347,9 +399,15 @@ func (s *snapshotWriter) commitPart(ctx context.Context, window *snapshotWindow,
 	}
 	cause := part.failed
 	if cause == nil {
-		// Commits wait for publication; holding a load permit meanwhile would
-		// stall the loads of the next window.
-		cause = part.tx.commit(ctx)
+		// Commits don't hold a load permit, which would stall the next
+		// window's loads.
+		var uncertain error
+		uncertain, cause = part.tx.submit(ctx)
+		if cause == nil && uncertain != nil {
+			// Only visibility tells whether a commit with a lost response took
+			// effect; the replay must stay until then.
+			cause = part.tx.awaitVisible(ctx, uncertain)
+		}
 		if cause == nil {
 			s.stats.transactions.Add(1)
 			config.Debug("[STARROCKS] Committed snapshot window %d transaction %d (label %s) for %s.%s: %d requests, %d bytes",

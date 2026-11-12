@@ -27,6 +27,8 @@ type streamLoadTransaction struct {
 	// mu guards failed: snapshot windows send concurrent loads into one transaction.
 	mu     sync.Mutex
 	failed error
+	// Time spent preparing, committing and waiting for visibility.
+	prepareTime, commitTime, publishTime time.Duration
 }
 
 type streamLoadTransactionResponse struct {
@@ -92,29 +94,45 @@ func (tx *streamLoadTransaction) load(ctx context.Context, body []byte) error {
 	return err
 }
 
+// commit prepares and commits the transaction and waits until it is visible.
 func (tx *streamLoadTransaction) commit(ctx context.Context) error {
+	uncertain, err := tx.submit(ctx)
+	if err != nil {
+		return err
+	}
+	return tx.awaitVisible(ctx, uncertain)
+}
+
+// submit prepares and commits the transaction without waiting for it to become
+// visible. A commit whose outcome is unknown, such as after lost responses,
+// returns its error as uncertain for awaitVisible to resolve.
+func (tx *streamLoadTransaction) submit(ctx context.Context) (uncertain, err error) {
 	tx.mu.Lock()
 	failed := tx.failed
 	tx.mu.Unlock()
 	if failed != nil {
-		return failed
+		return nil, failed
 	}
 	if tx.id <= 0 || tx.closed {
-		return fmt.Errorf("StarRocks transaction %s is not open for committing", tx.label)
+		return nil, fmt.Errorf("StarRocks transaction %s is not open for committing", tx.label)
 	}
 	if !tx.prepared {
+		start := time.Now()
 		response, err := tx.request(ctx, "prepare", nil)
+		tx.prepareTime += time.Since(start)
 		if err != nil {
 			tx.failed = err
-			return err
+			return nil, err
 		}
 		tx.prepared = true
 		if err := response.checkRows(); err != nil {
 			tx.failed = err
-			return err
+			return nil, err
 		}
 	}
 	var commitErr error
+	start := time.Now()
+	defer func() { tx.commitTime += time.Since(start) }()
 	if !tx.committed {
 		// Commit is idempotent at the FE. A lost response must never cause
 		// another begin or load against this label.
@@ -125,19 +143,28 @@ func (tx *streamLoadTransaction) commit(ctx context.Context) error {
 				break
 			}
 			if ctx.Err() != nil || isStreamLoadVersionPressure(commitErr) {
-				return commitErr
+				return nil, commitErr
 			}
 			if attempt < 2 {
 				timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
 				select {
 				case <-ctx.Done():
 					timer.Stop()
-					return ctx.Err()
+					return nil, ctx.Err()
 				case <-timer.C:
 				}
 			}
 		}
 	}
+	return commitErr, nil
+}
+
+// awaitVisible waits until a submitted transaction is visible, which also
+// resolves a commit whose outcome submit could not confirm.
+func (tx *streamLoadTransaction) awaitVisible(ctx context.Context, uncertain error) error {
+	start := time.Now()
+	defer func() { tx.publishTime += time.Since(start) }()
+	commitErr := uncertain
 	if tx.loader.waitForPublish == nil {
 		return fmt.Errorf("StarRocks transaction %d visibility cannot be verified: %w", tx.id, errors.Join(commitErr, errors.New("no visibility checker")))
 	}
