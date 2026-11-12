@@ -274,6 +274,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
               { text: "Monday", link: "/supported-sources/monday.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
+              { text: "Odoo", link: "/supported-sources/odoo.md" },
               { text: "Okta", link: "/supported-sources/okta.md" },
               { text: "Paddle", link: "/supported-sources/paddle.md" },
               { text: "Payrails", link: "/supported-sources/payrails.md" },
