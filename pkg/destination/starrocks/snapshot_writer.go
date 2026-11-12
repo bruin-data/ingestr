@@ -54,14 +54,15 @@ type snapshotWriteStats struct {
 	recvWait, dispatchWait, sealWait, commit, persist         atomic.Int64
 	idle, prepare, encode, load, loadWait, permitWait, begin  atomic.Int64
 	windows, loads, loadBytes, transactions, versionPressures atomic.Int64
+	validatedJSONColumns                                      atomic.Int64
 }
 
 func since(counter *atomic.Int64, start time.Time) { counter.Add(int64(time.Since(start))) }
 
 func (s *snapshotWriteStats) report(table string, elapsed time.Duration) {
 	d := func(c *atomic.Int64) time.Duration { return time.Duration(c.Load()).Round(time.Millisecond) }
-	config.Debug("[STARROCKS] Snapshot writer stats table=%s elapsed=%s coordinator: recv_wait=%s dispatch_wait=%s seal_wait=%s windows=%d; committer: commit=%s persist=%s transactions=%d version_pressure=%d; workers(sum): idle=%s prepare=%s encode=%s load_wait=%s; loaders(sum): load=%s (%d, %d MB) permit_wait=%s begin=%s",
-		table, elapsed.Round(time.Millisecond), d(&s.recvWait), d(&s.dispatchWait), d(&s.sealWait), s.windows.Load(),
+	config.Debug("[STARROCKS] Snapshot writer stats table=%s elapsed=%s coordinator: recv_wait=%s dispatch_wait=%s seal_wait=%s windows=%d validated_json_columns=%d; committer: commit=%s persist=%s transactions=%d version_pressure=%d; workers(sum): idle=%s prepare=%s encode=%s load_wait=%s; loaders(sum): load=%s (%d, %d MB) permit_wait=%s begin=%s",
+		table, elapsed.Round(time.Millisecond), d(&s.recvWait), d(&s.dispatchWait), d(&s.sealWait), s.windows.Load(), s.validatedJSONColumns.Load(),
 		d(&s.commit), d(&s.persist), s.transactions.Load(), s.versionPressures.Load(),
 		d(&s.idle), d(&s.prepare), d(&s.encode), d(&s.loadWait), d(&s.load), s.loads.Load(), s.loadBytes.Load()>>20, d(&s.permitWait), d(&s.begin))
 }
@@ -573,6 +574,13 @@ func (w *snapshotLoadWorker) queue(ctx context.Context, request snapshotLoad) er
 func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch) error {
 	s := w.writer
 	encoder := newJSONBatchEncoder(batch, s.limits.requestBytes)
+	validated := 0
+	for _, v := range encoder.validated {
+		if v {
+			validated++
+		}
+	}
+	s.stats.validatedJSONColumns.Store(int64(validated))
 	columns := columnsHeader(batch.Schema(), encoder.binaryColumns())
 	if w.columns != "" && w.columns != columns {
 		return fmt.Errorf("StarRocks snapshot columns changed while loading %s", s.table)

@@ -46,7 +46,7 @@ func (tc *TypeCaster) EnableRetarget() *TypeCaster {
 }
 
 func (tc *TypeCaster) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
-	if batch.Schema().Equal(tc.targetSchema) {
+	if sameFieldTypes(batch.Schema(), tc.targetSchema) {
 		batch.Retain()
 		return batch, nil
 	}
@@ -77,4 +77,19 @@ func (tc *TypeCaster) RetargetSchema(s *schema.TableSchema) {
 		}
 	}
 	tc.targetSchema = arrow.NewSchema(fields, nil)
+}
+
+// sameFieldTypes compares names, types and nullability, ignoring metadata, so
+// source field metadata survives when there is nothing to cast.
+func sameFieldTypes(a, b *arrow.Schema) bool {
+	if a.NumFields() != b.NumFields() {
+		return false
+	}
+	for i := range a.NumFields() {
+		x, y := a.Field(i), b.Field(i)
+		if x.Name != y.Name || x.Nullable != y.Nullable || !arrow.TypeEqual(x.Type, y.Type) {
+			return false
+		}
+	}
+	return true
 }
