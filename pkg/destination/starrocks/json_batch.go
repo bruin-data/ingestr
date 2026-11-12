@@ -374,15 +374,10 @@ func (b *boundedJSONBuffer) writeRawJSON(value string) {
 		return
 	}
 	const hexDigits = "0123456789abcdef"
-	// Compaction only shrinks the value; escapes add at most 5 bytes each and
-	// grow the slice past this reservation when needed.
-	if len(b.data)+len(value) > cap(b.data) {
-		capacity := min(b.limit, max(len(b.data)+len(value), max(1024, cap(b.data)*2)))
-		data := make([]byte, len(b.data), max(capacity, len(b.data)+len(value)))
-		copy(data, b.data)
-		b.data = data
+	// Whitespace may compact to fit even when the input exceeds the limit.
+	if !b.reserve(min(len(value), b.limit-len(b.data))) {
+		return
 	}
-	dst := b.data
 	quoted, escaped, start := false, false, 0
 	for i := 0; i < len(value); i++ {
 		c := value[i]
@@ -398,27 +393,31 @@ func (b *boundedJSONBuffer) writeRawJSON(value string) {
 		case c == '"':
 			quoted = !quoted
 		case c == '<' || c == '>' || c == '&':
-			dst = append(dst, value[start:i]...)
-			dst = append(dst, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
+			b.writeString(value[start:i])
+			if !b.reserve(6) {
+				return
+			}
+			b.data = append(b.data, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
 			start = i + 1
 		case c == 0xe2:
 			if i+2 < len(value) && value[i+1] == 0x80 && (value[i+2] == 0xa8 || value[i+2] == 0xa9) {
-				dst = append(dst, value[start:i]...)
-				dst = append(dst, '\\', 'u', '2', '0', '2', '8'+value[i+2]-0xa8)
+				b.writeString(value[start:i])
+				if !b.reserve(6) {
+					return
+				}
+				b.data = append(b.data, '\\', 'u', '2', '0', '2', '8'+value[i+2]-0xa8)
 				i += 2
 				start = i + 1
 			}
 		case !quoted:
-			dst = append(dst, value[start:i]...)
+			b.writeString(value[start:i])
+			if b.err != nil {
+				return
+			}
 			start = i + 1
 		}
 	}
-	dst = append(dst, value[start:]...)
-	if len(dst) > b.limit {
-		b.err = errJSONBodyLimit
-		return
-	}
-	b.data = dst
+	b.writeString(value[start:])
 }
 
 func (b *boundedJSONBuffer) writeList(values arrow.Array, start, end int) {

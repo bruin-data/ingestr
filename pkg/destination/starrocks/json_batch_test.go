@@ -41,6 +41,58 @@ func TestBoundedJSONStringsMatchStandardEncoder(t *testing.T) {
 	}
 }
 
+func TestBoundedRawJSONMatchesStandardEncoderAtLimit(t *testing.T) {
+	values := []string{
+		` { "nested": [ 1, { "a": "escaped\" \\ <>&" } ] } `,
+		"[\"\u2028\u2029\", \"\xff\"]",
+		strings.Repeat(" \t\n\r", 1<<16) + ` { "value": true } ` + strings.Repeat(" \t\n\r", 1<<16),
+	}
+	for i, value := range values {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			want, err := json.Marshal(json.RawMessage(value))
+			require.NoError(t, err)
+			for _, prefix := range []string{"", `{"json":`} {
+				for _, extra := range []int{-1, 0, 1} {
+					limit := len(prefix) + len(want) + extra
+					b := boundedJSONBuffer{limit: limit}
+					b.writeString(prefix)
+					b.writeRawJSON(value)
+					require.LessOrEqual(t, len(b.data), limit)
+					require.LessOrEqual(t, cap(b.data), limit)
+					if extra < 0 {
+						require.ErrorIs(t, b.err, errJSONBodyLimit)
+					} else {
+						require.NoError(t, b.err)
+						require.Equal(t, prefix+string(want), string(b.data))
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBoundedRawJSONRejectsOversizedValuesWithoutAllocating(t *testing.T) {
+	const limit = 64
+	for name, value := range map[string]string{
+		"wide":    `"` + strings.Repeat("x", 1<<20) + `"`,
+		"html":    `"` + strings.Repeat("<>&", 10) + `"`,
+		"unicode": `"` + strings.Repeat("\u2028\u2029", 5) + `"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := boundedJSONBuffer{data: make([]byte, 0, limit), limit: limit}
+			allocs := testing.AllocsPerRun(10, func() {
+				b.reset()
+				b.writeString(`{"json":`)
+				b.writeRawJSON(value)
+			})
+			require.Zero(t, allocs)
+			require.ErrorIs(t, b.err, errJSONBodyLimit)
+			require.LessOrEqual(t, len(b.data), limit)
+			require.Equal(t, limit, cap(b.data))
+		})
+	}
+}
+
 func stringJSONBatch(mem memory.Allocator, values []string) arrow.RecordBatch {
 	builder := array.NewStringBuilder(mem)
 	defer builder.Release()
