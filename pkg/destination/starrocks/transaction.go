@@ -24,9 +24,14 @@ type streamLoadTransaction struct {
 	prepared  bool
 	committed bool
 	closed    bool
-	// mu guards failed: snapshot windows send concurrent loads into one transaction.
+	// mu guards failed and node: snapshot windows send concurrent loads into one transaction.
 	mu     sync.Mutex
 	failed error
+	// node is the BE the FE routed this transaction to. Loads go there directly, so a busy FE
+	// that is slow to answer Expect: 100-continue never receives a body it would only redirect.
+	// Other operations still go through the FE: after prepare the BE no longer knows the
+	// transaction and only the FE can commit it.
+	node string
 	// Time spent preparing, committing and waiting for visibility.
 	prepareTime, commitTime, publishTime time.Duration
 }
@@ -202,6 +207,21 @@ func (response streamLoadTransactionResponse) checkRows() error {
 	return nil
 }
 
+func (tx *streamLoadTransaction) loadEndpoint() string {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.node != "" {
+		return tx.node
+	}
+	return tx.loader.endpoint
+}
+
+func (tx *streamLoadTransaction) setNode(node string) {
+	tx.mu.Lock()
+	tx.node = node
+	tx.mu.Unlock()
+}
+
 func (tx *streamLoadTransaction) request(ctx context.Context, operation string, body []byte) (streamLoadTransactionResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -210,6 +230,9 @@ func (tx *streamLoadTransaction) request(ctx context.Context, operation string, 
 		method = http.MethodPut
 	}
 	url := tx.loader.endpoint + "/api/transaction/" + operation
+	if operation == "load" {
+		url = tx.loadEndpoint() + "/api/transaction/load"
+	}
 	var response streamLoadTransactionResponse
 	for hop := 0; hop < 4; hop++ {
 		request, err := tx.loader.newRequest(ctx, method, url, bytes.NewReader(body))
@@ -253,7 +276,11 @@ func (tx *streamLoadTransaction) request(ctx context.Context, operation string, 
 			if err != nil {
 				return response, fmt.Errorf("parse transaction redirect: %w", err)
 			}
-			url = request.URL.ResolveReference(next).String()
+			target := request.URL.ResolveReference(next)
+			if operation == "begin" || operation == "load" {
+				tx.setNode(target.Scheme + "://" + target.Host)
+			}
+			url = target.String()
 			continue
 		}
 		data, readErr := io.ReadAll(io.LimitReader(result.Body, 1<<20))
