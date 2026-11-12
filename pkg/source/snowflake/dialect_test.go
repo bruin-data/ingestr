@@ -3,6 +3,7 @@ package snowflake
 import (
 	"testing"
 
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source/adbc"
 )
 
@@ -18,5 +19,21 @@ func TestDialectCustomQueryIdentifierQuotingPreservesCase(t *testing.T) {
 	}
 	if got, want := quoter.QuoteCustomQueryIdentifier("partition_ts"), `"partition_ts"`; got != want {
 		t.Fatalf("QuoteCustomQueryIdentifier() = %q, want %q", got, want)
+	}
+}
+
+func TestDialectQuoteIdentifierPreservesKnownColumnCase(t *testing.T) {
+	dialect := NewDialect()
+	dialect.rememberColumns([]schema.Column{{Name: "mixedCase"}, {Name: "UPDATED_AT"}})
+
+	tests := map[string]string{
+		"mixedCase":  `"mixedCase"`,
+		"updated_at": `"UPDATED_AT"`,
+		"unknown":    `"UNKNOWN"`,
+	}
+	for name, want := range tests {
+		if got := dialect.QuoteIdentifier(name); got != want {
+			t.Errorf("QuoteIdentifier(%q) = %q, want %q", name, got, want)
+		}
 	}
 }
