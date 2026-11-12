@@ -388,9 +388,13 @@ func githubBackoff(resp *ingestrhttp.Response) time.Duration {
 	return min(retryWait<<(retryAttempt(resp)-1), backoffMax)
 }
 
-// target names the run in messages: owner/repo, or just the owner when no repo is set.
+// target names the run in messages: owner/repo, just the owner when no repo is set, or the
+// listed repositories when the URI has no owner.
 func (s *GithubSource) target() string {
-	if s.repo == "" {
+	switch {
+	case s.owner == "":
+		return "the listed repositories"
+	case s.repo == "":
 		return s.owner
 	}
 	return s.owner + "/" + s.repo
@@ -417,8 +421,14 @@ func parseGitHubURI(uri string) (owner, repo, apiKey string, err error) {
 	owner = values.Get("owner")
 	repo = values.Get("repo")
 
-	if owner == "" {
-		return "", "", "", fmt.Errorf("owner parameter is required in URI (github://?access_token=...&owner=...&repo=...)")
+	if strings.Contains(owner, "/") {
+		return "", "", "", fmt.Errorf("owner must be a user or organization login, got %q", owner)
+	}
+	if strings.Contains(repo, "/") {
+		return "", "", "", fmt.Errorf("repo must be a bare repository name, got %q: set owner=<owner> and repo=<name>", repo)
+	}
+	if repo != "" && owner == "" {
+		return "", "", "", fmt.Errorf("repo %q needs owner in the URI (github://?access_token=...&owner=<owner>&repo=%s)", repo, repo)
 	}
 
 	// Accept both api_key and access_token for flexibility (optional)
@@ -450,7 +460,7 @@ func (s *GithubSource) Close(ctx context.Context) error {
 }
 
 func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {
-	tableName, listedRepos, err := parseTableName(req.Name, s.owner)
+	tableName, sel, err := parseTableName(req.Name, s.owner)
 	if err != nil {
 		return nil, err
 	}
@@ -459,15 +469,26 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
 	}
 
-	if s.repo == "" && tableName != "repositories" && tableName != "commits" {
-		return nil, fmt.Errorf("repo parameter is required in URI for table %s (only repositories and commits can be read with owner alone)", tableName)
+	switch tableName {
+	case "commits":
+		if sel == nil && s.owner == "" {
+			return nil, fmt.Errorf("table commits needs owner in the URI, or a list of repositories: commits:<owner>/<repo>, or commits:<owner>/* for every repository of an owner")
+		}
+	case "repositories":
+		if s.owner == "" {
+			return nil, fmt.Errorf("table repositories needs owner in the URI")
+		}
+	default:
+		if s.repo == "" {
+			return nil, fmt.Errorf("table %s needs owner and repo in the URI (only commits can list repositories)", tableName)
+		}
 	}
 
 	tableSchema, err := s.getSchema(ctx, tableName)
 	if err != nil {
 		return nil, err
 	}
-	if tableName == "commits" && s.readsManyRepos(listedRepos) {
+	if tableName == "commits" && s.readsManyRepos(sel) {
 		tableSchema.PrimaryKeys = []string{"repo", "sha"}
 	}
 
@@ -494,22 +515,31 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 			return tableSchema, nil
 		},
 		ReadFn: func(ctx context.Context, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-			return s.read(ctx, tableName, listedRepos, opts)
+			return s.read(ctx, tableName, sel, opts)
 		},
 	}, nil
 }
 
-// parseTableName splits "commits:<repo>,<owner>/<repo>" into the table and its repositories as
-// owner/name: trimmed, a bare name under defaultOwner, without empty entries or case-insensitive
-// duplicates. Other tables keep their full name, so a ":" suffix fails the table check.
-func parseTableName(name, defaultOwner string) (string, []string, error) {
+// commitSelection is the parsed list of a "commits:..." table: repositories named one by one, as
+// owner/name in the order written, and owners whose every repository is read through <owner>/*.
+type commitSelection struct {
+	repos  []string
+	owners []string
+}
+
+// parseTableName splits "commits:<repo>,<owner>/<repo>,<owner>/*" into the table and its
+// selection: trimmed, a bare name under defaultOwner, without empty entries or case-insensitive
+// duplicates. The selection is nil without a list. Other tables keep their full name, so a ":"
+// suffix fails the table check.
+func parseTableName(name, defaultOwner string) (string, *commitSelection, error) {
 	base, args, ok := strings.Cut(name, ":")
 	if !ok || base != "commits" {
 		return name, nil, nil
 	}
 
-	var repos []string
-	seen := make(map[string]bool)
+	sel := &commitSelection{}
+	seenRepos := make(map[string]bool)
+	seenOwners := make(map[string]bool)
 	for _, entry := range strings.Split(args, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
@@ -517,29 +547,54 @@ func parseTableName(name, defaultOwner string) (string, []string, error) {
 		}
 		owner, repo, qualified := strings.Cut(entry, "/")
 		owner, repo = strings.TrimSpace(owner), strings.TrimSpace(repo)
-		if !qualified {
+		switch {
+		case strings.Contains(owner, "*"):
+			return "", nil, wildcardError(entry, name)
+		case !qualified && defaultOwner == "":
+			return "", nil, fmt.Errorf("repository %q in table %s has no owner and the URI has no owner: write it as <owner>/%s, or use <owner>/* for every repository of an owner", entry, name, entry)
+		case !qualified:
 			owner, repo = defaultOwner, owner
-		}
-		if owner == "" || repo == "" || strings.Contains(repo, "/") {
-			return "", nil, fmt.Errorf("invalid repository %q in table %s: use <repo> for a repository of %s or <owner>/<repo>", entry, name, defaultOwner)
+		case owner == "" || strings.Contains(repo, "/"):
+			return "", nil, invalidRepositoryError(entry, name, defaultOwner)
+		case repo == "*":
+			if !seenOwners[strings.ToLower(owner)] {
+				seenOwners[strings.ToLower(owner)] = true
+				sel.owners = append(sel.owners, owner)
+			}
+			continue
+		case strings.Contains(repo, "*"):
+			return "", nil, wildcardError(entry, name)
+		case repo == "":
+			return "", nil, fmt.Errorf("invalid repository %q in table %s: use %s/* for every repository of %s, or %s/<repo>", entry, name, owner, owner, owner)
 		}
 		fullName := owner + "/" + repo
-		if seen[strings.ToLower(fullName)] {
+		if seenRepos[strings.ToLower(fullName)] {
 			continue
 		}
-		seen[strings.ToLower(fullName)] = true
-		repos = append(repos, fullName)
+		seenRepos[strings.ToLower(fullName)] = true
+		sel.repos = append(sel.repos, fullName)
 	}
-	if len(repos) == 0 {
-		return "", nil, fmt.Errorf("table %s lists no repositories, use commits:<repo>,<owner>/<repo>", name)
+	if len(sel.repos) == 0 && len(sel.owners) == 0 {
+		return "", nil, fmt.Errorf("table %s lists no repositories, use commits:<repo>,<owner>/<repo>,<owner>/*", name)
 	}
-	return base, repos, nil
+	return base, sel, nil
+}
+
+func wildcardError(entry, table string) error {
+	return fmt.Errorf("invalid repository %q in table %s: a wildcard can only be <owner>/*, which reads every repository of the owner", entry, table)
+}
+
+func invalidRepositoryError(entry, table, defaultOwner string) error {
+	if defaultOwner == "" {
+		return fmt.Errorf("invalid repository %q in table %s: use <owner>/<repo>, or <owner>/* for every repository of an owner", entry, table)
+	}
+	return fmt.Errorf("invalid repository %q in table %s: use <repo> for a repository of %s, <owner>/<repo>, or <owner>/* for every repository of an owner", entry, table, defaultOwner)
 }
 
 // readsManyRepos reports whether commits come from a repository list or from every repository of
 // the owner, rather than from the URI repo alone.
-func (s *GithubSource) readsManyRepos(listedRepos []string) bool {
-	return listedRepos != nil || s.repo == ""
+func (s *GithubSource) readsManyRepos(sel *commitSelection) bool {
+	return sel != nil || s.repo == ""
 }
 
 func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
@@ -576,7 +631,7 @@ func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.Tab
 	}, nil
 }
 
-func (s *GithubSource) read(ctx context.Context, table string, listedRepos []string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *GithubSource) read(ctx context.Context, table string, sel *commitSelection, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	if !isValidTable(table) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", table, strings.Join(supportedTables, ", "))
 	}
@@ -592,7 +647,7 @@ func (s *GithubSource) read(ctx context.Context, table string, listedRepos []str
 		var err error
 		switch table {
 		case "commits":
-			err = s.readCommits(ctx, opts, results, listedRepos)
+			err = s.readCommits(ctx, opts, results, sel)
 		case "issues":
 			err = s.readIssues(ctx, opts, results)
 		case "pull_requests":
@@ -1126,18 +1181,17 @@ func repoUnavailable(resp *ingestrhttp.Response) bool {
 	return false
 }
 
-// readCommits reads the URI repo, or the listed repositories, or every repository of the owner
-// except forks when neither is given. In the last case a repository that can't be read is skipped
-// with a warning; the other cases fail on it.
-func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, listedRepos []string) error {
-	repos, err := s.resolveCommitRepos(ctx, listedRepos)
+// readCommits reads the URI repo, or the selected repositories, or every repository of the owner
+// except forks when neither is given. A repository found through an owner's listing that can't be
+// read is skipped with a warning; a repository named in the list or the URI fails the run.
+func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, sel *commitSelection) error {
+	repos, err := s.resolveCommitRepos(ctx, sel)
 	if err != nil {
 		return err
 	}
-	skipUnavailable := listedRepos == nil && s.repo == ""
 
 	sent := 0
-	for _, fullName := range repos {
+	for _, r := range repos {
 		repoOpts := opts
 		if opts.Limit > 0 {
 			repoOpts.Limit = opts.Limit - sent
@@ -1145,11 +1199,11 @@ func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions,
 				break
 			}
 		}
-		n, err := s.readRepoCommits(ctx, repoOpts, results, fullName)
+		n, err := s.readRepoCommits(ctx, repoOpts, results, r.fullName)
 		sent += n
 		var unavailable unavailableRepoError
-		if skipUnavailable && errors.As(err, &unavailable) {
-			output.Warnf("\nWarning: skipping the commits of %s, GitHub answered %d\n", fullName, unavailable.status)
+		if !r.explicit && errors.As(err, &unavailable) {
+			output.Warnf("\nWarning: skipping the commits of %s, GitHub answered %d\n", r.fullName, unavailable.status)
 			continue
 		}
 		if err != nil {
@@ -1187,21 +1241,66 @@ func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOpti
 	return n, err
 }
 
-// resolveCommitRepos returns GitHub's full names of the repositories to read: the URI repo, the
-// listed owner/name repositories in their order, or every repository of the URI owner except forks.
-func (s *GithubSource) resolveCommitRepos(ctx context.Context, listedRepos []string) ([]string, error) {
-	switch {
-	case listedRepos != nil:
-		return s.lookupRepos(ctx, listedRepos)
-	case s.repo != "":
-		return s.lookupRepos(ctx, []string{s.owner + "/" + s.repo})
-	}
+// commitRepo is a repository to read commits from. explicit is false when it was found through an
+// owner's listing rather than named in the list or the URI.
+type commitRepo struct {
+	fullName string
+	explicit bool
+}
 
-	repos, forks, err := s.listOwnerRepoNames(ctx)
+// resolveCommitRepos returns the repositories to read under GitHub's full names: the selected
+// repositories in their order, then the repositories of each selected owner except forks and
+// those already selected; or the URI repo; or every repository of the URI owner except forks.
+func (s *GithubSource) resolveCommitRepos(ctx context.Context, sel *commitSelection) ([]commitRepo, error) {
+	switch {
+	case sel != nil:
+		named, err := s.lookupRepos(ctx, sel.repos)
+		if err != nil {
+			return nil, err
+		}
+		repos := make([]commitRepo, 0, len(named))
+		seen := make(map[string]bool)
+		for _, fullName := range named {
+			seen[strings.ToLower(fullName)] = true
+			repos = append(repos, commitRepo{fullName: fullName, explicit: true})
+		}
+		for _, owner := range sel.owners {
+			listed, err := s.ownerCommitRepos(ctx, owner)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range listed {
+				if !seen[strings.ToLower(r.fullName)] {
+					seen[strings.ToLower(r.fullName)] = true
+					repos = append(repos, r)
+				}
+			}
+		}
+		return repos, nil
+	case s.repo != "":
+		named, err := s.lookupRepos(ctx, []string{s.owner + "/" + s.repo})
+		if err != nil {
+			return nil, err
+		}
+		repos := make([]commitRepo, 0, len(named))
+		for _, fullName := range named {
+			repos = append(repos, commitRepo{fullName: fullName, explicit: true})
+		}
+		return repos, nil
+	}
+	return s.ownerCommitRepos(ctx, s.owner)
+}
+
+func (s *GithubSource) ownerCommitRepos(ctx context.Context, owner string) ([]commitRepo, error) {
+	names, forks, err := s.listOwnerRepoNames(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
-	output.Infof("[GITHUB] Reading the commits of %d repositories of %s (forks skipped: %d)\n", len(repos), s.owner, forks)
+	output.Infof("[GITHUB] Reading the commits of %d repositories of %s (forks skipped: %d)\n", len(names), owner, forks)
+	repos := make([]commitRepo, 0, len(names))
+	for _, fullName := range names {
+		repos = append(repos, commitRepo{fullName: fullName})
+	}
 	return repos, nil
 }
 
@@ -1252,8 +1351,8 @@ func (s *GithubSource) lookupRepo(ctx context.Context, fullName string) (string,
 
 // listOwnerRepoNames lists the repositories the repositories table would read, once each, and
 // returns the full names of those that aren't forks with the number of forks left out.
-func (s *GithubSource) listOwnerRepoNames(ctx context.Context) ([]string, int, error) {
-	listings, err := s.repositoryListings(ctx)
+func (s *GithubSource) listOwnerRepoNames(ctx context.Context, owner string) ([]string, int, error) {
+	listings, err := s.repositoryListings(ctx, owner)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1265,14 +1364,14 @@ func (s *GithubSource) listOwnerRepoNames(ctx context.Context) ([]string, int, e
 		for nextURL := l.path; nextURL != ""; {
 			resp, err := s.restClient.R(ctx).Get(nextURL)
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to list github repositories of %s: %w", s.owner, err)
+				return nil, 0, fmt.Errorf("failed to list github repositories of %s: %w", owner, err)
 			}
 			if !resp.IsSuccess() {
-				return nil, 0, fmt.Errorf("failed to list github repositories of %s with status %d: %s", s.owner, resp.StatusCode(), resp.String())
+				return nil, 0, fmt.Errorf("failed to list github repositories of %s with status %d: %s", owner, resp.StatusCode(), resp.String())
 			}
 			items, err := decodeRESTItems(resp.Body(), l.itemsKey)
 			if err != nil {
-				return nil, 0, fmt.Errorf("failed to decode github repositories of %s: %w", s.owner, err)
+				return nil, 0, fmt.Errorf("failed to decode github repositories of %s: %w", owner, err)
 			}
 			for _, item := range items {
 				if (l.keep != nil && !l.keep(item)) || seen[item["id"]] {
@@ -1283,7 +1382,7 @@ func (s *GithubSource) listOwnerRepoNames(ctx context.Context) ([]string, int, e
 					forks++
 					continue
 				}
-				names = append(names, repoFullName(s.owner, item))
+				names = append(names, repoFullName(owner, item))
 			}
 			nextURL = extractNextPageURL(resp.Header().Get("Link"))
 		}
@@ -1310,7 +1409,7 @@ type restListing struct {
 func (s *GithubSource) readRepositories(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	config.Debug("[GITHUB] Reading repositories for %s", s.owner)
 
-	listings, err := s.repositoryListings(ctx)
+	listings, err := s.repositoryListings(ctx, s.owner)
 	if err != nil {
 		return err
 	}
@@ -1346,10 +1445,10 @@ func (s *GithubSource) readRepositories(ctx context.Context, opts source.ReadOpt
 	return nil
 }
 
-// repositoryListings picks the endpoints that cover the owner's repositories for this token:
+// repositoryListings picks the endpoints that cover ownerName's repositories for this token:
 // org repos via /orgs, the token user's own via /user/repos, otherwise the public list, plus the
 // installation's repositories when the token is a GitHub App installation token.
-func (s *GithubSource) repositoryListings(ctx context.Context) ([]restListing, error) {
+func (s *GithubSource) repositoryListings(ctx context.Context, ownerName string) ([]restListing, error) {
 	params := url.Values{}
 	params.Set("per_page", strconv.Itoa(maxPageSize))
 
@@ -1357,17 +1456,17 @@ func (s *GithubSource) repositoryListings(ctx context.Context) ([]restListing, e
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	}
-	resp, err := s.restClient.R(ctx).SetResult(&owner).Get("/users/" + url.PathEscape(s.owner))
+	resp, err := s.restClient.R(ctx).SetResult(&owner).Get("/users/" + url.PathEscape(ownerName))
 	if err != nil {
-		return nil, fmt.Errorf("failed to look up github owner %s: %w", s.owner, err)
+		return nil, fmt.Errorf("failed to look up github owner %s: %w", ownerName, err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("failed to look up github owner %s with status %d: %s", s.owner, resp.StatusCode(), resp.String())
+		return nil, fmt.Errorf("failed to look up github owner %s with status %d: %s", ownerName, resp.StatusCode(), resp.String())
 	}
 
 	if owner.Type == "Organization" {
 		params.Set("type", "all")
-		return []restListing{{path: fmt.Sprintf("/orgs/%s/repos?%s", url.PathEscape(s.owner), params.Encode())}}, nil
+		return []restListing{{path: fmt.Sprintf("/orgs/%s/repos?%s", url.PathEscape(ownerName), params.Encode())}}, nil
 	}
 
 	login := ""
@@ -1384,7 +1483,7 @@ func (s *GithubSource) repositoryListings(ctx context.Context) ([]restListing, e
 	}
 
 	params.Set("type", "owner")
-	listings := []restListing{{path: fmt.Sprintf("/users/%s/repos?%s", url.PathEscape(s.owner), params.Encode())}}
+	listings := []restListing{{path: fmt.Sprintf("/users/%s/repos?%s", url.PathEscape(ownerName), params.Encode())}}
 
 	if s.apiKey != "" && login == "" {
 		installation, err := s.installationListing(ctx, owner.Login)

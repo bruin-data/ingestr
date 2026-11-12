@@ -923,7 +923,7 @@ func TestGithubOwnerOnlyURI(t *testing.T) {
 		t.Fatalf("strategy=%q incremental key=%q, want replace without an incremental key", table.Strategy(), table.IncrementalKey())
 	}
 
-	if _, err := s.GetTable(context.Background(), source.TableRequest{Name: "issues"}); err == nil || !strings.Contains(err.Error(), "repo parameter is required") {
+	if _, err := s.GetTable(context.Background(), source.TableRequest{Name: "issues"}); err == nil || !strings.Contains(err.Error(), "table issues needs owner and repo in the URI") {
 		t.Fatalf("issues without repo should fail with a repo error, got %v", err)
 	}
 }
@@ -1471,27 +1471,49 @@ func readCommitRows(t *testing.T, s *GithubSource, tableName string, opts source
 func TestGithubCommitsTableName(t *testing.T) {
 	cases := []struct {
 		name    string
+		owner   string
 		base    string
 		repos   []string
+		owners  []string
 		wantErr string
 	}{
+		{name: "commits", owner: "o", base: "commits"},
 		{name: "commits", base: "commits"},
-		{name: "commits:a", base: "commits", repos: []string{"o/a"}},
-		{name: "commits:agent-runner, bruin,  ingestr ", base: "commits", repos: []string{"o/agent-runner", "o/bruin", "o/ingestr"}},
-		{name: "commits:a,,b, ,", base: "commits", repos: []string{"o/a", "o/b"}},
-		{name: "commits:Bruin, bruin,BRUIN, a", base: "commits", repos: []string{"o/Bruin", "o/a"}},
-		{name: "commits:bruin, o/Bruin, O/bruin", base: "commits", repos: []string{"o/bruin"}},
-		{name: "commits:other/tool, x , other / lib,Other/Tool", base: "commits", repos: []string{"other/tool", "o/x", "other/lib"}},
-		{name: "commits:", wantErr: "lists no repositories"},
+		{name: "commits:a", owner: "o", base: "commits", repos: []string{"o/a"}},
+		{name: "commits:agent-runner, bruin,  ingestr ", owner: "o", base: "commits", repos: []string{"o/agent-runner", "o/bruin", "o/ingestr"}},
+		{name: "commits:a,,b, ,", owner: "o", base: "commits", repos: []string{"o/a", "o/b"}},
+		{name: "commits:Bruin, bruin,BRUIN, a", owner: "o", base: "commits", repos: []string{"o/Bruin", "o/a"}},
+		{name: "commits:bruin, o/Bruin, O/bruin", owner: "o", base: "commits", repos: []string{"o/bruin"}},
+		{name: "commits:other/tool, x , other / lib,Other/Tool", owner: "o", base: "commits", repos: []string{"other/tool", "o/x", "other/lib"}},
+		{name: "commits:o/*", owner: "o", base: "commits", owners: []string{"o"}},
+		{name: "commits:O/*, o/*, o / * ", base: "commits", owners: []string{"O"}},
+		{name: "commits:u/*, o/x, other/*, bruin, U/*", owner: "o", base: "commits", repos: []string{"o/x", "o/bruin"}, owners: []string{"u", "other"}},
+		{name: "commits:o/x, u/*", base: "commits", repos: []string{"o/x"}, owners: []string{"u"}},
+		{name: "commits:", owner: "o", wantErr: "lists no repositories"},
 		{name: "commits: , ", wantErr: "lists no repositories"},
-		{name: "commits:a, x/b/c", wantErr: `invalid repository "x/b/c"`},
-		{name: "commits:/b", wantErr: `invalid repository "/b"`},
-		{name: "commits:x/ ", wantErr: `invalid repository "x/"`},
+		{name: "commits:a, x/b/c", owner: "o", wantErr: `invalid repository "x/b/c" in table commits:a, x/b/c: use <repo> for a repository of o, <owner>/<repo>, or <owner>/* for every repository of an owner`},
+		{name: "commits:a/b/c", wantErr: `invalid repository "a/b/c" in table commits:a/b/c: use <owner>/<repo>, or <owner>/* for every repository of an owner`},
+		{name: "commits:/b", owner: "o", wantErr: `invalid repository "/b"`},
+		{name: "commits:/*", owner: "o", wantErr: `invalid repository "/*"`},
+		{name: "commits:o/*/x", owner: "o", wantErr: `invalid repository "o/*/x"`},
+		{name: "commits:x/ ", owner: "o", wantErr: `invalid repository "x/" in table commits:x/ : use x/* for every repository of x, or x/<repo>`},
+		{name: "commits:x/", wantErr: `invalid repository "x/" in table commits:x/: use x/* for every repository of x, or x/<repo>`},
+		{name: "commits:*", owner: "o", wantErr: `invalid repository "*" in table commits:*: a wildcard can only be <owner>/*, which reads every repository of the owner`},
+		{name: "commits:*", wantErr: `invalid repository "*" in table commits:*: a wildcard can only be <owner>/*`},
+		{name: "commits:bruin*", owner: "o", wantErr: `invalid repository "bruin*" in table commits:bruin*: a wildcard can only be <owner>/*`},
+		{name: "commits:o/bruin-*", owner: "o", wantErr: `invalid repository "o/bruin-*" in table commits:o/bruin-*: a wildcard can only be <owner>/*`},
+		{name: "commits:o/**", owner: "o", wantErr: `a wildcard can only be <owner>/*`},
+		{name: "commits:*/x", owner: "o", wantErr: `invalid repository "*/x" in table commits:*/x: a wildcard can only be <owner>/*`},
+		{name: "commits:o*/x", owner: "o", wantErr: `a wildcard can only be <owner>/*`},
+		{name: "commits:*/*", owner: "o", wantErr: `a wildcard can only be <owner>/*`},
+		{name: "commits:x", wantErr: `repository "x" in table commits:x has no owner and the URI has no owner: write it as <owner>/x, or use <owner>/* for every repository of an owner`},
+		{name: "commits:o/x, y", wantErr: `repository "y" in table commits:o/x, y has no owner`},
+		{name: "issues:x", owner: "o", base: "issues:x"},
 		{name: "issues:x", base: "issues:x"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			base, repos, err := parseTableName(tc.name, "o")
+		t.Run(tc.name+" owner="+tc.owner, func(t *testing.T) {
+			base, sel, err := parseTableName(tc.name, tc.owner)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err=%v want %q", err, tc.wantErr)
@@ -1501,8 +1523,15 @@ func TestGithubCommitsTableName(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if base != tc.base || fmt.Sprint(repos) != fmt.Sprint(tc.repos) {
-				t.Fatalf("base=%q repos=%q, want %q %q", base, repos, tc.base, tc.repos)
+			if wantList := tc.repos != nil || tc.owners != nil; (sel != nil) != wantList {
+				t.Fatalf("selection=%+v, want a selection: %v", sel, wantList)
+			}
+			var repos, owners []string
+			if sel != nil {
+				repos, owners = sel.repos, sel.owners
+			}
+			if base != tc.base || fmt.Sprint(repos) != fmt.Sprint(tc.repos) || fmt.Sprint(owners) != fmt.Sprint(tc.owners) {
+				t.Fatalf("base=%q repos=%q owners=%q, want %q %q %q", base, repos, owners, tc.base, tc.repos, tc.owners)
 			}
 		})
 	}
@@ -1801,5 +1830,238 @@ func TestGithubCommitsLimitSpansRepos(t *testing.T) {
 	}
 	if got := fmt.Sprint(f.commitRequests()); got != "[/repos/o/ingestr/commits /repos/o/Bruin/commits]" {
 		t.Fatalf("commit requests=%s, want none after the limit", got)
+	}
+
+	f = newCommitsFake(t)
+	s, _ = connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+	_, rows, _, err = readCommitRows(t, s, "commits:u/*, ingestr, o/*", source.ReadOptions{Limit: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/ingestr i1} {o/ingestr i2} {u/app a1} {o/r r1}]" {
+		t.Fatalf("rows=%s, want the named repository first, then the owners in the order written", got)
+	}
+	if got := fmt.Sprint(f.commitRequests()); got != "[/repos/o/ingestr/commits /repos/u/app/commits /repos/o/r/commits]" {
+		t.Fatalf("commit requests=%s, want none after the limit", got)
+	}
+}
+
+func TestGithubURIOwnerAndRepoRules(t *testing.T) {
+	cases := []struct{ uri, wantErr, wantTarget string }{
+		{uri: "github://?access_token=x", wantTarget: "the listed repositories"},
+		{uri: "github://?access_token=x&owner=&repo=", wantTarget: "the listed repositories"},
+		{uri: "github://?access_token=x&owner=o", wantTarget: "o"},
+		{uri: "github://?access_token=x&owner=o&repo=r", wantTarget: "o/r"},
+		{uri: "github://?access_token=x&repo=r", wantErr: `repo "r" needs owner in the URI`},
+		{uri: "github://?access_token=x&owner=&repo=r", wantErr: `repo "r" needs owner in the URI`},
+		{uri: "github://?access_token=x&owner=bruin-data&repo=bruin-data/ingestr", wantErr: `repo must be a bare repository name, got "bruin-data/ingestr": set owner=<owner> and repo=<name>`},
+		{uri: "github://?access_token=x&owner=bruin-data&repo=bruin-data%2Fingestr", wantErr: `repo must be a bare repository name, got "bruin-data/ingestr"`},
+		{uri: "github://?access_token=x&repo=bruin-data/ingestr", wantErr: `repo must be a bare repository name`},
+		{uri: "github://?access_token=x&owner=bruin-data/ingestr", wantErr: `owner must be a user or organization login, got "bruin-data/ingestr"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.uri, func(t *testing.T) {
+			s := NewGitHubSource()
+			err := s.Connect(context.Background(), tc.uri)
+			defer func() { _ = s.Close(context.Background()) }()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := s.target(); got != tc.wantTarget {
+				t.Fatalf("target=%q want %q", got, tc.wantTarget)
+			}
+		})
+	}
+}
+
+func TestGithubNoOwnerTables(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+
+	for name, want := range map[string]string{
+		"commits":       "table commits needs owner in the URI, or a list of repositories: commits:<owner>/<repo>, or commits:<owner>/* for every repository of an owner",
+		"commits:r":     `repository "r" in table commits:r has no owner and the URI has no owner`,
+		"repositories":  "table repositories needs owner in the URI",
+		"issues":        "table issues needs owner and repo in the URI (only commits can list repositories)",
+		"pull_requests": "table pull_requests needs owner and repo in the URI",
+		"stargazers":    "table stargazers needs owner and repo in the URI",
+		"repo_events":   "table repo_events needs owner and repo in the URI",
+	} {
+		if _, err := s.GetTable(context.Background(), source.TableRequest{Name: name}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("GetTable(%q) err=%v want %q", name, err, want)
+		}
+	}
+	if reqs := f.requests(func(string) bool { return true }); len(reqs) != 0 {
+		t.Fatalf("GitHub was called before the table errors: %v", reqs)
+	}
+
+	table, rows, _, err := readCommitRows(t, s, "commits:o/r, u/app", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pks := table.PrimaryKeys(); fmt.Sprint(pks) != "[repo sha]" {
+		t.Fatalf("primary keys=%v want [repo sha]", pks)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/r r1} {u/app a1}]" {
+		t.Fatalf("rows=%s", got)
+	}
+}
+
+func TestGithubOwnerWithoutRepoTables(t *testing.T) {
+	s := NewGitHubSource()
+	if err := s.Connect(context.Background(), "github://?owner=o"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close(context.Background()) }()
+	for _, name := range []string{"issues", "pull_requests", "stargazers", "repo_events"} {
+		want := "table " + name + " needs owner and repo in the URI"
+		if _, err := s.GetTable(context.Background(), source.TableRequest{Name: name}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("GetTable(%q) err=%v want %q", name, err, want)
+		}
+	}
+}
+
+func TestGithubCommitsWildcard(t *testing.T) {
+	for _, uri := range []string{"github://?access_token=test-token", "github://?access_token=test-token&owner=o"} {
+		t.Run(uri, func(t *testing.T) {
+			logs := captureOutput(t)
+			f := newCommitsFake(t)
+			s, _ := connectURIToFake(t, f, uri)
+
+			table, rows, _, err := readCommitRows(t, s, "commits:o/*", source.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pks := table.PrimaryKeys(); fmt.Sprint(pks) != "[repo sha]" {
+				t.Fatalf("primary keys=%v want [repo sha]", pks)
+			}
+			if got := fmt.Sprint(f.commitRequests()); got != "[/repos/o/r/commits /repos/o/ingestr/commits /repos/o/old/commits /repos/o/Bruin/commits]" {
+				t.Fatalf("commit requests=%s, want every repository of o but the fork, once", got)
+			}
+			if got := fmt.Sprint(rows); got != "[{o/r r1} {o/ingestr i1} {o/ingestr i2} {o/old o1} {o/Bruin b1} {o/Bruin b2}]" {
+				t.Fatalf("rows=%s", got)
+			}
+			if want := "Reading the commits of 4 repositories of o (forks skipped: 1)"; !strings.Contains(logs.String(), want) {
+				t.Fatalf("missing %q in output: %q", want, logs.String())
+			}
+		})
+	}
+}
+
+func TestGithubCommitsWildcardSeveralOwners(t *testing.T) {
+	logs := captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+
+	_, rows, _, err := readCommitRows(t, s, "commits:o/*, u/*, Other/*", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/r r1} {o/ingestr i1} {o/ingestr i2} {o/old o1} {o/Bruin b1} {o/Bruin b2} {u/app a1} {other/tool t1}]" {
+		t.Fatalf("rows=%s", got)
+	}
+	for _, want := range []string{
+		"Reading the commits of 4 repositories of o (forks skipped: 1)",
+		"Reading the commits of 1 repositories of u (forks skipped: 1)",
+		"Reading the commits of 1 repositories of Other (forks skipped: 1)",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("missing %q in output: %q", want, logs.String())
+		}
+	}
+}
+
+func TestGithubCommitsWildcardAndNamedRepos(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+
+	_, rows, _, err := readCommitRows(t, s, "commits:o/*, O/INGESTR, o/forked, u/app", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(f.commitRequests()); got != "[/repos/o/ingestr/commits /repos/o/forked/commits /repos/u/app/commits /repos/o/r/commits /repos/o/old/commits /repos/o/Bruin/commits]" {
+		t.Fatalf("commit requests=%s, want the named repositories first, a named fork read, and ingestr once", got)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/ingestr i1} {o/ingestr i2} {o/forked f1} {u/app a1} {o/r r1} {o/old o1} {o/Bruin b1} {o/Bruin b2}]" {
+		t.Fatalf("rows=%s", got)
+	}
+}
+
+func TestGithubCommitsWildcardSkipsUnreadableRepos(t *testing.T) {
+	logs := captureOutput(t)
+	f := newCommitsFake(t)
+	f.blocked["o/ingestr"] = http.StatusForbidden
+	f.blocked["o/old"] = http.StatusUnavailableForLegalReasons
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+
+	_, rows, _, err := readCommitRows(t, s, "commits:o/*", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/r r1} {o/Bruin b1} {o/Bruin b2}]" {
+		t.Fatalf("rows=%s", got)
+	}
+	for _, want := range []string{
+		"Warning: skipping the commits of o/ingestr, GitHub answered 403",
+		"Warning: skipping the commits of o/old, GitHub answered 451",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("missing %q in output: %q", want, logs.String())
+		}
+	}
+
+	f = newCommitsFake(t)
+	f.blocked["o/old"] = http.StatusUnavailableForLegalReasons
+	s, _ = connectURIToFake(t, f, "github://?access_token=test-token")
+	_, _, _, err = readCommitRows(t, s, "commits:o/*, o/old", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "failed to fetch commits with status") {
+		t.Fatalf("err=%v, want a named repository that can't be read to fail the run", err)
+	}
+}
+
+func TestGithubCommitsWildcardUnknownOwnerFailsBeforeReading(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+
+	_, rows, batches, err := readCommitRows(t, s, "commits:o/r, o/*, ghost/*", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "failed to look up github owner ghost with status 404") {
+		t.Fatalf("err=%v, want the unknown owner to fail the run", err)
+	}
+	if batches != 0 || len(rows) != 0 {
+		t.Fatalf("got %d batches with %d rows before failing", batches, len(rows))
+	}
+	if reqs := f.commitRequests(); len(reqs) != 0 {
+		t.Fatalf("commits were requested before failing: %v", reqs)
+	}
+}
+
+func TestGithubCommitsWildcardOverridesURIRepo(t *testing.T) {
+	captureOutput(t)
+	f := newCommitsFake(t)
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o&repo=r")
+
+	table, rows, _, err := readCommitRows(t, s, "commits:u/*", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pks := table.PrimaryKeys(); fmt.Sprint(pks) != "[repo sha]" {
+		t.Fatalf("primary keys=%v want [repo sha]", pks)
+	}
+	if got := fmt.Sprint(rows); got != "[{u/app a1}]" {
+		t.Fatalf("rows=%s, want only the repositories of u", got)
+	}
+	if reqs := f.requests(func(p string) bool {
+		return strings.HasPrefix(p, "/repos/o/") || strings.HasPrefix(p, "/orgs/o/") || p == "/users/o"
+	}); len(reqs) != 0 {
+		t.Fatalf("the URI owner or repo was read: %v", reqs)
 	}
 }
