@@ -71,8 +71,9 @@ func (s *snapshotWriteStats) report(table string, elapsed time.Duration) {
 
 // A command without seal asks a worker to flush its buffered request.
 type snapshotWriteCommand struct {
-	seal bool
-	next *snapshotWindow
+	seal     bool
+	next     *snapshotWindow
+	sequence int64
 }
 
 type snapshotWindow struct {
@@ -242,7 +243,7 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 			if result.CDCSnapshotRangeEnd {
 				for _, command := range commands {
 					select {
-					case command <- snapshotWriteCommand{}:
+					case command <- snapshotWriteCommand{sequence: dispatched}:
 					default:
 					}
 				}
@@ -646,7 +647,7 @@ func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan snapshotWri
 			if err != nil {
 				return err
 			}
-			err = w.append(ctx, batch, commands)
+			err = w.append(ctx, batch, job.sequence, commands)
 			batch.Release()
 			if err != nil {
 				return err
@@ -684,7 +685,7 @@ func (w *snapshotLoadWorker) queue(ctx context.Context, request snapshotLoad) er
 	}
 }
 
-func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch, commands <-chan snapshotWriteCommand) error {
+func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch, sequence int64, commands <-chan snapshotWriteCommand) error {
 	s := w.writer
 	encoder := newJSONBatchEncoder(batch, s.limits.requestBytes)
 	validated := 0
@@ -699,8 +700,9 @@ func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch
 		return fmt.Errorf("StarRocks snapshot columns changed while loading %s", s.table)
 	}
 	w.columns = columns
+	flushPage := false
 	for encoder.nextRow < batch.NumRows() {
-		if err := w.beforeRequest(ctx, commands); err != nil {
+		if err := w.beforeRequest(ctx, commands, sequence, &flushPage); err != nil {
 			return err
 		}
 		if len(w.body.data) == 0 {
@@ -718,17 +720,29 @@ func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch
 			}
 		}
 	}
+	if flushPage {
+		return w.flush(ctx)
+	}
 	return nil
 }
 
 // beforeRequest stops encoding into a full window even while the coordinator
 // waits for the previous commit. Sealing can flush at most one partial request
 // per worker beyond the budget.
-func (w *snapshotLoadWorker) beforeRequest(ctx context.Context, commands <-chan snapshotWriteCommand) error {
+func (w *snapshotLoadWorker) beforeRequest(ctx context.Context, commands <-chan snapshotWriteCommand, sequence int64, flushPage *bool) error {
+	handle := func(command snapshotWriteCommand) error {
+		if !command.seal && command.sequence >= sequence {
+			// A range boundary must flush the page it follows, even if the
+			// command arrives before this page has encoded any rows.
+			*flushPage = true
+			return nil
+		}
+		return w.handle(ctx, command)
+	}
 	for {
 		select {
 		case command := <-commands:
-			if err := w.handle(ctx, command); err != nil {
+			if err := handle(command); err != nil {
 				return err
 			}
 			continue
@@ -742,7 +756,7 @@ func (w *snapshotLoadWorker) beforeRequest(ctx context.Context, commands <-chan 
 		}
 		select {
 		case command := <-commands:
-			if err := w.handle(ctx, command); err != nil {
+			if err := handle(command); err != nil {
 				return err
 			}
 		case <-ctx.Done():

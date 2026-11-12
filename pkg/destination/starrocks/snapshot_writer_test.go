@@ -556,3 +556,30 @@ func TestSnapshotWriterRollsBackLostBeginResponse(t *testing.T) {
 	require.Zero(t, server.commits)
 	mem.AssertSize(t, 0)
 }
+
+func TestSnapshotWorkerDefersRangeFlushUntilPageIsEncoded(t *testing.T) {
+	d, _ := newSnapshotTestDestination(t)
+	s := &snapshotWriter{table: "events", workers: 1, limits: *d.snapshotLimits, stats: &snapshotWriteStats{}}
+	worker := &snapshotLoadWorker{
+		writer: s, window: s.newWindow(0),
+		loads: make(chan snapshotLoad, 1), body: boundedJSONBuffer{limit: s.limits.requestBytes},
+	}
+	commands := make(chan snapshotWriteCommand, 1)
+	commands <- snapshotWriteCommand{sequence: 1}
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	batch := snapshotLoadBatch(mem, 1, false, "[]")
+	prepared, err := prepareCDCSnapshotRecord(batch, snapshotWriteOptions(1))
+	batch.Release()
+	require.NoError(t, err)
+	err = worker.append(t.Context(), prepared, 1, commands)
+	prepared.Release()
+	require.NoError(t, err)
+	require.Len(t, worker.loads, 1, "the range marker must flush the completed page")
+	var rows []struct {
+		ID int64 `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal((<-worker.loads).body, &rows))
+	require.Len(t, rows, 1)
+	require.EqualValues(t, 1, rows[0].ID)
+	mem.AssertSize(t, 0)
+}
