@@ -11,6 +11,7 @@ import (
 
 	"github.com/bruin-data/ingestr/cmd"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/memlimit"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/fatih/color"
 	"github.com/urfave/cli/v3"
@@ -20,7 +21,12 @@ func main() {
 	os.Exit(run())
 }
 
+// defaultMemoryFraction leaves room outside the Go heap for cgo drivers,
+// goroutine stacks and the page cache.
+const defaultMemoryFraction = 0.75
+
 func run() int {
+	memlimit.SetDefault(defaultMemoryFraction)
 	stopProfile, profiling := startCPUProfile()
 	defer stopProfile()
 	if profiling {

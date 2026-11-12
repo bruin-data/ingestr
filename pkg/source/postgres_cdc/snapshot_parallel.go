@@ -167,6 +167,7 @@ func (s *Snapshot) readBoundedSnapshot(ctx context.Context, opts boundedSnapshot
 	rows, blocked, err := coordinateSnapshotWorkers(ctx, ranges, cap(opts.budget.slots), results, progress,
 		func(ctx context.Context, workerID int, jobs <-chan int, updates chan<- snapshotRangeResult) error {
 			worker := *s
+			worker.batchDataHint = make([]int, len(s.tableSchema.Columns))
 			workerTx := tx
 			if workerID == 0 {
 				defer stopAdmission()
@@ -362,7 +363,7 @@ func (s *Snapshot) readSnapshotRange(ctx context.Context, tx pgx.Tx, opts bounde
 	if batchSize <= 0 {
 		batchSize = 100000
 	}
-	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
+	arrowSchema := markValidatedJSON(buildArrowSchema(s.tableSchema.Columns), columns, description.Fields)
 	syncedAt := time.Now().UTC()
 	for {
 		batch, count, lastKey, err := s.rowsToBatch(rows, arrowSchema, columns, len(s.progressKeys), batchSize, opts.read.MaxBatchBytes, FormatLSN(opts.boundary), syncedAt)

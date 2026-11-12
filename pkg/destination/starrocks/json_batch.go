@@ -22,11 +22,13 @@ type jsonBatchEncoder struct {
 	record  arrow.RecordBatch
 	keys    [][]byte
 	columns []int
-	initErr error
-	nextRow int64
-	pending bool
-	body    boundedJSONBuffer
-	row     boundedJSONBuffer
+	// validated marks JSON columns whose source guarantees valid JSON text.
+	validated []bool
+	initErr   error
+	nextRow   int64
+	pending   bool
+	body      boundedJSONBuffer
+	row       boundedJSONBuffer
 }
 
 func newJSONBatchEncoder(record arrow.RecordBatch, limit int) *jsonBatchEncoder {
@@ -62,10 +64,21 @@ func newJSONBatchEncoder(record arrow.RecordBatch, limit int) *jsonBatchEncoder 
 		offsets[i+1] = len(encodedKeys.data)
 	}
 	encoder.keys = make([][]byte, len(encoder.columns))
-	for i := range encoder.keys {
+	encoder.validated = make([]bool, len(encoder.columns))
+	for i, column := range encoder.columns {
 		encoder.keys[i] = encodedKeys.data[offsets[i]:offsets[i+1]]
+		encoder.validated[i] = validatedJSONField(fields[column])
 	}
 	return encoder
+}
+
+func validatedJSONField(field arrow.Field) bool {
+	extension, ok := field.Type.(arrow.ExtensionType)
+	if !ok || extension.ExtensionName() != schema.JSONExtensionName {
+		return false
+	}
+	value, ok := field.Metadata.GetValue(schema.JSONValidatedMetadataKey)
+	return ok && value == "true"
 }
 
 func (e *jsonBatchEncoder) binaryColumns() []string {
@@ -121,7 +134,11 @@ func (e *jsonBatchEncoder) appendTo(ctx context.Context, body *boundedJSONBuffer
 				}
 				e.row.write(key)
 				e.row.writeByte(':')
-				e.row.writeValue(e.record.Column(e.columns[i]), int(e.nextRow), false)
+				if e.validated[i] {
+					e.row.writeValidatedJSON(e.record.Column(e.columns[i]), int(e.nextRow))
+				} else {
+					e.row.writeValue(e.record.Column(e.columns[i]), int(e.nextRow), false)
+				}
 			}
 			e.row.writeByte('}')
 			if e.row.err != nil {
@@ -315,40 +332,88 @@ func (b *boundedJSONBuffer) writeValue(arr arrow.Array, row int, nested bool) {
 	}
 }
 
+// writeValidatedJSON writes a JSON extension value that the source has
+// already validated, without validating it again.
+func (b *boundedJSONBuffer) writeValidatedJSON(arr arrow.Array, row int) {
+	if b.err != nil {
+		return
+	}
+	if arr.IsNull(row) {
+		b.writeString("null")
+		return
+	}
+	extension, ok := arr.(array.ExtensionArray)
+	if !ok {
+		b.writeValue(arr, row, false)
+		return
+	}
+	switch storage := extension.Storage().(type) {
+	case *array.String:
+		b.writeRawJSON(storage.Value(row))
+	case *array.LargeString:
+		b.writeRawJSON(storage.Value(row))
+	default:
+		b.writeValue(arr, row, false)
+	}
+}
+
+// rawJSONSpecial marks the bytes writeRawJSON must inspect: whitespace,
+// quotes, backslashes, HTML characters and the lead byte of U+2028/U+2029.
+var rawJSONSpecial = func() (table [256]bool) {
+	for _, c := range []byte{' ', '\t', '\n', '\r', '"', '\\', '<', '>', '&', 0xe2} {
+		table[c] = true
+	}
+	return table
+}()
+
 // writeRawJSON compacts a validated JSON value and escapes HTML characters
-// without allocating another copy of the value.
+// without allocating another copy of the value, matching
+// json.Marshal(json.RawMessage(value)).
 func (b *boundedJSONBuffer) writeRawJSON(value string) {
+	if b.err != nil {
+		return
+	}
+	const hexDigits = "0123456789abcdef"
+	// Whitespace may compact to fit even when the input exceeds the limit.
+	if !b.reserve(min(len(value), b.limit-len(b.data))) {
+		return
+	}
 	quoted, escaped, start := false, false, 0
-	for i := 0; i < len(value) && b.err == nil; i++ {
+	for i := 0; i < len(value); i++ {
 		c := value[i]
-		if !quoted && (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-			b.writeString(value[start:i])
-			start = i + 1
+		if !rawJSONSpecial[c] {
+			escaped = false
 			continue
 		}
-		if c == '"' && !escaped {
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
 			quoted = !quoted
-		}
-		escaped = c == '\\' && !escaped
-		if c == '<' || c == '>' || c == '&' {
+		case c == '<' || c == '>' || c == '&':
 			b.writeString(value[start:i])
-			switch c {
-			case '<':
-				b.writeString(`\u003c`)
-			case '>':
-				b.writeString(`\u003e`)
-			case '&':
-				b.writeString(`\u0026`)
+			if !b.reserve(6) {
+				return
 			}
+			b.data = append(b.data, '\\', 'u', '0', '0', hexDigits[c>>4], hexDigits[c&0xf])
 			start = i + 1
-		} else if c == 0xe2 && i+2 < len(value) && value[i+1] == 0x80 && (value[i+2] == 0xa8 || value[i+2] == 0xa9) {
-			b.writeString(value[start:i])
-			if value[i+2] == 0xa8 {
-				b.writeString(`\u2028`)
-			} else {
-				b.writeString(`\u2029`)
+		case c == 0xe2:
+			if i+2 < len(value) && value[i+1] == 0x80 && (value[i+2] == 0xa8 || value[i+2] == 0xa9) {
+				b.writeString(value[start:i])
+				if !b.reserve(6) {
+					return
+				}
+				b.data = append(b.data, '\\', 'u', '2', '0', '2', '8'+value[i+2]-0xa8)
+				i += 2
+				start = i + 1
 			}
-			i += 2
+		case !quoted:
+			b.writeString(value[start:i])
+			if b.err != nil {
+				return
+			}
 			start = i + 1
 		}
 	}

@@ -29,6 +29,8 @@ const keepaliveInterval = 5 * time.Second
 
 const finalizeConfirmationTimeout = 5 * time.Second
 
+const defaultCDCQueryPoolMaxConns = 32
+
 // defaultPublicationName is the publication ingestr creates and manages when the
 // URI does not specify one.
 const defaultPublicationName = "ingestr_publication"
@@ -257,6 +259,12 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
 		return fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	// pgx defaults to max(4, NumCPU) connections, which silently caps snapshot
+	// readers below --extract-parallelism. Connections open lazily, so a higher
+	// ceiling costs nothing until readers ask for them.
+	if !strings.Contains(normalizedURI, "pool_max_conns") {
+		pgConfig.MaxConns = max(pgConfig.MaxConns, defaultCDCQueryPoolMaxConns)
 	}
 
 	queryPool, err := pgxpool.NewWithConfig(ctx, pgConfig)

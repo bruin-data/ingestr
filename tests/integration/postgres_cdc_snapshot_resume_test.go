@@ -28,6 +28,47 @@ type snapshotResumeTarget struct {
 	table func(name string) string
 }
 
+type snapshotResumeProgress struct {
+	Boundary string                            `json:"b"`
+	Key      string                            `json:"k"`
+	Ranges   []source.CDCSnapshotRangeProgress `json:"r"`
+}
+
+func (p *snapshotResumeProgress) decode(position string) error {
+	*p = snapshotResumeProgress{}
+	if err := json.Unmarshal([]byte(position), p); err != nil {
+		return err
+	}
+	if len(p.Ranges) == 1 && p.Ranges[0].Key != nil {
+		key, err := json.Marshal(p.Ranges[0].Key)
+		if err != nil {
+			return err
+		}
+		p.Key = string(key)
+	}
+	return nil
+}
+
+func TestSnapshotResumeProgressClearsPreviousCursor(t *testing.T) {
+	for name, initial := range map[string]string{
+		"legacy": `{"b":"00000000/00000010","k":"[\"2000\"]"}`,
+		"ranges": `{"b":"00000000/00000010","r":[{"id":"0","k":["2000"]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var progress snapshotResumeProgress
+			require.NoError(t, progress.decode(initial))
+			require.NotEmpty(t, progress.Key)
+
+			require.NoError(t, progress.decode(`{"b":"00000000/00000020","r":[{"id":"0"}]}`))
+			require.Equal(t, "00000000/00000020", progress.Boundary)
+			require.Empty(t, progress.Key, "a replacement snapshot plan has no durable rows yet")
+
+			require.NoError(t, progress.decode(`{"b":"00000000/00000020","r":[{"id":"0","k":["4000"]}]}`))
+			require.Equal(t, `["4000"]`, progress.Key)
+		})
+	}
+}
+
 // TestPostgresCDC_StreamingSnapshotResumesAfterRestart interrupts the in-place
 // re-snapshot a source DROP COLUMN triggers and checks that the next run
 // continues it after the last durable key instead of starting over: rows the
@@ -143,25 +184,14 @@ func TestPostgresCDC_StreamingSnapshotResumesAfterRestart(t *testing.T) {
 			var initialStamp string
 			require.NoError(t, target.db.QueryRow("SELECT _cdc_lsn FROM "+items+" WHERE id = 1").Scan(&initialStamp))
 			exec("ALTER TABLE public.items DROP COLUMN dropme")
-			var progress struct {
-				Boundary string                            `json:"b"`
-				Key      string                            `json:"k"`
-				Ranges   []source.CDCSnapshotRangeProgress `json:"r"`
-			}
+			var progress snapshotResumeProgress
 			require.Eventually(t, func() bool {
 				var status, position string
 				err := target.db.QueryRow(`SELECT state_status, _cdc_lsn FROM _bruin_staging.cdc_state
 					WHERE state_kind = 'snapshot_progress' AND destination_table LIKE '%`+database+`.items%'
 					ORDER BY recorded_at DESC LIMIT 1`).Scan(&status, &position)
-				if !running(done) || err != nil || status != "in_progress" || json.Unmarshal([]byte(position), &progress) != nil {
+				if !running(done) || err != nil || status != "in_progress" || progress.decode(position) != nil {
 					return false
-				}
-				if len(progress.Ranges) == 1 && progress.Ranges[0].Key != nil {
-					key, err := json.Marshal(progress.Ranges[0].Key)
-					if err != nil {
-						return false
-					}
-					progress.Key = string(key)
 				}
 				return progress.Boundary > initialStamp && progress.Key != ""
 			}, 3*time.Minute, 20*time.Millisecond, "the replacement snapshot never recorded progress")

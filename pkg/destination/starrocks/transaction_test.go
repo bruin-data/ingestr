@@ -60,7 +60,9 @@ func TestTransactionLoadsCommitOnlyAfterPrepareAndVisibility(t *testing.T) {
 		_, _ = io.WriteString(w, response)
 	}))
 	defer backend.Close()
+	var frontendRequests atomic.Int32
 	frontend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		frontendRequests.Add(1)
 		http.Redirect(w, r, backend.URL+r.URL.Path, http.StatusTemporaryRedirect)
 	}))
 	defer frontend.Close()
@@ -83,6 +85,7 @@ func TestTransactionLoadsCommitOnlyAfterPrepareAndVisibility(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, bodies, 2)
+	require.EqualValues(t, 3, frontendRequests.Load(), "begin, prepare and commit go through the FE; loads go straight to its BE")
 	require.Equal(t, "visible", operations[len(operations)-1])
 	require.ErrorContains(t, tx.load(t.Context(), nil), "not open")
 	require.ErrorContains(t, tx.rollback(t.Context()), "already committed")

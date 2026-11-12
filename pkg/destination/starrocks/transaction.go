@@ -10,6 +10,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,7 +24,16 @@ type streamLoadTransaction struct {
 	prepared  bool
 	committed bool
 	closed    bool
-	failed    error
+	// mu guards failed and node: snapshot windows send concurrent loads into one transaction.
+	mu     sync.Mutex
+	failed error
+	// node is the BE the FE routed this transaction to. Loads go there directly, so a busy FE
+	// that is slow to answer Expect: 100-continue never receives a body it would only redirect.
+	// Other operations still go through the FE: after prepare the BE no longer knows the
+	// transaction and only the FE can commit it.
+	node string
+	// Time spent preparing, committing and waiting for visibility.
+	prepareTime, commitTime, publishTime time.Duration
 }
 
 type streamLoadTransactionResponse struct {
@@ -69,36 +79,65 @@ func (s *streamLoader) beginTransaction(ctx context.Context, database, table, la
 }
 
 func (tx *streamLoadTransaction) load(ctx context.Context, body []byte) error {
-	if tx.failed != nil {
-		return tx.failed
+	tx.mu.Lock()
+	failed, open := tx.failed, tx.id > 0 && !tx.prepared && !tx.closed
+	tx.mu.Unlock()
+	if failed != nil {
+		return failed
 	}
-	if tx.id <= 0 || tx.prepared || tx.closed {
+	if !open {
 		return fmt.Errorf("StarRocks transaction %s is not open for loading", tx.label)
 	}
-	_, tx.failed = tx.request(ctx, "load", body)
-	return tx.failed
+	_, err := tx.request(ctx, "load", body)
+	if err != nil {
+		tx.mu.Lock()
+		if tx.failed == nil {
+			tx.failed = err
+		}
+		tx.mu.Unlock()
+	}
+	return err
 }
 
+// commit prepares and commits the transaction and waits until it is visible.
 func (tx *streamLoadTransaction) commit(ctx context.Context) error {
-	if tx.failed != nil {
-		return tx.failed
+	uncertain, err := tx.submit(ctx)
+	if err != nil {
+		return err
+	}
+	return tx.awaitVisible(ctx, uncertain)
+}
+
+// submit prepares and commits the transaction without waiting for it to become
+// visible. A commit whose outcome is unknown, such as after lost responses,
+// returns its error as uncertain for awaitVisible to resolve.
+func (tx *streamLoadTransaction) submit(ctx context.Context) (uncertain, err error) {
+	tx.mu.Lock()
+	failed := tx.failed
+	tx.mu.Unlock()
+	if failed != nil {
+		return nil, failed
 	}
 	if tx.id <= 0 || tx.closed {
-		return fmt.Errorf("StarRocks transaction %s is not open for committing", tx.label)
+		return nil, fmt.Errorf("StarRocks transaction %s is not open for committing", tx.label)
 	}
 	if !tx.prepared {
+		start := time.Now()
 		response, err := tx.request(ctx, "prepare", nil)
+		tx.prepareTime += time.Since(start)
 		if err != nil {
 			tx.failed = err
-			return err
+			return nil, err
 		}
 		tx.prepared = true
 		if err := response.checkRows(); err != nil {
 			tx.failed = err
-			return err
+			return nil, err
 		}
 	}
 	var commitErr error
+	start := time.Now()
+	defer func() { tx.commitTime += time.Since(start) }()
 	if !tx.committed {
 		// Commit is idempotent at the FE. A lost response must never cause
 		// another begin or load against this label.
@@ -109,19 +148,28 @@ func (tx *streamLoadTransaction) commit(ctx context.Context) error {
 				break
 			}
 			if ctx.Err() != nil || isStreamLoadVersionPressure(commitErr) {
-				return commitErr
+				return nil, commitErr
 			}
 			if attempt < 2 {
 				timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
 				select {
 				case <-ctx.Done():
 					timer.Stop()
-					return ctx.Err()
+					return nil, ctx.Err()
 				case <-timer.C:
 				}
 			}
 		}
 	}
+	return commitErr, nil
+}
+
+// awaitVisible waits until a submitted transaction is visible, which also
+// resolves a commit whose outcome submit could not confirm.
+func (tx *streamLoadTransaction) awaitVisible(ctx context.Context, uncertain error) error {
+	start := time.Now()
+	defer func() { tx.publishTime += time.Since(start) }()
+	commitErr := uncertain
 	if tx.loader.waitForPublish == nil {
 		return fmt.Errorf("StarRocks transaction %d visibility cannot be verified: %w", tx.id, errors.Join(commitErr, errors.New("no visibility checker")))
 	}
@@ -147,6 +195,33 @@ func (tx *streamLoadTransaction) rollback(ctx context.Context) error {
 	return nil
 }
 
+// confirmAborted permits replay only when the transaction cannot publish rows.
+func (tx *streamLoadTransaction) confirmAborted(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if tx == nil || tx.id <= 0 || tx.committed {
+		return false, nil
+	}
+	if tx.closed {
+		return true, nil
+	}
+	if tx.loader.transactionState == nil {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	state, err := tx.loader.transactionState(ctx, tx.database, tx.id)
+	if err != nil {
+		return false, fmt.Errorf("verify StarRocks transaction %d abort: %w", tx.id, err)
+	}
+	if state != "ABORTED" {
+		return false, nil
+	}
+	tx.closed = true
+	return true, nil
+}
+
 func (response streamLoadTransactionResponse) checkRows() error {
 	if response.NumberLoadedRows == nil || response.NumberTotalRows == nil || response.NumberFilteredRows == nil || response.NumberUnselectedRows == nil {
 		return fmt.Errorf("StarRocks transaction prepare returned incomplete row counts")
@@ -159,6 +234,21 @@ func (response streamLoadTransactionResponse) checkRows() error {
 	return nil
 }
 
+func (tx *streamLoadTransaction) loadEndpoint() string {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.node != "" {
+		return tx.node
+	}
+	return tx.loader.endpoint
+}
+
+func (tx *streamLoadTransaction) setNode(node string) {
+	tx.mu.Lock()
+	tx.node = node
+	tx.mu.Unlock()
+}
+
 func (tx *streamLoadTransaction) request(ctx context.Context, operation string, body []byte) (streamLoadTransactionResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -167,6 +257,9 @@ func (tx *streamLoadTransaction) request(ctx context.Context, operation string, 
 		method = http.MethodPut
 	}
 	url := tx.loader.endpoint + "/api/transaction/" + operation
+	if operation == "load" {
+		url = tx.loadEndpoint() + "/api/transaction/load"
+	}
 	var response streamLoadTransactionResponse
 	for hop := 0; hop < 4; hop++ {
 		request, err := tx.loader.newRequest(ctx, method, url, bytes.NewReader(body))
@@ -210,7 +303,11 @@ func (tx *streamLoadTransaction) request(ctx context.Context, operation string, 
 			if err != nil {
 				return response, fmt.Errorf("parse transaction redirect: %w", err)
 			}
-			url = request.URL.ResolveReference(next).String()
+			target := request.URL.ResolveReference(next)
+			if operation == "begin" || operation == "load" {
+				tx.setNode(target.Scheme + "://" + target.Host)
+			}
+			url = target.String()
 			continue
 		}
 		data, readErr := io.ReadAll(io.LimitReader(result.Body, 1<<20))

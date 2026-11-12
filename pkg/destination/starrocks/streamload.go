@@ -16,11 +16,12 @@ import (
 
 // streamLoader loads JSON batches into StarRocks via the Stream Load HTTP API.
 type streamLoader struct {
-	endpoint       string // scheme://host:httpPort of the FE
-	user           string
-	password       string
-	client         *http.Client
-	waitForPublish func(context.Context, string, int64) error
+	endpoint         string // scheme://host:httpPort of the FE
+	user             string
+	password         string
+	client           *http.Client
+	waitForPublish   func(context.Context, string, int64) error
+	transactionState func(context.Context, string, int64) (string, error)
 }
 
 func newStreamLoader(host string, httpPort int, user, password, httpScheme string) (*streamLoader, error) {
