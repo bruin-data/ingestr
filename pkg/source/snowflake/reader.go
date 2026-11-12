@@ -63,7 +63,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	columns := srcadbc.FilterColumns(opts.Schema.Columns, opts.ExcludeColumns)
 	catalog, schemaName, tableName := d.ParseTableNameWithCatalog(table)
 	fullTable := tablename.TableName{Catalog: catalog, Schema: schemaName, Table: tableName}.String()
-	query := srcadbc.BuildSelectQuery(fullTable, columns, opts, d.QuoteIdentifier)
+	query := srcadbc.BuildSelectQueryWithExpressions(fullTable, columns, selectExpressions(columns, d.QuoteIdentifier), opts, d.QuoteIdentifier)
 	config.Debug("[SNOWFLAKE-NATIVE] Query: %s", query)
 
 	// Create Arrow batch context with microsecond timestamps (our standard)
@@ -231,6 +231,20 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	return results, nil
 }
 
+// selectExpressions returns the columns that must be read through an expression
+// instead of being selected as-is, keyed by column name.
+func selectExpressions(columns []schema.Column, quote func(string) string) map[string]string {
+	exprs := make(map[string]string)
+	for _, col := range columns {
+		switch col.DataType {
+		case schema.TypeTime:
+			// The driver ignores the TIME scale when casting to Time64[ns] and fails on TIME(0-4).
+			exprs[col.Name] = fmt.Sprintf("CAST(%s AS TIME(9))", quote(col.Name))
+		}
+	}
+	return exprs
+}
+
 // buildGosnowflakeDSN converts our URI format to a gosnowflake DSN string.
 // Supports all auth methods: password, key-pair, OAuth, external browser.
 func buildGosnowflakeDSN(uri string) (string, error) {
@@ -324,6 +338,12 @@ func convertRecord(mem memory.Allocator, src arrow.RecordBatch, targetSchema *ar
 // convertArray converts a source Arrow array to the target type.
 // Uses bulk operations where possible for performance.
 func convertArray(mem memory.Allocator, src arrow.Array, targetType arrow.DataType, col schema.Column, numRows int) (arrow.Array, error) {
+	if targetTime, ok := targetType.(*arrow.Time64Type); ok {
+		if s, ok := src.(*array.Time64); ok {
+			return convertTimeArray(mem, s, targetTime), nil
+		}
+	}
+
 	// Try fast path with bulk copy for matching or compatible types
 	if result := tryBulkConvert(mem, src, targetType, numRows); result != nil {
 		return result, nil
@@ -550,6 +570,24 @@ func decimal128ToInt64(dec decimal128.Num, scale int32) int64 {
 		dec = dec.ReduceScaleBy(scale, false)
 	}
 	return int64(dec.LowBits())
+}
+
+func convertTimeArray(mem memory.Allocator, src *array.Time64, targetType *arrow.Time64Type) arrow.Array {
+	b := array.NewTime64Builder(mem, targetType)
+	defer b.Release()
+	b.Reserve(src.Len())
+
+	srcNanos := int64(src.DataType().(*arrow.Time64Type).Unit.Multiplier())
+	targetNanos := int64(targetType.Unit.Multiplier())
+
+	for i := 0; i < src.Len(); i++ {
+		if src.IsNull(i) {
+			b.AppendNull()
+		} else {
+			b.Append(arrow.Time64(int64(src.Value(i)) * srcNanos / targetNanos))
+		}
+	}
+	return b.NewArray()
 }
 
 func convertDecimal128ToFloat64(mem memory.Allocator, src *array.Decimal128) arrow.Array {

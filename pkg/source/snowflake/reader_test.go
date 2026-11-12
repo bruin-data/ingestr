@@ -51,3 +51,34 @@ func TestConvertArrayDecimalToInt64IsExact(t *testing.T) {
 		t.Errorf("value = %d, want 999999999999999999", v)
 	}
 }
+
+func TestConvertArrayTimeNanosToMicros(t *testing.T) {
+	mem := memory.NewGoAllocator()
+	b := array.NewTime64Builder(mem, &arrow.Time64Type{Unit: arrow.Nanosecond})
+	b.Append(arrow.Time64(45296123456789))
+	b.AppendNull()
+	src := b.NewArray()
+	defer src.Release()
+
+	got, err := convertArray(mem, src, arrow.FixedWidthTypes.Time64us, schema.Column{DataType: schema.TypeTime}, src.Len())
+	if err != nil {
+		t.Fatalf("convertArray() error = %v", err)
+	}
+	defer got.Release()
+
+	arr := got.(*array.Time64)
+	if arr.Value(0) != 45296123456 {
+		t.Errorf("value = %d µs, want 45296123456", arr.Value(0))
+	}
+	if !arr.IsNull(1) {
+		t.Error("NULL time was not preserved")
+	}
+}
+
+func TestSelectExpressionsCastsTimeColumns(t *testing.T) {
+	columns := []schema.Column{{Name: "ID", DataType: schema.TypeInt64}, {Name: "T3", DataType: schema.TypeTime}}
+	got := selectExpressions(columns, NewDialect().QuoteIdentifier)
+	if len(got) != 1 || got["T3"] != `CAST("T3" AS TIME(9))` {
+		t.Errorf("selectExpressions() = %v", got)
+	}
+}
