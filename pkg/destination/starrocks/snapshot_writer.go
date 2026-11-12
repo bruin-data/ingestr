@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -37,6 +38,21 @@ func defaultSnapshotWriteLimits(workers int) snapshotWriteLimits {
 	}
 }
 
+type snapshotWriteStats struct {
+	recvWait, dispatchWait, commitBarrier, rangeBarrier, persist atomic.Int64
+	idle, prepare, encode, load, permitWait, commit, begin       atomic.Int64
+	commits, rangeBarriers, loads, loadBytes                     atomic.Int64
+}
+
+func since(counter *atomic.Int64, start time.Time) { counter.Add(int64(time.Since(start))) }
+
+func (s *snapshotWriteStats) report(table string, elapsed time.Duration) {
+	d := func(c *atomic.Int64) time.Duration { return time.Duration(c.Load()).Round(time.Millisecond) }
+	config.Debug("[STARROCKS] Snapshot writer stats table=%s elapsed=%s coordinator: recv_wait=%s dispatch_wait=%s commit_barrier=%s (%d) range_barrier=%s (%d) persist=%s; workers(sum): idle=%s prepare=%s encode=%s load=%s (%d, %d MB) permit_wait=%s begin=%s commit=%s",
+		table, elapsed.Round(time.Millisecond), d(&s.recvWait), d(&s.dispatchWait), d(&s.commitBarrier), s.commits.Load(), d(&s.rangeBarrier), s.rangeBarriers.Load(), d(&s.persist),
+		d(&s.idle), d(&s.prepare), d(&s.encode), d(&s.load), s.loads.Load(), s.loadBytes.Load()>>20, d(&s.permitWait), d(&s.begin), d(&s.commit))
+}
+
 type snapshotWriteCommand struct {
 	commit bool
 	done   chan<- error
@@ -54,12 +70,15 @@ func (d *StarRocksDestination) writeSnapshot(ctx context.Context, records <-chan
 	}
 	db, table := d.tableParts(opts.Table)
 	limiter := &snapshotLoadLimiter{limit: parallelism, changed: make(chan struct{})}
+	stats := &snapshotWriteStats{}
+	writeStart := time.Now()
+	defer func() { stats.report(table, time.Since(writeStart)) }()
 	group, writeCtx := errgroup.WithContext(ctx)
 	jobs := make(chan source.RecordBatchResult)
 	commands := make([]chan snapshotWriteCommand, parallelism)
 	for i := range commands {
 		commands[i] = make(chan snapshotWriteCommand, 1)
-		worker := &snapshotLoadWorker{dest: d, database: db, table: table, opts: opts, limits: limits, limiter: limiter}
+		worker := &snapshotLoadWorker{dest: d, database: db, table: table, opts: opts, limits: limits, limiter: limiter, stats: stats}
 		group.Go(func() error { return worker.run(writeCtx, jobs, commands[i]) })
 	}
 	group.Go(func() error {
@@ -87,6 +106,7 @@ func (d *StarRocksDestination) writeSnapshot(ctx context.Context, records <-chan
 				}
 			}
 			if commit && progress != nil && opts.CDCSnapshotProgress != nil {
+				defer since(&stats.persist, time.Now())
 				if err := d.checkCDCIncarnation(writeCtx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
 					return err
 				}
@@ -98,14 +118,19 @@ func (d *StarRocksDestination) writeSnapshot(ctx context.Context, records <-chan
 			return nil
 		}
 		for {
+			recvStart := time.Now()
 			select {
 			case <-writeCtx.Done():
 				return writeCtx.Err()
 			case <-ticker.C:
+				start := time.Now()
+				stats.commits.Add(1)
 				if err := barrier(true); err != nil {
 					return err
 				}
+				since(&stats.commitBarrier, start)
 			case result, ok := <-records:
+				since(&stats.recvWait, recvStart)
 				if !ok {
 					return barrier(true)
 				}
@@ -119,8 +144,10 @@ func (d *StarRocksDestination) writeSnapshot(ctx context.Context, records <-chan
 					return fmt.Errorf("StarRocks CDC snapshot cannot contain TRUNCATE events")
 				}
 				if result.Batch != nil {
+					dispatchStart := time.Now()
 					select {
 					case jobs <- result:
+						since(&stats.dispatchWait, dispatchStart)
 					case <-writeCtx.Done():
 						result.Batch.Release()
 						return writeCtx.Err()
@@ -134,9 +161,12 @@ func (d *StarRocksDestination) writeSnapshot(ctx context.Context, records <-chan
 					progress = &source.CDCStateCommitToken{SnapshotProgress: token.SnapshotProgress}
 				}
 				if result.CDCSnapshotRangeEnd {
+					start := time.Now()
+					stats.rangeBarriers.Add(1)
 					if err := barrier(false); err != nil {
 						return err
 					}
+					since(&stats.rangeBarrier, start)
 				}
 			}
 		}
@@ -154,6 +184,7 @@ type snapshotLoadWorker struct {
 	opts              destination.WriteOptions
 	limits            snapshotWriteLimits
 	limiter           *snapshotLoadLimiter
+	stats             *snapshotWriteStats
 	body              boundedJSONBuffer
 	columns           string
 	lastRow           time.Time
@@ -177,13 +208,17 @@ func (w *snapshotLoadWorker) run(ctx context.Context, jobs <-chan source.RecordB
 	ticker := time.NewTicker(w.limits.idleInterval)
 	defer ticker.Stop()
 	for {
+		idleStart := time.Now()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case command := <-commands:
+			since(&w.st().idle, idleStart)
 			err := w.flush(ctx)
 			if err == nil && command.commit {
+				start := time.Now()
 				err = w.commit(ctx)
+				since(&w.st().commit, start)
 			}
 			command.done <- err
 			if err != nil {
@@ -199,7 +234,10 @@ func (w *snapshotLoadWorker) run(ctx context.Context, jobs <-chan source.RecordB
 			if !ok {
 				return nil
 			}
+			since(&w.st().idle, idleStart)
+			prepStart := time.Now()
 			batch, err := prepareCDCSnapshotRecord(result.Batch, w.opts)
+			since(&w.st().prepare, prepStart)
 			result.Batch.Release()
 			if err != nil {
 				return err
@@ -224,9 +262,11 @@ func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch
 		if len(w.body.data) == 0 {
 			w.body.writeByte('[')
 		}
+		encodeStart := time.Now()
 		if _, err := encoder.appendTo(ctx, &w.body); err != nil {
 			return fmt.Errorf("encode StarRocks snapshot batch: %w", err)
 		}
+		since(&w.st().encode, encodeStart)
 		w.lastRow = time.Now()
 		if encoder.nextRow < batch.NumRows() || len(w.body.data) >= w.limits.requestTarget {
 			if err := w.flush(ctx); err != nil {
@@ -258,10 +298,16 @@ func (w *snapshotLoadWorker) flush(ctx context.Context) error {
 	w.transactionMemory += cap(body)
 	err := w.withPermit(ctx, func() error {
 		if w.tx == nil {
+			start := time.Now()
 			if err := w.begin(ctx); err != nil {
 				return err
 			}
+			since(&w.st().begin, start)
 		}
+		start := time.Now()
+		defer since(&w.st().load, start)
+		w.st().loads.Add(1)
+		w.st().loadBytes.Add(int64(len(body)))
 		return w.tx.load(ctx, body)
 	})
 	if err != nil {
@@ -356,9 +402,11 @@ func (w *snapshotLoadWorker) retry(ctx context.Context, cause error, commit bool
 }
 
 func (w *snapshotLoadWorker) withPermit(ctx context.Context, operation func() error) error {
+	start := time.Now()
 	if err := w.limiter.acquire(ctx); err != nil {
 		return err
 	}
+	since(&w.st().permitWait, start)
 	defer w.limiter.release()
 	return operation()
 }
@@ -403,4 +451,11 @@ func (l *snapshotLoadLimiter) reduce() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.limit = max(1, l.limit/2)
+}
+
+func (w *snapshotLoadWorker) st() *snapshotWriteStats {
+	if w.stats == nil {
+		w.stats = &snapshotWriteStats{}
+	}
+	return w.stats
 }
