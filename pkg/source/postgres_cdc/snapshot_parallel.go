@@ -167,6 +167,7 @@ func (s *Snapshot) readBoundedSnapshot(ctx context.Context, opts boundedSnapshot
 	rows, blocked, err := coordinateSnapshotWorkers(ctx, ranges, cap(opts.budget.slots), results, progress,
 		func(ctx context.Context, workerID int, jobs <-chan int, updates chan<- snapshotRangeResult) error {
 			worker := *s
+			worker.batchDataHint = make([]int, len(s.tableSchema.Columns))
 			workerTx := tx
 			if workerID == 0 {
 				defer stopAdmission()
