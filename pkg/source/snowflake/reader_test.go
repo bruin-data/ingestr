@@ -51,3 +51,30 @@ func TestConvertArrayDecimalToInt64IsExact(t *testing.T) {
 		t.Errorf("value = %d, want 999999999999999999", v)
 	}
 }
+
+func TestConvertArrayVariantToJSON(t *testing.T) {
+	mem := memory.NewGoAllocator()
+	b := array.NewStringBuilder(mem)
+	b.Append(`{"a": 1}`)
+	b.AppendNull()
+	src := b.NewArray()
+	defer src.Release()
+
+	got, err := convertArray(mem, src, schema.JSONArrowType, schema.Column{DataType: schema.TypeJSON}, src.Len())
+	if err != nil {
+		t.Fatalf("convertArray() error = %v", err)
+	}
+	defer got.Release()
+
+	ext, ok := got.(array.ExtensionArray)
+	if !ok {
+		t.Fatalf("got %T, want JSON extension array", got)
+	}
+	storage := ext.Storage().(*array.String)
+	if storage.Value(0) != `{"a": 1}` {
+		t.Errorf("value = %q", storage.Value(0))
+	}
+	if !storage.IsNull(1) {
+		t.Error("NULL variant was not preserved")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -324,6 +325,10 @@ func convertRecord(mem memory.Allocator, src arrow.RecordBatch, targetSchema *ar
 // convertArray converts a source Arrow array to the target type.
 // Uses bulk operations where possible for performance.
 func convertArray(mem memory.Allocator, src arrow.Array, targetType arrow.DataType, col schema.Column, numRows int) (arrow.Array, error) {
+	if extType, ok := targetType.(arrow.ExtensionType); ok && extType.ExtensionName() == schema.JSONExtensionName {
+		return convertToJSONArray(mem, src, extType)
+	}
+
 	// Try fast path with bulk copy for matching or compatible types
 	if result := tryBulkConvert(mem, src, targetType, numRows); result != nil {
 		return result, nil
@@ -550,6 +555,35 @@ func decimal128ToInt64(dec decimal128.Num, scale int32) int64 {
 		dec = dec.ReduceScaleBy(scale, false)
 	}
 	return int64(dec.LowBits())
+}
+
+func convertToJSONArray(mem memory.Allocator, src arrow.Array, targetType arrow.ExtensionType) (arrow.Array, error) {
+	b := array.NewStringBuilder(mem)
+	defer b.Release()
+	b.Reserve(src.Len())
+
+	for i := 0; i < src.Len(); i++ {
+		if src.IsNull(i) {
+			b.AppendNull()
+			continue
+		}
+		switch s := src.(type) {
+		case *array.String:
+			b.Append(s.Value(i))
+		case *array.LargeString:
+			b.Append(s.Value(i))
+		default:
+			raw, err := json.Marshal(src.GetOneForMarshal(i))
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal %s value to JSON: %w", src.DataType(), err)
+			}
+			b.Append(string(raw))
+		}
+	}
+
+	storage := b.NewArray()
+	defer storage.Release()
+	return array.NewExtensionArrayWithStorage(targetType, storage), nil
 }
 
 func convertDecimal128ToFloat64(mem memory.Allocator, src *array.Decimal128) arrow.Array {
