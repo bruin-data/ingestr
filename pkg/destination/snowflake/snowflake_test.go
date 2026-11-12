@@ -1584,3 +1584,15 @@ func TestClusterByClauseFor(t *testing.T) {
 	// Already-bare expression (no LINEAR wrapper) is wrapped as-is.
 	assert.Equal(t, "CLUSTER BY (C1)", clusterByClauseFor("C1"))
 }
+
+func TestBuildCreateTableSQLClusterBy(t *testing.T) {
+	cols := []schema.Column{{Name: "id", DataType: schema.TypeInt64}, {Name: "event_date", DataType: schema.TypeDate}}
+
+	got := buildCreateTableSQL(`"DB"."S"."T"`, cols, []string{"id"}, []string{"event_date", "id"})
+	if !strings.HasSuffix(got, `) CLUSTER BY ("EVENT_DATE", "ID")`) {
+		t.Errorf("missing CLUSTER BY clause:\n%s", got)
+	}
+	if got := buildCreateTableSQL(`"DB"."S"."T"`, cols, nil, nil); strings.Contains(got, "CLUSTER BY") {
+		t.Errorf("unexpected CLUSTER BY clause:\n%s", got)
+	}
+}

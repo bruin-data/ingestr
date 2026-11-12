@@ -121,7 +121,7 @@ func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destinatio
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys, opts.ClusterBy)
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
@@ -1831,7 +1831,7 @@ func buildChangeConditionsSnowflake(columns []string, targetAlias, sourceAlias s
 	return strings.Join(conditions, " OR ")
 }
 
-func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string, clusterBy []string) string {
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSnowflake(col)
@@ -1849,6 +1849,13 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	}
 
 	sql += "\n)"
+	if len(clusterBy) > 0 {
+		quotedCols := make([]string, len(clusterBy))
+		for i, c := range clusterBy {
+			quotedCols[i] = quoteIdentifier(c)
+		}
+		sql += fmt.Sprintf(" CLUSTER BY (%s)", strings.Join(quotedCols, ", "))
+	}
 	return sql
 }
 
