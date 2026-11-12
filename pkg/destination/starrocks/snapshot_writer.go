@@ -25,7 +25,7 @@ import (
 type snapshotWriteLimits struct {
 	requestBytes  int
 	requestTarget int
-	// transactionBytes seals a window once its loaded requests reach it; each
+	// transactionBytes seals a window once its retained buffers reach it; each
 	// worker's last request can still overshoot it by up to requestBytes.
 	transactionBytes int
 	commitInterval   time.Duration
@@ -40,8 +40,8 @@ const snapshotMemoryBudget = 4 << 30
 func defaultSnapshotWriteLimits(workers int) snapshotWriteLimits {
 	request := maxStreamLoadJSONBytes
 	// The open window and the one committing each hold up to transactionBytes
-	// plus a request per worker, and every worker encodes one more request.
-	window := max(256<<20, snapshotMemoryBudget/2-3*workers*request/2)
+	// plus a request per worker. Each encoder also holds a request and a row.
+	window := max(256<<20, snapshotMemoryBudget/2-2*workers*request)
 	return snapshotWriteLimits{
 		requestBytes: request, requestTarget: min(64<<20, request),
 		transactionBytes: window,
@@ -154,7 +154,8 @@ func (d *StarRocksDestination) writeSnapshot(ctx context.Context, records <-chan
 
 func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBatchResult) error {
 	group, writeCtx := errgroup.WithContext(ctx)
-	jobs := make(chan source.RecordBatchResult)
+	jobs := make(chan snapshotWriteJob)
+	completed := make(chan int64, s.workers)
 	commands := make([]chan snapshotWriteCommand, s.workers)
 	sealRequests := make(chan struct{}, 1)
 	sealed := make(chan *snapshotWindow, 1)
@@ -167,7 +168,7 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 	for i := range commands {
 		commands[i] = make(chan snapshotWriteCommand, 1)
 		worker := &snapshotLoadWorker{id: i, writer: s, window: current, sealRequests: sealRequests}
-		group.Go(func() error { return worker.run(writeCtx, jobs, commands[i]) })
+		group.Go(func() error { return worker.run(writeCtx, jobs, commands[i], completed) })
 	}
 	group.Go(func() error {
 		defer close(checkpoints)
@@ -212,7 +213,46 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 		ticker := time.NewTicker(s.limits.commitInterval)
 		defer ticker.Stop()
 		var progress *source.CDCStateCommitToken
-		dispatched := false
+		var pendingProgress []snapshotWriteProgress
+		var dispatched, finished int64
+		// Count completions until received so workers can always publish them
+		// without blocking on the coordinator while it seals a window.
+		activePages := 0
+		finishedPages := make(map[int64]bool)
+		var pending *snapshotWriteJob
+		input := records
+		promoteProgress := func() {
+			for len(pendingProgress) > 0 && pendingProgress[0].sequence <= finished {
+				progress = pendingProgress[0].token
+				pendingProgress[0] = snapshotWriteProgress{}
+				pendingProgress = pendingProgress[1:]
+			}
+		}
+		recordProgress := func(result source.RecordBatchResult) {
+			token, hasToken := result.CommitToken.(source.CDCStateCommitToken)
+			if ptr, ok := result.CommitToken.(*source.CDCStateCommitToken); ok && ptr != nil {
+				token, hasToken = *ptr, true
+			}
+			if hasToken && len(token.SnapshotProgress) != 0 && len(token.SnapshotPositions) == 0 {
+				pendingProgress = append(pendingProgress, snapshotWriteProgress{
+					sequence: dispatched, token: &source.CDCStateCommitToken{SnapshotProgress: token.SnapshotProgress},
+				})
+				promoteProgress()
+			}
+			if result.CDCSnapshotRangeEnd {
+				for _, command := range commands {
+					select {
+					case command <- snapshotWriteCommand{}:
+					default:
+					}
+				}
+			}
+		}
+		defer func() {
+			if pending != nil {
+				pending.result.Batch.Release()
+			}
+		}()
 		seal := func(final bool) error {
 			start := time.Now()
 			select {
@@ -223,7 +263,7 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 			since(&s.stats.sealWait, start)
 			s.stats.windows.Add(1)
 			window := current
-			window.token, progress, dispatched = progress, nil, false
+			window.token, progress = progress, nil
 			var next *snapshotWindow
 			if !final {
 				next = s.newWindow(window.id + 1)
@@ -251,20 +291,33 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 			return nil
 		}
 		for {
-			// A full window seals before the next page can add to it.
-			select {
-			case <-sealRequests:
-				if err := sealFull(); err != nil {
+			if input == nil && pending == nil && finished == dispatched {
+				if err := seal(true); err != nil {
 					return err
 				}
-			default:
+				close(sealed)
+				select {
+				case <-checkpointerDone:
+					return nil
+				case <-writeCtx.Done():
+					return writeCtx.Err()
+				}
+			}
+			var dispatch chan<- snapshotWriteJob
+			var job snapshotWriteJob
+			receive := input
+			if pending != nil {
+				job, receive = *pending, nil
+				if activePages < s.workers {
+					dispatch = jobs
+				}
 			}
 			recvStart := time.Now()
 			select {
 			case <-writeCtx.Done():
 				return writeCtx.Err()
 			case <-ticker.C:
-				if dispatched || progress != nil {
+				if finished < dispatched || current.bytes.Load() > 0 || progress != nil {
 					if err := seal(false); err != nil {
 						return err
 					}
@@ -273,19 +326,25 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 				if err := sealFull(); err != nil {
 					return err
 				}
-			case result, ok := <-records:
+			case sequence := <-completed:
+				activePages--
+				finishedPages[sequence] = true
+				for finishedPages[finished+1] {
+					finished++
+					delete(finishedPages, finished)
+				}
+				promoteProgress()
+			case dispatch <- job:
+				since(&s.stats.dispatchWait, recvStart)
+				dispatched = job.sequence
+				activePages++
+				pending = nil
+				recordProgress(job.result)
+			case result, ok := <-receive:
 				since(&s.stats.recvWait, recvStart)
 				if !ok {
-					if err := seal(true); err != nil {
-						return err
-					}
-					close(sealed)
-					select {
-					case <-checkpointerDone:
-						return nil
-					case <-writeCtx.Done():
-						return writeCtx.Err()
-					}
+					input = nil
+					continue
 				}
 				if result.Err != nil || result.Truncate {
 					if result.Batch != nil {
@@ -297,30 +356,9 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 					return fmt.Errorf("StarRocks CDC snapshot cannot contain TRUNCATE events")
 				}
 				if result.Batch != nil {
-					dispatchStart := time.Now()
-					select {
-					case jobs <- result:
-						since(&s.stats.dispatchWait, dispatchStart)
-						dispatched = true
-					case <-writeCtx.Done():
-						result.Batch.Release()
-						return writeCtx.Err()
-					}
-				}
-				token, hasToken := result.CommitToken.(source.CDCStateCommitToken)
-				if ptr, ok := result.CommitToken.(*source.CDCStateCommitToken); ok && ptr != nil {
-					token, hasToken = *ptr, true
-				}
-				if hasToken && len(token.SnapshotProgress) != 0 && len(token.SnapshotPositions) == 0 {
-					progress = &source.CDCStateCommitToken{SnapshotProgress: token.SnapshotProgress}
-				}
-				if result.CDCSnapshotRangeEnd {
-					for _, command := range commands {
-						select {
-						case command <- snapshotWriteCommand{}:
-						default:
-						}
-					}
+					pending = &snapshotWriteJob{result: result, sequence: dispatched + 1}
+				} else {
+					recordProgress(result)
 				}
 			}
 		}
@@ -483,7 +521,7 @@ func (s *snapshotWriter) rollbackOpen(ctx context.Context) {
 	defer cancel()
 	for _, window := range s.windows {
 		for _, part := range window.parts {
-			if part.tx != nil && part.tx.id > 0 && !part.tx.committed && !part.tx.closed {
+			if part.tx != nil && !part.tx.committed && !part.tx.closed {
 				if err := part.tx.rollback(cleanupCtx); err != nil {
 					config.Debug("[STARROCKS] Roll back snapshot transaction %d: %v", part.tx.id, err)
 				}
@@ -500,6 +538,18 @@ func (s *snapshotWriter) withPermit(ctx context.Context, operation func() error)
 	since(&s.stats.permitWait, start)
 	defer s.limiter.release()
 	return operation()
+}
+
+// Progress can cover a page only after all its requests have been assigned to
+// windows. A page may span several windows when it exceeds the replay budget.
+type snapshotWriteJob struct {
+	result   source.RecordBatchResult
+	sequence int64
+}
+
+type snapshotWriteProgress struct {
+	sequence int64
+	token    *source.CDCStateCommitToken
 }
 
 // A worker encodes pages into requests while its loader sends the previous
@@ -525,14 +575,14 @@ type snapshotLoad struct {
 	release bool
 }
 
-func (w *snapshotLoadWorker) run(ctx context.Context, jobs <-chan source.RecordBatchResult, commands <-chan snapshotWriteCommand) error {
+func (w *snapshotLoadWorker) run(ctx context.Context, jobs <-chan snapshotWriteJob, commands <-chan snapshotWriteCommand, completed chan<- int64) error {
 	w.body.limit = w.writer.limits.requestBytes
 	w.loads = make(chan snapshotLoad)
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error { return w.loadRequests(groupCtx) })
 	group.Go(func() error {
 		defer close(w.loads)
-		return w.encode(groupCtx, jobs, commands)
+		return w.encode(groupCtx, jobs, commands, completed)
 	})
 	err := group.Wait()
 	if w.window != nil {
@@ -555,7 +605,7 @@ func (w *snapshotLoadWorker) loadRequests(ctx context.Context) error {
 	return nil
 }
 
-func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan source.RecordBatchResult, commands <-chan snapshotWriteCommand) error {
+func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan snapshotWriteJob, commands <-chan snapshotWriteCommand, completed chan<- int64) error {
 	s := w.writer
 	ticker := time.NewTicker(s.limits.idleInterval)
 	defer ticker.Stop()
@@ -584,22 +634,27 @@ func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan source.Reco
 					return err
 				}
 			}
-		case result, ok := <-jobs:
+		case job, ok := <-jobs:
 			if !ok {
 				return nil
 			}
 			since(&s.stats.idle, idleStart)
 			prepStart := time.Now()
-			batch, err := prepareCDCSnapshotRecord(result.Batch, s.opts)
+			batch, err := prepareCDCSnapshotRecord(job.result.Batch, s.opts)
 			since(&s.stats.prepare, prepStart)
-			result.Batch.Release()
+			job.result.Batch.Release()
 			if err != nil {
 				return err
 			}
-			err = w.append(ctx, batch)
+			err = w.append(ctx, batch, commands)
 			batch.Release()
 			if err != nil {
 				return err
+			}
+			select {
+			case completed <- job.sequence:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
@@ -629,7 +684,7 @@ func (w *snapshotLoadWorker) queue(ctx context.Context, request snapshotLoad) er
 	}
 }
 
-func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch) error {
+func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch, commands <-chan snapshotWriteCommand) error {
 	s := w.writer
 	encoder := newJSONBatchEncoder(batch, s.limits.requestBytes)
 	validated := 0
@@ -645,6 +700,9 @@ func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch
 	}
 	w.columns = columns
 	for encoder.nextRow < batch.NumRows() {
+		if err := w.beforeRequest(ctx, commands); err != nil {
+			return err
+		}
 		if len(w.body.data) == 0 {
 			w.body.writeByte('[')
 		}
@@ -661,6 +719,36 @@ func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch
 		}
 	}
 	return nil
+}
+
+// beforeRequest stops encoding into a full window even while the coordinator
+// waits for the previous commit. Sealing can flush at most one partial request
+// per worker beyond the budget.
+func (w *snapshotLoadWorker) beforeRequest(ctx context.Context, commands <-chan snapshotWriteCommand) error {
+	for {
+		select {
+		case command := <-commands:
+			if err := w.handle(ctx, command); err != nil {
+				return err
+			}
+			continue
+		default:
+		}
+		if w.window == nil {
+			return fmt.Errorf("StarRocks snapshot rows for %s arrived after the final commit", w.writer.table)
+		}
+		if w.window.bytes.Load() < int64(w.writer.limits.transactionBytes) {
+			return nil
+		}
+		select {
+		case command := <-commands:
+			if err := w.handle(ctx, command); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // flush queues the buffered request for the worker's window.
@@ -685,7 +773,7 @@ func (w *snapshotLoadWorker) flush(ctx context.Context) error {
 	part.replay = append(part.replay, body)
 	failed := part.failed
 	part.mu.Unlock()
-	if window.bytes.Add(int64(len(body))) >= int64(s.limits.transactionBytes) {
+	if window.bytes.Add(int64(cap(body))) >= int64(s.limits.transactionBytes) {
 		select {
 		case w.sealRequests <- struct{}{}:
 		default:
