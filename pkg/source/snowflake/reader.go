@@ -63,7 +63,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	columns := srcadbc.FilterColumns(opts.Schema.Columns, opts.ExcludeColumns)
 	catalog, schemaName, tableName := d.ParseTableNameWithCatalog(table)
 	fullTable := tablename.TableName{Catalog: catalog, Schema: schemaName, Table: tableName}.String()
-	query := srcadbc.BuildSelectQueryWithExpressions(fullTable, columns, timeExpressions(columns, d.QuoteIdentifier), opts, d.QuoteIdentifier)
+	query := srcadbc.BuildSelectQueryWithExpressions(fullTable, columns, selectExpressions(columns, d.QuoteIdentifier), opts, d.QuoteIdentifier)
 	config.Debug("[SNOWFLAKE-NATIVE] Query: %s", query)
 
 	// Create Arrow batch context with microsecond timestamps (our standard)
@@ -231,12 +231,14 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	return results, nil
 }
 
-// timeExpressions reads TIME columns as TIME(9): the driver casts raw TIME
-// integers to Time64[ns] ignoring the column scale, and fails on TIME(0-4).
-func timeExpressions(columns []schema.Column, quote func(string) string) map[string]string {
+// selectExpressions returns the columns that must be read through an expression
+// instead of being selected as-is, keyed by column name.
+func selectExpressions(columns []schema.Column, quote func(string) string) map[string]string {
 	exprs := make(map[string]string)
 	for _, col := range columns {
-		if col.DataType == schema.TypeTime {
+		switch col.DataType {
+		case schema.TypeTime:
+			// The driver ignores the TIME scale when casting to Time64[ns] and fails on TIME(0-4).
 			exprs[col.Name] = fmt.Sprintf("CAST(%s AS TIME(9))", quote(col.Name))
 		}
 	}

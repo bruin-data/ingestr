@@ -75,10 +75,10 @@ func TestConvertArrayTimeNanosToMicros(t *testing.T) {
 	}
 }
 
-func TestTimeExpressionsCastsOnlyTimeColumns(t *testing.T) {
+func TestSelectExpressionsCastsTimeColumns(t *testing.T) {
 	columns := []schema.Column{{Name: "ID", DataType: schema.TypeInt64}, {Name: "T3", DataType: schema.TypeTime}}
-	got := timeExpressions(columns, NewDialect().QuoteIdentifier)
+	got := selectExpressions(columns, NewDialect().QuoteIdentifier)
 	if len(got) != 1 || got["T3"] != `CAST("T3" AS TIME(9))` {
-		t.Errorf("timeExpressions() = %v", got)
+		t.Errorf("selectExpressions() = %v", got)
 	}
 }
