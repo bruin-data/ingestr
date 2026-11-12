@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -391,6 +394,24 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 		}
 	}
 	return arrow.NewSchema(fields, nil)
+}
+
+// markValidatedJSON flags JSON columns read from json or jsonb, whose text
+// PostgreSQL has already validated; rowsToBatch copies that text unchanged.
+func markValidatedJSON(arrowSchema *arrow.Schema, columns []schema.Column, fields []pgconn.FieldDescription) *arrow.Schema {
+	out := slices.Clone(arrowSchema.Fields())
+	changed := false
+	for i := range min(len(columns), len(fields), len(out)) {
+		if columns[i].DataType == schema.TypeJSON && (fields[i].DataTypeOID == pgtype.JSONOID || fields[i].DataTypeOID == pgtype.JSONBOID) {
+			out[i].Metadata = arrow.NewMetadata([]string{schema.JSONValidatedMetadataKey}, []string{"true"})
+			changed = true
+		}
+	}
+	if !changed {
+		return arrowSchema
+	}
+	metadata := arrowSchema.Metadata()
+	return arrow.NewSchema(out, &metadata)
 }
 
 var _ source.SourceTable = (*CDCTable)(nil)

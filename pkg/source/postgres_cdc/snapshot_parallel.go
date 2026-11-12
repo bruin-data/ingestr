@@ -362,7 +362,7 @@ func (s *Snapshot) readSnapshotRange(ctx context.Context, tx pgx.Tx, opts bounde
 	if batchSize <= 0 {
 		batchSize = 100000
 	}
-	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
+	arrowSchema := markValidatedJSON(buildArrowSchema(s.tableSchema.Columns), columns, description.Fields)
 	syncedAt := time.Now().UTC()
 	for {
 		batch, count, lastKey, err := s.rowsToBatch(rows, arrowSchema, columns, len(s.progressKeys), batchSize, opts.read.MaxBatchBytes, FormatLSN(opts.boundary), syncedAt)

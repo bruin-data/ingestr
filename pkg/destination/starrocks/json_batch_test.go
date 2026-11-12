@@ -308,3 +308,28 @@ func FuzzBoundedRawJSON(f *testing.F) {
 		require.Equal(t, string(want), string(b.data))
 	})
 }
+
+func TestJSONBatchEncoderValidatedJSONMatchesValidatingPath(t *testing.T) {
+	values := []string{` { "nested": [ 1, { "a": "escaped\" \" <>&" } ] } `, "[\"  \", \"\xff\"]", `{"k": "v", "n": [1, 2.5e3, null, true]}`}
+	builder := schema.NewJSONBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+	for _, value := range values {
+		builder.Append(value)
+	}
+	builder.AppendNull()
+	arr := builder.NewArray()
+	defer arr.Release()
+	encode := func(metadata arrow.Metadata) string {
+		rec := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "json", Type: schema.JSONArrowType, Nullable: true, Metadata: metadata}}, nil), []arrow.Array{arr}, int64(arr.Len()))
+		defer rec.Release()
+		encoder := newJSONBatchEncoder(rec, 4096)
+		require.Equal(t, metadata.Len() != 0, encoder.validated[0])
+		body, n, err := encoder.next(t.Context())
+		require.NoError(t, err)
+		require.EqualValues(t, arr.Len(), n)
+		return string(body)
+	}
+	validated := encode(arrow.NewMetadata([]string{schema.JSONValidatedMetadataKey}, []string{"true"}))
+	require.Equal(t, encode(arrow.Metadata{}), validated)
+	require.Contains(t, validated, `{"json":null}`)
+}
