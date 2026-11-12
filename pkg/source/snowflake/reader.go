@@ -69,7 +69,8 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	// Create Arrow batch context with microsecond timestamps (our standard)
 	arrowCtx := arrowbatches.WithArrowBatches(ctx)
 	arrowCtx = arrowbatches.WithTimestampOption(arrowCtx, arrowbatches.UseMicrosecondTimestamp)
-	// Note: WithHigherPrecision changes decimal handling - don't use it for simpler type mapping
+	// Without it the driver casts NUMBER to int64/float64, losing precision and NULLs.
+	arrowCtx = sf.WithHigherPrecision(arrowCtx)
 
 	// Attribute the extract read via Snowflake's QUERY_TAG (Snowflake strips
 	// leading comments, so the destination-style tag is used instead of Prepend).
@@ -538,11 +539,17 @@ func convertDecimal128ToInt64(mem memory.Allocator, src *array.Decimal128) arrow
 		if src.IsNull(i) {
 			b.AppendNull()
 		} else {
-			dec := src.Value(i)
-			b.Append(int64(dec.ToFloat64(scale)))
+			b.Append(decimal128ToInt64(src.Value(i), scale))
 		}
 	}
 	return b.NewArray()
+}
+
+func decimal128ToInt64(dec decimal128.Num, scale int32) int64 {
+	if scale > 0 {
+		dec = dec.ReduceScaleBy(scale, false)
+	}
+	return int64(dec.LowBits())
 }
 
 func convertDecimal128ToFloat64(mem memory.Allocator, src *array.Decimal128) arrow.Array {
@@ -866,9 +873,7 @@ func getInt64Value(src arrow.Array, i int) int64 {
 	case *array.Float64:
 		return int64(arr.Value(i))
 	case *array.Decimal128:
-		dec := arr.Value(i)
-		scale := int32(arr.DataType().(*arrow.Decimal128Type).Scale)
-		return int64(dec.ToFloat64(scale))
+		return decimal128ToInt64(arr.Value(i), int32(arr.DataType().(*arrow.Decimal128Type).Scale))
 	default:
 		return 0
 	}
