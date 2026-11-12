@@ -384,6 +384,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("mqtt", "MQTT", []string{"mqtt", "mqtts"}, true, false),
 		genericURIConnector("nats", "NATS JetStream", []string{"nats"}, true, false),
 		genericURIConnector("notion", "Notion", []string{"notion"}, true, false),
+		genericURIConnector("odoo", "Odoo", []string{"odoo"}, true, false),
 		genericURIConnector("okta", "Okta", []string{"okta"}, true, false),
 		genericURIConnector("onelake", "OneLake", []string{"onelake"}, false, true),
 		genericURIConnector("openai", "OpenAI", []string{"openai"}, true, false),

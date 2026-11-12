@@ -59,6 +59,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [FastSpring](/supported-sources/fastspring.md)
 - [FundraiseUp](/supported-sources/fundraiseup.md)
 - [Hostaway](/supported-sources/hostaway.md)
+- [Odoo](/supported-sources/odoo.md)
 - [Paddle](/supported-sources/paddle.md)
 - [Primer](/supported-sources/primer.md)
 - [QuickBooks](/supported-sources/quickbooks.md)
