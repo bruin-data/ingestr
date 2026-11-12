@@ -44,7 +44,7 @@ func newSnapshotTestDestination(t *testing.T) (*StarRocksDestination, *snapshotT
 	server := &snapshotTestServer{transactions: make(map[string]*snapshotTestTransaction)}
 	limits := defaultSnapshotWriteLimits(1)
 	limits.requestBytes, limits.requestTarget = 1024, 512
-	limits.transactionBytes, limits.replayMemory = 4096, 4096
+	limits.transactionBytes = 4096
 	limits.retryInitial, limits.retryMaximum, limits.retryTimeout = time.Millisecond, 2*time.Millisecond, 8*time.Millisecond
 	d := &StarRocksDestination{snapshotLimits: &limits, loader: &streamLoader{
 		endpoint: "http://starrocks", client: &http.Client{Transport: parallelLoadTransport(server.request)},
@@ -137,7 +137,8 @@ func TestSnapshotWriterCoalescesPagesAndGroupsRequests(t *testing.T) {
 			require.LessOrEqual(t, len(body), d.snapshotLimits.requestBytes)
 			bytes += len(body)
 		}
-		require.LessOrEqual(t, bytes, d.snapshotLimits.transactionBytes)
+		// A window seals once it reaches transactionBytes; the worker's last request may overshoot it.
+		require.LessOrEqual(t, bytes, d.snapshotLimits.transactionBytes+d.snapshotLimits.requestBytes)
 		ids = append(ids, tx.rows...)
 	}
 	require.Less(t, server.loads, 25, "small source pages must share requests")
@@ -313,7 +314,16 @@ func TestSnapshotWriterProgressWaitsForEveryVisibleCommit(t *testing.T) {
 		callbacks := 0
 		opts.CDCSnapshotProgress = func(context.Context, source.CDCStateCommitToken) error {
 			callbacks++
-			require.Equal(t, 2, server.visible)
+			server.mu.Lock()
+			defer server.mu.Unlock()
+			require.Equal(t, server.commits, server.visible)
+			var committed []int64
+			for _, tx := range server.transactions {
+				if tx.committed {
+					committed = append(committed, tx.rows...)
+				}
+			}
+			require.ElementsMatch(t, []int64{0, 1}, committed, "progress must follow the commit of every preceding row")
 			return nil
 		}
 		done := make(chan error, 1)
@@ -343,7 +353,8 @@ func TestSnapshotWriterCheckpointFailureAborts(t *testing.T) {
 func TestSnapshotWriterMemoryBudget(t *testing.T) {
 	for workers := 1; workers <= 8; workers++ {
 		limits := defaultSnapshotWriteLimits(workers)
-		require.LessOrEqual(t, workers*(limits.replayMemory+limits.requestBytes), 4<<30)
-		require.GreaterOrEqual(t, limits.replayMemory, limits.requestBytes)
+		window := limits.transactionBytes + workers*limits.requestBytes
+		require.LessOrEqual(t, 2*window+workers*limits.requestBytes, 4<<30, "an open and a committing window plus one request per worker")
+		require.GreaterOrEqual(t, limits.transactionBytes, limits.requestBytes)
 	}
 }

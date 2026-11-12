@@ -10,6 +10,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,7 +24,9 @@ type streamLoadTransaction struct {
 	prepared  bool
 	committed bool
 	closed    bool
-	failed    error
+	// mu guards failed: snapshot windows send concurrent loads into one transaction.
+	mu     sync.Mutex
+	failed error
 }
 
 type streamLoadTransactionResponse struct {
@@ -69,19 +72,32 @@ func (s *streamLoader) beginTransaction(ctx context.Context, database, table, la
 }
 
 func (tx *streamLoadTransaction) load(ctx context.Context, body []byte) error {
-	if tx.failed != nil {
-		return tx.failed
+	tx.mu.Lock()
+	failed, open := tx.failed, tx.id > 0 && !tx.prepared && !tx.closed
+	tx.mu.Unlock()
+	if failed != nil {
+		return failed
 	}
-	if tx.id <= 0 || tx.prepared || tx.closed {
+	if !open {
 		return fmt.Errorf("StarRocks transaction %s is not open for loading", tx.label)
 	}
-	_, tx.failed = tx.request(ctx, "load", body)
-	return tx.failed
+	_, err := tx.request(ctx, "load", body)
+	if err != nil {
+		tx.mu.Lock()
+		if tx.failed == nil {
+			tx.failed = err
+		}
+		tx.mu.Unlock()
+	}
+	return err
 }
 
 func (tx *streamLoadTransaction) commit(ctx context.Context) error {
-	if tx.failed != nil {
-		return tx.failed
+	tx.mu.Lock()
+	failed := tx.failed
+	tx.mu.Unlock()
+	if failed != nil {
+		return failed
 	}
 	if tx.id <= 0 || tx.closed {
 		return fmt.Errorf("StarRocks transaction %s is not open for committing", tx.label)
