@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,11 +87,12 @@ type snapshotWindow struct {
 }
 
 type snapshotWindowPart struct {
-	mu      sync.Mutex
-	tx      *streamLoadTransaction
-	columns string
-	replay  [][]byte
-	failed  error
+	mu          sync.Mutex
+	tx          *streamLoadTransaction
+	columns     string
+	replay      [][]byte
+	failed      error
+	terminalErr error
 }
 
 type snapshotWriter struct {
@@ -433,10 +435,22 @@ func (s *snapshotWriter) checkpointWindow(ctx context.Context, window *snapshotW
 		}
 		since(&s.stats.persist, start)
 	}
+	window.token = nil
+	s.mu.Lock()
+	for i, tracked := range s.windows {
+		if tracked == window {
+			s.windows = slices.Delete(s.windows, i, i+1)
+			break
+		}
+	}
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *snapshotWriter) commitPart(ctx context.Context, window *snapshotWindow, part *snapshotWindowPart) error {
+	if part.terminalErr != nil {
+		return part.terminalErr
+	}
 	if part.tx == nil && len(part.replay) == 0 {
 		return nil
 	}
@@ -591,6 +605,8 @@ func (w *snapshotLoadWorker) run(ctx context.Context, jobs <-chan snapshotWriteJ
 	})
 	err := group.Wait()
 	if w.window != nil {
+		// Releasing a failed worker must not certify its unflushed rows.
+		w.window.parts[w.id].terminalErr = err
 		w.window.open.Done()
 		w.window = nil
 	}
