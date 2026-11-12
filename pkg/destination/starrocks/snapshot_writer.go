@@ -52,7 +52,7 @@ func defaultSnapshotWriteLimits(workers int) snapshotWriteLimits {
 
 type snapshotWriteStats struct {
 	recvWait, dispatchWait, sealWait, commit, persist         atomic.Int64
-	idle, prepare, encode, load, permitWait, begin            atomic.Int64
+	idle, prepare, encode, load, loadWait, permitWait, begin  atomic.Int64
 	windows, loads, loadBytes, transactions, versionPressures atomic.Int64
 }
 
@@ -60,10 +60,10 @@ func since(counter *atomic.Int64, start time.Time) { counter.Add(int64(time.Sinc
 
 func (s *snapshotWriteStats) report(table string, elapsed time.Duration) {
 	d := func(c *atomic.Int64) time.Duration { return time.Duration(c.Load()).Round(time.Millisecond) }
-	config.Debug("[STARROCKS] Snapshot writer stats table=%s elapsed=%s coordinator: recv_wait=%s dispatch_wait=%s seal_wait=%s windows=%d; committer: commit=%s persist=%s transactions=%d version_pressure=%d; workers(sum): idle=%s prepare=%s encode=%s load=%s (%d, %d MB) permit_wait=%s begin=%s",
+	config.Debug("[STARROCKS] Snapshot writer stats table=%s elapsed=%s coordinator: recv_wait=%s dispatch_wait=%s seal_wait=%s windows=%d; committer: commit=%s persist=%s transactions=%d version_pressure=%d; workers(sum): idle=%s prepare=%s encode=%s load_wait=%s; loaders(sum): load=%s (%d, %d MB) permit_wait=%s begin=%s",
 		table, elapsed.Round(time.Millisecond), d(&s.recvWait), d(&s.dispatchWait), d(&s.sealWait), s.windows.Load(),
 		d(&s.commit), d(&s.persist), s.transactions.Load(), s.versionPressures.Load(),
-		d(&s.idle), d(&s.prepare), d(&s.encode), d(&s.load), s.loads.Load(), s.loadBytes.Load()>>20, d(&s.permitWait), d(&s.begin))
+		d(&s.idle), d(&s.prepare), d(&s.encode), d(&s.loadWait), d(&s.load), s.loads.Load(), s.loadBytes.Load()>>20, d(&s.permitWait), d(&s.begin))
 }
 
 // A command without seal asks a worker to flush its buffered request.
@@ -218,7 +218,21 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 			ticker.Reset(s.limits.commitInterval)
 			return nil
 		}
+		sealFull := func() error {
+			if current.bytes.Load() >= int64(s.limits.transactionBytes) {
+				return seal(false)
+			}
+			return nil
+		}
 		for {
+			// A full window seals before the next page can add to it.
+			select {
+			case <-sealRequests:
+				if err := sealFull(); err != nil {
+					return err
+				}
+			default:
+			}
 			recvStart := time.Now()
 			select {
 			case <-writeCtx.Done():
@@ -230,10 +244,8 @@ func (s *snapshotWriter) run(ctx context.Context, records <-chan source.RecordBa
 					}
 				}
 			case <-sealRequests:
-				if current.bytes.Load() >= int64(s.limits.transactionBytes) {
-					if err := seal(false); err != nil {
-						return err
-					}
+				if err := sealFull(); err != nil {
+					return err
 				}
 			case result, ok := <-records:
 				since(&s.stats.recvWait, recvStart)
@@ -429,25 +441,61 @@ func (s *snapshotWriter) withPermit(ctx context.Context, operation func() error)
 	return operation()
 }
 
+// A worker encodes pages into requests while its loader sends the previous
+// request; loads into one transaction must not overlap.
 type snapshotLoadWorker struct {
 	id           int
 	writer       *snapshotWriter
 	window       *snapshotWindow
 	sealRequests chan<- struct{}
+	loads        chan snapshotLoad
 	body         boundedJSONBuffer
 	columns      string
 	lastRow      time.Time
 }
 
+// snapshotLoad is a request for the worker's loader, or with release, the
+// worker's last request into window.
+type snapshotLoad struct {
+	window  *snapshotWindow
+	part    *snapshotWindowPart
+	body    []byte
+	columns string
+	release bool
+}
+
 func (w *snapshotLoadWorker) run(ctx context.Context, jobs <-chan source.RecordBatchResult, commands <-chan snapshotWriteCommand) error {
-	s := w.writer
-	w.body.limit = s.limits.requestBytes
-	defer func() {
-		if w.window != nil {
-			w.window.open.Done()
-			w.window = nil
+	w.body.limit = w.writer.limits.requestBytes
+	w.loads = make(chan snapshotLoad)
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error { return w.loadRequests(groupCtx) })
+	group.Go(func() error {
+		defer close(w.loads)
+		return w.encode(groupCtx, jobs, commands)
+	})
+	err := group.Wait()
+	if w.window != nil {
+		w.window.open.Done()
+		w.window = nil
+	}
+	return err
+}
+
+func (w *snapshotLoadWorker) loadRequests(ctx context.Context) error {
+	for request := range w.loads {
+		if request.release {
+			request.window.open.Done()
+			continue
 		}
-	}()
+		if err := w.load(ctx, request); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan source.RecordBatchResult, commands <-chan snapshotWriteCommand) error {
+	s := w.writer
 	ticker := time.NewTicker(s.limits.idleInterval)
 	defer ticker.Stop()
 	for {
@@ -501,10 +549,23 @@ func (w *snapshotLoadWorker) handle(ctx context.Context, command snapshotWriteCo
 		return err
 	}
 	if command.seal {
-		w.window.open.Done()
+		if err := w.queue(ctx, snapshotLoad{window: w.window, release: true}); err != nil {
+			return err
+		}
 		w.window = command.next
 	}
 	return nil
+}
+
+func (w *snapshotLoadWorker) queue(ctx context.Context, request snapshotLoad) error {
+	start := time.Now()
+	defer since(&w.writer.stats.loadWait, start)
+	select {
+	case w.loads <- request:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch) error {
@@ -534,8 +595,7 @@ func (w *snapshotLoadWorker) append(ctx context.Context, batch arrow.RecordBatch
 	return nil
 }
 
-// flush loads the buffered request into the worker's window. A request refused
-// for version pressure marks the window part for replay at commit.
+// flush queues the buffered request for the worker's window.
 func (w *snapshotLoadWorker) flush(ctx context.Context) error {
 	if len(w.body.data) <= 1 {
 		return nil
@@ -566,8 +626,21 @@ func (w *snapshotLoadWorker) flush(ctx context.Context) error {
 	if failed != nil {
 		return nil
 	}
+	return w.queue(ctx, snapshotLoad{window: window, part: part, body: body, columns: w.columns})
+}
+
+// load sends a request into its window part's transaction. A request refused
+// for version pressure marks the part for replay at commit.
+func (w *snapshotLoadWorker) load(ctx context.Context, request snapshotLoad) error {
+	s, window, part, body := w.writer, request.window, request.part, request.body
+	part.mu.Lock()
+	failed := part.failed
+	part.mu.Unlock()
+	if failed != nil {
+		return nil
+	}
 	err := s.withPermit(ctx, func() error {
-		tx, err := w.transaction(ctx, part)
+		tx, err := w.transaction(ctx, part, request.columns)
 		if err != nil {
 			return err
 		}
@@ -593,12 +666,12 @@ func (w *snapshotLoadWorker) flush(ctx context.Context) error {
 	return nil
 }
 
-func (w *snapshotLoadWorker) transaction(ctx context.Context, part *snapshotWindowPart) (*streamLoadTransaction, error) {
+func (w *snapshotLoadWorker) transaction(ctx context.Context, part *snapshotWindowPart, columns string) (*streamLoadTransaction, error) {
 	part.mu.Lock()
 	defer part.mu.Unlock()
 	if part.tx == nil {
-		part.columns = w.columns
-		tx, err := w.writer.begin(ctx, w.columns)
+		part.columns = columns
+		tx, err := w.writer.begin(ctx, columns)
 		part.tx = tx
 		if err != nil {
 			return nil, err

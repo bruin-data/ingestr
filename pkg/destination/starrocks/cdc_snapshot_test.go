@@ -152,7 +152,7 @@ func TestWriteCDCSnapshotLoadsConcurrentlyAndProjectsMetadata(t *testing.T) {
 		t.Run(strconv.Itoa(parallelism), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-				const batches = 8
+				const batches = 16
 				records := make(chan source.RecordBatchResult, batches)
 				for id := range batches {
 					records <- source.RecordBatchResult{Batch: snapshotLoadBatch(mem, int64(id), false, "[]")}
@@ -193,7 +193,9 @@ func TestWriteCDCSnapshotLoadsConcurrentlyAndProjectsMetadata(t *testing.T) {
 					workers = 4
 				}
 				require.EqualValues(t, workers, active.Load())
-				require.GreaterOrEqual(t, len(records), batches-workers-1)
+				// Each worker holds the request its loader is sending and the next one it encoded,
+				// and the coordinator holds one more page.
+				require.GreaterOrEqual(t, len(records), batches-2*workers-1)
 				close(release)
 				require.NoError(t, <-done)
 				require.EqualValues(t, batches, requests.Load())

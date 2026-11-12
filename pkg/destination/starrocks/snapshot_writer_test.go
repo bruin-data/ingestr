@@ -137,8 +137,9 @@ func TestSnapshotWriterCoalescesPagesAndGroupsRequests(t *testing.T) {
 			require.LessOrEqual(t, len(body), d.snapshotLimits.requestBytes)
 			bytes += len(body)
 		}
-		// A window seals once it reaches transactionBytes; the worker's last request may overshoot it.
-		require.LessOrEqual(t, bytes, d.snapshotLimits.transactionBytes+d.snapshotLimits.requestBytes)
+		// A window seals once it reaches transactionBytes; the request that crossed it and the
+		// worker's partial request can still land in it.
+		require.LessOrEqual(t, bytes, d.snapshotLimits.transactionBytes+2*d.snapshotLimits.requestBytes)
 		ids = append(ids, tx.rows...)
 	}
 	require.Less(t, server.loads, 25, "small source pages must share requests")
