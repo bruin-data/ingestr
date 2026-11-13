@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,43 +41,294 @@ var errLeaseTableNotFound = errors.New("lease table not found")
 func (d *DatabricksDestination) SupportsCDCConditionalMerge() bool { return true }
 func (d *DatabricksDestination) SupportsCDCConditionalSwap() bool  { return true }
 
-func (d *DatabricksDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
-	if expectedIncarnation == "" {
-		return errors.New("databricks conditional CDC truncate requires an expected incarnation")
-	}
-	if err := d.checkCDCIncarnation(ctx, table, expectedIncarnation); err != nil {
-		return err
-	}
-	if err := d.TruncateTable(ctx, table); err != nil {
-		return fmt.Errorf("truncate Databricks CDC target: %w", err)
-	}
-	return d.checkCDCIncarnation(ctx, table, expectedIncarnation)
+type cdcFenceSpec struct {
+	table               string
+	expectedIncarnation string
 }
 
-func (d *DatabricksDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
-	for _, merge := range merges {
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+func newGuardTableName(tableName, op string) (string, error) {
+	var suffixBytes [8]byte
+	if _, err := rand.Read(suffixBytes[:]); err != nil {
+		return "", fmt.Errorf("generate Databricks guard table suffix: %w", err)
+	}
+	suffix := hex.EncodeToString(suffixBytes[:])
+	candidate := fmt.Sprintf("__ingestr_%s_%s_%s", op, tableName, suffix)
+	return destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("databricks")), nil
+}
+
+func (d *DatabricksDestination) withFencedCDCTarget(ctx context.Context, table, expectedIncarnation, op string, fn func(guardFull string) error) error {
+	if expectedIncarnation == "" {
+		return errors.New("databricks conditional CDC fence requires an expected incarnation")
+	}
+	cat, sch, tbl := d.parseTableParts(table)
+	canonKey := canonicalTargetKey(cat, sch, tbl)
+	return d.withFencedCDCTargets(ctx, []cdcFenceSpec{{
+		table:               table,
+		expectedIncarnation: expectedIncarnation,
+	}}, op, func(guardedRefs map[string]string) error {
+		return fn(guardedRefs[canonKey])
+	})
+}
+
+func (d *DatabricksDestination) withFencedCDCTargets(ctx context.Context, specs []cdcFenceSpec, op string, fn func(guardedRefs map[string]string) error) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if len(specs) == 0 {
+		return fn(nil)
+	}
+
+	d.fenceMu.Lock()
+	defer d.fenceMu.Unlock()
+
+	type targetFence struct {
+		canonKey            string
+		rawTable            string
+		catalog             string
+		schemaName          string
+		tableName           string
+		targetFull          string
+		guardFull           string
+		expectedIncarnation string
+	}
+
+	byCanon := make(map[string]*targetFence, len(specs))
+	for _, spec := range specs {
+		if spec.expectedIncarnation == "" {
+			return errors.New("databricks conditional CDC fence requires an expected incarnation")
+		}
+		cat, sch, tbl := d.parseTableParts(spec.table)
+		canonKey := canonicalTargetKey(cat, sch, tbl)
+		if existing, ok := byCanon[canonKey]; ok {
+			if existing.expectedIncarnation != spec.expectedIncarnation {
+				return fmt.Errorf("conflicting expected incarnations for Databricks CDC target %q", spec.table)
+			}
+			continue
+		}
+		guardName, err := newGuardTableName(tbl, op)
+		if err != nil {
 			return err
 		}
-		if merge.Truncate {
-			if merge.Options.CDCExpectedIncarnation != "" {
-				if err := d.TruncateCDCTableIfIncarnation(ctx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation); err != nil {
-					return err
-				}
-			} else if err := d.TruncateTable(ctx, merge.Options.TargetTable); err != nil {
-				return fmt.Errorf("truncate Databricks CDC target: %w", err)
+		byCanon[canonKey] = &targetFence{
+			canonKey:            canonKey,
+			rawTable:            spec.table,
+			catalog:             cat,
+			schemaName:          sch,
+			tableName:           tbl,
+			targetFull:          quoteTableParts(cat, sch, tbl),
+			guardFull:           quoteTableParts(cat, sch, guardName),
+			expectedIncarnation: spec.expectedIncarnation,
+		}
+	}
+
+	ordered := make([]*targetFence, 0, len(byCanon))
+	for _, f := range byCanon {
+		ordered = append(ordered, f)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].canonKey < ordered[j].canonKey
+	})
+
+	for _, f := range ordered {
+		if err := d.checkCDCIncarnation(ctx, f.rawTable, f.expectedIncarnation); err != nil {
+			return err
+		}
+	}
+
+	moved := make([]*targetFence, 0, len(ordered))
+	restoreMoved := func() error {
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		var restoreErr error
+		for i := len(moved) - 1; i >= 0; i-- {
+			m := moved[i]
+			renameBackSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", m.guardFull, m.targetFull)
+			if err := d.executeStatement(restoreCtx, renameBackSQL); err != nil {
+				config.LogFailedQuery(renameBackSQL, err)
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("restore Databricks CDC target %s: %w", m.rawTable, err))
 			}
 		}
-		if err := d.MergeTable(ctx, merge.Options); err != nil {
+		return restoreErr
+	}
+
+	for _, f := range ordered {
+		renameToGuardSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", f.targetFull, f.guardFull)
+		if err := d.executeStatement(ctx, renameToGuardSQL); err != nil {
+			config.LogFailedQuery(renameToGuardSQL, err)
+			restoreErr := restoreMoved()
+			if isDatabricksMissingError(err) {
+				return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", f.rawTable, err), restoreErr)
+			}
+			return errors.Join(fmt.Errorf("lock Databricks CDC target %q: %w", f.rawTable, err), restoreErr)
+		}
+		moved = append(moved, f)
+
+		_, _, _, guardID, exists, idErr := d.tableIdentity(ctx, f.guardFull)
+		movedInc := canonicalIncarnationKey(f.catalog, f.schemaName, f.tableName, guardID)
+		if idErr != nil || !exists || movedInc != f.expectedIncarnation {
+			restoreErr := restoreMoved()
+			if idErr != nil {
+				return errors.Join(idErr, restoreErr)
+			}
+			return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed", f.rawTable), restoreErr)
+		}
+	}
+
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return errors.Join(err, restoreMoved())
+	}
+
+	guardedRefs := make(map[string]string, len(ordered))
+	for _, f := range ordered {
+		guardedRefs[f.canonKey] = f.guardFull
+	}
+
+	if err := fn(guardedRefs); err != nil {
+		return errors.Join(err, restoreMoved())
+	}
+
+	publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	var publishErr error
+	for i := len(moved) - 1; i >= 0; i-- {
+		m := moved[i]
+		renameBackSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", m.guardFull, m.targetFull)
+		if err := d.executeStatement(publishCtx, renameBackSQL); err != nil {
+			config.LogFailedQuery(renameBackSQL, err)
+			if isDatabricksAlreadyExistsError(err) {
+				publishErr = errors.Join(publishErr, fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", m.rawTable, err))
+			} else {
+				publishErr = errors.Join(publishErr, fmt.Errorf("publish Databricks CDC target %q: %w", m.rawTable, err))
+			}
+		}
+	}
+	if publishErr != nil {
+		return publishErr
+	}
+
+	for _, f := range ordered {
+		if err := d.checkCDCIncarnation(publishCtx, f.rawTable, f.expectedIncarnation); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func buildAtomicStatementsSQL(statements []string) string {
+	if len(statements) == 1 {
+		return statements[0]
+	}
+	var b strings.Builder
+	b.WriteString("BEGIN ATOMIC\n")
+	for _, stmt := range statements {
+		trimmed := strings.TrimRight(strings.TrimSpace(stmt), ";")
+		b.WriteString("  ")
+		b.WriteString(trimmed)
+		b.WriteString(";\n")
+	}
+	b.WriteString("END;")
+	return b.String()
+}
+
+func (d *DatabricksDestination) executeFencedMerges(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if len(merges) == 0 {
+		return nil
+	}
+
+	expectedByCanon := make(map[string]string, len(merges))
+	fenceSpecs := make([]cdcFenceSpec, 0, len(merges))
+	for _, m := range merges {
+		if len(m.Options.PrimaryKeys) == 0 {
+			if destination.HasCDCDeletedColumn(m.Options.Columns) {
+				return errors.New("databricks CDC merge requires at least one primary key")
+			}
+			return errors.New("merge requires at least one primary key")
+		}
+		if m.Options.CDCExpectedIncarnation != "" {
+			cat, sch, tbl := d.parseTableParts(m.Options.TargetTable)
+			canonKey := canonicalTargetKey(cat, sch, tbl)
+			if prev, ok := expectedByCanon[canonKey]; ok && prev != m.Options.CDCExpectedIncarnation {
+				return fmt.Errorf("conflicting expected incarnations for Databricks CDC target %q", m.Options.TargetTable)
+			}
+			expectedByCanon[canonKey] = m.Options.CDCExpectedIncarnation
+			fenceSpecs = append(fenceSpecs, cdcFenceSpec{
+				table:               m.Options.TargetTable,
+				expectedIncarnation: m.Options.CDCExpectedIncarnation,
+			})
+		}
+	}
+
+	return d.withFencedCDCTargets(ctx, fenceSpecs, "merge", func(guardedRefs map[string]string) error {
+		statements := make([]string, 0, len(merges)*2)
+		for _, m := range merges {
+			cat, sch, tbl := d.parseTableParts(m.Options.TargetTable)
+			canonKey := canonicalTargetKey(cat, sch, tbl)
+			targetRef := quoteTableParts(cat, sch, tbl)
+			if guardedRefs != nil {
+				if guardedRef, ok := guardedRefs[canonKey]; ok {
+					targetRef = guardedRef
+				}
+			}
+			if m.Truncate {
+				statements = append(statements, fmt.Sprintf("DELETE FROM %s", targetRef))
+			}
+			if destination.HasCDCDeletedColumn(m.Options.Columns) {
+				statements = append(statements, d.buildCDCMergeSQLForTarget(m.Options, targetRef))
+			} else {
+				statements = append(statements, d.buildNonCDCMergeSQLForTarget(m.Options, targetRef))
+			}
+		}
+
+		sql := buildAtomicStatementsSQL(statements)
+		config.Debug("[DATABRICKS] Executing merge SQL: %s", sql)
+		if err := d.executeStatement(ctx, sql); err != nil {
+			config.LogFailedQuery(sql, err)
+			if len(statements) == 1 {
+				if destination.HasCDCDeletedColumn(merges[0].Options.Columns) {
+					return fmt.Errorf("failed to execute CDC merge: %w", err)
+				}
+				return fmt.Errorf("failed to execute merge: %w", err)
+			}
+			return fmt.Errorf("failed to execute atomic CDC merge batch: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *DatabricksDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return errors.New("databricks conditional CDC truncate requires an expected incarnation")
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	return d.withFencedCDCTarget(ctx, table, expectedIncarnation, "trunc", func(guardFull string) error {
+		truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s", guardFull)
+		if err := d.executeStatement(ctx, truncateSQL); err != nil {
+			config.LogFailedQuery(truncateSQL, err)
+			return fmt.Errorf("truncate Databricks CDC target: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *DatabricksDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
+	return d.executeFencedMerges(ctx, merges)
+}
+
 func (d *DatabricksDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim, opts destination.PrepareOptions) (string, error) {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return "", err
+	}
 	if opts.Schema == nil {
 		return "", errors.New("cannot create an empty managed CDC target without a schema")
+	}
+	owner, err := claim.OwnerID()
+	if err != nil {
+		return "", err
 	}
 	target, err := d.CanonicalCDCTarget(ctx, opts.Table)
 	if err != nil {
@@ -96,8 +348,8 @@ func (d *DatabricksDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Contex
 	}
 
 	marker := d.claimMarker(claimTable, target)
-	_, markerErr := d.queryStatement(ctx, "SELECT owner_id FROM "+marker)
-	claimExisted := markerErr == nil
+	res, markerErr := d.queryStatement(ctx, "SELECT owner_id FROM "+marker)
+	claimExisted := markerErr == nil && len(res.rows) > 0 && len(res.rows[0]) > 0 && res.rows[0][0] == owner
 
 	if err := d.ClaimCDCTarget(ctx, claimTable, claim); err != nil {
 		return "", err
@@ -108,7 +360,6 @@ func (d *DatabricksDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Contex
 		if !claimExisted {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			owner, _ := claim.OwnerID()
 			dropErr := d.executeStatement(cleanupCtx, "DROP VIEW IF EXISTS "+marker)
 			delErr := d.executeStatement(
 				cleanupCtx,
@@ -139,6 +390,7 @@ func (d *DatabricksDestination) CDCConditionalSwapIncarnations(ctx context.Conte
 	stageCat, _, _ := d.parseTableParts(stagingTable)
 
 	physical := stagingTable
+	swapKey := d.canonicalSwapKey(stagingTable)
 	if !strings.EqualFold(stageCat, targetCat) {
 		copied, err := d.copySwapStaging(ctx, stagingTable, targetCat, targetSchema, targetName)
 		if err != nil {
@@ -148,8 +400,8 @@ func (d *DatabricksDestination) CDCConditionalSwapIncarnations(ctx context.Conte
 		if d.preparedSwaps == nil {
 			d.preparedSwaps = map[string]string{}
 		}
-		previous, hadPrevious := d.preparedSwaps[stagingTable]
-		d.preparedSwaps[stagingTable] = copied
+		previous, hadPrevious := d.preparedSwaps[swapKey]
+		d.preparedSwaps[swapKey] = copied
 		d.swapMu.Unlock()
 		if hadPrevious {
 			d.dropQuietly(ctx, previous)
@@ -170,8 +422,8 @@ func (d *DatabricksDestination) CDCConditionalSwapIncarnations(ctx context.Conte
 		return "", "", err
 	}
 
-	return destination.CDCTargetKey(physCat, physSchema, physName, id),
-		destination.CDCTargetKey(targetCat, targetSchema, targetName, id),
+	return canonicalIncarnationKey(physCat, physSchema, physName, id),
+		canonicalIncarnationKey(targetCat, targetSchema, targetName, id),
 		nil
 }
 
@@ -181,8 +433,8 @@ func (d *DatabricksDestination) copySwapStaging(ctx context.Context, stagingTabl
 	}
 	copyCandidate := fmt.Sprintf("%s_swap_%d", targetName, time.Now().UnixNano())
 	copyName := destination.ShortenIdentifier(copyCandidate, copyCandidate, destination.MaxIdentifierLength("databricks"))
-	copyTable := fmt.Sprintf("%s.%s.%s", targetCat, targetSchema, copyName)
-	copySQL := fmt.Sprintf("CREATE TABLE %s AS SELECT * FROM %s", quoteTableParts(targetCat, targetSchema, copyName), d.quoteTableRef(stagingTable))
+	copyTable := quoteTableParts(targetCat, targetSchema, copyName)
+	copySQL := fmt.Sprintf("CREATE TABLE %s AS SELECT * FROM %s", copyTable, d.quoteTableRef(stagingTable))
 	if err := d.executeStatement(ctx, copySQL); err != nil {
 		config.LogFailedQuery(copySQL, err)
 		return "", fmt.Errorf("copy Databricks swap staging %s: %w", stagingTable, err)
@@ -190,27 +442,35 @@ func (d *DatabricksDestination) copySwapStaging(ctx context.Context, stagingTabl
 	return copyTable, nil
 }
 
+func (d *DatabricksDestination) canonicalSwapKey(table string) string {
+	cat, sch, tbl := d.parseTableParts(table)
+	return canonicalTargetKey(cat, sch, tbl)
+}
+
 func (d *DatabricksDestination) takePreparedSwap(stagingTable string) (string, bool) {
+	swapKey := d.canonicalSwapKey(stagingTable)
 	d.swapMu.Lock()
 	defer d.swapMu.Unlock()
-	copied, ok := d.preparedSwaps[stagingTable]
-	delete(d.preparedSwaps, stagingTable)
+	copied, ok := d.preparedSwaps[swapKey]
+	delete(d.preparedSwaps, swapKey)
 	return copied, ok
 }
 
 func (d *DatabricksDestination) forgetSwapCopy(table string) {
+	swapKey := d.canonicalSwapKey(table)
 	d.swapMu.Lock()
 	defer d.swapMu.Unlock()
 	if d.keptSwaps == nil {
 		d.keptSwaps = map[string]bool{}
 	}
-	d.keptSwaps[table] = true
+	d.keptSwaps[swapKey] = true
 }
 
 func (d *DatabricksDestination) dropQuietly(ctx context.Context, table string) {
+	swapKey := d.canonicalSwapKey(table)
 	d.swapMu.Lock()
-	kept := d.keptSwaps[table]
-	delete(d.keptSwaps, table)
+	kept := d.keptSwaps[swapKey]
+	delete(d.keptSwaps, swapKey)
 	d.swapMu.Unlock()
 	if kept {
 		return
@@ -256,7 +516,7 @@ func (d *DatabricksDestination) AcquireManagedCDCRunLease(ctx context.Context, c
 
 	lease := &databricksCDCRunLease{
 		d:       d,
-		catalog: d.effectiveCatalog(),
+		catalog: strings.ToLower(d.effectiveCatalog()),
 		schema:  stagingSchema,
 		name:    "cdc_lease_" + hex.EncodeToString(sum[:10]),
 		comment: cdcLeaseCommentHead + token,
@@ -301,7 +561,7 @@ func (l *databricksCDCRunLease) ref() string {
 }
 
 func (l *databricksCDCRunLease) tableNameOf(name string) string {
-	return fmt.Sprintf("%s.%s.%s", l.catalog, l.schema, name)
+	return quoteTableParts(l.catalog, l.schema, name)
 }
 
 func (l *databricksCDCRunLease) tryAcquire(ctx context.Context) (bool, error) {
@@ -489,6 +749,9 @@ func (l *databricksCDCRunLease) Done() <-chan struct{} {
 }
 
 func (l *databricksCDCRunLease) Err() error {
+	if !l.stopping.Load() && l.renewalOverdue() {
+		l.markLost(errors.New("the lease could not be renewed in time"))
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.err

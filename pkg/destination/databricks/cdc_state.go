@@ -8,6 +8,7 @@ import (
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
@@ -32,11 +33,31 @@ var (
 
 const cdcStateDeleteBatchSize = 200
 
+func canonicalTargetKey(catalog, schemaName, tableName string) string {
+	return destination.CDCTargetKey(
+		strings.ToLower(catalog),
+		strings.ToLower(schemaName),
+		strings.ToLower(tableName),
+	)
+}
+
+func canonicalIncarnationKey(catalog, schemaName, tableName, id string) string {
+	return destination.CDCTargetKey(
+		strings.ToLower(catalog),
+		strings.ToLower(schemaName),
+		strings.ToLower(tableName),
+		id,
+	)
+}
+
 func (d *DatabricksDestination) ManagedCDCStateCatalog() string {
-	return d.effectiveCatalog()
+	return strings.ToLower(d.effectiveCatalog())
 }
 
 func (d *DatabricksDestination) TruncateCDCTable(ctx context.Context, table string) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	return d.TruncateTable(ctx, table)
 }
 
@@ -48,7 +69,7 @@ func (d *DatabricksDestination) CanonicalCDCTarget(_ context.Context, table stri
 	if schemaName == "" {
 		return "", fmt.Errorf("databricks CDC requires a schema for target %q", table)
 	}
-	return destination.CDCTargetKey(catalog, schemaName, tableName), nil
+	return canonicalTargetKey(catalog, schemaName, tableName), nil
 }
 
 func (d *DatabricksDestination) tableIdentity(ctx context.Context, table string) (catalog, schemaName, tableName, id string, exists bool, err error) {
@@ -86,7 +107,7 @@ func (d *DatabricksDestination) CDCTargetIncarnation(ctx context.Context, table 
 	if err != nil || !exists {
 		return "", false, err
 	}
-	return destination.CDCTargetKey(catalog, schemaName, tableName, id), true, nil
+	return canonicalIncarnationKey(catalog, schemaName, tableName, id), true, nil
 }
 
 func (d *DatabricksDestination) checkCDCIncarnation(ctx context.Context, table, expected string) error {

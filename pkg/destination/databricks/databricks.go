@@ -40,6 +40,7 @@ type DatabricksDestination struct {
 	catalog    string
 	schemaName string
 
+	fenceMu       sync.Mutex
 	swapMu        sync.Mutex
 	preparedSwaps map[string]string
 	keptSwaps     map[string]bool
@@ -332,35 +333,46 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 	uploadTime := time.Since(uploadStart)
 	config.Debug("[DATABRICKS] Uploaded %d bytes to volume in %v (%.2f MB/s)", fileSize, uploadTime, float64(fileSize)/uploadTime.Seconds()/1024/1024)
 
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		_ = d.client.Files.DeleteByFilePath(ctx, volumePath)
-		return err
-	}
-	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
-		_ = d.client.Files.DeleteByFilePath(ctx, volumePath)
-		return err
-	}
-
-	copyStart := time.Now()
-	copySQL := fmt.Sprintf("COPY INTO %s FROM '%s' FILEFORMAT = PARQUET COPY_OPTIONS ('mergeSchema' = 'true')", fullTable, volumePath)
-	config.Debug("[DATABRICKS] Executing: %s", copySQL)
-
-	if err := d.executeStatement(ctx, copySQL); err != nil {
-		config.LogFailedQuery(copySQL, err)
-		_ = d.client.Files.DeleteByFilePath(ctx, volumePath)
-		return fmt.Errorf("COPY INTO failed: %w", err)
+	cleanupVolume := func() {
+		delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := d.client.Files.DeleteByFilePath(delCtx, volumePath); err != nil {
+			config.Debug("[DATABRICKS] Warning: failed to cleanup volume file: %v", err)
+		}
 	}
 
-	copyTime := time.Since(copyStart)
-	config.Debug("[DATABRICKS] COPY INTO completed in %v (%.0f rows/sec)", copyTime, float64(totalRows)/copyTime.Seconds())
+	copyIntoTarget := func(targetRef string) error {
+		copyStart := time.Now()
+		copySQL := fmt.Sprintf("COPY INTO %s FROM '%s' FILEFORMAT = PARQUET COPY_OPTIONS ('mergeSchema' = 'true')", targetRef, volumePath)
+		config.Debug("[DATABRICKS] Executing: %s", copySQL)
 
-	if err := d.client.Files.DeleteByFilePath(ctx, volumePath); err != nil {
-		config.Debug("[DATABRICKS] Warning: failed to cleanup volume file: %v", err)
+		if err := d.executeStatement(ctx, copySQL); err != nil {
+			config.LogFailedQuery(copySQL, err)
+			return fmt.Errorf("COPY INTO failed: %w", err)
+		}
+
+		copyTime := time.Since(copyStart)
+		config.Debug("[DATABRICKS] COPY INTO completed in %v (%.0f rows/sec)", copyTime, float64(totalRows)/copyTime.Seconds())
+		return nil
 	}
 
-	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
-		return err
+	if opts.CDCExpectedIncarnation != "" {
+		if err := d.withFencedCDCTarget(ctx, opts.Table, opts.CDCExpectedIncarnation, "write", copyIntoTarget); err != nil {
+			cleanupVolume()
+			return err
+		}
+	} else {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			cleanupVolume()
+			return err
+		}
+		if err := copyIntoTarget(fullTable); err != nil {
+			cleanupVolume()
+			return err
+		}
 	}
+
+	cleanupVolume()
 
 	config.Debug("[DATABRICKS] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
@@ -368,6 +380,14 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 
 func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
+	fenced := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
+	if fenced {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		d.fenceMu.Lock()
+		defer d.fenceMu.Unlock()
+	}
 
 	physicalStaging := opts.StagingTable
 	if copied, ok := d.takePreparedSwap(opts.StagingTable); ok {
@@ -385,7 +405,6 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 		return fmt.Errorf("failed to ensure target schema exists: %w", err)
 	}
 
-	fenced := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
 	targetExists := true
 	if fenced {
 		targetInc, exists, err := d.CDCTargetIncarnation(ctx, opts.TargetTable)
@@ -393,6 +412,9 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 			return err
 		}
 		if opts.CDCExpectedIncarnation != "" && (!exists || targetInc != opts.CDCExpectedIncarnation) {
+			return fmt.Errorf("databricks CDC target %q physical incarnation changed", opts.TargetTable)
+		}
+		if opts.CDCExpectedIncarnation == "" && exists {
 			return fmt.Errorf("databricks CDC target %q physical incarnation changed", opts.TargetTable)
 		}
 		targetExists = exists
@@ -408,9 +430,17 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 		}
 	}
 
-	tempNameCandidate := fmt.Sprintf("%s_OLD_%d", targetName, time.Now().UnixNano())
-	tempName := destination.ShortenIdentifier(tempNameCandidate, tempNameCandidate, destination.MaxIdentifierLength("databricks"))
+	tempName, err := newGuardTableName(targetName, "swap_old")
+	if err != nil {
+		return err
+	}
 	tempFull := quoteTableParts(targetCat, targetSchema, tempName)
+
+	restoreOldTarget := func() error {
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return d.executeStatement(restoreCtx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", tempFull, targetFull))
+	}
 
 	targetMoved := false
 	if targetExists {
@@ -418,38 +448,71 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 		if err := d.executeStatement(ctx, renameOldSQL); err != nil {
 			if fenced {
 				config.LogFailedQuery(renameOldSQL, err)
+				if opts.CDCExpectedIncarnation != "" && isDatabricksMissingError(err) {
+					return fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", opts.TargetTable, err)
+				}
 				return fmt.Errorf("failed to rename target to temporary table: %w", err)
 			}
 			config.LogFailedQuery(renameOldSQL, err)
 			config.Debug("[DATABRICKS] Target table doesn't exist, proceeding with rename")
 		} else {
 			targetMoved = true
+			if fenced && opts.CDCExpectedIncarnation != "" {
+				_, _, _, tempID, tempExists, idErr := d.tableIdentity(ctx, tempFull)
+				movedInc := canonicalIncarnationKey(targetCat, targetSchema, targetName, tempID)
+				if idErr != nil || !tempExists || movedInc != opts.CDCExpectedIncarnation {
+					restoreErr := restoreOldTarget()
+					if idErr != nil {
+						return errors.Join(idErr, restoreErr)
+					}
+					return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed", opts.TargetTable), restoreErr)
+				}
+			}
+		}
+	}
+
+	if fenced {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			var restoreErr error
+			if targetMoved {
+				restoreErr = restoreOldTarget()
+			}
+			return errors.Join(err, restoreErr)
 		}
 	}
 
 	renameNewSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingFull, targetFull)
 	if err := d.executeStatement(ctx, renameNewSQL); err != nil {
 		config.LogFailedQuery(renameNewSQL, err)
-		if targetMoved {
-			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			_ = d.executeStatement(restoreCtx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", tempFull, targetFull))
-			cancel()
+		var restoreErr error
+		if targetMoved && !isDatabricksAlreadyExistsError(err) {
+			restoreErr = restoreOldTarget()
 		}
-		return fmt.Errorf("failed to rename staging to target: %w", err)
-	}
-
-	if physicalStaging != opts.StagingTable {
-		d.forgetSwapCopy(physicalStaging)
+		if fenced && isDatabricksAlreadyExistsError(err) {
+			return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", opts.TargetTable, err), restoreErr)
+		}
+		return errors.Join(fmt.Errorf("failed to rename staging to target: %w", err), restoreErr)
 	}
 
 	if opts.CDCExpectedResultIncarnation != "" {
 		resultInc, exists, err := d.CDCTargetIncarnation(ctx, opts.TargetTable)
-		if err != nil {
-			return err
+		if err != nil || !exists || resultInc != opts.CDCExpectedResultIncarnation {
+			undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			undoErr := d.executeStatement(undoCtx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFull, stagingFull))
+			cancel()
+			var restoreErr error
+			if targetMoved && undoErr == nil {
+				restoreErr = restoreOldTarget()
+			}
+			if err != nil {
+				return errors.Join(err, undoErr, restoreErr)
+			}
+			return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed after swap", opts.TargetTable), undoErr, restoreErr)
 		}
-		if !exists || resultInc != opts.CDCExpectedResultIncarnation {
-			return fmt.Errorf("databricks CDC target %q physical incarnation changed after swap", opts.TargetTable)
-		}
+	}
+
+	if physicalStaging != opts.StagingTable {
+		d.forgetSwapCopy(physicalStaging)
 	}
 
 	if targetMoved {
@@ -461,6 +524,9 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 }
 
 func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	if destination.HasCDCDeletedColumn(opts.Columns) {
 		return d.mergeCDC(ctx, opts)
 	}
@@ -471,8 +537,8 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 		return errors.New("merge requires at least one primary key")
 	}
 
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
-		return err
+	if opts.CDCExpectedIncarnation != "" {
+		return d.executeFencedMerges(ctx, []destination.CDCAtomicTableMerge{{Options: opts}})
 	}
 
 	mergeSQL := d.buildNonCDCMergeSQL(opts)
@@ -483,17 +549,16 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 		return fmt.Errorf("failed to execute merge: %w", err)
 	}
 
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
-		return err
-	}
-
 	config.Debug("[DATABRICKS] Merge completed in %v", time.Since(startMerge))
 	return nil
 }
 
 func (d *DatabricksDestination) buildNonCDCMergeSQL(opts destination.MergeOptions) string {
+	return d.buildNonCDCMergeSQLForTarget(opts, d.quoteTableRef(opts.TargetTable))
+}
+
+func (d *DatabricksDestination) buildNonCDCMergeSQLForTarget(opts destination.MergeOptions, targetFull string) string {
 	stagingFull := d.quoteTableRef(opts.StagingTable)
-	targetFull := d.quoteTableRef(opts.TargetTable)
 
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
@@ -707,8 +772,8 @@ func (d *DatabricksDestination) ListStagingTables(ctx context.Context, schemaNam
 			continue
 		}
 		name := row[nameIdx]
-		if strings.HasPrefix(name, prefix) {
-			tables = append(tables, name)
+		if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
+			tables = append(tables, prefix+name[len(prefix):])
 		}
 	}
 	return tables, nil
@@ -900,6 +965,9 @@ func (d *DatabricksDestination) parseTableParts(table string) (catalog, schemaNa
 		Schema:  schDefault,
 	})
 	if err != nil {
+		if parts := tablename.Split(table); len(parts) == 1 && parts[0] != "" {
+			return catDefault, schDefault, parts[0]
+		}
 		return catDefault, schDefault, table
 	}
 	if tn.Catalog == "" {
