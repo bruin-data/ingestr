@@ -275,14 +275,27 @@ func (d *TrinoDestination) writeBatch(ctx context.Context, records <-chan source
 func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
 
+	conditional := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
+	if conditional {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		if err := d.checkCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
+			return err
+		}
+	}
+
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
-	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
-	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
+	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
+	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
 	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 	oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("trino"))
-	oldFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(oldName))
+	oldFQN := qualifyTrinoTable(targetCatalog, targetSchema, oldName)
 
 	// Replace only PrepareTables the staging side, so the target schema may
 	// not exist yet on first run with the _bruin_staging design.
@@ -290,10 +303,16 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		return fmt.Errorf("failed to ensure target schema exists: %w", err)
 	}
 
-	// Rename the existing target out of the way (within its own schema).
+	movedOld := false
 	renameOldSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFQN, oldFQN)
 	if _, err := d.db.ExecContext(ctx, renameOldSQL); err != nil {
+		if opts.CDCExpectedIncarnation != "" {
+			config.LogFailedQuery(renameOldSQL, err)
+			return fmt.Errorf("failed to rename fenced target table %s: %w", opts.TargetTable, err)
+		}
 		config.Debug("[TRINO] No existing table to rename (this is OK for first run): %v", err)
+	} else {
+		movedOld = true
 	}
 
 	// Cross-schema move: Trino requires the new name to be fully qualified when
@@ -302,7 +321,17 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	renameNewSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingFQN, targetFQN)
 	if _, err := d.db.ExecContext(ctx, renameNewSQL); err != nil {
 		config.LogFailedQuery(renameNewSQL, err)
+		if movedOld {
+			restoreSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", oldFQN, targetFQN)
+			_, _ = d.db.ExecContext(context.WithoutCancel(ctx), restoreSQL)
+		}
 		return fmt.Errorf("failed to rename staging to target: %w", err)
+	}
+
+	if opts.CDCExpectedResultIncarnation != "" {
+		if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedResultIncarnation); err != nil {
+			return err
+		}
 	}
 
 	dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", oldFQN)
@@ -313,13 +342,20 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 }
 
 func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		return d.mergeCDC(ctx, opts)
+	}
+
 	startMerge := time.Now()
+	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
 
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
-	stagingFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(stagingCatalog), quoteIdentifier(stagingSchema), quoteIdentifier(stagingName))
-	targetFQN := fmt.Sprintf("%s.%s.%s", quoteIdentifier(targetCatalog), quoteIdentifier(targetSchema), quoteIdentifier(targetName))
+	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
+	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
 
 	var onConditions []string
 	for _, pk := range opts.PrimaryKeys {
@@ -367,6 +403,9 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)`,
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
 		config.LogFailedQuery(mergeSQL, err)
 		return fmt.Errorf("failed to merge tables: %w", err)
+	}
+	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+		return err
 	}
 
 	config.Debug("[TRINO MERGE] Merge completed in %v", time.Since(startMerge))
@@ -544,12 +583,60 @@ func (d *TrinoDestination) SupportsMergeStrategy() bool        { return true }
 func (d *TrinoDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *TrinoDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *TrinoDestination) SupportsSCD2Strategy() bool         { return true }
-func (d *TrinoDestination) SupportsAtomicSwap() bool           { return false }
+func (d *TrinoDestination) SupportsAtomicSwap() bool           { return true }
 
 func (d *TrinoDestination) GetScheme() string { return "trino" }
 
 func (d *TrinoDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	return nil, nil
+	if d.db == nil {
+		return nil, errors.New("trino destination is not connected")
+	}
+	catalog, schemaName, tableName, err := d.resolveTableName(table)
+	if err != nil {
+		return nil, err
+	}
+
+	query := fmt.Sprintf(
+		`SELECT column_name, data_type, is_nullable
+		FROM %s.information_schema.columns
+		WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s)
+		ORDER BY ordinal_position`,
+		quoteIdentifier(catalog),
+		escapeString(schemaName),
+		escapeString(tableName),
+	)
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		if isTrinoMissingObject(err) {
+			return nil, nil
+		}
+		config.LogFailedQuery(query, err)
+		return nil, fmt.Errorf("failed to inspect Trino table schema for %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var columns []schema.Column
+	for rows.Next() {
+		var colName, dataType, isNullable string
+		if err := rows.Scan(&colName, &dataType, &isNullable); err != nil {
+			return nil, fmt.Errorf("failed to scan Trino column metadata for %s: %w", table, err)
+		}
+		col := mapTrinoTypeToColumn(dataType)
+		col.Name = colName
+		col.Nullable = !strings.EqualFold(strings.TrimSpace(isNullable), "NO")
+		columns = append(columns, col)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read Trino column metadata for %s: %w", table, err)
+	}
+	if len(columns) == 0 {
+		return nil, nil
+	}
+	return &schema.TableSchema{
+		Name:    tableName,
+		Schema:  schemaName,
+		Columns: columns,
+	}, nil
 }
 
 type jsonTypeMode string
@@ -695,23 +782,51 @@ func (d *TrinoDestination) parseTableName(table string) (catalog, schemaName, ta
 	return tn.Catalog, tn.Schema, tn.Table
 }
 
+func (d *TrinoDestination) resolveTableName(table string) (catalog, schemaName, tableName string, err error) {
+	tn, err := tablename.Trino.Parse(table, tablename.Defaults{Catalog: d.catalog, Schema: d.schema})
+	if err != nil {
+		return "", "", "", fmt.Errorf("invalid Trino table name %q: %w", table, err)
+	}
+	if tn.Catalog == "" || tn.Schema == "" || tn.Table == "" {
+		return "", "", "", fmt.Errorf("incomplete Trino table name %q", table)
+	}
+	return tn.Catalog, tn.Schema, tn.Table, nil
+}
+
+func qualifyTrinoTable(catalog, schemaName, table string) string {
+	return fmt.Sprintf("%s.%s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(table))
+}
+
 func buildCreateTableSQL(catalog, schemaName, table string, columns []schema.Column, jsonType jsonTypeMode) string {
+	return buildCreateTableSQLWithOptions(catalog, schemaName, table, columns, jsonType, true, "")
+}
+
+func buildCreateTableSQLWithOptions(catalog, schemaName, table string, columns []schema.Column, jsonType jsonTypeMode, ifNotExists bool, lsnComment string) string {
 	var colDefs []string
 	for _, col := range columns {
 		colType := mapDataTypeToTrino(col, jsonType)
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
+		def := fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType)
+		if lsnComment != "" && strings.EqualFold(col.Name, destination.CDCLSNColumn) {
+			def += " COMMENT " + escapeString(lsnComment)
+		}
+		colDefs = append(colDefs, def)
 	}
 
-	sql := fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS %s.%s.%s (\n  %s\n)",
-		quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(table),
+	clause := "CREATE TABLE "
+	if ifNotExists {
+		clause += "IF NOT EXISTS "
+	}
+	sqlStr := fmt.Sprintf(
+		"%s%s (\n  %s\n)",
+		clause,
+		qualifyTrinoTable(catalog, schemaName, table),
 		strings.Join(colDefs, ",\n  "),
 	)
 	if jsonType.normalized() == jsonTypeVariant {
-		sql += "\nWITH (format_version = 3)"
+		sqlStr += "\nWITH (format_version = 3)"
 	}
 
-	return sql
+	return sqlStr
 }
 
 func buildInsertSQLWithValues(catalog, schemaName, table string, columns []string, record arrow.RecordBatch, startRow, endRow int, jsonType jsonTypeMode) string {
@@ -839,6 +954,9 @@ func castNull(dt arrow.DataType, jsonType jsonTypeMode) string {
 	case arrow.TIME64:
 		return "CAST(NULL AS TIME)"
 	case arrow.TIMESTAMP:
+		if tsType, ok := dt.(*arrow.TimestampType); ok && tsType.TimeZone != "" {
+			return "CAST(NULL AS TIMESTAMP(6) WITH TIME ZONE)"
+		}
 		return "CAST(NULL AS TIMESTAMP)"
 	case arrow.BINARY:
 		return "CAST(NULL AS VARBINARY)"
