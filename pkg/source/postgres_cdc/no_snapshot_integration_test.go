@@ -53,29 +53,33 @@ func TestNoSnapshotSlotValidationWaitsForReleasedWalsender(t *testing.T) {
 		}, 10*time.Second, 50*time.Millisecond)
 		return conn
 	}
-	configure := func(t *testing.T) error {
+	// validating runs right before validation, after the source has connected,
+	// so connection setup cannot eat into the window the slot stays active.
+	configure := func(t *testing.T, validating func()) error {
 		t.Helper()
 		src := NewPostgresCDCSource()
 		uri := strings.Replace(connString, "postgres://", "postgres+cdc://", 1) + "&publication=release_pub&slot=release_slot"
 		require.NoError(t, src.Connect(ctx, uri))
 		defer func() { _ = src.Close(context.Background()) }()
+		validating()
 		return src.ConfigureNoSnapshot(ctx, map[string]string{"public.orders": startLSN})
 	}
 
 	t.Run("released after close", func(t *testing.T) {
 		holder := holdSlot(t)
 		closed := make(chan error, 1)
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			closed <- holder.Close(context.Background())
-		}()
-		require.NoError(t, configure(t))
+		require.NoError(t, configure(t, func() {
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				closed <- holder.Close(context.Background())
+			}()
+		}))
 		require.NoError(t, <-closed)
 	})
 
 	t.Run("still active", func(t *testing.T) {
 		holder := holdSlot(t)
 		defer func() { _ = holder.Close(context.Background()) }()
-		require.ErrorContains(t, configure(t), `slot "release_slot" must be an inactive persistent pgoutput slot`)
+		require.ErrorContains(t, configure(t, func() {}), `slot "release_slot" must be an inactive persistent pgoutput slot`)
 	})
 }
