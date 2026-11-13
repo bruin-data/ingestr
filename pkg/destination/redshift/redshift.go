@@ -3,16 +3,14 @@ package redshift
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/bruin-data/ingestr/internal/arrowutil"
-	"github.com/bruin-data/ingestr/internal/config"
-	intredshift "github.com/bruin-data/ingestr/internal/redshift"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -20,32 +18,90 @@ import (
 
 type RedshiftDestination struct {
 	*postgres.PostgresDestination
+	db                 redshiftDB
+	dbOIDMu            sync.Mutex
+	dbOID              int64
+	leaseTTL           time.Duration
+	leaseRenewInterval time.Duration
 }
 
 func NewRedshiftDestination() *RedshiftDestination {
-	// Redshift does not support the to_regclass/parse_ident resolver. Preserve
-	// its public-schema default instead of issuing PostgreSQL catalog queries.
-	return &RedshiftDestination{PostgresDestination: &postgres.PostgresDestination{DefaultSchema: "public"}}
+	return &RedshiftDestination{
+		PostgresDestination: &postgres.PostgresDestination{DefaultSchema: "public"},
+		leaseTTL:            defaultRedshiftLeaseTTL,
+		leaseRenewInterval:  defaultRedshiftLeaseRenewInterval,
+	}
 }
 
 func (d *RedshiftDestination) Schemes() []string {
 	return []string{"redshift", "redshift+psycopg2"}
 }
 
-func (d *RedshiftDestination) Connect(ctx context.Context, uri string) error {
-	return d.PostgresDestination.Connect(ctx, intredshift.NormalizeURI(uri))
+func drainRecordBatches(records <-chan source.RecordBatchResult) {
+	for result := range records {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
 }
 
-func (d *RedshiftDestination) ValidateManagedCDCState() error {
-	return errors.New("redshift does not support destination-managed CDC state")
+func (d *RedshiftDestination) verifyCDCIncarnation(ctx context.Context, queryer redshiftQueryer, schemaName, tableName, table, expectedIncarnation string) error {
+	if expectedIncarnation == "" {
+		return nil
+	}
+	inc, exists, err := d.targetIncarnationInTx(ctx, queryer, schemaName, tableName)
+	if err != nil {
+		return err
+	}
+	if !exists || inc != expectedIncarnation {
+		return fmt.Errorf("redshift CDC target %q physical incarnation changed", table)
+	}
+	return nil
 }
 
 func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		drainRecordBatches(records)
+		return err
+	}
+
+	var (
+		db        redshiftDB
+		targetRef string
+	)
+	resolveTarget := func() error {
+		if db != nil {
+			return nil
+		}
+		conn, err := d.requireDB()
+		if err != nil {
+			return err
+		}
+		schemaName, tableName, err := d.resolveSchemaTable(ctx, conn, opts.Table)
+		if err != nil {
+			return err
+		}
+		db = conn
+		targetRef = quoteTable(schemaName, tableName)
+		if err := d.verifyCDCIncarnation(ctx, db, schemaName, tableName, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if opts.CDCExpectedIncarnation != "" {
+		if err := resolveTarget(); err != nil {
+			drainRecordBatches(records)
+			return err
+		}
+	}
+
 	for result := range records {
 		if result.Err != nil {
 			if result.Batch != nil {
 				result.Batch.Release()
 			}
+			drainRecordBatches(records)
 			return result.Err
 		}
 		record := result.Batch
@@ -59,6 +115,17 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 		if numRows == 0 {
 			record.Release()
 			continue
+		}
+
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			record.Release()
+			drainRecordBatches(records)
+			return err
+		}
+		if err := resolveTarget(); err != nil {
+			record.Release()
+			drainRecordBatches(records)
+			return err
 		}
 
 		columns := make([]string, numCols)
@@ -75,22 +142,51 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 			rowsPerInsert = 1
 		}
 
-		for offset := 0; offset < numRows; offset += rowsPerInsert {
-			end := offset + rowsPerInsert
-			if end > numRows {
-				end = numRows
+		writeChunks := func(execFn func(sql string, args ...any) error) error {
+			for offset := 0; offset < numRows; offset += rowsPerInsert {
+				end := min(offset+rowsPerInsert, numRows)
+				sql, args := buildInsertSQL(targetRef, columns, record, offset, end)
+				if err := execFn(sql, args...); err != nil {
+					return fmt.Errorf("failed to insert batch: %w", err)
+				}
 			}
-
-			sql, args := buildInsert(opts.Table, columns, record, offset, end)
-			if err := d.Exec(ctx, sql, args...); err != nil {
-				record.Release()
-				return fmt.Errorf("failed to insert batch: %w", err)
-			}
+			return nil
 		}
 
+		var err error
+		if opts.CDCExpectedIncarnation != "" {
+			err = d.withTx(ctx, func(tx redshiftTx) error {
+				if _, _, _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+					return err
+				}
+				return writeChunks(func(sql string, args ...any) error {
+					_, execErr := tx.Exec(ctx, sql, args...)
+					return execErr
+				})
+			})
+		} else {
+			err = writeChunks(func(sql string, args ...any) error {
+				_, execErr := db.Exec(ctx, sql, args...)
+				return execErr
+			})
+		}
 		record.Release()
+		if err != nil {
+			drainRecordBatches(records)
+			return err
+		}
 	}
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if opts.CDCExpectedIncarnation != "" {
+		schemaName, tableName, err := d.resolveSchemaTable(ctx, db, opts.Table)
+		if err != nil {
+			return err
+		}
+		return d.verifyCDCIncarnation(ctx, db, schemaName, tableName, opts.Table, opts.CDCExpectedIncarnation)
+	}
 	return nil
 }
 
@@ -105,10 +201,19 @@ func buildInsert(table string, columns []string, record interface {
 	Column(int) arrow.Array
 }, startRow, endRow int,
 ) (string, []interface{}) {
+	return buildInsertSQL(destination.QuoteTableName(table), columns, record, startRow, endRow)
+}
+
+func buildInsertSQL(targetRef string, columns []string, record interface {
+	NumRows() int64
+	NumCols() int64
+	Column(int) arrow.Array
+}, startRow, endRow int,
+) (string, []interface{}) {
 	var b strings.Builder
 
 	b.WriteString("INSERT INTO ")
-	b.WriteString(destination.QuoteTableName(table))
+	b.WriteString(targetRef)
 	b.WriteString(" (")
 	for i, col := range columns {
 		if i > 0 {
@@ -143,68 +248,7 @@ func buildInsert(table string, columns []string, record interface {
 	return b.String(), args
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func (d *RedshiftDestination) GetScheme() string { return "redshift" }
-
-// MergeTable performs a merge operation using Redshift's native MERGE statement.
-// For CDC sources (detected by presence of _cdc_deleted column), it handles
-// deleted rows specially by only updating CDC columns (preserving original data).
-func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	startMerge := time.Now()
-
-	if len(opts.PrimaryKeys) == 0 {
-		return fmt.Errorf("merge requires at least one primary key")
-	}
-
-	// Redshift MERGE only accepts equality predicates between source and target
-	// columns in its ON clause, so predicate merges run as UPDATE + anti-join INSERT.
-	if predicate := strings.TrimSpace(opts.IncrementalPredicate); predicate != "" {
-		if err := d.mergeWithPredicate(ctx, opts, predicate); err != nil {
-			return err
-		}
-		config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
-		return nil
-	}
-
-	mergeSQL := d.buildMergeSQL(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns)
-	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
-
-	if err := d.Exec(ctx, mergeSQL); err != nil {
-		return fmt.Errorf("failed to execute merge: %w", err)
-	}
-
-	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
-	return nil
-}
-
-func (d *RedshiftDestination) mergeWithPredicate(ctx context.Context, opts destination.MergeOptions, predicate string) error {
-	statements := buildPredicateMergeStatements(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, predicate)
-
-	tx, err := d.BeginTransaction(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	for _, stmt := range statements {
-		config.Debug("[MERGE] Executing predicate merge statement: %s", stmt)
-		if err := tx.Exec(ctx, stmt); err != nil {
-			config.LogFailedQuery(stmt, err)
-			return fmt.Errorf("failed to execute predicate merge statement: %w", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
-}
 
 type mergeParts struct {
 	dedupSource    string
