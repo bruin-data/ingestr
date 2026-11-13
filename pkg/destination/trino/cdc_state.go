@@ -128,6 +128,10 @@ func (d *TrinoDestination) LoadCDCState(ctx context.Context, table, connectorID 
 	if d.db == nil {
 		return nil, errors.New("trino destination is not connected")
 	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return nil, err
+	}
 	catalog, schemaName, tableName, err := d.resolveTableName(table)
 	if err != nil {
 		return nil, err
@@ -176,6 +180,10 @@ func (d *TrinoDestination) LoadCDCState(ctx context.Context, table, connectorID 
 func (d *TrinoDestination) LoadCDCStateFence(ctx context.Context, table, connectorID string) (destination.CDCStateFence, error) {
 	if d.db == nil {
 		return destination.CDCStateFence{}, errors.New("trino destination is not connected")
+	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return destination.CDCStateFence{}, err
 	}
 	catalog, schemaName, tableName, err := d.resolveTableName(table)
 	if err != nil {
@@ -272,6 +280,10 @@ func (d *TrinoDestination) DeleteCDCStateEvents(ctx context.Context, table, conn
 func (d *TrinoDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	if d.db == nil {
 		return "", errors.New("trino destination is not connected")
+	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return "", err
 	}
 	meta, exists, err := d.trinoTargetMetadata(ctx, table)
 	if err != nil || !exists || !meta.hasLSNColumn {
@@ -382,6 +394,10 @@ func (d *TrinoDestination) trinoTargetMetadata(ctx context.Context, table string
 }
 
 func (d *TrinoDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return "", false, err
+	}
 	meta, exists, err := d.trinoTargetMetadata(ctx, table)
 	if err != nil || !exists {
 		return "", exists, err
@@ -394,6 +410,10 @@ func (d *TrinoDestination) CDCTargetIncarnation(ctx context.Context, table strin
 }
 
 func (d *TrinoDestination) EnsureCDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return "", false, err
+	}
 	meta, exists, err := d.trinoTargetMetadata(ctx, table)
 	if err != nil || !exists {
 		return "", exists, err
@@ -510,6 +530,10 @@ func (d *TrinoDestination) claimMarkerTable(claimTable, target string) (catalog,
 func (d *TrinoDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
 	if d.db == nil {
 		return errors.New("trino destination is not connected")
+	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, claimTable, claim.DestinationTable); err != nil {
+		return err
 	}
 	owner, err := claim.OwnerID()
 	if err != nil {
@@ -628,6 +652,10 @@ func (d *TrinoDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Context, cl
 	if d.db == nil {
 		return "", errors.New("trino destination is not connected")
 	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, claimTable, claim.DestinationTable, opts.Table); err != nil {
+		return "", err
+	}
 	if opts.Schema == nil {
 		return "", errors.New("cannot create an empty managed CDC target without a schema")
 	}
@@ -719,31 +747,20 @@ func (d *TrinoDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Context, cl
 	return incarnation, nil
 }
 
-type trinoExecFunc func(ctx context.Context, sqlStr string, args ...any) error
-
-func (d *TrinoDestination) defaultExec(ctx context.Context, sqlStr string, args ...any) error {
-	_, err := d.db.ExecContext(ctx, sqlStr, args...)
-	return err
-}
-
 func (d *TrinoDestination) TruncateTable(ctx context.Context, table string) error {
 	if d.db == nil {
 		return errors.New("trino destination is not connected")
 	}
-	return d.truncateTableWithExec(ctx, table, d.defaultExec, false)
-}
-
-func (d *TrinoDestination) truncateTableWithExec(ctx context.Context, table string, execFn trinoExecFunc, useDelete bool) error {
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return err
+	}
 	catalog, schemaName, tableName, err := d.resolveTableName(table)
 	if err != nil {
 		return err
 	}
-	verb := "TRUNCATE TABLE "
-	if useDelete {
-		verb = "DELETE FROM "
-	}
-	query := verb + qualifyTrinoTable(catalog, schemaName, tableName)
-	if err := execFn(ctx, query); err != nil {
+	query := "TRUNCATE TABLE " + qualifyTrinoTable(catalog, schemaName, tableName)
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
 		config.LogFailedQuery(query, err)
 		return fmt.Errorf("truncate Trino table %s: %w", table, err)
 	}
@@ -764,6 +781,10 @@ func (d *TrinoDestination) TruncateCDCTableIfIncarnation(ctx context.Context, ta
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return err
+	}
 	releaseLocks, verifyLocks, err := d.acquireCDCTargetLocks(ctx, table)
 	if err != nil {
 		return err
@@ -775,7 +796,7 @@ func (d *TrinoDestination) TruncateCDCTableIfIncarnation(ctx context.Context, ta
 		return err
 	}
 	incarnationPred := trinoIncarnationExistsPredicate(meta.catalog, meta.schemaName, meta.tableName, marker)
-	if err := d.truncateCDCTableIfIncarnationLocked(ctx, table, meta.fqn, expectedIncarnation, incarnationPred, d.defaultExec, verifyLocks); err != nil {
+	if err := d.truncateCDCTableIfIncarnationLocked(ctx, table, meta.fqn, incarnationPred, verifyLocks); err != nil {
 		return err
 	}
 	return d.checkCDCIncarnation(ctx, table, expectedIncarnation)
@@ -783,8 +804,7 @@ func (d *TrinoDestination) TruncateCDCTableIfIncarnation(ctx context.Context, ta
 
 func (d *TrinoDestination) truncateCDCTableIfIncarnationLocked(
 	ctx context.Context,
-	table, targetFQN, expectedIncarnation, incarnationPred string,
-	execFn trinoExecFunc,
+	table, targetFQN, incarnationPred string,
 	verifyLocks func() error,
 ) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -796,7 +816,7 @@ func (d *TrinoDestination) truncateCDCTableIfIncarnationLocked(
 		}
 	}
 	query := fmt.Sprintf("DELETE FROM %s WHERE %s", targetFQN, incarnationPred)
-	if err := execFn(ctx, query); err != nil {
+	if _, err := d.db.ExecContext(ctx, query); err != nil {
 		config.LogFailedQuery(query, err)
 		return fmt.Errorf("truncate Trino table %s: %w", table, err)
 	}
@@ -811,6 +831,10 @@ func (d *TrinoDestination) truncateCDCTableIfIncarnationLocked(
 func (d *TrinoDestination) SupportsCDCConditionalSwap() bool { return true }
 
 func (d *TrinoDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, targetTable, stagingTable); err != nil {
+		return "", "", err
+	}
 	targetCatalog, targetSchema, targetName, err := d.resolveTableName(targetTable)
 	if err != nil {
 		return "", "", err
@@ -837,365 +861,17 @@ func (d *TrinoDestination) CDCConditionalSwapIncarnations(ctx context.Context, t
 	if marker == "" {
 		return "", "", fmt.Errorf("trino CDC staging table %q is missing an incarnation marker", stagingTable)
 	}
-	return stagingIncarnation, trinoTableIncarnation(targetCatalog, targetSchema, targetName, marker), nil
-}
-
-type preparedAtomicMerge struct {
-	merge           destination.CDCAtomicTableMerge
-	canonicalTarget string
-	targetFQN       string
-	incarnationPred string
-}
-
-type trinoTargetSnapshot struct {
-	canonicalTarget     string
-	table               string
-	catalog             string
-	schemaName          string
-	tableName           string
-	fqn                 string
-	expectedIncarnation string
-	incarnationPred     string
-	hasSnapshot         bool
-	snapshotID          int64
-}
-
-func (d *TrinoDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
-	if len(merges) == 0 {
-		return nil
-	}
-	if d.db == nil {
-		return errors.New("trino destination is not connected")
-	}
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		return err
-	}
-
-	targetTables := make([]string, 0, len(merges))
-	for _, merge := range merges {
-		if len(merge.Options.PrimaryKeys) == 0 {
-			return fmt.Errorf("trino atomic CDC merge for %q requires primary keys", merge.Options.TargetTable)
-		}
-		targetTables = append(targetTables, merge.Options.TargetTable)
-	}
-
-	releaseLocks, verifyLocks, err := d.acquireCDCTargetLocks(ctx, targetTables...)
+	targetIncarnation, targetExists, err := d.CDCTargetIncarnation(ctx, targetTable)
 	if err != nil {
-		return err
+		return "", "", err
 	}
-	defer func() { _ = releaseLocks() }()
-
-	prepared := make([]preparedAtomicMerge, 0, len(merges))
-	snapshotsByKey := make(map[string]*trinoTargetSnapshot, len(merges))
-	orderedSnapshots := make([]*trinoTargetSnapshot, 0, len(merges))
-
-	for _, merge := range merges {
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
-			return err
-		}
-		if err := verifyLocks(); err != nil {
-			return err
-		}
-		catalog, schemaName, tableName, err := d.resolveTableName(merge.Options.TargetTable)
-		if err != nil {
-			return err
-		}
-		var guardPred string
-		if merge.Options.CDCExpectedIncarnation != "" {
-			meta, marker, err := d.ensureCheckedCDCIncarnation(ctx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation)
-			if err != nil {
-				return err
-			}
-			catalog, schemaName, tableName = meta.catalog, meta.schemaName, meta.tableName
-			guardPred = trinoIncarnationExistsPredicate(catalog, schemaName, tableName, marker)
-		}
-		canonicalKey := destination.CDCTargetKey(strings.ToLower(catalog), strings.ToLower(schemaName), strings.ToLower(tableName))
-		fqn := qualifyTrinoTable(catalog, schemaName, tableName)
-		prepared = append(prepared, preparedAtomicMerge{
-			merge:           merge,
-			canonicalTarget: canonicalKey,
-			targetFQN:       fqn,
-			incarnationPred: guardPred,
-		})
-		if existing, ok := snapshotsByKey[canonicalKey]; ok {
-			if existing.expectedIncarnation == "" && merge.Options.CDCExpectedIncarnation != "" {
-				existing.expectedIncarnation = merge.Options.CDCExpectedIncarnation
-				existing.incarnationPred = guardPred
-			}
-			continue
-		}
-		snap := &trinoTargetSnapshot{
-			canonicalTarget:     canonicalKey,
-			table:               merge.Options.TargetTable,
-			catalog:             catalog,
-			schemaName:          schemaName,
-			tableName:           tableName,
-			fqn:                 fqn,
-			expectedIncarnation: merge.Options.CDCExpectedIncarnation,
-			incarnationPred:     guardPred,
-		}
-		snapshotsByKey[canonicalKey] = snap
-		orderedSnapshots = append(orderedSnapshots, snap)
+	if !targetExists {
+		return stagingIncarnation, trinoTableIncarnation(targetCatalog, targetSchema, targetName, marker), nil
 	}
-
-	needsRollbackCapability := len(prepared) > 1 || prepared[0].merge.Truncate
-	hasIcebergSnapshots, err := d.captureTrinoTargetSnapshots(ctx, orderedSnapshots)
-	if err != nil {
-		return err
+	if targetIncarnation == "" {
+		return "", "", fmt.Errorf("trino CDC target table %q has no durable physical incarnation", targetTable)
 	}
-	if !hasIcebergSnapshots {
-		if !needsRollbackCapability {
-			return d.executePreparedAtomicMergeStep(ctx, prepared[0], d.defaultExec, verifyLocks, true)
-		}
-		return d.executeAtomicMergesInTransaction(ctx, prepared, verifyLocks)
-	}
-
-	mutatedOrder := make([]*trinoTargetSnapshot, 0, len(orderedSnapshots))
-	mutatedSeen := make(map[string]struct{}, len(orderedSnapshots))
-	recordMutated := func(key string) {
-		if _, ok := mutatedSeen[key]; ok {
-			return
-		}
-		mutatedSeen[key] = struct{}{}
-		mutatedOrder = append(mutatedOrder, snapshotsByKey[key])
-	}
-
-	var batchErr error
-	for _, item := range prepared {
-		err := d.executePreparedAtomicMergeStepWithMutationHook(
-			ctx,
-			item,
-			d.defaultExec,
-			verifyLocks,
-			true,
-			func() { recordMutated(item.canonicalTarget) },
-		)
-		if err != nil {
-			batchErr = err
-			break
-		}
-	}
-	if batchErr == nil {
-		if err := verifyLocks(); err != nil {
-			batchErr = err
-		} else if err := source.ConnectorLeaseLoss(ctx); err != nil {
-			batchErr = err
-		}
-	}
-	if batchErr != nil {
-		rollbackErr := d.rollbackTrinoTargetSnapshots(ctx, mutatedOrder)
-		return errors.Join(batchErr, rollbackErr)
-	}
-	return nil
-}
-
-func (d *TrinoDestination) captureTrinoTargetSnapshots(ctx context.Context, targets []*trinoTargetSnapshot) (bool, error) {
-	for i, target := range targets {
-		refsFQN := qualifyTrinoTable(target.catalog, target.schemaName, target.tableName+"$refs")
-		query := fmt.Sprintf("SELECT snapshot_id FROM %s WHERE name = 'main'", refsFQN)
-		var snapshotID sql.NullInt64
-		err := d.db.QueryRowContext(ctx, query).Scan(&snapshotID)
-		if errors.Is(err, sql.ErrNoRows) {
-			target.hasSnapshot = false
-			continue
-		}
-		if err != nil {
-			if i == 0 && isTrinoUnsupportedSnapshots(err) {
-				return false, nil
-			}
-			config.LogFailedQuery(query, err)
-			return false, fmt.Errorf("read Trino snapshot ref for %s: %w", target.table, err)
-		}
-		if snapshotID.Valid {
-			target.hasSnapshot = true
-			target.snapshotID = snapshotID.Int64
-		}
-	}
-	return true, nil
-}
-
-func isTrinoUnsupportedSnapshots(err error) bool {
-	if isTrinoMissingObject(err) {
-		return true
-	}
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not supported") || strings.Contains(msg, "unsupported")
-}
-
-func (d *TrinoDestination) rollbackTrinoTargetSnapshots(ctx context.Context, mutated []*trinoTargetSnapshot) error {
-	if len(mutated) == 0 {
-		return nil
-	}
-	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-	defer cancel()
-
-	var errs []error
-	for i := len(mutated) - 1; i >= 0; i-- {
-		if err := d.rollbackSingleTrinoTargetSnapshot(rollbackCtx, mutated[i]); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (d *TrinoDestination) rollbackSingleTrinoTargetSnapshot(ctx context.Context, snap *trinoTargetSnapshot) error {
-	if snap.expectedIncarnation != "" {
-		if err := d.checkCDCIncarnation(ctx, snap.table, snap.expectedIncarnation); err != nil {
-			return nil
-		}
-	}
-	if !snap.hasSnapshot {
-		query := "DELETE FROM " + snap.fqn
-		if snap.incarnationPred != "" {
-			query += " WHERE " + snap.incarnationPred
-		}
-		if _, err := d.db.ExecContext(ctx, query); err != nil {
-			config.LogFailedQuery(query, err)
-			return fmt.Errorf("rollback empty Trino CDC target %s: %w", snap.table, err)
-		}
-		return nil
-	}
-
-	rollbackSQL := fmt.Sprintf("ALTER TABLE %s EXECUTE rollback_to_snapshot(%d)", snap.fqn, snap.snapshotID)
-	const maxAttempts = 5
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		_, err := d.db.ExecContext(ctx, rollbackSQL)
-		if err == nil {
-			return nil
-		}
-		if currentID, ok := d.currentTrinoSnapshotID(ctx, snap); ok && currentID == snap.snapshotID {
-			return nil
-		}
-		if !isTrinoCommitConflict(err) || attempt == maxAttempts-1 {
-			config.LogFailedQuery(rollbackSQL, err)
-			return fmt.Errorf("rollback Trino CDC target %s to snapshot %d: %w", snap.table, snap.snapshotID, err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
-		}
-	}
-	return nil
-}
-
-func (d *TrinoDestination) currentTrinoSnapshotID(ctx context.Context, snap *trinoTargetSnapshot) (int64, bool) {
-	refsFQN := qualifyTrinoTable(snap.catalog, snap.schemaName, snap.tableName+"$refs")
-	var id sql.NullInt64
-	if err := d.db.QueryRowContext(ctx, fmt.Sprintf("SELECT snapshot_id FROM %s WHERE name = 'main'", refsFQN)).Scan(&id); err != nil || !id.Valid {
-		return 0, false
-	}
-	return id.Int64, true
-}
-
-func (d *TrinoDestination) executeAtomicMergesInTransaction(
-	ctx context.Context,
-	prepared []preparedAtomicMerge,
-	verifyLocks func() error,
-) error {
-	tx, err := d.BeginTransaction(ctx)
-	if err != nil {
-		return fmt.Errorf("begin Trino atomic CDC merge transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
-		}
-		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-		defer cancel()
-		_ = tx.Rollback(rollbackCtx)
-	}()
-
-	for _, item := range prepared {
-		if err := d.executePreparedAtomicMergeStep(ctx, item, tx.Exec, verifyLocks, false); err != nil {
-			return err
-		}
-	}
-	for _, item := range prepared {
-		if item.merge.Options.CDCExpectedIncarnation != "" {
-			if err := d.checkCDCIncarnation(ctx, item.merge.Options.TargetTable, item.merge.Options.CDCExpectedIncarnation); err != nil {
-				return err
-			}
-		}
-	}
-	if err := verifyLocks(); err != nil {
-		return err
-	}
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit Trino atomic CDC merge transaction: %w", err)
-	}
-	committed = true
-	return nil
-}
-
-func (d *TrinoDestination) executePreparedAtomicMergeStep(
-	ctx context.Context,
-	item preparedAtomicMerge,
-	execFn trinoExecFunc,
-	verifyLocks func() error,
-	verifyIncarnationAfter bool,
-) error {
-	return d.executePreparedAtomicMergeStepWithMutationHook(ctx, item, execFn, verifyLocks, verifyIncarnationAfter, nil)
-}
-
-func (d *TrinoDestination) executePreparedAtomicMergeStepWithMutationHook(
-	ctx context.Context,
-	item preparedAtomicMerge,
-	execFn trinoExecFunc,
-	verifyLocks func() error,
-	verifyIncarnationAfter bool,
-	onMutated func(),
-) error {
-	hookedExec := func(execCtx context.Context, sqlStr string, args ...any) error {
-		err := execFn(execCtx, sqlStr, args...)
-		if (err == nil || execCtx.Err() != nil) && onMutated != nil {
-			onMutated()
-		}
-		return err
-	}
-
-	merge := item.merge
-	if merge.Truncate {
-		if merge.Options.CDCExpectedIncarnation != "" {
-			if err := d.truncateCDCTableIfIncarnationLocked(
-				ctx,
-				merge.Options.TargetTable,
-				item.targetFQN,
-				merge.Options.CDCExpectedIncarnation,
-				item.incarnationPred,
-				hookedExec,
-				verifyLocks,
-			); err != nil {
-				return err
-			}
-		} else if err := d.truncateTableWithExec(ctx, merge.Options.TargetTable, hookedExec, !verifyIncarnationAfter); err != nil {
-			return err
-		}
-	}
-
-	if destination.HasCDCDeletedColumn(merge.Options.Columns) {
-		if err := d.mergeCDCLocked(ctx, merge.Options, item.incarnationPred, hookedExec, verifyLocks); err != nil {
-			return err
-		}
-	} else {
-		if err := d.mergeTableLocked(ctx, merge.Options, item.incarnationPred, hookedExec, verifyLocks); err != nil {
-			return err
-		}
-	}
-
-	if verifyIncarnationAfter && merge.Options.CDCExpectedIncarnation != "" {
-		if err := d.checkCDCIncarnation(ctx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation); err != nil {
-			return err
-		}
-	}
-	return nil
+	return stagingIncarnation, targetIncarnation, nil
 }
 
 func (d *TrinoDestination) ListStagingTables(ctx context.Context, schemaName, prefix string) ([]string, error) {
@@ -1227,6 +903,9 @@ func (d *TrinoDestination) ListStagingTables(ctx context.Context, schemaName, pr
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return nil, fmt.Errorf("scan Trino staging table name: %w", err)
+		}
+		if strings.HasPrefix(strings.ToLower(name), trinoCDCInternalTablePrefix) {
+			continue
 		}
 		if strings.HasPrefix(name, prefix) {
 			tables = append(tables, name)

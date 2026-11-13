@@ -239,6 +239,31 @@ func TestTrinoPostgresCDCPipeline(t *testing.T) {
 	}
 	require.NoError(t, hardRows.Err())
 	require.Equal(t, []string{"2:two_v2", "3:three"}, gotHard)
+
+	// Multi-table postgres+cdc pipeline: snapshot + incremental across multiple tables.
+	_, err = trinoDB.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS iceberg."cdc_pg_multi"`)
+	require.NoError(t, err)
+	multiDestURI := strings.Replace(destURI, "/iceberg/cdc_pg", "/iceberg/cdc_pg_multi", 1)
+	multiCfg := &config.IngestConfig{
+		SourceURI:           pgCDCURI + "&slot=trino_multi_slot",
+		SourceTables:        []string{"public.orders", "public.orders_hard"},
+		DestURI:             multiDestURI,
+		IncrementalStrategy: config.StrategyMerge,
+	}
+	require.NoError(t, pipeline.New(multiCfg).Run(ctx))
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO public.orders (id, name, big_payload) VALUES (5, 'item5', 'multi5');
+		INSERT INTO public.orders_hard (id, name) VALUES (4, 'four');
+	`)
+	require.NoError(t, err)
+	require.NoError(t, pipeline.New(multiCfg).Run(ctx))
+
+	var multiOrdersCnt, multiHardCnt int
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_pg_multi"."orders" WHERE "_cdc_deleted" = false`).Scan(&multiOrdersCnt))
+	require.Equal(t, 4, multiOrdersCnt)
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_pg_multi"."orders_hard" WHERE "_cdc_deleted" = false`).Scan(&multiHardCnt))
+	require.Equal(t, 3, multiHardCnt)
 }
 
 func TestTrinoMySQLCDCPipeline(t *testing.T) {
@@ -346,4 +371,73 @@ func TestTrinoMySQLCDCPipeline(t *testing.T) {
 		"3:three:30:false",
 		"4:four:40:false",
 	}, got)
+
+	// Run 3: full-refresh exercises conditional SwapTable (inline-guarded MERGE INTO) on existing target.
+	refreshCfg := *cfg
+	refreshCfg.FullRefresh = true
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer refreshCancel()
+	require.NoError(t, pipeline.New(&refreshCfg).Run(refreshCtx))
+
+	var postRefreshCnt int
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_mysql"."items" WHERE "_cdc_deleted" = false`).Scan(&postRefreshCnt))
+	require.Equal(t, 3, postRefreshCnt)
+
+	// Multi-table mysql+cdc pipeline: snapshot + binlog incremental batch across two tables via MergeCDCTablesAtomically.
+	_, err = mysqlDB.ExecContext(ctx, `
+		CREATE TABLE items_two (
+			id INT NOT NULL PRIMARY KEY,
+			label VARCHAR(100) NOT NULL
+		);
+		INSERT INTO items_two (id, label) VALUES (10, 'alpha'), (20, 'beta');
+	`)
+	require.NoError(t, err)
+
+	_, err = trinoDB.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS iceberg."cdc_mysql_multi"`)
+	require.NoError(t, err)
+	multiDestURI := strings.Replace(destURI, "/iceberg/cdc_mysql", "/iceberg/cdc_mysql_multi", 1)
+
+	uMulti := u
+	uMulti.RawQuery = "mode=batch&server_id=18889"
+	multiMySQLCfg := &config.IngestConfig{
+		SourceURI:           uMulti.String(),
+		SourceTables:        []string{"items", "items_two"},
+		DestURI:             multiDestURI,
+		IncrementalStrategy: config.StrategyMerge,
+	}
+
+	require.NoError(t, pipeline.New(multiMySQLCfg).Run(ctx))
+
+	var multiItemsCnt, multiItemsTwoCnt int
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_mysql_multi"."items" WHERE "_cdc_deleted" = false`).Scan(&multiItemsCnt))
+	require.Equal(t, 3, multiItemsCnt)
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_mysql_multi"."items_two" WHERE "_cdc_deleted" = false`).Scan(&multiItemsTwoCnt))
+	require.Equal(t, 2, multiItemsTwoCnt)
+
+	// Single MySQL transaction mutating both tables -> binlog incremental exercises MergeCDCTablesAtomically.
+	_, err = mysqlDB.ExecContext(ctx, `
+		BEGIN;
+		UPDATE items SET val = 99 WHERE id = 1;
+		INSERT INTO items (id, name, val) VALUES (5, 'five', 50);
+		DELETE FROM items_two WHERE id = 10;
+		INSERT INTO items_two (id, label) VALUES (30, 'gamma');
+		COMMIT;
+	`)
+	require.NoError(t, err)
+
+	multiIncCtx, multiIncCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer multiIncCancel()
+	require.NoError(t, pipeline.New(multiMySQLCfg).Run(multiIncCtx))
+
+	var gotItem1Val int
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT val FROM "iceberg"."cdc_mysql_multi"."items" WHERE id = 1 AND "_cdc_deleted" = false`).Scan(&gotItem1Val))
+	require.Equal(t, 99, gotItem1Val)
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_mysql_multi"."items" WHERE "_cdc_deleted" = false`).Scan(&multiItemsCnt))
+	require.Equal(t, 4, multiItemsCnt)
+
+	var item10Deleted bool
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT "_cdc_deleted" FROM "iceberg"."cdc_mysql_multi"."items_two" WHERE id = 10`).Scan(&item10Deleted))
+	require.True(t, item10Deleted)
+	require.NoError(t, trinoDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_mysql_multi"."items_two" WHERE "_cdc_deleted" = false`).Scan(&multiItemsTwoCnt))
+	require.Equal(t, 2, multiItemsTwoCnt)
 }

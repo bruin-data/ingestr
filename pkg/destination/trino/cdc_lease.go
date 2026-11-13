@@ -81,6 +81,10 @@ func (d *TrinoDestination) acquireManagedCDCRunLeaseWithTimings(
 	if d.catalog == "" {
 		return nil, errors.New("trino managed CDC run lease requires a catalog")
 	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx); err != nil {
+		return nil, err
+	}
 
 	sum := sha256.Sum256([]byte(connectorID))
 	return d.acquireTrinoTableLease(

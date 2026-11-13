@@ -29,7 +29,7 @@ func (d *TrinoDestination) mergeCDC(ctx context.Context, opts destination.MergeO
 		return err
 	}
 	if opts.CDCExpectedIncarnation == "" {
-		return d.mergeCDCLocked(ctx, opts, "", d.defaultExec, nil)
+		return d.mergeCDCLocked(ctx, opts, "", nil)
 	}
 
 	releaseLocks, verifyLocks, err := d.acquireCDCTargetLocks(ctx, opts.TargetTable)
@@ -43,7 +43,7 @@ func (d *TrinoDestination) mergeCDC(ctx context.Context, opts destination.MergeO
 		return err
 	}
 	incarnationPred := trinoIncarnationExistsPredicate(meta.catalog, meta.schemaName, meta.tableName, marker)
-	if err := d.mergeCDCLocked(ctx, opts, incarnationPred, d.defaultExec, verifyLocks); err != nil {
+	if err := d.mergeCDCLocked(ctx, opts, incarnationPred, verifyLocks); err != nil {
 		return err
 	}
 	return d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
@@ -53,7 +53,6 @@ func (d *TrinoDestination) mergeCDCLocked(
 	ctx context.Context,
 	opts destination.MergeOptions,
 	incarnationPred string,
-	execFn trinoExecFunc,
 	verifyLocks func() error,
 ) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -69,7 +68,7 @@ func (d *TrinoDestination) mergeCDCLocked(
 	mergeSQL := d.buildCDCMergeSQLWithGuard(opts, incarnationPred)
 	config.Debug("[TRINO CDC MERGE] Executing: %s", mergeSQL)
 
-	if err := execFn(ctx, mergeSQL); err != nil {
+	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
 		config.LogFailedQuery(mergeSQL, err)
 		return fmt.Errorf("failed to execute Trino CDC merge: %w", err)
 	}

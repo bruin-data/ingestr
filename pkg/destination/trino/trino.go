@@ -21,12 +21,18 @@ import (
 )
 
 type TrinoDestination struct {
-	db            *sql.DB
-	catalog       string
-	schema        string
-	jsonType      jsonTypeMode
-	transactions  *transactionRegistry
-	newLeaseToken func() (string, error)
+	db                      *sql.DB
+	catalog                 string
+	schema                  string
+	jsonType                jsonTypeMode
+	transactions            *transactionRegistry
+	newLeaseToken           func() (string, error)
+	afterSwapPrecheck       func()
+	atomicRecoveryEnabled   bool
+	atomicJournalTTL        time.Duration
+	atomicJournalRenewIv    time.Duration
+	atomicOrphanMaxAge      time.Duration
+	beforeAtomicPublishStep func(step int, targetTable string) error
 }
 
 func NewTrinoDestination() *TrinoDestination {
@@ -58,6 +64,7 @@ func (d *TrinoDestination) Connect(ctx context.Context, uri string) error {
 	d.schema = connectionConfig.schema
 	d.jsonType = connectionConfig.jsonType
 	d.transactions = connectionConfig.transactions
+	d.atomicRecoveryEnabled = true
 	config.Debug("[TRINO] Connected to catalog: %s, schema: %s, JSON type: %s", d.catalog, d.schema, d.jsonType)
 	return nil
 }
@@ -72,6 +79,10 @@ func (d *TrinoDestination) Close(ctx context.Context) error {
 func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	if opts.Schema == nil {
 		return fmt.Errorf("schema is required")
+	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, opts.Table); err != nil {
+		return err
 	}
 
 	catalog, schemaName, tableName := d.parseTableName(opts.Table)
@@ -277,6 +288,10 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	if d.db == nil {
 		return errors.New("trino destination is not connected")
 	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, opts.TargetTable, opts.StagingTable); err != nil {
+		return err
+	}
 	startSwap := time.Now()
 
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
@@ -285,49 +300,12 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
 
 	conditional := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
-	var verifyLocks func() error
-	var tableComment string
 	if conditional {
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		if err := d.swapTableConditionally(ctx, opts); err != nil {
 			return err
 		}
-		releaseLocks, checkHeld, err := d.acquireCDCTargetLocks(ctx, opts.TargetTable)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = releaseLocks() }()
-		verifyLocks = checkHeld
-
-		if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
-			return err
-		}
-		var resultMarker string
-		if opts.CDCExpectedStagingIncarnation != "" {
-			_, stagingMarker, err := d.ensureCheckedCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation)
-			if err != nil {
-				return err
-			}
-			resultMarker = stagingMarker
-		}
-		if opts.CDCExpectedResultIncarnation != "" {
-			expectedMarker, ok := markerFromTableIncarnation(targetCatalog, targetSchema, targetName, opts.CDCExpectedResultIncarnation)
-			if !ok {
-				return fmt.Errorf("trino CDC target %q expected result incarnation is invalid", opts.TargetTable)
-			}
-			if resultMarker != "" && resultMarker != expectedMarker {
-				return fmt.Errorf("trino CDC swap staging and result incarnations disagree for %q", opts.TargetTable)
-			}
-			resultMarker = expectedMarker
-		}
-		if resultMarker != "" {
-			tableComment = trinoIncarnationCommentPrefix + resultMarker
-		}
-		if err := verifyLocks(); err != nil {
-			return err
-		}
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
-			return err
-		}
+		config.Debug("[TRINO] Conditional table swap completed in %v", time.Since(startSwap))
+		return nil
 	}
 
 	if err := d.ensureSchemaExists(ctx, targetCatalog, targetSchema); err != nil {
@@ -341,9 +319,9 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		}
 	}
 
-	replaceSQL := buildReplaceTableFromStagingSQL(targetFQN, stagingFQN, selectList, d.jsonType, tableComment)
+	replaceSQL := buildReplaceTableFromStagingSQL(targetFQN, stagingFQN, selectList, d.jsonType)
 	if _, err := d.db.ExecContext(ctx, replaceSQL); err != nil {
-		if !conditional && isTrinoReplaceTableUnsupported(err) {
+		if isTrinoReplaceTableUnsupported(err) {
 			if fallbackErr := d.swapTableWithoutReplaceSupport(ctx, targetCatalog, targetSchema, targetName, targetFQN, stagingFQN, selectList); fallbackErr != nil {
 				return fallbackErr
 			}
@@ -354,33 +332,637 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		return fmt.Errorf("failed to replace target table %s from staging: %w", opts.TargetTable, err)
 	}
 
-	if opts.CDCExpectedResultIncarnation != "" {
-		if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedResultIncarnation); err != nil {
-			return err
-		}
-	}
-	if verifyLocks != nil {
-		if err := verifyLocks(); err != nil {
-			return err
-		}
-	}
-	if conditional {
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
-			return err
-		}
-	}
-
 	_, _ = d.db.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+stagingFQN)
 	config.Debug("[TRINO] Table swap completed in %v", time.Since(startSwap))
 	return nil
 }
 
-func buildReplaceTableFromStagingSQL(targetFQN, stagingFQN, selectList string, jsonType jsonTypeMode, tableComment string) string {
+const trinoCDCIncarnationGuardSentinel = "INGESTR_CDC_INCARNATION_CHANGED"
+
+type trinoSwapColumnSpec struct {
+	name     string
+	dataType string
+	nullable bool
+}
+
+type trinoSwapMergeCol struct {
+	name       string
+	castToType string
+}
+
+type trinoSwapTypeRelation int
+
+const (
+	trinoSwapTypeEqual trinoSwapTypeRelation = iota
+	trinoSwapTypeTargetSubsumesStage
+	trinoSwapTypeStageWidensTarget
+	trinoSwapTypeIncompatible
+)
+
+func (d *TrinoDestination) swapTableConditionally(ctx context.Context, opts destination.SwapOptions) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	releaseLocks, verifyLocks, err := d.acquireCDCTargetLocks(ctx, opts.TargetTable)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = releaseLocks() }()
+
+	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
+	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
+	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
+	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
+
+	var stagingMarker, stagingPred string
+	if opts.CDCExpectedStagingIncarnation != "" {
+		stagingMeta, marker, err := d.ensureCheckedCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation)
+		if err != nil {
+			return err
+		}
+		stagingMarker = marker
+		stagingPred = trinoIncarnationExistsPredicate(stagingMeta.catalog, stagingMeta.schemaName, stagingMeta.tableName, marker)
+	}
+
+	if opts.CDCExpectedIncarnation == "" {
+		if _, exists, err := d.trinoTargetMetadata(ctx, opts.TargetTable); err != nil {
+			return err
+		} else if exists {
+			return fmt.Errorf("trino CDC target %q physical incarnation changed", opts.TargetTable)
+		}
+		resultMarker := stagingMarker
+		if opts.CDCExpectedResultIncarnation != "" {
+			expectedMarker, ok := markerFromTableIncarnation(targetCatalog, targetSchema, targetName, opts.CDCExpectedResultIncarnation)
+			if !ok {
+				return fmt.Errorf("trino CDC target %q expected result incarnation is invalid", opts.TargetTable)
+			}
+			if resultMarker != "" && resultMarker != expectedMarker {
+				return fmt.Errorf("trino CDC swap staging and result incarnations disagree for %q", opts.TargetTable)
+			}
+			resultMarker = expectedMarker
+		}
+		var tableComment string
+		if resultMarker != "" {
+			tableComment = trinoIncarnationCommentPrefix + resultMarker
+		}
+
+		selectList := "*"
+		if opts.Schema != nil {
+			if destCols := destination.DestinationColumns(opts.Schema.ColumnNames()); len(destCols) > 0 {
+				rawStageSpecs, err := d.readTrinoSwapColumnSpecs(ctx, stagingCatalog, stagingSchema, stagingName)
+				if err != nil {
+					return err
+				}
+				rawStageByLower := make(map[string]string, len(rawStageSpecs))
+				for _, spec := range rawStageSpecs {
+					rawStageByLower[strings.ToLower(spec.name)] = spec.name
+				}
+				resolvedCols := make([]string, 0, len(destCols))
+				for _, colName := range destCols {
+					actualName, ok := rawStageByLower[strings.ToLower(colName)]
+					if !ok {
+						return fmt.Errorf("trino CDC staging table %q is missing expected column %q", opts.StagingTable, colName)
+					}
+					resolvedCols = append(resolvedCols, actualName)
+				}
+				selectList = strings.Join(quoteColumns(resolvedCols), ", ")
+			}
+		}
+
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := d.ensureSchemaExists(ctx, targetCatalog, targetSchema); err != nil {
+			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+		}
+		if d.afterSwapPrecheck != nil {
+			d.afterSwapPrecheck()
+		}
+
+		createSQL := buildCreateTableFromStagingSQL(targetFQN, stagingFQN, selectList, d.jsonType, tableComment, stagingPred)
+		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			config.LogFailedQuery(createSQL, err)
+			if isTrinoAlreadyExists(err) {
+				return fmt.Errorf("trino CDC target %q physical incarnation changed: %w", opts.TargetTable, err)
+			}
+			if opts.CDCExpectedStagingIncarnation != "" {
+				if incErr := d.checkCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation); incErr != nil {
+					return incErr
+				}
+			}
+			if strings.Contains(err.Error(), trinoCDCIncarnationGuardSentinel) {
+				return fmt.Errorf("trino CDC target %q physical incarnation changed: %w", opts.StagingTable, err)
+			}
+			return fmt.Errorf("failed to create CDC target table %s from staging: %w", opts.TargetTable, err)
+		}
+		if opts.CDCExpectedStagingIncarnation != "" {
+			if err := d.checkCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
+				return err
+			}
+		}
+		if opts.CDCExpectedResultIncarnation != "" {
+			if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedResultIncarnation); err != nil {
+				return err
+			}
+		}
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		_, _ = d.db.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+stagingFQN)
+		return nil
+	}
+
+	targetMeta, targetMarker, err := d.ensureCheckedCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
+	if err != nil {
+		return err
+	}
+	if opts.CDCExpectedResultIncarnation != "" && opts.CDCExpectedResultIncarnation != opts.CDCExpectedIncarnation {
+		return fmt.Errorf(
+			"trino CDC target %q expected result incarnation %q does not match expected target incarnation %q",
+			opts.TargetTable,
+			opts.CDCExpectedResultIncarnation,
+			opts.CDCExpectedIncarnation,
+		)
+	}
+
+	mergeCols, allColNames, err := d.alignTargetColumnsForConditionalSwap(
+		ctx,
+		opts,
+		targetMeta,
+		stagingCatalog,
+		stagingSchema,
+		stagingName,
+		verifyLocks,
+	)
+	if err != nil {
+		return err
+	}
+
+	if err := verifyLocks(); err != nil {
+		return err
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if d.afterSwapPrecheck != nil {
+		d.afterSwapPrecheck()
+	}
+
+	guardPred := trinoIncarnationExistsPredicate(targetMeta.catalog, targetMeta.schemaName, targetMeta.tableName, targetMarker)
+	if stagingPred != "" {
+		guardPred += " AND " + stagingPred
+	}
+	swapMergeSQL := buildConditionalSwapMergeSQL(targetMeta.fqn, stagingFQN, mergeCols, allColNames, guardPred)
+	if _, err := d.db.ExecContext(ctx, swapMergeSQL); err != nil {
+		config.LogFailedQuery(swapMergeSQL, err)
+		if incErr := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); incErr != nil {
+			return incErr
+		}
+		if opts.CDCExpectedStagingIncarnation != "" {
+			if incErr := d.checkCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation); incErr != nil {
+				return incErr
+			}
+		}
+		if strings.Contains(err.Error(), trinoCDCIncarnationGuardSentinel) {
+			return fmt.Errorf("trino CDC target %q physical incarnation changed: %w", opts.TargetTable, err)
+		}
+		return fmt.Errorf("failed to conditionally swap target table %s from staging: %w", opts.TargetTable, err)
+	}
+
+	if opts.CDCExpectedStagingIncarnation != "" {
+		if err := d.checkCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
+			return err
+		}
+	}
+	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+	if err := verifyLocks(); err != nil {
+		return err
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+
+	_, _ = d.db.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+stagingFQN)
+	return nil
+}
+
+func (d *TrinoDestination) alignTargetColumnsForConditionalSwap(
+	ctx context.Context,
+	opts destination.SwapOptions,
+	targetMeta trinoTargetMeta,
+	stagingCatalog, stagingSchema, stagingName string,
+	verifyLocks func() error,
+) ([]trinoSwapMergeCol, []string, error) {
+	targetSpecs, err := d.readTrinoSwapColumnSpecs(ctx, targetMeta.catalog, targetMeta.schemaName, targetMeta.tableName)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(targetSpecs) == 0 {
+		return nil, nil, fmt.Errorf("trino CDC target %q physical incarnation changed", opts.TargetTable)
+	}
+
+	rawStageSpecs, err := d.readTrinoSwapColumnSpecs(ctx, stagingCatalog, stagingSchema, stagingName)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(rawStageSpecs) == 0 {
+		return nil, nil, fmt.Errorf("trino CDC staging table %q has no columns", opts.StagingTable)
+	}
+	rawStageByLower := make(map[string]trinoSwapColumnSpec, len(rawStageSpecs))
+	for _, spec := range rawStageSpecs {
+		rawStageByLower[strings.ToLower(spec.name)] = spec
+	}
+
+	var stageSpecs []trinoSwapColumnSpec
+	if opts.Schema != nil {
+		destSchema := destination.DestinationTableSchema(opts.Schema)
+		stageSpecs = make([]trinoSwapColumnSpec, 0, len(destSchema.Columns))
+		for _, col := range destSchema.Columns {
+			actual, ok := rawStageByLower[strings.ToLower(col.Name)]
+			if !ok {
+				return nil, nil, fmt.Errorf("trino CDC staging table %q is missing expected column %q", opts.StagingTable, col.Name)
+			}
+			stageSpecs = append(stageSpecs, trinoSwapColumnSpec{
+				name:     actual.name,
+				dataType: actual.dataType,
+				nullable: col.Nullable,
+			})
+		}
+	} else {
+		for _, spec := range rawStageSpecs {
+			if strings.EqualFold(spec.name, destination.CDCUnchangedColsColumn) {
+				continue
+			}
+			stageSpecs = append(stageSpecs, spec)
+		}
+	}
+	if len(stageSpecs) == 0 {
+		return nil, nil, fmt.Errorf("trino CDC staging table %q has no destination columns", opts.StagingTable)
+	}
+
+	targetByLower := make(map[string]trinoSwapColumnSpec, len(targetSpecs))
+	allColNames := make([]string, 0, len(targetSpecs)+len(stageSpecs))
+	for _, spec := range targetSpecs {
+		targetByLower[strings.ToLower(spec.name)] = spec
+		allColNames = append(allColNames, spec.name)
+	}
+	stageByLower := make(map[string]struct{}, len(stageSpecs))
+	for _, spec := range stageSpecs {
+		lower := strings.ToLower(spec.name)
+		stageByLower[lower] = struct{}{}
+		if _, exists := targetByLower[lower]; !exists {
+			allColNames = append(allColNames, spec.name)
+		}
+	}
+
+	execAdditiveDDL := func(ddl string) error {
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		if _, err := d.db.ExecContext(ctx, ddl); err != nil {
+			config.LogFailedQuery(ddl, err)
+			if incErr := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); incErr != nil {
+				return incErr
+			}
+			return fmt.Errorf("align Trino CDC target %s schema for swap: %w", opts.TargetTable, err)
+		}
+		return d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
+	}
+
+	mergeCols := make([]trinoSwapMergeCol, 0, len(stageSpecs))
+	for _, spec := range stageSpecs {
+		existing, ok := targetByLower[strings.ToLower(spec.name)]
+		if !ok {
+			if err := execAdditiveDDL(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", targetMeta.fqn, quoteIdentifier(spec.name), spec.dataType)); err != nil {
+				return nil, nil, err
+			}
+			mergeCols = append(mergeCols, trinoSwapMergeCol{name: spec.name})
+			continue
+		}
+		switch classifyTrinoSwapType(existing.dataType, spec.dataType) {
+		case trinoSwapTypeEqual:
+			mergeCols = append(mergeCols, trinoSwapMergeCol{name: spec.name})
+		case trinoSwapTypeTargetSubsumesStage:
+			mergeCols = append(mergeCols, trinoSwapMergeCol{name: spec.name, castToType: existing.dataType})
+		case trinoSwapTypeStageWidensTarget:
+			if err := execAdditiveDDL(fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DATA TYPE %s", targetMeta.fqn, quoteIdentifier(existing.name), spec.dataType)); err != nil {
+				return nil, nil, err
+			}
+			mergeCols = append(mergeCols, trinoSwapMergeCol{name: spec.name})
+		default:
+			return nil, nil, fmt.Errorf(
+				"cannot conditionally swap Trino CDC target %s column %q from %s to incompatible staging type %s",
+				opts.TargetTable,
+				existing.name,
+				existing.dataType,
+				spec.dataType,
+			)
+		}
+	}
+
+	for _, spec := range targetSpecs {
+		if _, inStage := stageByLower[strings.ToLower(spec.name)]; !inStage && !spec.nullable {
+			if err := execAdditiveDDL(fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL", targetMeta.fqn, quoteIdentifier(spec.name))); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	return mergeCols, allColNames, nil
+}
+
+func (d *TrinoDestination) readTrinoSwapColumnSpecs(ctx context.Context, catalog, schemaName, tableName string) ([]trinoSwapColumnSpec, error) {
+	query := fmt.Sprintf(
+		`SELECT column_name, data_type, is_nullable
+		FROM %s.information_schema.columns
+		WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s)
+		ORDER BY ordinal_position`,
+		quoteIdentifier(catalog),
+		escapeString(schemaName),
+		escapeString(tableName),
+	)
+	rows, err := d.db.QueryContext(ctx, query)
+	if err != nil {
+		if isTrinoMissingObject(err) {
+			return nil, nil
+		}
+		config.LogFailedQuery(query, err)
+		return nil, fmt.Errorf("inspect Trino table columns for %s.%s.%s: %w", catalog, schemaName, tableName, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var specs []trinoSwapColumnSpec
+	for rows.Next() {
+		var name, dataType, isNullable string
+		if err := rows.Scan(&name, &dataType, &isNullable); err != nil {
+			return nil, fmt.Errorf("scan Trino column metadata for %s.%s.%s: %w", catalog, schemaName, tableName, err)
+		}
+		specs = append(specs, trinoSwapColumnSpec{
+			name:     name,
+			dataType: dataType,
+			nullable: !strings.EqualFold(strings.TrimSpace(isNullable), "NO"),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read Trino column metadata for %s.%s.%s: %w", catalog, schemaName, tableName, err)
+	}
+	return specs, nil
+}
+
+func normalizeTrinoTypeSpec(t string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(t), " ", ""))
+}
+
+func trinoIntegerWidthRank(base string) int {
+	switch base {
+	case "tinyint":
+		return 1
+	case "smallint":
+		return 2
+	case "integer", "int":
+		return 3
+	case "bigint":
+		return 4
+	default:
+		return 0
+	}
+}
+
+func parseTrinoDecimalSpec(base string, params []string) (precision, scale int, ok bool) {
+	if base != "decimal" || len(params) == 0 || len(params) > 2 {
+		return 0, 0, false
+	}
+	p, err := strconv.Atoi(params[0])
+	if err != nil || p <= 0 {
+		return 0, 0, false
+	}
+	s := 0
+	if len(params) == 2 {
+		s, err = strconv.Atoi(params[1])
+		if err != nil || s < 0 || s > p {
+			return 0, 0, false
+		}
+	}
+	return p, s, true
+}
+
+func parseTrinoBoundedStringLen(base string, params []string) (maxLen int, unbounded, isString bool) {
+	switch base {
+	case "varchar":
+		if len(params) == 0 {
+			return 0, true, true
+		}
+		if len(params) == 1 {
+			n, err := strconv.Atoi(params[0])
+			if err == nil && n > 0 {
+				return n, false, true
+			}
+		}
+	case "char":
+		if len(params) == 0 {
+			return 1, false, true
+		}
+		if len(params) == 1 {
+			n, err := strconv.Atoi(params[0])
+			if err == nil && n > 0 {
+				return n, false, true
+			}
+		}
+	}
+	return 0, false, false
+}
+
+func classifyTrinoSwapType(targetDataType, stageDataType string) trinoSwapTypeRelation {
+	normTarget := normalizeTrinoTypeSpec(targetDataType)
+	normStage := normalizeTrinoTypeSpec(stageDataType)
+	if normTarget == normStage {
+		return trinoSwapTypeEqual
+	}
+
+	lowerTarget := strings.ToLower(strings.TrimSpace(targetDataType))
+	lowerStage := strings.ToLower(strings.TrimSpace(stageDataType))
+	if strings.HasPrefix(lowerTarget, "array(") && strings.HasSuffix(lowerTarget, ")") &&
+		strings.HasPrefix(lowerStage, "array(") && strings.HasSuffix(lowerStage, ")") {
+		return classifyTrinoSwapType(
+			lowerTarget[len("array("):len(lowerTarget)-1],
+			lowerStage[len("array("):len(lowerStage)-1],
+		)
+	}
+
+	tBase, tParams := splitTrinoTypeParams(lowerTarget)
+	sBase, sParams := splitTrinoTypeParams(lowerStage)
+
+	if len(tParams) == 0 && len(sParams) == 0 {
+		tRank := trinoIntegerWidthRank(tBase)
+		sRank := trinoIntegerWidthRank(sBase)
+		if tRank > 0 && sRank > 0 {
+			switch {
+			case tRank == sRank:
+				return trinoSwapTypeEqual
+			case tRank > sRank:
+				return trinoSwapTypeTargetSubsumesStage
+			default:
+				return trinoSwapTypeStageWidensTarget
+			}
+		}
+		if tBase == "double" && sBase == "real" {
+			return trinoSwapTypeTargetSubsumesStage
+		}
+		if tBase == "real" && sBase == "double" {
+			return trinoSwapTypeStageWidensTarget
+		}
+	}
+
+	if pT, sT, okT := parseTrinoDecimalSpec(tBase, tParams); okT {
+		if pS, sS, okS := parseTrinoDecimalSpec(sBase, sParams); okS {
+			intT := pT - sT
+			intS := pS - sS
+			switch {
+			case pT == pS && sT == sS:
+				return trinoSwapTypeEqual
+			case sT >= sS && intT >= intS:
+				return trinoSwapTypeTargetSubsumesStage
+			case sS >= sT && intS >= intT:
+				return trinoSwapTypeStageWidensTarget
+			default:
+				return trinoSwapTypeIncompatible
+			}
+		}
+	}
+
+	nT, unbT, isStrT := parseTrinoBoundedStringLen(tBase, tParams)
+	nS, unbS, isStrS := parseTrinoBoundedStringLen(sBase, sParams)
+	if isStrT && isStrS {
+		switch {
+		case unbT && unbS:
+			return trinoSwapTypeEqual
+		case unbT:
+			return trinoSwapTypeTargetSubsumesStage
+		case unbS:
+			return trinoSwapTypeStageWidensTarget
+		case tBase == sBase && nT == nS:
+			return trinoSwapTypeEqual
+		case tBase == "varchar" && nT >= nS:
+			return trinoSwapTypeTargetSubsumesStage
+		case sBase == "varchar" && nS >= nT:
+			return trinoSwapTypeStageWidensTarget
+		case tBase == "char" && sBase == "char" && nT > nS:
+			return trinoSwapTypeTargetSubsumesStage
+		case tBase == "char" && sBase == "char" && nS > nT:
+			return trinoSwapTypeStageWidensTarget
+		default:
+			return trinoSwapTypeIncompatible
+		}
+	}
+
+	return trinoSwapTypeIncompatible
+}
+
+func trinoInlineGuardAbortExpr() string {
+	return fmt.Sprintf("CAST(concat('%s:', CAST(uuid() AS VARCHAR)) AS BOOLEAN)", trinoCDCIncarnationGuardSentinel)
+}
+
+func buildConditionalSwapMergeSQL(targetFQN, stagingFQN string, cols []trinoSwapMergeCol, allColNames []string, guardPred string) string {
+	delAlias := uniqueTrinoAlias("__ingestr_swap_del", allColNames)
+	selectExprs := make([]string, len(cols))
+	quotedCols := make([]string, len(cols))
+	emptyCols := make([]string, len(cols))
+	insertVals := make([]string, len(cols))
+	for i, col := range cols {
+		q := quoteIdentifier(col.name)
+		quotedCols[i] = q
+		if col.castToType != "" {
+			selectExprs[i] = fmt.Sprintf("CAST(%s AS %s) AS %s", q, col.castToType, q)
+		} else {
+			selectExprs[i] = q
+		}
+		emptyCols[i] = "_empty." + q
+		insertVals[i] = "s." + q
+	}
+	selectList := strings.Join(selectExprs, ", ")
+	colList := strings.Join(quotedCols, ", ")
+	effectiveGuard := guardPred
+	sentinelWhere := "TRUE"
+	if effectiveGuard == "" {
+		effectiveGuard = "TRUE"
+	} else {
+		sentinelWhere = fmt.Sprintf("CASE WHEN %s THEN true ELSE %s END", effectiveGuard, trinoInlineGuardAbortExpr())
+	}
+	return fmt.Sprintf(
+		`MERGE INTO %s AS t
+USING (
+  SELECT %s, false AS %s
+  FROM %s
+  WHERE %s
+  UNION ALL
+  SELECT %s, true AS %s
+  FROM (SELECT %s FROM %s WHERE FALSE) AS _empty
+  RIGHT JOIN (SELECT 1 AS _one WHERE %s) AS _sentinel ON TRUE
+) AS s
+ON s.%s
+WHEN MATCHED THEN DELETE
+WHEN NOT MATCHED AND NOT s.%s THEN INSERT (%s) VALUES (%s)`,
+		targetFQN,
+		selectList,
+		delAlias,
+		stagingFQN,
+		effectiveGuard,
+		strings.Join(emptyCols, ", "),
+		delAlias,
+		selectList,
+		stagingFQN,
+		sentinelWhere,
+		delAlias,
+		delAlias,
+		colList,
+		strings.Join(insertVals, ", "),
+	)
+}
+
+func buildCreateTableFromStagingSQL(targetFQN, stagingFQN, selectList string, jsonType jsonTypeMode, tableComment, wherePred string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE OR REPLACE TABLE %s", targetFQN)
+	fmt.Fprintf(&b, "CREATE TABLE %s", targetFQN)
 	if tableComment != "" {
 		fmt.Fprintf(&b, "\nCOMMENT %s", escapeString(tableComment))
 	}
+	if jsonType.normalized() == jsonTypeVariant {
+		b.WriteString("\nWITH (format_version = 3)")
+	}
+	if wherePred == "" {
+		fmt.Fprintf(&b, "\nAS SELECT %s FROM %s", selectList, stagingFQN)
+		return b.String()
+	}
+	fmt.Fprintf(
+		&b,
+		"\nAS SELECT %s FROM %s WHERE %s\nUNION ALL\nSELECT _empty.* FROM (SELECT %s FROM %s WHERE FALSE) AS _empty\nRIGHT JOIN (SELECT 1 AS _one WHERE CASE WHEN %s THEN false ELSE %s END) AS _guard ON TRUE",
+		selectList,
+		stagingFQN,
+		wherePred,
+		selectList,
+		stagingFQN,
+		wherePred,
+		trinoInlineGuardAbortExpr(),
+	)
+	return b.String()
+}
+
+func buildReplaceTableFromStagingSQL(targetFQN, stagingFQN, selectList string, jsonType jsonTypeMode) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE OR REPLACE TABLE %s", targetFQN)
 	if jsonType.normalized() == jsonTypeVariant {
 		b.WriteString("\nWITH (format_version = 3)")
 	}
@@ -453,14 +1035,18 @@ func (d *TrinoDestination) swapTableWithoutReplaceSupport(
 }
 
 func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	if destination.HasCDCDeletedColumn(opts.Columns) {
-		return d.mergeCDC(ctx, opts)
-	}
 	if d.db == nil {
 		return errors.New("trino destination is not connected")
 	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, opts.TargetTable, opts.StagingTable); err != nil {
+		return err
+	}
+	if destination.HasCDCDeletedColumn(opts.Columns) {
+		return d.mergeCDC(ctx, opts)
+	}
 	if opts.CDCExpectedIncarnation == "" {
-		return d.mergeTableLocked(ctx, opts, "", d.defaultExec, nil)
+		return d.mergeTableLocked(ctx, opts, "", nil)
 	}
 
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -477,7 +1063,7 @@ func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.Merg
 		return err
 	}
 	incarnationPred := trinoIncarnationExistsPredicate(meta.catalog, meta.schemaName, meta.tableName, marker)
-	if err := d.mergeTableLocked(ctx, opts, incarnationPred, d.defaultExec, verifyLocks); err != nil {
+	if err := d.mergeTableLocked(ctx, opts, incarnationPred, verifyLocks); err != nil {
 		return err
 	}
 	return d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
@@ -487,7 +1073,6 @@ func (d *TrinoDestination) mergeTableLocked(
 	ctx context.Context,
 	opts destination.MergeOptions,
 	incarnationPred string,
-	execFn trinoExecFunc,
 	verifyLocks func() error,
 ) error {
 	if opts.CDCExpectedIncarnation != "" {
@@ -555,7 +1140,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)`,
 
 	config.Debug("[TRINO MERGE] Executing: %s", mergeSQL)
 
-	if err := execFn(ctx, mergeSQL); err != nil {
+	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
 		config.LogFailedQuery(mergeSQL, err)
 		return fmt.Errorf("failed to merge tables: %w", err)
 	}
@@ -752,6 +1337,10 @@ func (d *TrinoDestination) GetScheme() string { return "trino" }
 func (d *TrinoDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	if d.db == nil {
 		return nil, errors.New("trino destination is not connected")
+	}
+	var err error
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+		return nil, err
 	}
 	catalog, schemaName, tableName, err := d.resolveTableName(table)
 	if err != nil {
