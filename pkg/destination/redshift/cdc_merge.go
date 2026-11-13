@@ -403,10 +403,10 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 
 		antiJoin := buildJoinCondition(primaryKeys, "target", "la")
 		insertSQL := fmt.Sprintf(
-			`%s INSERT INTO %s (%s) SELECT %s FROM latest_all AS la %s WHERE la.%s = false AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-			cteBlock,
+			`INSERT INTO %s (%s) %s SELECT %s FROM latest_all AS la %s WHERE la.%s = false AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			targetRef,
 			strings.Join(destQuoted, ", "),
+			cteBlock,
 			buildInsertValues("la", false),
 			strings.Join(valueJoinsLA, " "),
 			qDeleted,
@@ -458,10 +458,10 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 
 	antiJoin := buildJoinCondition(primaryKeys, "target", "latest")
 	insertUnmatchedSQL := fmt.Sprintf(
-		`%s INSERT INTO %s (%s) SELECT %s FROM latest_all AS latest LEFT JOIN latest_active AS la ON %s %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-		softCTEBlock,
+		`INSERT INTO %s (%s) %s SELECT %s FROM latest_all AS latest LEFT JOIN latest_active AS la ON %s %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		targetRef,
 		strings.Join(destQuoted, ", "),
+		softCTEBlock,
 		buildInsertValues("latest", true),
 		buildJoinCondition(primaryKeys, "latest", "la"),
 		strings.Join(valueJoinsLatest, " "),

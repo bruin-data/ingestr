@@ -1402,6 +1402,9 @@ func TestRedshiftCDCMergeSoftAndHardDeletesAndAtomicMultiTable(t *testing.T) {
 		require.Contains(t, stmts[1], `SET "_cdc_deleted" = true, "_cdc_lsn" = latest."_cdc_lsn", "_cdc_synced_at" = latest."_cdc_synced_at"`)
 		require.Contains(t, stmts[2], `INSERT INTO "public"."dst"`)
 		require.Contains(t, stmts[2], `FROM latest_all AS latest`)
+		// Redshift only accepts WITH inside the INSERT query, after the column list.
+		require.True(t, strings.HasPrefix(stmts[2], `INSERT INTO "public"."dst" (`), stmts[2])
+		require.Contains(t, stmts[2], `"_cdc_synced_at") WITH latest_all AS (`)
 	})
 
 	t.Run("soft_delete_with_unchanged_cols", func(t *testing.T) {
@@ -1429,6 +1432,8 @@ func TestRedshiftCDCMergeSoftAndHardDeletesAndAtomicMultiTable(t *testing.T) {
 		require.Contains(t, stmts[1], `"_cdc_lsn" >= "public"."dst"."_cdc_lsn"`)
 		require.Contains(t, stmts[2], `INSERT INTO "public"."dst"`)
 		require.Contains(t, stmts[2], `WHERE la."_cdc_deleted" = false`)
+		require.True(t, strings.HasPrefix(stmts[2], `INSERT INTO "public"."dst" (`), stmts[2])
+		require.Contains(t, stmts[2], `"_cdc_synced_at") WITH latest_all AS (`)
 	})
 
 	t.Run("hard_delete_with_incremental_predicate", func(t *testing.T) {
@@ -1984,6 +1989,34 @@ func TestRedshiftWriteCDCFencingAndTruncateCDCTable(t *testing.T) {
 		})
 		require.ErrorContains(t, err, "physical incarnation changed")
 		require.Equal(t, 1, insertCount)
+	})
+
+	t.Run("write_returns_insert_error_without_draining_input", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		db.addTable("public", "orders", nil, []string{"id"})
+		db.execHook = func(sql string, _ []any, _ bool) (pgconn.CommandTag, bool, error) {
+			if strings.HasPrefix(strings.TrimSpace(sql), `INSERT INTO "public"."orders"`) {
+				return pgconn.CommandTag{}, true, fmt.Errorf("insert failed")
+			}
+			return pgconn.NewCommandTag(""), false, nil
+		}
+
+		// The channel stays open: the caller must be able to cancel the source
+		// after Write returns, so Write must not wait for the input to finish.
+		ch := make(chan source.RecordBatchResult, 2)
+		ch <- source.RecordBatchResult{Batch: makeTestIDBatch(1)}
+		ch <- source.RecordBatchResult{Batch: makeTestIDBatch(2)}
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- dest.Write(ctx, ch, destination.WriteOptions{Table: "public.orders"}) }()
+		select {
+		case err := <-errCh:
+			require.ErrorContains(t, err, "insert failed")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Write blocked draining the input after an insert error")
+		}
+		require.Len(t, ch, 1)
+		(<-ch).Batch.Release()
 	})
 
 	t.Run("truncate_cdc_table_checks_lease", func(t *testing.T) {

@@ -48,14 +48,6 @@ func (d *RedshiftDestination) Schemes() []string {
 	return []string{"redshift", "redshift+psycopg2"}
 }
 
-func drainRecordBatches(records <-chan source.RecordBatchResult) {
-	for result := range records {
-		if result.Batch != nil {
-			result.Batch.Release()
-		}
-	}
-}
-
 func (d *RedshiftDestination) verifyCDCIncarnation(ctx context.Context, queryer redshiftQueryer, schemaName, tableName, table, expectedIncarnation string) error {
 	if expectedIncarnation == "" {
 		return nil
@@ -72,7 +64,6 @@ func (d *RedshiftDestination) verifyCDCIncarnation(ctx context.Context, queryer 
 
 func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		drainRecordBatches(records)
 		return err
 	}
 
@@ -105,7 +96,6 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 
 	if opts.CDCExpectedIncarnation != "" {
 		if err := resolveTarget(); err != nil {
-			drainRecordBatches(records)
 			return err
 		}
 	}
@@ -115,7 +105,6 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 			if result.Batch != nil {
 				result.Batch.Release()
 			}
-			drainRecordBatches(records)
 			return result.Err
 		}
 		record := result.Batch
@@ -133,12 +122,10 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			record.Release()
-			drainRecordBatches(records)
 			return err
 		}
 		if err := resolveTarget(); err != nil {
 			record.Release()
-			drainRecordBatches(records)
 			return err
 		}
 
@@ -189,7 +176,6 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 		}
 		record.Release()
 		if err != nil {
-			drainRecordBatches(records)
 			return err
 		}
 	}
