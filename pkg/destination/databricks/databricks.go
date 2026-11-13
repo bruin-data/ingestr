@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -38,6 +39,12 @@ type DatabricksDestination struct {
 	httpPath   string
 	catalog    string
 	schemaName string
+
+	fenceMu       sync.Mutex
+	swapMu        sync.Mutex
+	preparedSwaps map[string]string
+	keptSwaps     map[string]bool
+	activeSwaps   map[string]int
 }
 
 func NewDatabricksDestination() *DatabricksDestination {
@@ -106,46 +113,69 @@ func (d *DatabricksDestination) Close(ctx context.Context) error {
 }
 
 func (d *DatabricksDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	return d.prepareTable(ctx, opts, false)
+}
+
+func (d *DatabricksDestination) prepareTable(ctx context.Context, opts destination.PrepareOptions, exclusive bool) error {
 	if opts.Schema == nil {
 		return errors.New("schema is required")
 	}
 
-	_, tableName := d.parseTableName(opts.Table)
-
-	// Use dedicated ingestr_staging schema for staging tables
-	fullTable := d.quoteFullTable(stagingSchema, tableName)
+	catalog, targetSchema, tableName := d.parseTableParts(opts.Table)
+	fullTable := quoteTableParts(catalog, targetSchema, tableName)
 
 	startPrep := time.Now()
 
-	// Optimistically run volume and table creation in parallel
-	// Schema will exist 99% of the time after first run
 	p := pool.New().WithContext(ctx).WithFirstError()
 
-	p.Go(func(ctx context.Context) error {
-		if err := d.ensureVolumeExists(ctx, stagingSchema); err != nil {
-			// Schema might not exist, try creating it and retry
-			if strings.Contains(err.Error(), "SCHEMA_NOT_FOUND") {
-				if schemaErr := d.ensureSchemaExists(ctx, stagingSchema); schemaErr != nil {
-					return schemaErr
+	if !exclusive {
+		p.Go(func(ctx context.Context) error {
+			volCatalog := d.effectiveCatalog()
+			if err := d.ensureVolume(ctx, volCatalog); err != nil {
+				if isDatabricksMissingError(err) {
+					if schemaErr := d.ensureSchemaForParts(ctx, volCatalog, stagingSchema); schemaErr != nil {
+						return schemaErr
+					}
+					return d.ensureVolume(ctx, volCatalog)
 				}
-				return d.ensureVolumeExists(ctx, stagingSchema)
+				config.Debug("[DATABRICKS] Volume creation warning: %v", err)
 			}
-			config.Debug("[DATABRICKS] Volume creation warning: %v", err)
-		}
-		return nil // volume creation errors are non-fatal
-	})
+			return nil
+		})
+	}
 
 	p.Go(func(ctx context.Context) error {
-		createSQL := d.buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys)
+		if exclusive {
+			if err := d.ensureSchemaForParts(ctx, catalog, targetSchema); err != nil {
+				return err
+			}
+		} else if opts.DropFirst {
+			dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", fullTable)
+			if err := d.executeStatement(ctx, dropSQL); err != nil && !isDatabricksMissingError(err) {
+				config.LogFailedQuery(dropSQL, err)
+				return fmt.Errorf("failed to drop table %s before prepare: %w", opts.Table, err)
+			}
+		}
+
+		if !opts.DropFirst {
+			if _, err := d.recoverInterruptedSwap(ctx, catalog, targetSchema, tableName, false); err != nil {
+				return err
+			}
+		}
+
+		createSQL := d.buildCreateTableSQL(fullTable, opts.Schema.Columns, exclusive)
 		if err := d.executeStatement(ctx, createSQL); err != nil {
-			config.LogFailedQuery(createSQL, err)
-			// Schema might not exist, try creating it and retry
-			if strings.Contains(err.Error(), "SCHEMA_NOT_FOUND") {
-				if schemaErr := d.ensureSchemaExists(ctx, stagingSchema); schemaErr != nil {
+			if !exclusive && isDatabricksMissingError(err) {
+				if schemaErr := d.ensureSchemaForParts(ctx, catalog, targetSchema); schemaErr != nil {
 					return schemaErr
 				}
-				return d.executeStatement(ctx, createSQL)
+				if retryErr := d.executeStatement(ctx, createSQL); retryErr != nil {
+					config.LogFailedQuery(createSQL, retryErr)
+					return retryErr
+				}
+				return nil
 			}
+			config.LogFailedQuery(createSQL, err)
 			return err
 		}
 		return nil
@@ -160,30 +190,30 @@ func (d *DatabricksDestination) PrepareTable(ctx context.Context, opts destinati
 	return nil
 }
 
-func (d *DatabricksDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
-	if schemaName == "" || strings.ToLower(schemaName) == "default" {
+func (d *DatabricksDestination) ensureSchemaForParts(ctx context.Context, catalog, schemaName string) error {
+	if schemaName == "" || strings.EqualFold(schemaName, "default") {
 		return nil
 	}
 
-	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdentifier(d.catalog), quoteIdentifier(schemaName))
+	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName))
 	if err := d.executeStatement(ctx, createSchemaSQL); err != nil {
 		config.LogFailedQuery(createSchemaSQL, err)
-		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
+		return fmt.Errorf("failed to create schema %s.%s: %w", catalog, schemaName, err)
 	}
-	config.Debug("[DATABRICKS] Ensured schema exists: %s", schemaName)
+	config.Debug("[DATABRICKS] Ensured schema exists: %s.%s", catalog, schemaName)
 	return nil
 }
 
-func (d *DatabricksDestination) ensureVolumeExists(ctx context.Context, schemaName string) error {
+func (d *DatabricksDestination) ensureVolume(ctx context.Context, catalog string) error {
 	createVolumeSQL := fmt.Sprintf(
 		"CREATE VOLUME IF NOT EXISTS %s.%s.`files`",
-		quoteIdentifier(d.catalog), quoteIdentifier(schemaName),
+		quoteIdentifier(catalog), quoteIdentifier(stagingSchema),
 	)
 	if err := d.executeStatement(ctx, createVolumeSQL); err != nil {
 		config.LogFailedQuery(createVolumeSQL, err)
 		return fmt.Errorf("failed to create volume: %w", err)
 	}
-	config.Debug("[DATABRICKS] Ensured volume exists: %s.%s.files", d.catalog, schemaName)
+	config.Debug("[DATABRICKS] Ensured volume exists: %s.%s.files", catalog, stagingSchema)
 	return nil
 }
 
@@ -195,9 +225,8 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 	config.Debug("[DATABRICKS] Starting file-based write")
 	startTotal := time.Now()
 
-	_, tableName := d.parseTableName(opts.Table)
-	// Use dedicated ingestr_staging schema for staging tables
-	fullTable := d.quoteFullTable(stagingSchema, tableName)
+	_, _, tableName := d.parseTableParts(opts.Table)
+	fullTable := d.quoteTableRef(opts.Table)
 
 	tempFile, err := os.CreateTemp("", "ingestr-databricks-*.parquet")
 	if err != nil {
@@ -273,12 +302,19 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 		return nil
 	}
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+
 	writeTime := time.Since(startTotal)
 	config.Debug("[DATABRICKS] Parquet file written: %d rows in %v (%.0f rows/sec)", totalRows, writeTime, float64(totalRows)/writeTime.Seconds())
 
 	uploadStart := time.Now()
 	fileName := fmt.Sprintf("ingestr_%s_%d.parquet", tableName, time.Now().UnixNano())
-	volumePath := fmt.Sprintf("/Volumes/%s/%s/files/%s", d.catalog, stagingSchema, fileName)
+	volumePath := fmt.Sprintf("/Volumes/%s/%s/files/%s", d.effectiveCatalog(), stagingSchema, fileName)
 
 	localFile, err := os.Open(tempPath)
 	if err != nil {
@@ -300,22 +336,46 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 	uploadTime := time.Since(uploadStart)
 	config.Debug("[DATABRICKS] Uploaded %d bytes to volume in %v (%.2f MB/s)", fileSize, uploadTime, float64(fileSize)/uploadTime.Seconds()/1024/1024)
 
-	copyStart := time.Now()
-	copySQL := fmt.Sprintf("COPY INTO %s FROM '%s' FILEFORMAT = PARQUET COPY_OPTIONS ('mergeSchema' = 'true')", fullTable, volumePath)
-	config.Debug("[DATABRICKS] Executing: %s", copySQL)
-
-	if err := d.executeStatement(ctx, copySQL); err != nil {
-		config.LogFailedQuery(copySQL, err)
-		_ = d.client.Files.DeleteByFilePath(ctx, volumePath)
-		return fmt.Errorf("COPY INTO failed: %w", err)
+	cleanupVolume := func() {
+		delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := d.client.Files.DeleteByFilePath(delCtx, volumePath); err != nil {
+			config.Debug("[DATABRICKS] Warning: failed to cleanup volume file: %v", err)
+		}
 	}
 
-	copyTime := time.Since(copyStart)
-	config.Debug("[DATABRICKS] COPY INTO completed in %v (%.0f rows/sec)", copyTime, float64(totalRows)/copyTime.Seconds())
+	copyIntoTarget := func(targetRef string) error {
+		copyStart := time.Now()
+		copySQL := fmt.Sprintf("COPY INTO %s FROM '%s' FILEFORMAT = PARQUET COPY_OPTIONS ('mergeSchema' = 'true')", targetRef, volumePath)
+		config.Debug("[DATABRICKS] Executing: %s", copySQL)
 
-	if err := d.client.Files.DeleteByFilePath(ctx, volumePath); err != nil {
-		config.Debug("[DATABRICKS] Warning: failed to cleanup volume file: %v", err)
+		if err := d.executeStatement(ctx, copySQL); err != nil {
+			config.LogFailedQuery(copySQL, err)
+			return fmt.Errorf("COPY INTO failed: %w", err)
+		}
+
+		copyTime := time.Since(copyStart)
+		config.Debug("[DATABRICKS] COPY INTO completed in %v (%.0f rows/sec)", copyTime, float64(totalRows)/copyTime.Seconds())
+		return nil
 	}
+
+	if opts.CDCExpectedIncarnation != "" {
+		if err := d.fencedCopyInto(ctx, opts.Table, opts.CDCExpectedIncarnation, volumePath); err != nil {
+			cleanupVolume()
+			return err
+		}
+	} else {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			cleanupVolume()
+			return err
+		}
+		if err := copyIntoTarget(fullTable); err != nil {
+			cleanupVolume()
+			return err
+		}
+	}
+
+	cleanupVolume()
 
 	config.Debug("[DATABRICKS] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), float64(totalRows)/time.Since(startTotal).Seconds())
 	return nil
@@ -323,54 +383,165 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 
 func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
 	startSwap := time.Now()
+	fenced := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
+	if fenced {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		d.fenceMu.Lock()
+		defer d.fenceMu.Unlock()
+	}
 
-	// Staging table is always in ingestr_staging schema
-	_, stagingName := d.parseTableName(opts.StagingTable)
-	targetSchema, targetName := d.parseTableName(opts.TargetTable)
+	physicalStaging := opts.StagingTable
+	if copied, ok := d.takePreparedSwap(opts.StagingTable); ok {
+		physicalStaging = copied
+		defer d.dropQuietly(ctx, copied)
+	}
 
-	stagingFull := d.quoteFullTable(stagingSchema, stagingName)
-	targetFull := d.quoteFullTable(targetSchema, targetName)
+	stageCat, stageSchema, stageName := d.parseTableParts(physicalStaging)
+	targetCat, targetSchema, targetName := d.parseTableParts(opts.TargetTable)
 
-	// Ensure target schema exists
-	if err := d.ensureSchemaExists(ctx, targetSchema); err != nil {
+	stagingFull := quoteTableParts(stageCat, stageSchema, stageName)
+	targetFull := quoteTableParts(targetCat, targetSchema, targetName)
+
+	if err := d.ensureSchemaForParts(ctx, targetCat, targetSchema); err != nil {
 		return fmt.Errorf("failed to ensure target schema exists: %w", err)
 	}
 
-	tempNameCandidate := fmt.Sprintf("%s_OLD_%d", targetName, time.Now().UnixNano())
-	tempName := destination.ShortenIdentifier(tempNameCandidate, tempNameCandidate, destination.MaxIdentifierLength("databricks"))
-	tempFull := d.quoteFullTable(targetSchema, tempName)
+	if _, err := d.recoverInterruptedSwap(ctx, targetCat, targetSchema, targetName, true); err != nil {
+		return err
+	}
+	release := d.markSwapActive(targetCat, targetSchema, targetName)
+	defer release()
 
-	renameOldSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFull, tempFull)
-	if err := d.executeStatement(ctx, renameOldSQL); err != nil {
-		config.LogFailedQuery(renameOldSQL, err)
-		config.Debug("[DATABRICKS] Target table doesn't exist, proceeding with rename")
+	targetExists := true
+	if fenced {
+		targetInc, exists, err := d.CDCTargetIncarnation(ctx, opts.TargetTable)
+		if err != nil {
+			return err
+		}
+		if (opts.CDCExpectedIncarnation != "" && (!exists || targetInc != opts.CDCExpectedIncarnation)) ||
+			(opts.CDCExpectedIncarnation == "" && exists) {
+			return incarnationChangedError(opts.TargetTable)
+		}
+		targetExists = exists
+	}
+
+	if opts.CDCExpectedStagingIncarnation != "" {
+		stageInc, exists, err := d.CDCTargetIncarnation(ctx, physicalStaging)
+		if err != nil {
+			return err
+		}
+		if !exists || stageInc != opts.CDCExpectedStagingIncarnation {
+			return fmt.Errorf("databricks CDC staging %q physical incarnation changed", opts.StagingTable)
+		}
+	}
+
+	tempFull := quoteTableParts(targetCat, targetSchema, swapOldTableName(targetCat, targetSchema, targetName))
+
+	restoreOldTarget := func() error {
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return d.executeStatement(restoreCtx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", tempFull, targetFull))
+	}
+
+	targetMoved := false
+	if targetExists {
+		renameOldSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFull, tempFull)
+		if err := d.executeStatement(ctx, renameOldSQL); err != nil {
+			config.LogFailedQuery(renameOldSQL, err)
+			if fenced {
+				if opts.CDCExpectedIncarnation != "" && isDatabricksMissingError(err) {
+					return fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", opts.TargetTable, err)
+				}
+				return fmt.Errorf("failed to rename target to temporary table: %w", err)
+			}
+			config.Debug("[DATABRICKS] Target table doesn't exist, proceeding with rename")
+		} else {
+			targetMoved = true
+			if fenced && opts.CDCExpectedIncarnation != "" {
+				_, _, _, tempID, tempExists, idErr := d.tableIdentity(ctx, tempFull)
+				movedInc := canonicalIncarnationKey(targetCat, targetSchema, targetName, tempID)
+				if idErr != nil || !tempExists || movedInc != opts.CDCExpectedIncarnation {
+					restoreErr := restoreOldTarget()
+					if idErr != nil {
+						return errors.Join(idErr, restoreErr)
+					}
+					return errors.Join(incarnationChangedError(opts.TargetTable), restoreErr)
+				}
+			}
+		}
+	}
+
+	if fenced {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			var restoreErr error
+			if targetMoved {
+				restoreErr = restoreOldTarget()
+			}
+			return errors.Join(err, restoreErr)
+		}
 	}
 
 	renameNewSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingFull, targetFull)
 	if err := d.executeStatement(ctx, renameNewSQL); err != nil {
 		config.LogFailedQuery(renameNewSQL, err)
-		return fmt.Errorf("failed to rename staging to target: %w", err)
+		var restoreErr error
+		if targetMoved && !isDatabricksAlreadyExistsError(err) {
+			restoreErr = restoreOldTarget()
+		}
+		if fenced && isDatabricksAlreadyExistsError(err) {
+			return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", opts.TargetTable, err), restoreErr)
+		}
+		return errors.Join(fmt.Errorf("failed to rename staging to target: %w", err), restoreErr)
 	}
 
-	_ = d.executeStatement(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tempFull))
+	if opts.CDCExpectedResultIncarnation != "" {
+		resultInc, _, _, exists, err := d.ensureTableIncarnationStampLocked(ctx, opts.TargetTable, opts.CDCExpectedResultIncarnation)
+		if err != nil || !exists || resultInc != opts.CDCExpectedResultIncarnation {
+			undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			undoErr := d.executeStatement(undoCtx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFull, stagingFull))
+			cancel()
+			var restoreErr error
+			if targetMoved && undoErr == nil {
+				restoreErr = restoreOldTarget()
+			}
+			if err != nil && !errors.Is(err, errCDCIncarnationChanged) {
+				return errors.Join(err, undoErr, restoreErr)
+			}
+			return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed after swap", opts.TargetTable), undoErr, restoreErr)
+		}
+	}
+
+	if physicalStaging != opts.StagingTable {
+		d.forgetSwapCopy(physicalStaging)
+	}
+
+	if targetMoved {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = d.executeStatement(cleanupCtx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tempFull))
+		cancel()
+	}
 
 	config.Debug("[DATABRICKS] Table swap completed in %v", time.Since(startSwap))
 	return nil
 }
 
 func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
-	startMerge := time.Now()
-
-	if len(opts.PrimaryKeys) == 0 {
-		return errors.New("merge requires at least one primary key")
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
 	}
+	startMerge := time.Now()
+	if err := d.executeMerges(ctx, []destination.CDCAtomicTableMerge{{Options: opts}}); err != nil {
+		return err
+	}
+	config.Debug("[DATABRICKS] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
 
-	// Staging table is always in ingestr_staging schema
-	_, stagingName := d.parseTableName(opts.StagingTable)
-	targetSchema, targetName := d.parseTableName(opts.TargetTable)
-
-	stagingFull := d.quoteFullTable(stagingSchema, stagingName)
-	targetFull := d.quoteFullTable(targetSchema, targetName)
+func (d *DatabricksDestination) buildNonCDCMergeSQL(opts destination.MergeOptions) string {
+	targetFull := d.quoteTableRef(opts.TargetTable)
+	stagingFull := d.quoteTableRef(opts.StagingTable)
 
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
@@ -430,16 +601,7 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 	mergeSQL.WriteString("WHEN NOT MATCHED THEN\n")
 	fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
 	fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(sourceCols, ", "))
-
-	config.Debug("[DATABRICKS] Executing MERGE: %s", mergeSQL.String())
-
-	if err := d.executeStatement(ctx, mergeSQL.String()); err != nil {
-		config.LogFailedQuery(mergeSQL.String(), err)
-		return fmt.Errorf("failed to execute merge: %w", err)
-	}
-
-	config.Debug("[DATABRICKS] Merge completed in %v", time.Since(startMerge))
-	return nil
+	return mergeSQL.String()
 }
 
 func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
@@ -459,11 +621,8 @@ func (d *DatabricksDestination) DeleteInsertTable(ctx context.Context, opts dest
 }
 
 func (d *DatabricksDestination) buildDeleteInsertSQL(opts destination.DeleteInsertOptions) (string, string, string) {
-	_, stagingName := d.parseTableName(opts.StagingTable)
-	targetSchema, targetName := d.parseTableName(opts.TargetTable)
-
-	stagingFull := d.quoteFullTable(stagingSchema, stagingName)
-	targetFull := d.quoteFullTable(targetSchema, targetName)
+	stagingFull := d.quoteTableRef(opts.StagingTable)
+	targetFull := d.quoteTableRef(opts.TargetTable)
 
 	startVal := d.formatValue(opts.IntervalStart)
 	endVal := d.formatValue(opts.IntervalEnd)
@@ -486,12 +645,13 @@ func (d *DatabricksDestination) SCD2Table(ctx context.Context, opts destination.
 }
 
 func (d *DatabricksDestination) DropTable(ctx context.Context, table string) error {
-	// Staging tables are always in ingestr_staging schema
-	_, tableName := d.parseTableName(table)
-	fullTable := d.quoteFullTable(stagingSchema, tableName)
+	fullTable := d.quoteTableRef(table)
 
 	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", fullTable)
 	if err := d.executeStatement(ctx, dropSQL); err != nil {
+		if isDatabricksMissingError(err) {
+			return nil
+		}
 		config.LogFailedQuery(dropSQL, err)
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
 	}
@@ -500,8 +660,7 @@ func (d *DatabricksDestination) DropTable(ctx context.Context, table string) err
 }
 
 func (d *DatabricksDestination) TruncateTable(ctx context.Context, table string) error {
-	targetSchema, tableName := d.parseTableName(table)
-	fullTable := d.quoteFullTable(targetSchema, tableName)
+	fullTable := d.quoteTableRef(table)
 
 	truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s", fullTable)
 	if err := d.executeStatement(ctx, truncateSQL); err != nil {
@@ -513,8 +672,6 @@ func (d *DatabricksDestination) TruncateTable(ctx context.Context, table string)
 }
 
 func (d *DatabricksDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
-	_, stagingName := d.parseTableName(opts.StagingTable)
-	targetSchema, targetName := d.parseTableName(opts.TargetTable)
 	columns := quoteColumns(destination.DestinationColumns(opts.Columns))
 	if len(columns) == 0 {
 		return errors.New("insert from staging requires at least one column")
@@ -522,7 +679,7 @@ func (d *DatabricksDestination) InsertFromStaging(ctx context.Context, opts dest
 	columnList := strings.Join(columns, ", ")
 	insertSQL := fmt.Sprintf(
 		"INSERT INTO %s (%s) SELECT %s FROM %s",
-		d.quoteFullTable(targetSchema, targetName), columnList, columnList, d.quoteFullTable(stagingSchema, stagingName),
+		d.quoteTableRef(opts.TargetTable), columnList, columnList, d.quoteTableRef(opts.StagingTable),
 	)
 	if err := d.executeStatement(ctx, insertSQL); err != nil {
 		config.LogFailedQuery(insertSQL, err)
@@ -558,45 +715,242 @@ func (d *DatabricksDestination) SupportsDeleteInsertStrategy() bool { return tru
 func (d *DatabricksDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *DatabricksDestination) SupportsAtomicSwap() bool           { return true }
 
+func (d *DatabricksDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
+	return destination.ReplaceStagingPolicy{
+		DefaultPlacement:     destination.ReplaceStagingManagedSchema,
+		DefaultManagedSchema: stagingSchema,
+	}
+}
+
+func (d *DatabricksDestination) ManagedStagingPolicy() destination.ReplaceStagingPolicy {
+	return d.ReplaceStagingPolicy()
+}
+
+func (d *DatabricksDestination) ListStagingTables(ctx context.Context, schemaName, prefix string) ([]string, error) {
+	catalog, sch, _ := d.parseTableParts(schemaName + ".x")
+	query := fmt.Sprintf("SHOW TABLES IN %s.%s", quoteIdentifier(catalog), quoteIdentifier(sch))
+	res, err := d.queryStatement(ctx, query)
+	if err != nil {
+		if isDatabricksMissingError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list Databricks staging tables in %s.%s: %w", catalog, sch, err)
+	}
+
+	nameIdx := res.columnIndex("tableName")
+	if nameIdx < 0 {
+		nameIdx = 1
+	}
+	tempIdx := res.columnIndex("isTemporary")
+
+	var tables []string
+	for _, row := range res.rows {
+		if nameIdx >= len(row) {
+			continue
+		}
+		if tempIdx >= 0 && tempIdx < len(row) && strings.EqualFold(row[tempIdx], "true") {
+			continue
+		}
+		name := row[nameIdx]
+		if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
+			tables = append(tables, prefix+name[len(prefix):])
+		}
+	}
+	return tables, nil
+}
+
 func (d *DatabricksDestination) GetScheme() string { return "databricks" }
 
 func (d *DatabricksDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	return nil, nil
+	catalog, schemaName, tableName := d.parseTableParts(table)
+	fullTable := quoteTableParts(catalog, schemaName, tableName)
+	described, err := d.describeColumns(ctx, fullTable)
+	if isDatabricksMissingError(err) {
+		recovered, recErr := d.recoverInterruptedSwap(ctx, catalog, schemaName, tableName, false)
+		if recErr != nil || !recovered {
+			return nil, recErr
+		}
+		described, err = d.describeColumns(ctx, fullTable)
+		if isDatabricksMissingError(err) {
+			return nil, nil
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	columns := make([]schema.Column, 0, len(described))
+	for _, dc := range described {
+		col := MapDatabricksTypeToSchema(dc.dataType)
+		col.Name = dc.name
+		columns = append(columns, col)
+	}
+	if len(columns) == 0 {
+		return nil, nil
+	}
+	return &schema.TableSchema{
+		Name:    tableName,
+		Schema:  schemaName,
+		Columns: columns,
+	}, nil
+}
+
+type queryResult struct {
+	columns  []string
+	colIndex map[string]int
+	rows     [][]string
+}
+
+func (r *queryResult) columnIndex(name string) int {
+	if r == nil || r.colIndex == nil {
+		return -1
+	}
+	if idx, ok := r.colIndex[strings.ToLower(name)]; ok {
+		return idx
+	}
+	return -1
 }
 
 func (d *DatabricksDestination) executeStatement(ctx context.Context, sql string) error {
+	_, err := d.runStatement(ctx, sql, "", "")
+	return err
+}
+
+func (d *DatabricksDestination) queryStatement(ctx context.Context, sql string) (*queryResult, error) {
+	resp, err := d.runStatement(ctx, sql, dbsql.DispositionInline, dbsql.FormatJsonArray)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &queryResult{
+		colIndex: make(map[string]int),
+	}
+	if resp.Manifest != nil {
+		if resp.Manifest.Truncated {
+			return nil, errors.New("databricks query result was truncated")
+		}
+		if resp.Manifest.Schema != nil {
+			for i, col := range resp.Manifest.Schema.Columns {
+				res.columns = append(res.columns, col.Name)
+				res.colIndex[strings.ToLower(col.Name)] = i
+			}
+		}
+	}
+
+	if resp.Result != nil {
+		res.rows = append(res.rows, resp.Result.DataArray...)
+		nextChunk := resp.Result.NextChunkIndex
+		for nextChunk > 0 && resp.StatementId != "" {
+			chunk, err := d.client.StatementExecution.GetStatementResultChunkNByStatementIdAndChunkIndex(ctx, resp.StatementId, nextChunk)
+			if err != nil {
+				return nil, fmt.Errorf("fetch statement result chunk %d: %w", nextChunk, err)
+			}
+			res.rows = append(res.rows, chunk.DataArray...)
+			nextChunk = chunk.NextChunkIndex
+		}
+	}
+
+	return res, nil
+}
+
+func (d *DatabricksDestination) runStatement(ctx context.Context, sql string, disposition dbsql.Disposition, format dbsql.Format) (*dbsql.StatementResponse, error) {
 	warehouseID := d.extractWarehouseID()
 
-	resp, err := d.client.StatementExecution.ExecuteAndWait(ctx, dbsql.ExecuteStatementRequest{
-		WarehouseId: warehouseID,
-		Statement:   sql,
-		WaitTimeout: statementTimeout,
+	req := dbsql.ExecuteStatementRequest{
+		WarehouseId:   warehouseID,
+		Catalog:       d.effectiveCatalog(),
+		Statement:     sql,
+		WaitTimeout:   statementTimeout,
+		OnWaitTimeout: dbsql.ExecuteStatementRequestOnWaitTimeoutContinue,
+		Disposition:   disposition,
+		Format:        format,
+	}
+
+	resp, err := d.client.StatementExecution.ExecuteAndWait(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("statement execution failed: %w", err)
+	}
+
+	pollInterval := 250 * time.Millisecond
+	for resp.Status != nil && (resp.Status.State == dbsql.StatementStatePending || resp.Status.State == dbsql.StatementStateRunning) {
+		if resp.StatementId == "" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			_ = d.client.StatementExecution.CancelExecution(context.Background(), dbsql.CancelExecutionRequest{StatementId: resp.StatementId})
+			return nil, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+		if pollInterval < time.Second {
+			pollInterval *= 2
+		}
+		resp, err = d.client.StatementExecution.GetStatementByStatementId(ctx, resp.StatementId)
+		if err != nil {
+			return nil, fmt.Errorf("poll statement status: %w", err)
+		}
+	}
+
+	if resp.Status != nil {
+		switch resp.Status.State {
+		case dbsql.StatementStateFailed, dbsql.StatementStateCanceled, dbsql.StatementStateClosed:
+			errMsg := string(resp.Status.State)
+			if resp.Status.Error != nil && resp.Status.Error.Message != "" {
+				errMsg = resp.Status.Error.Message
+				if resp.Status.Error.ErrorCode != "" {
+					errMsg = fmt.Sprintf("[%s] %s", resp.Status.Error.ErrorCode, errMsg)
+				}
+			}
+			return nil, fmt.Errorf("statement failed: %s", errMsg)
+		}
+	}
+
+	return resp, nil
+}
+
+func (d *DatabricksDestination) effectiveCatalog() string {
+	if d.catalog == "" {
+		return defaultCatalog
+	}
+	return d.catalog
+}
+
+func (d *DatabricksDestination) effectiveSchema() string {
+	if d.schemaName == "" {
+		return defaultSchema
+	}
+	return d.schemaName
+}
+
+func (d *DatabricksDestination) parseTableParts(table string) (catalog, schemaName, tableName string) {
+	catDefault := d.effectiveCatalog()
+	schDefault := d.effectiveSchema()
+	tn, err := tablename.Databricks.Parse(table, tablename.Defaults{
+		Catalog: catDefault,
+		Schema:  schDefault,
 	})
 	if err != nil {
-		return fmt.Errorf("statement execution failed: %w", err)
-	}
-
-	if resp.Status != nil && resp.Status.State == dbsql.StatementStateFailed {
-		errMsg := ""
-		if resp.Status.Error != nil {
-			errMsg = resp.Status.Error.Message
+		if parts := tablename.Split(table); len(parts) == 1 && parts[0] != "" {
+			return catDefault, schDefault, parts[0]
 		}
-		return fmt.Errorf("statement failed: %s", errMsg)
+		return catDefault, schDefault, table
 	}
-
-	return nil
+	if tn.Catalog == "" {
+		tn.Catalog = catDefault
+	}
+	if tn.Schema == "" {
+		tn.Schema = schDefault
+	}
+	return tn.Catalog, tn.Schema, tn.Table
 }
 
-func (d *DatabricksDestination) parseTableName(table string) (schemaName, tableName string) {
-	tn, err := tablename.Databricks.Parse(table, tablename.Defaults{Schema: d.schemaName})
-	if err != nil {
-		return d.schemaName, table
-	}
-	return tn.Schema, tn.Table
+func (d *DatabricksDestination) quoteTableRef(table string) string {
+	cat, sch, tbl := d.parseTableParts(table)
+	return quoteTableParts(cat, sch, tbl)
 }
 
-func (d *DatabricksDestination) quoteFullTable(schemaName, tableName string) string {
-	return fmt.Sprintf("`%s`.`%s`.`%s`", strings.ReplaceAll(d.catalog, "`", "``"), strings.ReplaceAll(schemaName, "`", "``"), strings.ReplaceAll(tableName, "`", "``"))
+func quoteTableParts(catalog, schemaName, tableName string) string {
+	return fmt.Sprintf("%s.%s.%s", quoteIdentifier(catalog), quoteIdentifier(schemaName), quoteIdentifier(tableName))
 }
 
 func quoteIdentifier(name string) string {
@@ -611,6 +965,35 @@ func quoteColumns(cols []string) []string {
 	return quoted
 }
 
+func sqlString(value string) string {
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), "'", "''") + "'"
+}
+
+func isDatabricksMissingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table_or_view_not_found") ||
+		strings.Contains(msg, "schema_not_found") ||
+		strings.Contains(msg, "table or view not found") ||
+		strings.Contains(msg, "schema not found") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "cannot be found") ||
+		strings.Contains(msg, "42p01") ||
+		strings.Contains(msg, "42704")
+}
+
+func isDatabricksAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table_or_view_already_exists") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "42p07")
+}
+
 func (d *DatabricksDestination) extractWarehouseID() string {
 	parts := strings.Split(d.httpPath, "/")
 	for i, part := range parts {
@@ -621,34 +1004,43 @@ func (d *DatabricksDestination) extractWarehouseID() string {
 	return d.httpPath
 }
 
-func (d *DatabricksDestination) buildCreateTableSQL(fullTable string, columns []schema.Column, primaryKeys []string) string {
+func (d *DatabricksDestination) buildCreateTableSQL(fullTable string, columns []schema.Column, exclusive bool) string {
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToDatabricks(col)
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
-	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", fullTable, strings.Join(colDefs, ",\n  "))
-
-	return sql
+	clause := "IF NOT EXISTS "
+	if exclusive {
+		clause = ""
+	}
+	return fmt.Sprintf("CREATE TABLE %s%s (\n  %s\n)", clause, fullTable, strings.Join(colDefs, ",\n  "))
 }
 
 func (d *DatabricksDestination) formatValue(v interface{}) string {
 	switch val := v.(type) {
+	case nil:
+		return "NULL"
+	case bool:
+		if val {
+			return "TRUE"
+		}
+		return "FALSE"
 	case time.Time:
-		return fmt.Sprintf("TIMESTAMP '%s'", val.Format("2006-01-02 15:04:05.000000"))
+		return fmt.Sprintf("TIMESTAMP '%s'", val.UTC().Format("2006-01-02 15:04:05.000000"))
 	case *time.Time:
 		if val == nil {
 			return "NULL"
 		}
-		return fmt.Sprintf("TIMESTAMP '%s'", val.Format("2006-01-02 15:04:05.000000"))
+		return fmt.Sprintf("TIMESTAMP '%s'", val.UTC().Format("2006-01-02 15:04:05.000000"))
 	case string:
-		return fmt.Sprintf("'%s'", strings.ReplaceAll(val, "'", "''"))
-	case int, int32, int64:
+		return sqlString(val)
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 		return fmt.Sprintf("%d", val)
 	case float32, float64:
 		return fmt.Sprintf("%v", val)
 	default:
-		return fmt.Sprintf("'%v'", val)
+		return sqlString(fmt.Sprintf("%v", val))
 	}
 }
