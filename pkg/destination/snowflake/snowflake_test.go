@@ -1596,3 +1596,15 @@ func TestBuildCreateTableSQLClusterBy(t *testing.T) {
 		t.Errorf("unexpected CLUSTER BY clause:\n%s", got)
 	}
 }
+
+func TestSplitClusterByColumns(t *testing.T) {
+	cols := []schema.Column{{Name: "ID"}, {Name: "event_date"}}
+
+	found, missing := splitClusterByColumns(cols, []string{"id", "EVENT_DATE", "gone"})
+	assert.Equal(t, []string{"id", "EVENT_DATE"}, found)
+	assert.Equal(t, []string{"gone"}, missing)
+
+	found, missing = splitClusterByColumns(cols, nil)
+	assert.Empty(t, found)
+	assert.Empty(t, missing)
+}

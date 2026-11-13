@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,8 @@ type SnowflakeDestination struct {
 	database  string
 	warehouse string
 	role      string
+
+	clusterByWarning sync.Once
 }
 
 func NewSnowflakeDestination() *SnowflakeDestination {
@@ -120,8 +123,15 @@ func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destinatio
 		config.Debug("[DEST] DROP TABLE took %v", time.Since(startDrop))
 	}
 
+	clusterBy, missing := splitClusterByColumns(opts.Schema.Columns, opts.ClusterBy)
+	if len(missing) > 0 {
+		d.clusterByWarning.Do(func() {
+			output.Warnf("Snowflake: skipped cluster_by columns that are not in the table: %s\n", strings.Join(missing, ", "))
+		})
+	}
+
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys, opts.ClusterBy)
+	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys, clusterBy)
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
@@ -1829,6 +1839,20 @@ func buildChangeConditionsSnowflake(columns []string, targetAlias, sourceAlias s
 		conditions[i] = fmt.Sprintf(`%s.%s IS DISTINCT FROM %s.%s`, targetAlias, quoteIdentifier(col), sourceAlias, quoteIdentifier(col))
 	}
 	return strings.Join(conditions, " OR ")
+}
+
+// splitClusterByColumns separates cluster_by columns that exist in the table
+// from ones that don't, matching names case-insensitively like Snowflake does.
+func splitClusterByColumns(columns []schema.Column, clusterBy []string) ([]string, []string) {
+	var found, missing []string
+	for _, c := range clusterBy {
+		if slices.ContainsFunc(columns, func(col schema.Column) bool { return strings.EqualFold(col.Name, c) }) {
+			found = append(found, c)
+		} else {
+			missing = append(missing, c)
+		}
+	}
+	return found, missing
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string, clusterBy []string) string {
