@@ -17,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/naming"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/source"
 	mssqldb "github.com/microsoft/go-mssqldb"
 )
 
@@ -590,4 +591,157 @@ func TestSchemaEvolutionTypeChangeFailureIncludesQuery(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestNonCDCLongStringAndBinaryPrimaryKeysLoadWithout900ByteLimit(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "text_pk", DataType: schema.TypeString},
+		{Name: "bytea_pk", DataType: schema.TypeBinary},
+		{Name: "payload", DataType: schema.TypeString},
+	}}
+	createSQL := buildCreateTableSQL("dbo.pg_items", tableSchema.Columns, []string{"text_pk", "bytea_pk"})
+	if !strings.Contains(createSQL, "[text_pk] VARCHAR(8000) NOT NULL") {
+		t.Fatalf("expected VARCHAR(8000) NOT NULL for unbounded string PK, got:\n%s", createSQL)
+	}
+	if !strings.Contains(createSQL, "[bytea_pk] VARBINARY(8000) NOT NULL") {
+		t.Fatalf("expected VARBINARY(8000) NOT NULL for unbounded binary PK, got:\n%s", createSQL)
+	}
+	if strings.Contains(createSQL, "900") {
+		t.Fatalf("unexpected 900-byte limit in Fabric CREATE TABLE SQL:\n%s", createSQL)
+	}
+
+	longTextPK := strings.Repeat("a", 1000)
+	longByteaPK := []byte(strings.Repeat("x", 1024))
+
+	mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+	copySQL := mssqldb.CopyIn("[dbo].[pg_items]", mssqldb.BulkOptions{RowsPerBatch: 1, Tablock: true}, "text_pk", "bytea_pk", "payload")
+	mock.ExpectBegin()
+	stmt := mock.ExpectPrepare(regexp.QuoteMeta(copySQL))
+	stmt.ExpectExec().WithArgs(longTextPK, longByteaPK, "body").WillReturnResult(sqlmock.NewResult(0, 1))
+	stmt.ExpectExec().WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	dest := &FabricDestination{db: db, writeMode: writeModeCopy}
+	if err := dest.PrepareTable(t.Context(), destination.PrepareOptions{
+		Table:       "dbo.pg_items",
+		Schema:      tableSchema,
+		PrimaryKeys: []string{"text_pk", "bytea_pk"},
+	}); err != nil {
+		t.Fatalf("PrepareTable: %v", err)
+	}
+
+	pool := memory.NewGoAllocator()
+	recSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "text_pk", Type: arrow.BinaryTypes.String},
+		{Name: "bytea_pk", Type: arrow.BinaryTypes.Binary},
+		{Name: "payload", Type: arrow.BinaryTypes.String},
+	}, nil)
+	b := array.NewRecordBuilder(pool, recSchema)
+	b.Field(0).(*array.StringBuilder).Append(longTextPK)
+	b.Field(1).(*array.BinaryBuilder).Append(longByteaPK)
+	b.Field(2).(*array.StringBuilder).Append("body")
+	batch := b.NewRecordBatch()
+	b.Release()
+
+	records := make(chan source.RecordBatchResult, 1)
+	records <- source.RecordBatchResult{Batch: batch}
+	close(records)
+
+	if err := dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+		Table:  "dbo.pg_items",
+		Schema: tableSchema,
+	}); err != nil {
+		t.Fatalf("WriteParallel: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNormalizeSchemaEvolutionSourceColumnPrimaryKeyBounds(t *testing.T) {
+	d := &FabricDestination{}
+
+	t.Run("unbounded and >8000 source string PKs do not widen VARCHAR(8000) PK to VARCHAR(MAX)", func(t *testing.T) {
+		existing := &schema.TableSchema{
+			PrimaryKeys: []string{"id"},
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeString, MaxLength: 8000, IsPrimaryKey: true},
+				{Name: "note", DataType: schema.TypeString, MaxLength: 100, Nullable: true},
+			},
+		}
+		for _, srcLen := range []int{0, 10000} {
+			incoming := &schema.TableSchema{Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeString, MaxLength: srcLen},
+				{Name: "note", DataType: schema.TypeString, MaxLength: 0, Nullable: true},
+			}}
+			cmp, err := schemaevolution.Compare(incoming, existing, &schemaevolution.CompareOptions{
+				PrimaryKeys:           []string{"id"},
+				NormalizeColumn:       d.NormalizeSchemaEvolutionColumn,
+				NormalizeSourceColumn: d.NormalizeSchemaEvolutionSourceColumn,
+			})
+			if err != nil {
+				t.Fatalf("Compare(srcLen=%d): %v", srcLen, err)
+			}
+			stmts, _, err := destination.RenderEvolution(&Dialect{}, "dbo.events", cmp)
+			if err != nil {
+				t.Fatalf("RenderEvolution(srcLen=%d): %v", srcLen, err)
+			}
+			want := []string{"ALTER TABLE dbo.events ALTER COLUMN [note] VARCHAR(MAX) NULL"}
+			if len(stmts) != 1 || stmts[0] != want[0] {
+				t.Fatalf("Compare(srcLen=%d) statements = %v, want %v", srcLen, stmts, want)
+			}
+		}
+	})
+
+	t.Run("narrower VARCHAR(900) PK widens to VARCHAR(8000) for unbounded source and preserves explicit bounded width", func(t *testing.T) {
+		existing := &schema.TableSchema{
+			PrimaryKeys: []string{"id"},
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeString, MaxLength: 900, IsPrimaryKey: true},
+			},
+		}
+		unbounded := &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeString},
+		}}
+		cmp, err := schemaevolution.Compare(unbounded, existing, &schemaevolution.CompareOptions{
+			PrimaryKeys:           []string{"id"},
+			NormalizeSourceColumn: d.NormalizeSchemaEvolutionSourceColumn,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmts, _, err := destination.RenderEvolution(&Dialect{}, "dbo.events", cmp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "ALTER TABLE dbo.events ALTER COLUMN [id] VARCHAR(8000) NOT NULL"
+		if len(stmts) != 1 || stmts[0] != want {
+			t.Fatalf("statements = %v, want [%q]", stmts, want)
+		}
+
+		bounded := &schema.TableSchema{Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeString, MaxLength: 2000},
+		}}
+		cmp, err = schemaevolution.Compare(bounded, existing, &schemaevolution.CompareOptions{
+			PrimaryKeys:           []string{"id"},
+			NormalizeSourceColumn: d.NormalizeSchemaEvolutionSourceColumn,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmts, _, err = destination.RenderEvolution(&Dialect{}, "dbo.events", cmp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantBounded := "ALTER TABLE dbo.events ALTER COLUMN [id] VARCHAR(2000) NOT NULL"
+		if len(stmts) != 1 || stmts[0] != wantBounded {
+			t.Fatalf("statements = %v, want [%q]", stmts, wantBounded)
+		}
+	})
 }

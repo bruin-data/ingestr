@@ -48,24 +48,149 @@ func TestFabricCDCCapabilitiesAndStrategyValidators(t *testing.T) {
 func TestBuildCreateTableSQLBoundsPrimaryKeyStringAndBinary(t *testing.T) {
 	sqlText := buildCreateTableSQL("dbo.mongo_events", []schema.Column{
 		{Name: "_id", DataType: schema.TypeString},
+		{Name: "bounded_id", DataType: schema.TypeString, MaxLength: 1500},
+		{Name: "oversized_id", DataType: schema.TypeString, MaxLength: 10000},
 		{Name: "payload", DataType: schema.TypeString},
 		{Name: "raw_key", DataType: schema.TypeBinary},
-	}, []string{"_id", "raw_key"})
+		{Name: "bounded_raw", DataType: schema.TypeBinary, MaxLength: 2048},
+		{Name: "oversized_raw", DataType: schema.TypeBinary, MaxLength: 12000},
+		{Name: "blob", DataType: schema.TypeBinary},
+	}, []string{"_id", "bounded_id", "oversized_id", "raw_key", "bounded_raw", "oversized_raw"})
 
-	assert.Contains(t, sqlText, "[_id] VARCHAR(900) NOT NULL")
-	assert.Contains(t, sqlText, "[raw_key] VARBINARY(900) NOT NULL")
+	assert.Contains(t, sqlText, "[_id] VARCHAR(8000) NOT NULL")
+	assert.Contains(t, sqlText, "[bounded_id] VARCHAR(1500) NOT NULL")
+	assert.Contains(t, sqlText, "[oversized_id] VARCHAR(8000) NOT NULL")
+	assert.Contains(t, sqlText, "[raw_key] VARBINARY(8000) NOT NULL")
+	assert.Contains(t, sqlText, "[bounded_raw] VARBINARY(2048) NOT NULL")
+	assert.Contains(t, sqlText, "[oversized_raw] VARBINARY(8000) NOT NULL")
 	assert.Contains(t, sqlText, "[payload] VARCHAR(MAX)")
-	assert.Contains(t, sqlText, "PRIMARY KEY NONCLUSTERED ([_id], [raw_key]) NOT ENFORCED")
+	assert.Contains(t, sqlText, "[blob] VARBINARY(MAX)")
+	assert.NotContains(t, sqlText, "VARCHAR(900)")
+	assert.NotContains(t, sqlText, "VARBINARY(900)")
+	assert.Contains(t, sqlText, "PRIMARY KEY NONCLUSTERED ([_id], [bounded_id], [oversized_id], [raw_key], [bounded_raw], [oversized_raw]) NOT ENFORCED")
 }
 
 func TestBuildCreateTableSQLWithDeferredPrimaryKeys(t *testing.T) {
 	sqlText := buildCreateTableSQLWithOptions("dbo.events", []schema.Column{
 		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "slug", DataType: schema.TypeString},
+		{Name: "raw_key", DataType: schema.TypeBinary},
 		{Name: "name", DataType: schema.TypeString},
-	}, nil, []string{"id"}, false)
+	}, nil, []string{"id", "slug", "raw_key"}, false)
 
 	assert.Contains(t, sqlText, "[id] BIGINT NOT NULL")
+	assert.Contains(t, sqlText, "[slug] VARCHAR(8000) NOT NULL")
+	assert.Contains(t, sqlText, "[raw_key] VARBINARY(8000) NOT NULL")
+	assert.Contains(t, sqlText, "[name] VARCHAR(MAX)")
 	assert.NotContains(t, sqlText, "ADD CONSTRAINT")
+}
+
+func TestCDCLongStringAndBinaryPrimaryKeys(t *testing.T) {
+	longStringKey := strings.Repeat("k", 1200)
+	longBinaryKey := []byte(strings.Repeat("b", 1200))
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "doc_id", DataType: schema.TypeString},
+		{Name: "bin_id", DataType: schema.TypeBinary},
+		{Name: "payload", DataType: schema.TypeString},
+		{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+		{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+	}}
+
+	t.Run("CDC ClaimAndPrepareEmptyCDCTarget and fenced WriteParallel accept >900-byte keys", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		canonical := destination.CDCTargetKeyDigest("", "dbo", "long_pk_events")
+		claim := destination.CDCTargetClaim{
+			ConnectorID:      "pg-cdc-long-pk",
+			DestinationTable: "dbo.long_pk_events",
+			SourceTable:      "public.long_pk_events",
+		}
+		ownerID, err := claim.OwnerID()
+		require.NoError(t, err)
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "long_pk_events").WillReturnError(sql.ErrNoRows)
+		mock.ExpectQuery(`SELECT \[connector_id\] FROM \[_bruin_staging\]\.\[cdc_targets\]`).WithArgs(canonical).WillReturnError(sql.ErrNoRows)
+		mock.ExpectExec(`CREATE VIEW \[_bruin_staging\]\.\[cdc_claim_`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(`SELECT \[owner_id\] FROM \[_bruin_staging\]\.\[cdc_claim_`).WillReturnRows(sqlmock.NewRows([]string{"owner_id"}).AddRow(ownerID))
+		mock.ExpectBegin()
+		mock.ExpectQuery(`SELECT \[connector_id\] FROM \[_bruin_staging\]\.\[cdc_targets\]`).WithArgs(canonical).WillReturnError(sql.ErrNoRows)
+		mock.ExpectExec(`INSERT INTO \[_bruin_staging\]\.\[cdc_targets\]`).WithArgs(canonical, ownerID).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+
+		expectedCreateSQL := buildCreateTableSQLWithOptions("dbo.long_pk_events", tableSchema.Columns, []string{"doc_id", "bin_id"}, nil, true)
+		require.Contains(t, expectedCreateSQL, "[doc_id] VARCHAR(8000) NOT NULL")
+		require.Contains(t, expectedCreateSQL, "[bin_id] VARBINARY(8000) NOT NULL")
+		require.NotContains(t, expectedCreateSQL, "900")
+		mock.ExpectExec(regexp.QuoteMeta(expectedCreateSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "long_pk_events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(301), "2026-01-01T00:00:00"))
+
+		dest := &FabricDestination{db: db, writeMode: writeModeInsert}
+		inc, err := dest.ClaimAndPrepareEmptyCDCTarget(t.Context(), "_bruin_staging.cdc_targets", claim, destination.PrepareOptions{
+			Table:       "dbo.long_pk_events",
+			Schema:      tableSchema,
+			PrimaryKeys: []string{"doc_id", "bin_id"},
+			CDCMode:     true,
+			CDCKeys:     []string{"doc_id", "bin_id"},
+		})
+		require.NoError(t, err)
+
+		// Merge staging table prepared without PrimaryKeys keeps VARCHAR(MAX)/VARBINARY(MAX).
+		stagingCreateSQL := buildCreateTableSQL("dbo.long_pk_events_staging", tableSchema.Columns, nil)
+		require.Contains(t, stagingCreateSQL, "[doc_id] VARCHAR(MAX)")
+		require.Contains(t, stagingCreateSQL, "[bin_id] VARBINARY(MAX)")
+		mock.ExpectExec(regexp.QuoteMeta(stagingCreateSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+		require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+			Table:   "dbo.long_pk_events_staging",
+			Schema:  tableSchema,
+			CDCMode: true,
+			CDCKeys: []string{"doc_id", "bin_id"},
+		}))
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "long_pk_events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(301), "2026-01-01T00:00:00"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "long_pk_events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(301), "2026-01-01T00:00:00"))
+		mock.ExpectExec(`INSERT INTO \[dbo\]\.\[long_pk_events\]`).
+			WithArgs(longStringKey, longBinaryKey, "hello", "0/16B3748", 0).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "long_pk_events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(301), "2026-01-01T00:00:00"))
+		mock.ExpectCommit()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "long_pk_events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(301), "2026-01-01T00:00:00"))
+
+		mem := memory.NewGoAllocator()
+		recSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "doc_id", Type: arrow.BinaryTypes.String},
+			{Name: "bin_id", Type: arrow.BinaryTypes.Binary},
+			{Name: "payload", Type: arrow.BinaryTypes.String},
+			{Name: destination.CDCLSNColumn, Type: arrow.BinaryTypes.String},
+			{Name: destination.CDCDeletedColumn, Type: arrow.FixedWidthTypes.Boolean},
+		}, nil)
+		b := array.NewRecordBuilder(mem, recSchema)
+		b.Field(0).(*array.StringBuilder).Append(longStringKey)
+		b.Field(1).(*array.BinaryBuilder).Append(longBinaryKey)
+		b.Field(2).(*array.StringBuilder).Append("hello")
+		b.Field(3).(*array.StringBuilder).Append("0/16B3748")
+		b.Field(4).(*array.BooleanBuilder).Append(false)
+		batch := b.NewRecordBatch()
+		b.Release()
+
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: batch}
+		close(records)
+
+		require.NoError(t, dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+			Table:                  "dbo.long_pk_events",
+			Schema:                 tableSchema,
+			CDCExpectedIncarnation: inc,
+		}))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
 func TestPrepareTableRequirePrimaryKeyMatch(t *testing.T) {

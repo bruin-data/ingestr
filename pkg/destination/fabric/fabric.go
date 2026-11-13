@@ -1048,24 +1048,27 @@ func buildCreateTableSQLWithOptions(table string, columns []schema.Column, prima
 	return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s", escapeTableName(table), createPart)
 }
 
+const maxFabricPrimaryKeyLength = 8000
+
 func mapFabricColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
+	mapped := MapDataTypeToFabric(col)
 	if !isPrimaryKey {
-		return MapDataTypeToFabric(col)
+		return mapped
 	}
 
-	switch col.DataType {
-	case schema.TypeString, schema.TypeJSON, schema.TypeArray:
-		if col.MaxLength > 0 && col.MaxLength <= 8000 {
+	switch mapped {
+	case "VARCHAR(MAX)":
+		if col.MaxLength > 0 && col.MaxLength <= maxFabricPrimaryKeyLength {
 			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
 		}
-		return "VARCHAR(900)"
-	case schema.TypeBinary:
-		if col.MaxLength > 0 && col.MaxLength <= 8000 {
+		return fmt.Sprintf("VARCHAR(%d)", maxFabricPrimaryKeyLength)
+	case "VARBINARY(MAX)":
+		if col.MaxLength > 0 && col.MaxLength <= maxFabricPrimaryKeyLength {
 			return fmt.Sprintf("VARBINARY(%d)", col.MaxLength)
 		}
-		return "VARBINARY(900)"
+		return fmt.Sprintf("VARBINARY(%d)", maxFabricPrimaryKeyLength)
 	default:
-		return MapDataTypeToFabric(col)
+		return mapped
 	}
 }
 
