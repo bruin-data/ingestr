@@ -1001,7 +1001,36 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 			return dbsql.StatementResponse{}, err
 		}
 	}
+	return uc.dispatch(stmt)
+}
 
+// checkGuard evaluates a fence guard the way Databricks would, returning the
+// SIGNAL error when the target no longer has the bound identity.
+func (uc *mockUCState) checkGuard(sub string) error {
+	ref, created, expectedComment, hasGuard := parseMockInfoSchemaPredicate(nil, sub)
+	tbl, ok := uc.tables[ref]
+	if !hasGuard || expectedComment == "" || !strings.Contains(sub, "THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '"+cdcIncarnationGuardMarker) {
+		return fmt.Errorf("malformed guard: %s", sub)
+	}
+	if !ok || tbl.effectiveCreatedMicros() != created || tbl.comment != expectedComment {
+		return fmt.Errorf("[USER_RAISED_EXCEPTION] %s: %s SQLSTATE: 45000", cdcIncarnationGuardMarker, ref)
+	}
+	return nil
+}
+
+func splitMockBlock(stmt, begin string) []string {
+	body := strings.TrimPrefix(stmt, begin+"\n")
+	body = strings.TrimSuffix(strings.TrimSpace(body), "END;")
+	var subs []string
+	for _, rawSub := range strings.Split(body, ";\n") {
+		if sub := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rawSub), ";")); sub != "" {
+			subs = append(subs, sub)
+		}
+	}
+	return subs
+}
+
+func (uc *mockUCState) dispatch(stmt string) (dbsql.StatementResponse, error) {
 	switch {
 	case strings.HasPrefix(stmt, "DESCRIBE DETAIL "):
 		ref := normalizeMockUCRef(strings.TrimPrefix(stmt, "DESCRIBE DETAIL "))
@@ -1082,6 +1111,24 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 		uc.tables[ref] = tbl
 		return dbsql.StatementResponse{}, nil
 
+	case strings.HasPrefix(stmt, "BEGIN\n"):
+		// A plain SQL script is not transactional: statements before a SIGNAL stay applied.
+		for _, sub := range splitMockBlock(stmt, "BEGIN") {
+			if uc.onAtomicSub != nil {
+				uc.onAtomicSub(sub, uc)
+			}
+			if strings.HasPrefix(sub, "IF NOT EXISTS (SELECT 1 FROM ") {
+				if err := uc.checkGuard(sub); err != nil {
+					return dbsql.StatementResponse{}, err
+				}
+				continue
+			}
+			if _, err := uc.dispatch(sub); err != nil {
+				return dbsql.StatementResponse{}, err
+			}
+		}
+		return dbsql.StatementResponse{}, nil
+
 	case strings.HasPrefix(stmt, "BEGIN ATOMIC\n"):
 		undo := map[string]int{}
 		touch := func(ref string) (mockUCTable, bool) {
@@ -1101,27 +1148,15 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 				}
 			}
 		}
-		body := strings.TrimPrefix(stmt, "BEGIN ATOMIC\n")
-		body = strings.TrimSuffix(strings.TrimSpace(body), "END;")
-		for _, rawSub := range strings.Split(body, ";\n") {
-			sub := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rawSub), ";"))
-			if sub == "" {
-				continue
-			}
+		for _, sub := range splitMockBlock(stmt, "BEGIN ATOMIC") {
 			if uc.onAtomicSub != nil {
 				uc.onAtomicSub(sub, uc)
 			}
 			switch {
 			case strings.HasPrefix(sub, "IF NOT EXISTS (SELECT 1 FROM "):
-				ref, created, expectedComment, hasGuard := parseMockInfoSchemaPredicate(nil, sub)
-				tbl, ok := uc.tables[ref]
-				if !hasGuard || expectedComment == "" || !strings.Contains(sub, "THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '"+cdcIncarnationGuardMarker) {
+				if err := uc.checkGuard(sub); err != nil {
 					rollback()
-					return dbsql.StatementResponse{}, fmt.Errorf("malformed guard: %s", sub)
-				}
-				if !ok || tbl.effectiveCreatedMicros() != created || tbl.comment != expectedComment {
-					rollback()
-					return dbsql.StatementResponse{}, fmt.Errorf("[USER_RAISED_EXCEPTION] %s: %s SQLSTATE: 45000", cdcIncarnationGuardMarker, ref)
+					return dbsql.StatementResponse{}, err
 				}
 			case strings.HasPrefix(sub, "TRUNCATE TABLE "):
 				rollback()

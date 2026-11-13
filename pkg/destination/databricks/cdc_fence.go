@@ -342,21 +342,32 @@ func buildFencedAtomicSQL(fences []*cdcFence, statements []string) string {
 	if len(fences) == 0 && len(statements) == 1 {
 		return statements[0]
 	}
+	block := make([]string, 0, len(statements)+2*len(fences))
+	for _, f := range fences {
+		block = append(block, f.guardSQL())
+	}
+	block = append(block, statements...)
+	for _, f := range fences {
+		block = append(block, f.guardSQL())
+	}
+	return buildSQLBlock("BEGIN ATOMIC", block)
+}
+
+// buildGuardedScriptSQL runs DDL, which BEGIN ATOMIC rejects, in a plain SQL
+// script directly after a server-side guard on the fence: SIGNAL stops the
+// script before any statement runs against a replaced table.
+func buildGuardedScriptSQL(f *cdcFence, statements []string) string {
+	return buildSQLBlock("BEGIN", append([]string{f.guardSQL()}, statements...))
+}
+
+func buildSQLBlock(begin string, statements []string) string {
 	var b strings.Builder
-	b.WriteString("BEGIN ATOMIC\n")
-	writeStmt := func(stmt string) {
+	b.WriteString(begin)
+	b.WriteString("\n")
+	for _, stmt := range statements {
 		b.WriteString("  ")
 		b.WriteString(strings.TrimRight(strings.TrimSpace(stmt), ";"))
 		b.WriteString(";\n")
-	}
-	for _, f := range fences {
-		writeStmt(f.guardSQL())
-	}
-	for _, stmt := range statements {
-		writeStmt(stmt)
-	}
-	for _, f := range fences {
-		writeStmt(f.guardSQL())
 	}
 	b.WriteString("END;")
 	return b.String()
