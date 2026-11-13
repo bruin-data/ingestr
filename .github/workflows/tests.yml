@@ -43,15 +43,15 @@ jobs:
       # at the same time under race builds.
       TEST_CONCURRENCY: "1"
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v10.3.3
       - name: Run full test suite
         run: make test-full
 
@@ -62,7 +62,7 @@ jobs:
       # runners — they're destroyed after the job, no orphan-container risk.
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Pre-pull testcontainer images (background)
         run: |
@@ -73,7 +73,7 @@ jobs:
           done
 
       - name: Setup Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
@@ -106,7 +106,7 @@ jobs:
       GOFLAGS: "-p=1"
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Pre-pull testcontainer images (background)
         env:
@@ -117,7 +117,7 @@ jobs:
           done <<< "$TEST_IMAGES"
 
       - name: Setup Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
@@ -133,25 +133,25 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Log in to the Container registry
-        uses: docker/login-action@v3.7.0
+        uses: docker/login-action@v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: bruin-data
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@v5.10.0
+        uses: docker/metadata-action@v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
       - name: Set up Depot
-        uses: depot/setup-action@v1.7.1
+        uses: depot/setup-action@v1.7.2
 
       - name: Build Docker image
-        uses: depot/build-push-action@v1.18.0
+        uses: depot/build-push-action@v1.19.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -165,8 +165,8 @@ jobs:
   lint:
     runs-on: depot-ubuntu-24.04-4
     steps:
-      - uses: actions/checkout@v4.4.0
-      - uses: actions/setup-go@v6.5.0
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
@@ -180,8 +180,8 @@ jobs:
   licenses:
     runs-on: depot-ubuntu-24.04-4
     steps:
-      - uses: actions/checkout@v4.4.0
-      - uses: actions/setup-go@v6.5.0
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"

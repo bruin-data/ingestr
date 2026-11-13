@@ -23,7 +23,7 @@ jobs:
   preflight:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
       - name: Validate stable tag
         run: |
           [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
@@ -58,15 +58,15 @@ jobs:
             suite: test-integration-nodocker
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5.6.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@v10.3.3
       - name: Run test suite
         run: make ${{ matrix.suite }}
 
@@ -74,17 +74,17 @@ jobs:
     needs: [preflight]
     runs-on: depot-ubuntu-latest-8
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v6.5.0
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
       - name: Run GoReleaser
         run: |
           docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e INGESTR_DISABLE_TELEMETRY=true -e DISABLE_TELEMETRY=true -e GGOOS=darwin -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: archives-darwin
           overwrite: true
@@ -96,17 +96,17 @@ jobs:
     needs: [preflight]
     runs-on: depot-ubuntu-latest-8
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v6.5.0
+      - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
       - name: Run GoReleaser
         run: |
           docker run --privileged   -v /var/run/docker.sock:/var/run/docker.sock -e INGESTR_DISABLE_TELEMETRY=true -e DISABLE_TELEMETRY=true -e GGOOS=linux -e GORELEASER_KEY=${{ secrets.GORELEASER_KEY }} -e COMMIT_SHA=${{ github.sha }} -e VERSION=${{ github.ref_name }} -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/src -w /src goreleaser/goreleaser-cross-pro:v1.23 release --clean --split --verbose
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: archives-linux
           overwrite: true
@@ -121,11 +121,11 @@ jobs:
         shell: msys2 {0}
 
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: msys2/setup-msys2@v2.32.0
+      - uses: msys2/setup-msys2@v2.33.0
         with:
           msystem: UCRT64
           update: true
@@ -136,13 +136,13 @@ jobs:
             mingw-w64-ucrt-x86_64-winpthreads
 
       - name: Setup Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
           cache-dependency-path: "go.sum"
 
       - name: Release
-        uses: goreleaser/goreleaser-action@v6.4.0
+        uses: goreleaser/goreleaser-action@v7.3.0
         with:
           version: v2.3.2
           distribution: goreleaser-pro
@@ -160,7 +160,7 @@ jobs:
           CC: x86_64-w64-mingw32-gcc
           CGO_LDFLAGS: "-static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic"
 
-      - uses: actions/upload-artifact@v4.6.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: archives-windows
           overwrite: true
@@ -179,8 +179,8 @@ jobs:
           - {goos: windows, archive: ingestr_Windows_x86_64.zip, runner: windows-2022}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4.4.0
-      - uses: actions/download-artifact@v4.3.0
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: archives-${{ matrix.goos }}
           path: release-assets
@@ -205,8 +205,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4.4.0
-      - uses: actions/download-artifact@v4.3.0
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: archives-*
           merge-multiple: true
@@ -272,10 +272,10 @@ jobs:
     runs-on: depot-ubuntu-latest
     needs: [publish-release]
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5.6.0
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.11'
 
@@ -352,7 +352,7 @@ jobs:
     name: Installer Script on Windows
     needs: [publish-release]
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
       - name: Show directories
         shell: bash
         run: pwd && cd && pwd
@@ -383,7 +383,7 @@ jobs:
     name: Installer Script on Linux
     needs: [publish-release]
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
       - name: Extract tag from ref
         id: extract_tag
         run: |
@@ -421,25 +421,25 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Log in to the Container registry
-        uses: docker/login-action@v3.7.0
+        uses: docker/login-action@v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: bruin-data
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@v5.10.0
+        uses: docker/metadata-action@v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
       - name: Set up Depot
-        uses: depot/setup-action@v1.7.1
+        uses: depot/setup-action@v1.7.2
 
       - name: Build and push Docker image
-        uses: depot/build-push-action@v1.18.0
+        uses: depot/build-push-action@v1.19.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -468,10 +468,10 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4.4.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Log in to the Container registry
-        uses: docker/login-action@v3.7.0
+        uses: docker/login-action@v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: bruin-data
