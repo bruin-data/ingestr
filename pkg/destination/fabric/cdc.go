@@ -1035,12 +1035,20 @@ func (d *FabricDestination) swapTable(ctx context.Context, opts destination.Swap
 
 	swapSource := opts.StagingTable
 	dropSourceAfterCommit := false
+	committed := false
+	defer func() {
+		if !committed && dropSourceAfterCommit {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			_ = d.DropTable(cleanupCtx, swapSource)
+		}
+	}()
 	if prepared, ok := d.takePreparedSwap(opts.StagingTable); ok {
+		swapSource = prepared
+		dropSourceAfterCommit = true
 		if err := d.ensureSchemaExists(ctx, targetID.schema); err != nil {
 			return fmt.Errorf("failed to ensure target schema exists: %w", err)
 		}
-		swapSource = prepared
-		dropSourceAfterCommit = true
 	} else {
 		sameSchema, err := d.sameSwapSchema(ctx, targetID, stagingID)
 		if err != nil {
@@ -1065,20 +1073,11 @@ func (d *FabricDestination) swapTable(ctx context.Context, opts destination.Swap
 
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		if dropSourceAfterCommit {
-			_ = d.DropTable(ctx, swapSource)
-		}
 		return fmt.Errorf("failed to begin Fabric swap transaction: %w", err)
 	}
-	committed := false
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
-			if dropSourceAfterCommit {
-				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				defer cancel()
-				_ = d.DropTable(cleanupCtx, swapSource)
-			}
 		}
 	}()
 

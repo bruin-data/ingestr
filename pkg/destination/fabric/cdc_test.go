@@ -1529,3 +1529,18 @@ func TestSwapTableRejectsOtherWarehouses(t *testing.T) {
 		})
 	}
 }
+
+func TestSwapTableDropsPreparedCloneWhenSchemaSetupFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectExec(`CREATE SCHEMA \[Sales\]`).WillReturnError(errors.New("schema failed"))
+	mock.ExpectExec(`^IF OBJECT_ID\('\[Sales\]\.\[orders_swap_1\]', 'U'\) IS NOT NULL DROP TABLE \[Sales\]\.\[orders_swap_1\]$`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	dest := &FabricDestination{db: db, database: "wh", preparedSwaps: map[string]string{"_bruin_staging.orders_stg": "[Sales].[orders_swap_1]"}}
+	err = dest.SwapTable(t.Context(), destination.SwapOptions{StagingTable: "_bruin_staging.orders_stg", TargetTable: "Sales.orders"})
+	require.ErrorContains(t, err, "schema failed")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
