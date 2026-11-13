@@ -286,9 +286,14 @@ func (d *DatabricksDestination) DeleteCDCStateEvents(ctx context.Context, table,
 	return nil
 }
 
-func (d *DatabricksDestination) claimMarker(claimTable, target string) string {
-	cat, sch, _ := d.parseTableParts(claimTable)
-	return quoteTableParts(cat, sch, "cdc_claim_"+destination.CDCTargetKeyDigest(target))
+// claimMarker returns the exclusive ownership marker for a destination table.
+// It lives in the target's own catalog rather than the claim table's, so every
+// connector writing that table checks the same marker whatever its URI catalog.
+func (d *DatabricksDestination) claimMarker(destinationTable string) (catalog, marker string) {
+	cat, sch, tbl := d.parseTableParts(destinationTable)
+	catalog = strings.ToLower(cat)
+	digest := destination.CDCTargetKeyDigest(canonicalTargetKey(cat, sch, tbl))
+	return catalog, quoteTableParts(catalog, stagingSchema, "cdc_claim_"+digest)
 }
 
 func (d *DatabricksDestination) ClaimCDCTarget(ctx context.Context, claimTable string, claim destination.CDCTargetClaim) error {
@@ -305,8 +310,12 @@ func (d *DatabricksDestination) ClaimCDCTarget(ctx context.Context, claimTable s
 	if err := d.ensureSchemaForParts(ctx, cat, sch); err != nil {
 		return err
 	}
-
-	marker := d.claimMarker(claimTable, target)
+	markerCat, marker := d.claimMarker(claim.DestinationTable)
+	if !strings.EqualFold(markerCat, cat) || !strings.EqualFold(sch, stagingSchema) {
+		if err := d.ensureSchemaForParts(ctx, markerCat, stagingSchema); err != nil {
+			return err
+		}
+	}
 	createMarkerSQL := fmt.Sprintf("CREATE VIEW IF NOT EXISTS %s AS SELECT %s AS owner_id", marker, sqlString(owner))
 	if err := d.executeStatement(ctx, createMarkerSQL); err != nil {
 		config.LogFailedQuery(createMarkerSQL, err)
