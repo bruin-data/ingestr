@@ -268,6 +268,9 @@ func (d *RedshiftDestination) PrepareTable(ctx context.Context, opts destination
 	if err != nil {
 		return err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, opts.Table)
 	if err != nil {
 		return err
@@ -336,6 +339,9 @@ func (d *RedshiftDestination) GeneratedColumns(_ context.Context, _ string) ([]s
 func (d *RedshiftDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	db, err := d.requireDB()
 	if err != nil {
+		return nil, err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return nil, err
 	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
@@ -465,6 +471,9 @@ func (d *RedshiftDestination) SwapTable(ctx context.Context, opts destination.Sw
 	}
 	db, err := d.requireDB()
 	if err != nil {
+		return err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return err
 	}
 

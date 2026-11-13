@@ -118,29 +118,44 @@ func (t *redshiftTransaction) Rollback(ctx context.Context) error {
 }
 
 func (d *RedshiftDestination) Connect(ctx context.Context, uri string) error {
-	normalizedURI := intredshift.NormalizeURI(uri)
-	poolConfig, err := pgxpool.ParseConfig(normalizedURI)
-	if err != nil {
-		return fmt.Errorf("failed to parse Redshift URI: %w", err)
-	}
-	if poolConfig.MaxConns == 0 || poolConfig.MaxConns < 16 {
-		poolConfig.MaxConns = 16
-	}
-	poolConfig.MinConns = 1
-	poolConfig.MaxConnLifetime = 30 * time.Minute
-	poolConfig.MaxConnIdleTime = 5 * time.Minute
+	var db redshiftDB
+	if d.openDB != nil {
+		opened, err := d.openDB(ctx, uri)
+		if err != nil {
+			return err
+		}
+		db = opened
+	} else {
+		normalizedURI := intredshift.NormalizeURI(uri)
+		poolConfig, err := pgxpool.ParseConfig(normalizedURI)
+		if err != nil {
+			return fmt.Errorf("failed to parse Redshift URI: %w", err)
+		}
+		if poolConfig.MaxConns == 0 || poolConfig.MaxConns < 16 {
+			poolConfig.MaxConns = 16
+		}
+		poolConfig.MinConns = 1
+		poolConfig.MaxConnLifetime = 30 * time.Minute
+		poolConfig.MaxConnIdleTime = 5 * time.Minute
 
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		return fmt.Errorf("failed to connect to Redshift: %w", err)
+		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+		if err != nil {
+			return fmt.Errorf("failed to connect to Redshift: %w", err)
+		}
+		db = &pgxPoolAdapter{pool: pool}
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
+	if err := db.Ping(ctx); err != nil {
+		db.Close()
 		return fmt.Errorf("failed to ping Redshift: %w", err)
 	}
 
-	d.db = &pgxPoolAdapter{pool: pool}
+	d.db = db
 	d.dbOID = 0
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, d.db); err != nil {
+		db.Close()
+		d.db = nil
+		return err
+	}
 	return nil
 }
 
@@ -210,6 +225,9 @@ func (d *RedshiftDestination) DropTable(ctx context.Context, table string) error
 	if err != nil {
 		return err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
 	if err != nil {
 		return err
@@ -226,6 +244,9 @@ func (d *RedshiftDestination) TruncateTable(ctx context.Context, table string) e
 	if err != nil {
 		return err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
 	if err != nil {
 		return err
@@ -240,6 +261,9 @@ func (d *RedshiftDestination) TruncateTable(ctx context.Context, table string) e
 func (d *RedshiftDestination) ListStagingTables(ctx context.Context, schemaName, prefix string) ([]string, error) {
 	db, err := d.requireDB()
 	if err != nil {
+		return nil, err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return nil, err
 	}
 	if schemaName == "" {
@@ -273,6 +297,9 @@ func (d *RedshiftDestination) ListStagingTables(ctx context.Context, schemaName,
 func (d *RedshiftDestination) TruncateInsertFromStaging(ctx context.Context, opts destination.TruncateInsertFromStagingOptions) error {
 	db, err := d.requireDB()
 	if err != nil {
+		return err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return err
 	}
 	targetSchema, targetTable, err := d.resolveSchemaTable(ctx, db, opts.TargetTable)
@@ -319,6 +346,9 @@ func (d *RedshiftDestination) DeleteInsertTable(ctx context.Context, opts destin
 	if err != nil {
 		return err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return err
+	}
 	targetSchema, targetTable, err := d.resolveSchemaTable(ctx, db, opts.TargetTable)
 	if err != nil {
 		return err
@@ -329,7 +359,7 @@ func (d *RedshiftDestination) DeleteInsertTable(ctx context.Context, opts destin
 	}
 	targetRef := quoteTable(targetSchema, targetTable)
 	stagingRef := quoteTable(stagingSchema, stagingTable)
-	keyCol := destination.QuoteIdentifier(opts.IncrementalKey)
+	keyCol := destination.QuoteIdentifier(actualColName(opts.Columns, opts.IncrementalKey))
 
 	quotedCols := make([]string, len(opts.Columns))
 	for i, c := range opts.Columns {
@@ -337,20 +367,32 @@ func (d *RedshiftDestination) DeleteInsertTable(ctx context.Context, opts destin
 	}
 	colList := strings.Join(quotedCols, ", ")
 
+	quotedPKs := make([]string, len(opts.PrimaryKeys))
+	for i, pk := range opts.PrimaryKeys {
+		quotedPKs[i] = destination.QuoteIdentifier(actualColName(opts.Columns, pk))
+	}
+	pkList := strings.Join(quotedPKs, ", ")
+	if len(quotedCols) == 0 && pkList != "" {
+		return errors.New("delete+insert with primary keys requires columns")
+	}
+
 	return d.withTx(ctx, func(tx redshiftTx) error {
 		if _, err := tx.Exec(ctx, "LOCK "+targetRef); err != nil {
 			return fmt.Errorf("failed to lock target table %s: %w", opts.TargetTable, err)
 		}
 		deleteSQL := fmt.Sprintf(
-			`DELETE FROM %s WHERE %s IN (SELECT DISTINCT %s FROM %s WHERE %s IS NOT NULL)`,
-			targetRef, keyCol, keyCol, stagingRef, keyCol,
+			`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
+			targetRef, keyCol, keyCol,
 		)
-		if _, err := tx.Exec(ctx, deleteSQL); err != nil {
+		if _, err := tx.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
 			return fmt.Errorf("failed to delete matching rows from %s: %w", opts.TargetTable, err)
 		}
-		insertSQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", targetRef, colList, colList, stagingRef)
+		var insertSQL string
 		if len(quotedCols) == 0 {
 			insertSQL = fmt.Sprintf("INSERT INTO %s SELECT * FROM %s", targetRef, stagingRef)
+		} else {
+			selectClause := destination.DedupStagingSelect(colList, pkList, stagingRef, keyCol)
+			insertSQL = fmt.Sprintf("INSERT INTO %s (%s) %s", targetRef, colList, selectClause)
 		}
 		if _, err := tx.Exec(ctx, insertSQL); err != nil {
 			return fmt.Errorf("failed to insert rows into %s: %w", opts.TargetTable, err)
@@ -365,6 +407,9 @@ func (d *RedshiftDestination) SCD2Table(ctx context.Context, opts destination.SC
 	}
 	db, err := d.requireDB()
 	if err != nil {
+		return err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return err
 	}
 	targetSchema, targetTable, err := d.resolveSchemaTable(ctx, db, opts.TargetTable)

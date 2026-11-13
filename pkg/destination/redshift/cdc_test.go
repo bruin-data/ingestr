@@ -3,6 +3,8 @@ package redshift
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -27,6 +30,17 @@ type fakeRedshiftTable struct {
 	pks        []string
 	maxLSN     *string
 	colMaxLens map[string]int
+	rows       []map[string]any
+}
+
+type fakeEvolutionJournalRow struct {
+	targetSchema        string
+	targetTable         string
+	guardTable          string
+	expectedIncarnation string
+	ownerToken          string
+	expiresAt           time.Time
+	createdAt           time.Time
 }
 
 type fakeCDCStateRow struct {
@@ -44,20 +58,25 @@ type fakeLease struct {
 }
 
 type fakeRedshiftDB struct {
-	mu          sync.Mutex
-	dbOID       int64
-	nextOID     int64
-	tables      map[string]*fakeRedshiftTable
-	stateRows   []fakeCDCStateRow
-	claims      map[string]fakeClaim
-	leases      map[string]fakeLease
-	now         time.Time
-	execLog     []string
-	txEvents    []string
-	locks       []string
-	execHook    func(sql string, args []any, inTx bool) (pgconn.CommandTag, bool, error)
-	queryHook   func(sql string, args []any) (redshiftRows, bool, error)
-	queryRowErr error
+	mu               sync.Mutex
+	dbOID            int64
+	nextOID          int64
+	tables           map[string]*fakeRedshiftTable
+	stateRows        []fakeCDCStateRow
+	claims           map[string]fakeClaim
+	leases           map[string]fakeLease
+	evolutionJournal []fakeEvolutionJournalRow
+	journalSeq       int
+	now              time.Time
+	execLog          []string
+	execArgsLog      [][]any
+	txEvents         []string
+	locks            []string
+	execHook         func(sql string, args []any, inTx bool) (pgconn.CommandTag, bool, error)
+	beforeExecHook   func(sql string)
+	queryHook        func(sql string, args []any) (redshiftRows, bool, error)
+	queryRowErr      error
+	commitHook       func() error
 }
 
 func newFakeRedshiftDB() *fakeRedshiftDB {
@@ -103,13 +122,20 @@ func (f *fakeRedshiftDB) BeginTx(_ context.Context) (redshiftTx, error) {
 }
 
 func (f *fakeRedshiftDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	return f.execInternal(ctx, sql, args, false)
+	f.mu.Lock()
+	before := f.beforeExecHook
+	f.mu.Unlock()
+	if before != nil {
+		before(sql)
+	}
+	return f.execInternal(ctx, sql, args, nil)
 }
 
 func (f *fakeRedshiftDB) Query(_ context.Context, sql string, args ...any) (redshiftRows, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execLog = append(f.execLog, sql)
+	f.execArgsLog = append(f.execArgsLog, append([]any(nil), args...))
 	if f.queryHook != nil {
 		if rows, handled, err := f.queryHook(sql, args); handled {
 			return rows, err
@@ -214,6 +240,20 @@ func (f *fakeRedshiftDB) Query(_ context.Context, sql string, args ...any) (reds
 		}
 		return &fakeRows{data: out}, nil
 
+	case strings.Contains(sql, `SELECT "target_schema", "target_table", "guard_table", "expected_incarnation" FROM`):
+		sorted := append([]fakeEvolutionJournalRow(nil), f.evolutionJournal...)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			return sorted[i].createdAt.After(sorted[j].createdAt)
+		})
+		var out [][]any
+		for _, e := range sorted {
+			if strings.Contains(sql, `"expires_at" <= CURRENT_TIMESTAMP`) && e.expiresAt.After(f.now) {
+				continue
+			}
+			out = append(out, []any{e.targetSchema, e.targetTable, e.guardTable, e.expectedIncarnation})
+		}
+		return &fakeRows{data: out}, nil
+
 	case strings.Contains(sql, "information_schema.tables"):
 		schemaName := args[0].(string)
 		var out [][]any
@@ -232,6 +272,7 @@ func (f *fakeRedshiftDB) QueryRow(_ context.Context, sql string, args ...any) re
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execLog = append(f.execLog, sql)
+	f.execArgsLog = append(f.execArgsLog, append([]any(nil), args...))
 	if f.queryRowErr != nil {
 		return &fakeRow{err: f.queryRowErr}
 	}
@@ -320,6 +361,24 @@ func (f *fakeRedshiftDB) QueryRow(_ context.Context, sql string, args ...any) re
 		}
 		return &fakeRow{err: pgx.ErrNoRows}
 
+	case strings.Contains(sql, `SELECT "expected_incarnation", ("expires_at" <= CURRENT_TIMESTAMP) FROM`):
+		ts, tt, gt := args[0].(string), args[1].(string), args[2].(string)
+		for _, e := range f.evolutionJournal {
+			if e.targetSchema == ts && e.targetTable == tt && e.guardTable == gt {
+				return &fakeRow{vals: []any{e.expectedIncarnation, !e.expiresAt.After(f.now)}}
+			}
+		}
+		return &fakeRow{err: pgx.ErrNoRows}
+
+	case strings.Contains(sql, `SELECT "expected_incarnation" FROM`):
+		ts, tt, gt := args[0].(string), args[1].(string), args[2].(string)
+		for _, e := range f.evolutionJournal {
+			if e.targetSchema == ts && e.targetTable == tt && e.guardTable == gt {
+				return &fakeRow{vals: []any{e.expectedIncarnation}}
+			}
+		}
+		return &fakeRow{err: pgx.ErrNoRows}
+
 	case strings.Contains(sql, `SELECT "lease_token", ("expires_at" > CURRENT_TIMESTAMP)`):
 		connID := args[0].(string)
 		if l, ok := f.leases[connID]; ok {
@@ -331,10 +390,13 @@ func (f *fakeRedshiftDB) QueryRow(_ context.Context, sql string, args ...any) re
 	return &fakeRow{err: pgx.ErrNoRows}
 }
 
-func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any, inTx bool) (pgconn.CommandTag, error) {
+func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any, tx *fakeRedshiftTx) (pgconn.CommandTag, error) {
+	inTx := tx != nil
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execLog = append(f.execLog, sql)
+	argsCopy := append([]any(nil), args...)
+	f.execArgsLog = append(f.execArgsLog, argsCopy)
 	if f.execHook != nil {
 		if tag, handled, err := f.execHook(sql, args, inTx); handled {
 			return tag, err
@@ -351,6 +413,9 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 		return pgconn.NewCommandTag("CREATE SCHEMA"), nil
 
 	case strings.HasPrefix(trimmed, "CREATE TABLE"):
+		if strings.Contains(trimmed, "DEFAULT CURRENT_TIMESTAMP") {
+			return pgconn.CommandTag{}, fmt.Errorf("DEFAULT CURRENT_TIMESTAMP is not supported on TIMESTAMP WITHOUT TIME ZONE in Redshift")
+		}
 		ifNotExists := strings.HasPrefix(trimmed, "CREATE TABLE IF NOT EXISTS ")
 		tableRef := extractTableRefAfter(trimmed, "IF NOT EXISTS ")
 		if tableRef == "" {
@@ -363,8 +428,21 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 			return pgconn.NewCommandTag("CREATE TABLE"), nil
 		}
 		f.nextOID++
+		var cols []schema.Column
+		if tableRef == "_bruin_staging.cdc_evolution_journal" && strings.Contains(trimmed, `"owner_token"`) {
+			cols = []schema.Column{
+				{Name: "target_schema", DataType: schema.TypeString},
+				{Name: "target_table", DataType: schema.TypeString},
+				{Name: "guard_table", DataType: schema.TypeString},
+				{Name: "expected_incarnation", DataType: schema.TypeString},
+				{Name: "owner_token", DataType: schema.TypeString},
+				{Name: "expires_at", DataType: schema.TypeTimestamp},
+				{Name: "created_at", DataType: schema.TypeTimestamp},
+			}
+		}
 		f.tables[tableRef] = &fakeRedshiftTable{
 			oid:        f.nextOID,
+			columns:    cols,
 			colMaxLens: make(map[string]int),
 		}
 		return pgconn.NewCommandTag("CREATE TABLE"), nil
@@ -389,6 +467,12 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 			}
 			delete(f.tables, srcRef)
 			f.tables[dstKey] = tbl
+			if tx != nil {
+				tx.undo = append(tx.undo, func() {
+					delete(f.tables, dstKey)
+					f.tables[srcRef] = tbl
+				})
+			}
 		}
 		return pgconn.NewCommandTag("ALTER TABLE"), nil
 
@@ -401,8 +485,14 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 		if !ok {
 			return pgconn.CommandTag{}, fmt.Errorf("relation %q does not exist", tableRef)
 		}
-		if strings.Contains(trimmed, `ALTER COLUMN "_cdc_lsn" TYPE`) {
-			tbl.colMaxLens["_cdc_lsn"] = 65535
+		alterIdx := strings.Index(trimmed, " ALTER COLUMN ")
+		typeIdx := strings.Index(trimmed, " TYPE ")
+		colIdent := unquoteRedshiftIdent(strings.TrimSpace(trimmed[alterIdx+len(" ALTER COLUMN ") : typeIdx]))
+		typeSpec := strings.ToUpper(strings.TrimSpace(trimmed[typeIdx+len(" TYPE "):]))
+		if strings.HasPrefix(typeSpec, "VARCHAR(") && strings.HasSuffix(typeSpec, ")") {
+			if n, convErr := strconv.Atoi(typeSpec[len("VARCHAR(") : len(typeSpec)-1]); convErr == nil {
+				tbl.colMaxLens[strings.ToLower(colIdent)] = n
+			}
 		}
 		return pgconn.NewCommandTag("ALTER TABLE"), nil
 
@@ -412,6 +502,86 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 			tbl.columns = append(tbl.columns, schema.Column{Name: "_cdc_lsn", DataType: schema.TypeString, MaxLength: 65535, Nullable: true})
 		}
 		return pgconn.NewCommandTag("ALTER TABLE"), nil
+
+	case strings.Contains(trimmed, `ADD COLUMN "owner_token"`):
+		tableRef := extractTableRefAfter(trimmed, "ALTER TABLE ")
+		if tbl, ok := f.tables[tableRef]; ok {
+			tbl.columns = append(tbl.columns, schema.Column{Name: "owner_token", DataType: schema.TypeString, MaxLength: 128})
+		}
+		return pgconn.NewCommandTag("ALTER TABLE"), nil
+
+	case strings.Contains(trimmed, `ADD COLUMN "expires_at"`):
+		if strings.Contains(trimmed, "DEFAULT CURRENT_TIMESTAMP") {
+			return pgconn.CommandTag{}, fmt.Errorf("DEFAULT CURRENT_TIMESTAMP is not supported on ADD COLUMN TIMESTAMP WITHOUT TIME ZONE in Redshift")
+		}
+		tableRef := extractTableRefAfter(trimmed, "ALTER TABLE ")
+		if tbl, ok := f.tables[tableRef]; ok {
+			tbl.columns = append(tbl.columns, schema.Column{Name: "expires_at", DataType: schema.TypeTimestamp})
+		}
+		return pgconn.NewCommandTag("ALTER TABLE"), nil
+
+	case strings.HasPrefix(trimmed, `INSERT INTO "_bruin_staging"."cdc_evolution_journal"`):
+		prev := append([]fakeEvolutionJournalRow(nil), f.evolutionJournal...)
+		f.journalSeq++
+		ttlSec := parseDateAddSeconds(trimmed, 45)
+		var ownerTok string
+		if len(args) >= 5 {
+			ownerTok = args[4].(string)
+		}
+		f.evolutionJournal = append(f.evolutionJournal, fakeEvolutionJournalRow{
+			targetSchema:        args[0].(string),
+			targetTable:         args[1].(string),
+			guardTable:          args[2].(string),
+			expectedIncarnation: args[3].(string),
+			ownerToken:          ownerTok,
+			expiresAt:           f.now.Add(time.Duration(ttlSec) * time.Second),
+			createdAt:           f.now.Add(time.Duration(f.journalSeq) * time.Microsecond),
+		})
+		if tx != nil {
+			tx.undo = append(tx.undo, func() {
+				f.evolutionJournal = prev
+			})
+		}
+		return pgconn.NewCommandTag("INSERT 0 1"), nil
+
+	case strings.HasPrefix(trimmed, `UPDATE "_bruin_staging"."cdc_evolution_journal"`):
+		ts, tt, gt, tok := args[0].(string), args[1].(string), args[2].(string), args[3].(string)
+		expireNow := strings.Contains(trimmed, `SET "expires_at" = CURRENT_TIMESTAMP`)
+		ttlSec := parseDateAddSeconds(trimmed, 45)
+		for i := range f.evolutionJournal {
+			e := &f.evolutionJournal[i]
+			if e.targetSchema != ts || e.targetTable != tt || e.guardTable != gt || e.ownerToken != tok {
+				continue
+			}
+			if expireNow {
+				e.expiresAt = f.now
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			}
+			if strings.Contains(trimmed, `"expires_at" > CURRENT_TIMESTAMP`) && !e.expiresAt.After(f.now) {
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			}
+			e.expiresAt = f.now.Add(time.Duration(ttlSec) * time.Second)
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		}
+		return pgconn.NewCommandTag("UPDATE 0"), nil
+
+	case strings.HasPrefix(trimmed, `DELETE FROM "_bruin_staging"."cdc_evolution_journal"`):
+		prev := append([]fakeEvolutionJournalRow(nil), f.evolutionJournal...)
+		ts, tt, gt := args[0].(string), args[1].(string), args[2].(string)
+		kept := make([]fakeEvolutionJournalRow, 0, len(f.evolutionJournal))
+		for _, e := range f.evolutionJournal {
+			if e.targetSchema == ts && e.targetTable == tt && e.guardTable == gt {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		f.evolutionJournal = kept
+		if tx != nil {
+			tx.undo = append(tx.undo, func() {
+				f.evolutionJournal = prev
+			})
+		}
+		return pgconn.NewCommandTag("DELETE"), nil
 
 	case strings.HasPrefix(trimmed, `INSERT INTO`) && strings.Contains(trimmed, `"claimed_at"`):
 		f.claims[args[0].(string)] = fakeClaim{
@@ -469,9 +639,269 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 		}
 		f.stateRows = kept
 		return pgconn.NewCommandTag("DELETE"), nil
+
+	case strings.HasPrefix(trimmed, "DELETE FROM ") && strings.Contains(trimmed, ">= $1 AND ") && strings.Contains(trimmed, "<= $2"):
+		targetRef := extractTableRefAfter(trimmed, "DELETE FROM ")
+		whereIdx := strings.Index(trimmed, " WHERE ")
+		gteIdx := strings.Index(trimmed, " >= $1")
+		if tbl, ok := f.tables[targetRef]; ok && tbl.rows != nil && whereIdx != -1 && gteIdx > whereIdx && len(args) == 2 {
+			keyCol := unquoteRedshiftIdent(strings.TrimSpace(trimmed[whereIdx+len(" WHERE ") : gteIdx]))
+			prev := cloneFakeRows(tbl.rows)
+			kept := make([]map[string]any, 0, len(tbl.rows))
+			for _, row := range tbl.rows {
+				val, has := fakeRowVal(row, keyCol)
+				if has && val != nil && compareFakeValues(val, args[0]) >= 0 && compareFakeValues(val, args[1]) <= 0 {
+					continue
+				}
+				kept = append(kept, row)
+			}
+			tbl.rows = kept
+			if tx != nil {
+				tx.undo = append(tx.undo, func() {
+					tbl.rows = prev
+				})
+			}
+		}
+		return pgconn.NewCommandTag("DELETE"), nil
+
+	case strings.HasPrefix(trimmed, "INSERT INTO ") && strings.Contains(trimmed, ") VALUES "):
+		targetRef := extractTableRefAfter(trimmed, "INSERT INTO ")
+		if !strings.HasPrefix(targetRef, "_bruin_staging.") {
+			if tbl, ok := f.tables[targetRef]; ok {
+				openParen := strings.Index(trimmed, " (")
+				valIdx := strings.Index(trimmed, ") VALUES ")
+				if openParen != -1 && valIdx > openParen {
+					cols := parseQuotedIdentList(trimmed[openParen+2 : valIdx])
+					if len(cols) > 0 && len(args)%len(cols) == 0 {
+						prev := cloneFakeRows(tbl.rows)
+						for i := 0; i < len(args); i += len(cols) {
+							row := make(map[string]any, len(cols))
+							for j, col := range cols {
+								row[col] = args[i+j]
+							}
+							tbl.rows = append(tbl.rows, row)
+						}
+						if tx != nil {
+							tx.undo = append(tx.undo, func() {
+								tbl.rows = prev
+							})
+						}
+					}
+				}
+			}
+		}
+		return pgconn.NewCommandTag("INSERT"), nil
+
+	case strings.HasPrefix(trimmed, "INSERT INTO ") && strings.Contains(trimmed, "SELECT "):
+		f.simulateInsertSelect(trimmed, tx)
+		return pgconn.NewCommandTag("INSERT"), nil
 	}
 
 	return pgconn.NewCommandTag("OK"), nil
+}
+
+func (f *fakeRedshiftDB) simulateInsertSelect(trimmed string, tx *fakeRedshiftTx) {
+	targetRef := extractTableRefAfter(trimmed, "INSERT INTO ")
+	targetTbl, ok := f.tables[targetRef]
+	if !ok {
+		return
+	}
+
+	var cols []string
+	selIdx := strings.Index(trimmed, " SELECT ")
+	if openParen := strings.Index(trimmed, " ("); openParen != -1 && selIdx > openParen {
+		if closeParen := strings.Index(trimmed[openParen:], ") SELECT "); closeParen != -1 {
+			cols = parseQuotedIdentList(trimmed[openParen+2 : openParen+closeParen])
+		}
+	}
+
+	var stagingRef string
+	var pkCols []string
+	var orderCol string
+	if rnIdx := strings.Index(trimmed, "ROW_NUMBER() OVER (PARTITION BY "); rnIdx != -1 {
+		afterPart := trimmed[rnIdx+len("ROW_NUMBER() OVER (PARTITION BY "):]
+		orderIdx := strings.Index(afterPart, " ORDER BY ")
+		endOverIdx := strings.Index(afterPart, ") AS ")
+		if orderIdx != -1 && endOverIdx > orderIdx {
+			pkCols = parseQuotedIdentList(afterPart[:orderIdx])
+			orderExpr := strings.TrimSpace(afterPart[orderIdx+len(" ORDER BY ") : endOverIdx])
+			orderExpr = strings.TrimSuffix(orderExpr, " DESC")
+			orderCol = unquoteRedshiftIdent(strings.TrimSpace(orderExpr))
+		}
+		afterOver := afterPart[endOverIdx:]
+		fromIdx := strings.Index(afterOver, " FROM ")
+		subEndIdx := strings.Index(afterOver, ") AS _numbered")
+		if fromIdx != -1 && subEndIdx > fromIdx {
+			rawStaging := strings.TrimSpace(afterOver[fromIdx+len(" FROM ") : subEndIdx])
+			parts := strings.Split(rawStaging, ".")
+			for i, p := range parts {
+				parts[i] = unquoteRedshiftIdent(p)
+			}
+			stagingRef = strings.Join(parts, ".")
+		}
+	} else {
+		stagingRef = extractTableRefAfter(trimmed, " FROM ")
+	}
+
+	stagingTbl, ok := f.tables[stagingRef]
+	if !ok || stagingTbl.rows == nil {
+		return
+	}
+
+	sourceRows := cloneFakeRows(stagingTbl.rows)
+	if len(pkCols) > 0 {
+		type group struct {
+			rows []map[string]any
+		}
+		var groupOrder []string
+		groups := make(map[string]*group)
+		for _, r := range sourceRows {
+			var keyParts []string
+			for _, pk := range pkCols {
+				v, _ := fakeRowVal(r, pk)
+				keyParts = append(keyParts, fmt.Sprintf("%T:%v", v, v))
+			}
+			gk := strings.Join(keyParts, "|")
+			g, exists := groups[gk]
+			if !exists {
+				g = &group{}
+				groups[gk] = g
+				groupOrder = append(groupOrder, gk)
+			}
+			g.rows = append(g.rows, r)
+		}
+		deduped := make([]map[string]any, 0, len(groupOrder))
+		for _, gk := range groupOrder {
+			gRows := groups[gk].rows
+			if orderCol != "" && orderCol != "(SELECT NULL)" {
+				sort.SliceStable(gRows, func(i, j int) bool {
+					vi, _ := fakeRowVal(gRows[i], orderCol)
+					vj, _ := fakeRowVal(gRows[j], orderCol)
+					return compareFakeValues(vi, vj) > 0
+				})
+			}
+			deduped = append(deduped, gRows[0])
+		}
+		sourceRows = deduped
+	}
+
+	prev := cloneFakeRows(targetTbl.rows)
+	if targetTbl.rows == nil {
+		targetTbl.rows = []map[string]any{}
+	}
+	for _, sr := range sourceRows {
+		if len(cols) == 0 {
+			cp := make(map[string]any, len(sr))
+			for k, v := range sr {
+				cp[k] = v
+			}
+			targetTbl.rows = append(targetTbl.rows, cp)
+			continue
+		}
+		dstRow := make(map[string]any, len(cols))
+		for _, c := range cols {
+			v, _ := fakeRowVal(sr, c)
+			dstRow[c] = v
+		}
+		targetTbl.rows = append(targetTbl.rows, dstRow)
+	}
+	if tx != nil {
+		tx.undo = append(tx.undo, func() {
+			targetTbl.rows = prev
+		})
+	}
+}
+
+func parseQuotedIdentList(s string) []string {
+	raw := strings.Split(s, ",")
+	out := make([]string, 0, len(raw))
+	for _, p := range raw {
+		ident := unquoteRedshiftIdent(strings.TrimSpace(p))
+		if ident != "" {
+			out = append(out, ident)
+		}
+	}
+	return out
+}
+
+func cloneFakeRows(rows []map[string]any) []map[string]any {
+	if rows == nil {
+		return nil
+	}
+	out := make([]map[string]any, len(rows))
+	for i, r := range rows {
+		cp := make(map[string]any, len(r))
+		for k, v := range r {
+			cp[k] = v
+		}
+		out[i] = cp
+	}
+	return out
+}
+
+func fakeRowVal(row map[string]any, col string) (any, bool) {
+	if v, ok := row[col]; ok {
+		return v, true
+	}
+	for k, v := range row {
+		if strings.EqualFold(k, col) {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+func compareFakeValues(a, b any) int {
+	toTime := func(v any) (time.Time, bool) {
+		switch t := v.(type) {
+		case time.Time:
+			return t.UTC(), true
+		case string:
+			for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+				if parsed, err := time.Parse(layout, t); err == nil {
+					return parsed.UTC(), true
+				}
+			}
+		}
+		return time.Time{}, false
+	}
+	if ta, okA := toTime(a); okA {
+		if tb, okB := toTime(b); okB {
+			switch {
+			case ta.Before(tb):
+				return -1
+			case ta.After(tb):
+				return 1
+			default:
+				return 0
+			}
+		}
+	}
+	toInt64 := func(v any) (int64, bool) {
+		switch n := v.(type) {
+		case int:
+			return int64(n), true
+		case int64:
+			return n, true
+		case int32:
+			return int64(n), true
+		}
+		return 0, false
+	}
+	if ia, okA := toInt64(a); okA {
+		if ib, okB := toInt64(b); okB {
+			switch {
+			case ia < ib:
+				return -1
+			case ia > ib:
+				return 1
+			default:
+				return 0
+			}
+		}
+	}
+	sa, sb := fmt.Sprint(a), fmt.Sprint(b)
+	return strings.Compare(sa, sb)
 }
 
 func extractTableRefAfter(sql, marker string) string {
@@ -494,10 +924,11 @@ func extractTableRefAfter(sql, marker string) string {
 type fakeRedshiftTx struct {
 	db     *fakeRedshiftDB
 	closed bool
+	undo   []func()
 }
 
 func (t *fakeRedshiftTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	return t.db.execInternal(ctx, sql, args, true)
+	return t.db.execInternal(ctx, sql, args, t)
 }
 
 func (t *fakeRedshiftTx) Query(ctx context.Context, sql string, args ...any) (redshiftRows, error) {
@@ -510,8 +941,15 @@ func (t *fakeRedshiftTx) QueryRow(ctx context.Context, sql string, args ...any) 
 
 func (t *fakeRedshiftTx) Commit(_ context.Context) error {
 	if !t.closed {
-		t.closed = true
 		t.db.mu.Lock()
+		if t.db.commitHook != nil {
+			if err := t.db.commitHook(); err != nil {
+				t.db.mu.Unlock()
+				return err
+			}
+		}
+		t.closed = true
+		t.undo = nil
 		t.db.txEvents = append(t.db.txEvents, "COMMIT")
 		t.db.mu.Unlock()
 	}
@@ -522,6 +960,10 @@ func (t *fakeRedshiftTx) Rollback(_ context.Context) error {
 	if !t.closed {
 		t.closed = true
 		t.db.mu.Lock()
+		for i := len(t.undo) - 1; i >= 0; i-- {
+			t.undo[i]()
+		}
+		t.undo = nil
 		t.db.txEvents = append(t.db.txEvents, "ROLLBACK")
 		t.db.mu.Unlock()
 	}
@@ -1557,4 +1999,629 @@ func TestRedshiftWriteCDCFencingAndTruncateCDCTable(t *testing.T) {
 		err := dest.TruncateCDCTable(leaseCtx, "orders")
 		require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
 	})
+}
+
+func TestRedshiftDeleteInsertTableIntervalAndDedup(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("reloaded_range_deletes_disappeared_rows_and_preserves_outside_interval", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		db.addTable("public", "events", nil, []string{"id"})
+		db.addTable("public", "events_stg", nil, nil)
+
+		db.tables["public.events"].rows = []map[string]any{
+			{"id": int64(1), "name": "before-window", "updated_at": int64(10)},
+			{"id": int64(2), "name": "updated-in-window-old", "updated_at": int64(20)},
+			{"id": int64(3), "name": "disappeared-from-source", "updated_at": int64(25)},
+			{"id": int64(4), "name": "after-window", "updated_at": int64(40)},
+		}
+		db.tables["public.events_stg"].rows = []map[string]any{
+			{"id": int64(2), "name": "updated-in-window-new", "updated_at": int64(22)},
+			{"id": int64(5), "name": "inserted-in-window", "updated_at": int64(28)},
+		}
+
+		db.execLog = nil
+		db.execArgsLog = nil
+		require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+			TargetTable:    "public.events",
+			StagingTable:   "public.events_stg",
+			PrimaryKeys:    []string{"id"},
+			IncrementalKey: "updated_at",
+			Columns:        []string{"id", "name", "updated_at"},
+			IntervalStart:  int64(20),
+			IntervalEnd:    int64(30),
+		}))
+
+		joined := strings.Join(db.execLog, "\n")
+		require.Contains(t, joined, `DELETE FROM "public"."events" WHERE "updated_at" >= $1 AND "updated_at" <= $2`)
+		require.NotContains(t, joined, "SELECT DISTINCT")
+
+		foundDeleteArgs := false
+		for i, stmt := range db.execLog {
+			if strings.HasPrefix(strings.TrimSpace(stmt), `DELETE FROM "public"."events" WHERE`) {
+				require.Equal(t, []any{int64(20), int64(30)}, db.execArgsLog[i])
+				foundDeleteArgs = true
+			}
+		}
+		require.True(t, foundDeleteArgs)
+
+		require.Equal(t, []map[string]any{
+			{"id": int64(1), "name": "before-window", "updated_at": int64(10)},
+			{"id": int64(4), "name": "after-window", "updated_at": int64(40)},
+			{"id": int64(2), "name": "updated-in-window-new", "updated_at": int64(22)},
+			{"id": int64(5), "name": "inserted-in-window", "updated_at": int64(28)},
+		}, db.tables["public.events"].rows)
+	})
+
+	t.Run("empty_staging_with_explicit_interval_deletes_window_via_strategy", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		tblSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64},
+				{Name: "updated_at", DataType: schema.TypeTimestampTZ},
+			},
+		}
+		db.addTable("public", "events", tblSchema.Columns, []string{"id"})
+		tBefore := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+		tInside := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+		tAfter := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+		db.tables["public.events"].rows = []map[string]any{
+			{"id": int64(1), "updated_at": tBefore},
+			{"id": int64(2), "updated_at": tInside},
+			{"id": int64(3), "updated_at": tAfter},
+		}
+
+		emptyStream := make(chan source.RecordBatchResult)
+		close(emptyStream)
+
+		iStart := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+		iEnd := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+
+		strat := &strategy.DeleteInsertStrategy{}
+		job := &strategy.IngestionJob{
+			Destination:     dest,
+			Schema:          tblSchema,
+			SourceSchema:    tblSchema,
+			BufferedRecords: emptyStream,
+			Config: &config.IngestConfig{
+				DestTable:      "public.events",
+				IncrementalKey: "updated_at",
+				PrimaryKeys:    []string{"id"},
+				IntervalStart:  &iStart,
+				IntervalEnd:    &iEnd,
+				RunID:          "run1",
+			},
+		}
+		require.NoError(t, strat.Execute(ctx, job))
+
+		require.Equal(t, []map[string]any{
+			{"id": int64(1), "updated_at": tBefore},
+			{"id": int64(3), "updated_at": tAfter},
+		}, db.tables["public.events"].rows)
+	})
+
+	t.Run("primary_keys_dedup_keeps_greatest_incremental_key_per_pk", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		db.addTable("public", "orders", nil, []string{"tenant_id", "ID"})
+		db.addTable("public", "orders_stg", nil, nil)
+
+		db.tables["public.orders"].rows = []map[string]any{
+			{"tenant_id": "t1", "ID": int64(1), "status": "stale", "Updated_At": int64(100)},
+		}
+		db.tables["public.orders_stg"].rows = []map[string]any{
+			{"tenant_id": "t1", "ID": int64(1), "status": "v1", "Updated_At": int64(100)},
+			{"tenant_id": "t1", "ID": int64(1), "status": "v3-latest", "Updated_At": int64(300)},
+			{"tenant_id": "t1", "ID": int64(1), "status": "v2", "Updated_At": int64(200)},
+			{"tenant_id": "t2", "ID": int64(1), "status": "other-tenant-old", "Updated_At": int64(150)},
+			{"tenant_id": "t2", "ID": int64(1), "status": "other-tenant-latest", "Updated_At": int64(250)},
+		}
+
+		db.execLog = nil
+		require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+			TargetTable:    "public.orders",
+			StagingTable:   "public.orders_stg",
+			PrimaryKeys:    []string{"TENANT_ID", "id"},
+			IncrementalKey: "updated_at",
+			Columns:        []string{"tenant_id", "ID", "status", "Updated_At"},
+			IntervalStart:  int64(100),
+			IntervalEnd:    int64(300),
+		}))
+
+		joined := strings.Join(db.execLog, "\n")
+		require.Contains(t, joined, `ROW_NUMBER() OVER (PARTITION BY "tenant_id", "ID" ORDER BY "Updated_At" DESC) AS __bruin_dedup_rn`)
+		require.Contains(t, joined, `WHERE __bruin_dedup_rn = 1`)
+
+		require.Equal(t, []map[string]any{
+			{"tenant_id": "t1", "ID": int64(1), "status": "v3-latest", "Updated_At": int64(300)},
+			{"tenant_id": "t2", "ID": int64(1), "status": "other-tenant-latest", "Updated_At": int64(250)},
+		}, db.tables["public.orders"].rows)
+	})
+
+	t.Run("keyless_delete_insert_inserts_all_staged_rows_without_dedup", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		db.addTable("public", "logs", nil, nil)
+		db.addTable("public", "logs_stg", nil, nil)
+
+		db.tables["public.logs"].rows = []map[string]any{
+			{"msg": "old-in-window", "ts": int64(15)},
+		}
+		db.tables["public.logs_stg"].rows = []map[string]any{
+			{"msg": "dup", "ts": int64(16)},
+			{"msg": "dup", "ts": int64(16)},
+		}
+
+		db.execLog = nil
+		require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+			TargetTable:    "public.logs",
+			StagingTable:   "public.logs_stg",
+			PrimaryKeys:    nil,
+			IncrementalKey: "ts",
+			Columns:        []string{"msg", "ts"},
+			IntervalStart:  int64(10),
+			IntervalEnd:    int64(20),
+		}))
+
+		joined := strings.Join(db.execLog, "\n")
+		require.NotContains(t, joined, "ROW_NUMBER()")
+		require.Len(t, db.tables["public.logs"].rows, 2)
+	})
+}
+
+func TestRedshiftSchemaEvolutionCrashAndRestartRecovery(t *testing.T) {
+	ctx := t.Context()
+
+	widenComparison := &schemaevolution.SchemaComparison{
+		HasChanges: true,
+		Changes: []schemaevolution.SchemaChange{
+			{
+				Type:       schemaevolution.ChangeWidenType,
+				ColumnName: "name",
+				OldColumn:  &schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+				NewColumn:  schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 200},
+			},
+		},
+	}
+
+	stageCrashAfterTx1 := func(t *testing.T, alterSucceeds bool) (*fakeRedshiftDB, int64, string) {
+		t.Helper()
+		crashedDest, db := newConnectedFakeRedshift()
+		origOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+		}, []string{"id"})
+		db.tables["public.events"].rows = []map[string]any{
+			{"id": int64(101), "name": "preserved-row"},
+		}
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		txCommits := 0
+		db.commitHook = func() error {
+			txCommits++
+			if txCommits == 2 {
+				return fmt.Errorf("simulated crash before restore commit")
+			}
+			return nil
+		}
+		if !alterSucceeds {
+			db.execHook = func(sql string, _ []any, _ bool) (pgconn.CommandTag, bool, error) {
+				if strings.Contains(sql, " ALTER COLUMN ") && strings.Contains(sql, " TYPE ") {
+					return pgconn.CommandTag{}, true, fmt.Errorf("simulated crash before standalone DDL")
+				}
+				return pgconn.NewCommandTag(""), false, nil
+			}
+		}
+
+		_, _, err := crashedDest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", widenComparison, origInc)
+		require.Error(t, err)
+		db.commitHook = nil
+		db.execHook = nil
+
+		_, liveExists := db.tables["public.events"]
+		require.False(t, liveExists, "simulated crash must leave public.events hidden under __ingestr_evolve_*")
+		require.Len(t, db.evolutionJournal, 1, "Tx 1 must durably persist the guard mapping in _bruin_staging.cdc_evolution_journal")
+		require.Equal(t, "public", db.evolutionJournal[0].targetSchema)
+		require.Equal(t, "events", db.evolutionJournal[0].targetTable)
+		require.Equal(t, origInc, db.evolutionJournal[0].expectedIncarnation)
+		require.True(t, strings.HasPrefix(db.evolutionJournal[0].guardTable, "__ingestr_evolve_"))
+
+		return db, origOID, origInc
+	}
+
+	t.Run("restart_recovers_hidden_target_before_cdc_and_table_operations", func(t *testing.T) {
+		entrypoints := []struct {
+			name string
+			call func(d *RedshiftDestination) error
+		}{
+			{
+				name: "CDCTargetIncarnation",
+				call: func(d *RedshiftDestination) error {
+					inc, exists, err := d.CDCTargetIncarnation(ctx, "public.events")
+					require.NoError(t, err)
+					require.True(t, exists)
+					require.NotEmpty(t, inc)
+					return nil
+				},
+			},
+			{
+				name: "GetTableSchema",
+				call: func(d *RedshiftDestination) error {
+					s, err := d.GetTableSchema(ctx, "public.events")
+					require.NoError(t, err)
+					require.NotNil(t, s)
+					return nil
+				},
+			},
+			{
+				name: "LoadCDCState",
+				call: func(d *RedshiftDestination) error {
+					_, err := d.LoadCDCState(ctx, "_bruin_staging.cdc_state", "conn-1")
+					return err
+				},
+			},
+			{
+				name: "AcquireManagedCDCRunLease",
+				call: func(d *RedshiftDestination) error {
+					lease, err := d.AcquireManagedCDCRunLease(ctx, "conn-1")
+					if err != nil {
+						return err
+					}
+					return lease.Release()
+				},
+			},
+			{
+				name: "PrepareTable",
+				call: func(d *RedshiftDestination) error {
+					return d.PrepareTable(ctx, destination.PrepareOptions{
+						Table: "public.events",
+						Schema: &schema.TableSchema{
+							Columns: []schema.Column{
+								{Name: "id", DataType: schema.TypeInt64},
+								{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+							},
+						},
+					})
+				},
+			},
+			{
+				name: "ApplySchemaEvolutionIfIncarnation",
+				call: func(d *RedshiftDestination) error {
+					inc := dbExpectedInc(d.db.(*fakeRedshiftDB))
+					_, gotInc, err := d.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", widenComparison, inc)
+					require.NoError(t, err)
+					require.Equal(t, inc, gotInc)
+					return nil
+				},
+			},
+		}
+
+		for _, ep := range entrypoints {
+			t.Run(ep.name, func(t *testing.T) {
+				db, origOID, origInc := stageCrashAfterTx1(t, false)
+				guardName := db.evolutionJournal[0].guardTable
+
+				restarted := NewRedshiftDestination()
+				restarted.db = db
+				require.NoError(t, ep.call(restarted))
+
+				restored, ok := db.tables["public.events"]
+				require.True(t, ok, "public.events must be automatically restored on restart")
+				require.Equal(t, origOID, restored.oid, "restored table must preserve its physical OID")
+				require.Equal(t, []map[string]any{{"id": int64(101), "name": "preserved-row"}}, restored.rows)
+				_, guardStillThere := db.tables["public."+guardName]
+				require.False(t, guardStillThere)
+				require.Empty(t, db.evolutionJournal, "journal entry must be cleaned up once restored")
+
+				gotInc, exists, err := restarted.CDCTargetIncarnation(ctx, "public.events")
+				require.NoError(t, err)
+				require.True(t, exists)
+				require.Equal(t, origInc, gotInc)
+			})
+		}
+	})
+
+	t.Run("crash_after_alter_column_type_preserves_widened_column_on_recovery", func(t *testing.T) {
+		db, origOID, _ := stageCrashAfterTx1(t, true)
+
+		restarted := NewRedshiftDestination()
+		restarted.db = db
+
+		tblSchema, err := restarted.GetTableSchema(ctx, "public.events")
+		require.NoError(t, err)
+		require.NotNil(t, tblSchema)
+		require.Equal(t, origOID, db.tables["public.events"].oid)
+		require.Empty(t, db.evolutionJournal)
+
+		var nameCol *schema.Column
+		for i := range tblSchema.Columns {
+			if tblSchema.Columns[i].Name == "name" {
+				nameCol = &tblSchema.Columns[i]
+				break
+			}
+		}
+		require.NotNil(t, nameCol)
+		require.Equal(t, 200, nameCol.MaxLength)
+	})
+
+	t.Run("same_instance_recovers_after_transient_tx2_failure", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		origOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+		}, []string{"id"})
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		commits := 0
+		db.commitHook = func() error {
+			commits++
+			if commits == 2 {
+				return fmt.Errorf("transient network drop on Tx 2 commit")
+			}
+			return nil
+		}
+
+		_, _, err := dest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", widenComparison, origInc)
+		require.ErrorContains(t, err, "transient network drop on Tx 2 commit")
+		db.commitHook = nil
+		require.Len(t, db.evolutionJournal, 1)
+
+		gotInc, exists, err := dest.CDCTargetIncarnation(ctx, "public.events")
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, origInc, gotInc)
+		require.Empty(t, db.evolutionJournal)
+	})
+
+	t.Run("tx1_rename_failure_rolls_back_journal_entry_atomically", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		origOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+		}, []string{"id"})
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		db.execHook = func(sql string, _ []any, _ bool) (pgconn.CommandTag, bool, error) {
+			if strings.Contains(sql, "RENAME TO \"__ingestr_evolve_") {
+				return pgconn.CommandTag{}, true, fmt.Errorf("simulated Tx 1 rename error")
+			}
+			return pgconn.NewCommandTag(""), false, nil
+		}
+
+		_, _, err := dest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", widenComparison, origInc)
+		require.ErrorContains(t, err, "simulated Tx 1 rename error")
+		require.Empty(t, db.evolutionJournal, "Tx 1 rollback must undo the journal insert")
+		require.Contains(t, db.tables, "public.events")
+		require.Equal(t, origOID, db.tables["public.events"].oid)
+	})
+
+	t.Run("recovery_does_not_overwrite_replacement_table_created_before_restart", func(t *testing.T) {
+		db, origOID, _ := stageCrashAfterTx1(t, false)
+		guardName := db.evolutionJournal[0].guardTable
+
+		replacementOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+		}, []string{"id"})
+		db.tables["public.events"].rows = []map[string]any{
+			{"id": int64(999), "name": "replacement-row"},
+		}
+
+		restarted := NewRedshiftDestination()
+		restarted.db = db
+
+		gotInc, exists, err := restarted.CDCTargetIncarnation(ctx, "public.events")
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, fmt.Sprintf("42:%d", replacementOID), gotInc)
+		require.Equal(t, []map[string]any{{"id": int64(999), "name": "replacement-row"}}, db.tables["public.events"].rows)
+
+		staged, guardExists := db.tables["public."+guardName]
+		require.True(t, guardExists, "displaced original table must be preserved under guard name rather than dropped")
+		require.Equal(t, origOID, staged.oid)
+		require.Empty(t, db.evolutionJournal, "superseded journal row must be retired so later drops do not resurrect stale data")
+
+		require.NoError(t, restarted.DropTable(ctx, "public.events"))
+		_, resurrected := db.tables["public.events"]
+		require.False(t, resurrected)
+	})
+
+	t.Run("cross_process_active_evolution_is_not_stolen_while_expired_crash_is_recovered", func(t *testing.T) {
+		procA, db := newConnectedFakeRedshift()
+		procA.leaseTTL = 2 * time.Second
+		procA.leaseRenewInterval = 15 * time.Millisecond
+
+		origOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+		}, []string{"id"})
+		db.tables["public.events"].rows = []map[string]any{
+			{"id": int64(7), "name": "in-flight-row"},
+		}
+		db.addTable("public", "other_table", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+		}, []string{"id"})
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		alterEntered := make(chan struct{})
+		releaseAlter := make(chan struct{})
+		var pauseOnce sync.Once
+		db.beforeExecHook = func(sql string) {
+			if strings.Contains(sql, " ALTER COLUMN ") && strings.Contains(sql, " TYPE ") {
+				pauseOnce.Do(func() {
+					close(alterEntered)
+					<-releaseAlter
+				})
+			}
+		}
+
+		procADone := make(chan error, 1)
+		go func() {
+			_, gotInc, err := procA.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", widenComparison, origInc)
+			if err == nil && gotInc != origInc {
+				err = fmt.Errorf("unexpected incarnation %q != %q", gotInc, origInc)
+			}
+			procADone <- err
+		}()
+
+		select {
+		case <-alterEntered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for Process A to enter standalone ALTER COLUMN")
+		}
+
+		// Advance server clock slightly (< leaseTTL) so Process A's heartbeat renews liveness
+		// while Process B connects and inspects tables concurrently.
+		db.mu.Lock()
+		db.now = db.now.Add(500 * time.Millisecond)
+		require.Len(t, db.evolutionJournal, 1)
+		inFlightGuard := db.evolutionJournal[0].guardTable
+		_, liveVisibleMidEvolution := db.tables["public.events"]
+		db.mu.Unlock()
+		require.False(t, liveVisibleMidEvolution)
+
+		// Wait briefly so at least one heartbeat renewal tick runs on Process A.
+		time.Sleep(40 * time.Millisecond)
+
+		procB := NewRedshiftDestination()
+		procB.openDB = func(_ context.Context, _ string) (redshiftDB, error) {
+			return db, nil
+		}
+		require.NoError(t, procB.Connect(ctx, "redshift://u:p@localhost:5439/dev"))
+
+		otherSchema, err := procB.GetTableSchema(ctx, "public.other_table")
+		require.NoError(t, err)
+		require.NotNil(t, otherSchema)
+
+		eventsSchemaMidFlight, err := procB.GetTableSchema(ctx, "public.events")
+		require.NoError(t, err)
+		require.Nil(t, eventsSchemaMidFlight, "Process B must not steal Process A's active unexpired evolution guard")
+
+		db.mu.Lock()
+		_, guardStillOwnedByA := db.tables["public."+inFlightGuard]
+		journalCountMidFlight := len(db.evolutionJournal)
+		db.mu.Unlock()
+		require.True(t, guardStillOwnedByA, "staged guard table must remain in place for Process A")
+		require.Equal(t, 1, journalCountMidFlight, "Process A's active journal entry must not be deleted by Process B")
+
+		close(releaseAlter)
+		require.NoError(t, <-procADone)
+		db.beforeExecHook = nil
+
+		evolvedSchema, err := procB.GetTableSchema(ctx, "public.events")
+		require.NoError(t, err)
+		require.NotNil(t, evolvedSchema)
+		require.Empty(t, db.evolutionJournal)
+
+		// Now simulate a hard SIGKILL crash after Tx 1 where neither Tx 2 nor best-effort expiry ran:
+		// before TTL expiry Process B leaves it untouched; once TTL expires Process B recovers it.
+		sigkillOID := db.tables["public.events"].oid
+		sigkillInc := fmt.Sprintf("42:%d", sigkillOID)
+		strandedGuard := "__ingestr_evolve_sigkill01"
+		db.mu.Lock()
+		tbl := db.tables["public.events"]
+		delete(db.tables, "public.events")
+		db.tables["public."+strandedGuard] = tbl
+		db.evolutionJournal = []fakeEvolutionJournalRow{
+			{
+				targetSchema:        "public",
+				targetTable:         "events",
+				guardTable:          strandedGuard,
+				expectedIncarnation: sigkillInc,
+				ownerToken:          "dead-process-token",
+				expiresAt:           db.now.Add(30 * time.Second),
+				createdAt:           db.now,
+			},
+		}
+		db.mu.Unlock()
+
+		// Before TTL expires, Process B must not steal the entry.
+		stillHidden, err := procB.GetTableSchema(ctx, "public.events")
+		require.NoError(t, err)
+		require.Nil(t, stillHidden)
+		require.Len(t, db.evolutionJournal, 1)
+
+		// Advance clock past expires_at: Process B now recovers public.events on Connect / GetTableSchema.
+		db.mu.Lock()
+		db.now = db.now.Add(31 * time.Second)
+		db.mu.Unlock()
+
+		procC := NewRedshiftDestination()
+		procC.openDB = func(_ context.Context, _ string) (redshiftDB, error) {
+			return db, nil
+		}
+		require.NoError(t, procC.Connect(ctx, "redshift://u:p@localhost:5439/dev"))
+
+		recoveredSchema, err := procC.GetTableSchema(ctx, "public.events")
+		require.NoError(t, err)
+		require.NotNil(t, recoveredSchema)
+		require.Equal(t, sigkillOID, db.tables["public.events"].oid)
+		require.Equal(t, []map[string]any{{"id": int64(7), "name": "in-flight-row"}}, db.tables["public.events"].rows)
+		require.Empty(t, db.evolutionJournal)
+	})
+
+	t.Run("legacy_journal_table_without_lease_columns_is_migrated_and_recovered", func(t *testing.T) {
+		_, db := newConnectedFakeRedshift()
+		origOID := db.addTable("public", "__ingestr_evolve_legacy01", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+		}, []string{"id"})
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		// Simulate an older journal table created without owner_token / expires_at columns.
+		db.addTable("_bruin_staging", "cdc_evolution_journal", []schema.Column{
+			{Name: "target_schema", DataType: schema.TypeString},
+			{Name: "target_table", DataType: schema.TypeString},
+			{Name: "guard_table", DataType: schema.TypeString},
+			{Name: "expected_incarnation", DataType: schema.TypeString},
+			{Name: "created_at", DataType: schema.TypeTimestamp},
+		}, nil)
+		db.evolutionJournal = []fakeEvolutionJournalRow{
+			{
+				targetSchema:        "public",
+				targetTable:         "events",
+				guardTable:          "__ingestr_evolve_legacy01",
+				expectedIncarnation: origInc,
+				expiresAt:           db.now,
+				createdAt:           db.now,
+			},
+		}
+
+		restarted := NewRedshiftDestination()
+		restarted.db = db
+
+		gotInc, exists, err := restarted.CDCTargetIncarnation(ctx, "public.events")
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, origInc, gotInc)
+		require.Empty(t, db.evolutionJournal)
+
+		joined := strings.Join(db.execLog, "\n")
+		require.Contains(t, joined, `ADD COLUMN "owner_token"`)
+		require.Contains(t, joined, `ADD COLUMN "expires_at" TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT '1970-01-01 00:00:00'`)
+		require.NotContains(t, joined, "DEFAULT CURRENT_TIMESTAMP")
+	})
+}
+
+func parseDateAddSeconds(sql string, fallback int) int {
+	const marker = "DATEADD(second, "
+	idx := strings.Index(sql, marker)
+	if idx == -1 {
+		return fallback
+	}
+	rest := sql[idx+len(marker):]
+	comma := strings.IndexByte(rest, ',')
+	if comma == -1 {
+		return fallback
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(rest[:comma])); err == nil && n > 0 {
+		return n
+	}
+	return fallback
+}
+
+func dbExpectedInc(db *fakeRedshiftDB) string {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if len(db.evolutionJournal) > 0 {
+		return db.evolutionJournal[0].expectedIncarnation
+	}
+	return ""
 }

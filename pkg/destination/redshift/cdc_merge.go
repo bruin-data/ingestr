@@ -21,7 +21,11 @@ func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.M
 	if len(opts.PrimaryKeys) == 0 {
 		return errors.New("merge requires at least one primary key")
 	}
-	if _, err := d.requireDB(); err != nil {
+	db, err := d.requireDB()
+	if err != nil {
+		return err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return err
 	}
 	return d.withTx(ctx, func(tx redshiftTx) error {
@@ -39,7 +43,11 @@ func (d *RedshiftDestination) MergeCDCTablesAtomically(ctx context.Context, merg
 	if len(merges) == 0 {
 		return nil
 	}
-	if _, err := d.requireDB(); err != nil {
+	db, err := d.requireDB()
+	if err != nil {
+		return err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return err
 	}
 

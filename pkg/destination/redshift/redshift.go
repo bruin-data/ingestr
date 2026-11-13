@@ -21,9 +21,12 @@ type RedshiftDestination struct {
 	db                 redshiftDB
 	dbOIDMu            sync.Mutex
 	dbOID              int64
+	evolveMu           sync.Mutex
+	inFlightGuards     map[string]struct{}
 	leaseTTL           time.Duration
 	leaseRenewInterval time.Duration
 	nowFn              func() time.Time
+	openDB             func(ctx context.Context, uri string) (redshiftDB, error)
 }
 
 func (d *RedshiftDestination) now() time.Time {
@@ -83,6 +86,9 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 		}
 		conn, err := d.requireDB()
 		if err != nil {
+			return err
+		}
+		if err := d.recoverInterruptedSchemaEvolutions(ctx, conn); err != nil {
 			return err
 		}
 		schemaName, tableName, err := d.resolveSchemaTable(ctx, conn, opts.Table)

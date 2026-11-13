@@ -68,6 +68,9 @@ func (d *RedshiftDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 	if err != nil {
 		return "", err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return "", err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
 	if err != nil {
 		return "", err
@@ -93,6 +96,9 @@ func (d *RedshiftDestination) GetMaxCDCLSN(ctx context.Context, table string) (s
 func (d *RedshiftDestination) PrepareCDCStateTable(ctx context.Context, table string, tableSchema *schema.TableSchema) error {
 	db, err := d.requireDB()
 	if err != nil {
+		return err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return err
 	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
@@ -125,6 +131,9 @@ func (d *RedshiftDestination) PrepareCDCStateTable(ctx context.Context, table st
 func (d *RedshiftDestination) EnsureCDCStatePositionColumn(ctx context.Context, table string) error {
 	db, err := d.requireDB()
 	if err != nil {
+		return err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return err
 	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
@@ -237,6 +246,9 @@ func (d *RedshiftDestination) LoadCDCState(ctx context.Context, table, connector
 	if err != nil {
 		return nil, err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return nil, err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
 	if err != nil {
 		return nil, err
@@ -300,6 +312,9 @@ func (d *RedshiftDestination) LoadCDCStateFence(ctx context.Context, table, conn
 	if err != nil {
 		return destination.CDCStateFence{}, err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return destination.CDCStateFence{}, err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
 	if err != nil {
 		return destination.CDCStateFence{}, err
@@ -360,6 +375,9 @@ func (d *RedshiftDestination) DeleteCDCStateEvents(ctx context.Context, table, c
 	if err != nil {
 		return err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
 	if err != nil {
 		return err
@@ -399,6 +417,9 @@ func (d *RedshiftDestination) DeleteCDCStateEvents(ctx context.Context, table, c
 func (d *RedshiftDestination) CanonicalCDCTarget(ctx context.Context, table string) (string, error) {
 	db, err := d.requireDB()
 	if err != nil {
+		return "", err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return "", err
 	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
@@ -450,6 +471,9 @@ func (d *RedshiftDestination) targetIncarnationInTx(ctx context.Context, queryer
 func (d *RedshiftDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
 	db, err := d.requireDB()
 	if err != nil {
+		return "", false, err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return "", false, err
 	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
@@ -519,6 +543,9 @@ func (d *RedshiftDestination) ClaimCDCTarget(ctx context.Context, claimTable str
 	if err != nil {
 		return err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return err
+	}
 	canonicalTarget, err := d.CanonicalCDCTarget(ctx, claim.DestinationTable)
 	if err != nil {
 		return err
@@ -542,6 +569,9 @@ func (d *RedshiftDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Context,
 	}
 	db, err := d.requireDB()
 	if err != nil {
+		return "", err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return "", err
 	}
 	canonicalClaimTarget, err := d.CanonicalCDCTarget(ctx, claim.DestinationTable)
@@ -629,6 +659,9 @@ func (d *RedshiftDestination) TruncateCDCTableIfIncarnation(ctx context.Context,
 	if err != nil {
 		return err
 	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		return err
+	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, db, table)
 	if err != nil {
 		return err
@@ -664,6 +697,9 @@ func (d *RedshiftDestination) TruncateCDCTableIfIncarnation(ctx context.Context,
 func (d *RedshiftDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
 	db, err := d.requireDB()
 	if err != nil {
+		return "", "", err
+	}
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
 		return "", "", err
 	}
 	targetSchema, _, err := d.resolveSchemaTable(ctx, db, targetTable)
@@ -838,6 +874,10 @@ func (d *RedshiftDestination) AcquireManagedCDCRunLease(ctx context.Context, con
 	}
 	lease.wg.Add(1)
 	go lease.heartbeatLoop()
+	if err := d.recoverInterruptedSchemaEvolutions(ctx, db); err != nil {
+		_ = lease.Release()
+		return nil, err
+	}
 	return lease, nil
 }
 
