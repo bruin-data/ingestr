@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"database/sql/driver"
 	"math/big"
 	"sync/atomic"
 	"testing"
@@ -948,6 +949,7 @@ func TestSQLIntValueAcceptsFloatAndBigIntValues(t *testing.T) {
 		{name: "float64", value: float64(42), want: 42},
 		{name: "big int", value: big.NewInt(99), want: 99},
 		{name: "decimal128", value: decimal128.FromI64(-1234567890123), want: -1234567890123},
+		{name: "driver valuer", value: stringValuer("42"), want: 42},
 	}
 
 	for _, tt := range tests {
@@ -1007,3 +1009,7 @@ func TestSQLCustomQueryBuilders(t *testing.T) {
 		t.Fatalf("bounds query = %q, want %q", boundsQuery, wantBounds)
 	}
 }
+
+type stringValuer string
+
+func (v stringValuer) Value() (driver.Value, error) { return string(v), nil }

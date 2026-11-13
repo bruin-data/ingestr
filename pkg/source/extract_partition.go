@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math"
 	"math/big"
@@ -691,6 +692,16 @@ func SQLIntValue(value any) (int64, error) {
 		return v.Int64(), nil
 	case decimal128.Num:
 		return SQLIntValue(v.BigInt())
+	case driver.Valuer:
+		// Driver numeric types (e.g. pgtype.Numeric) expose their value this way.
+		inner, err := v.Value()
+		if err != nil {
+			return 0, err
+		}
+		if _, ok := inner.(driver.Valuer); ok {
+			return 0, fmt.Errorf("unsupported value type %T", value)
+		}
+		return SQLIntValue(inner)
 	case string:
 		return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	case []byte:
