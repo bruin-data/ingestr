@@ -228,7 +228,7 @@ func buildFabricMergeSQL(opts destination.MergeOptions) string {
 func buildFabricCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalPredicate string) string {
 	targetColumns := destination.DestinationColumns(columns)
 	quotedTargetColumns := quoteColumns(targetColumns)
-	nonPKColumns := filterColumns(targetColumns, primaryKeys)
+	nonPKColumns := excludeFabricIdentifiers(targetColumns, primaryKeys)
 
 	onConditions := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
@@ -329,7 +329,7 @@ ON %s
 func buildFabricCDCHardDeleteMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalPredicate string) string {
 	targetColumns := destination.DestinationColumns(columns)
 	quotedTargetColumns := quoteColumns(targetColumns)
-	nonPKColumns := filterColumns(targetColumns, primaryKeys)
+	nonPKColumns := excludeFabricIdentifiers(targetColumns, primaryKeys)
 	stagingCols := strings.Join(quoteColumns(columns), ", ")
 	dedupRowNumber := quoteColumn(newFabricInternalNameAllocator(columns)("__bruin_dedup_rn"))
 
@@ -409,6 +409,19 @@ func newFabricInternalNameAllocator(columns []string) func(string) string {
 			candidate = fmt.Sprintf("%s_%d", base, suffix)
 		}
 	}
+}
+
+// excludeFabricIdentifiers removes the selected identifiers from columns using
+// matchedFabricIdentifiers, so a key `id` does not also drop a distinct `ID`.
+func excludeFabricIdentifiers(columns, excluded []string) []string {
+	matched := matchedFabricIdentifiers(columns, excluded)
+	result := make([]string, 0, len(columns))
+	for _, col := range columns {
+		if !matched[col] {
+			result = append(result, col)
+		}
+	}
+	return result
 }
 
 func matchedFabricIdentifiers(columns, selected []string) map[string]bool {
@@ -912,11 +925,7 @@ func (d *FabricDestination) MergeCDCTablesAtomically(ctx context.Context, merges
 }
 
 func (d *FabricDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
-	targetID, err := d.resolveTargetIdentity(targetTable)
-	if err != nil {
-		return "", "", err
-	}
-	stagingID, err := d.resolveTargetIdentity(stagingTable)
+	targetID, stagingID, err := d.resolveSwapIdentities(targetTable, stagingTable)
 	if err != nil {
 		return "", "", err
 	}
@@ -965,6 +974,29 @@ func (d *FabricDestination) CDCConditionalSwapIncarnations(ctx context.Context, 
 	return incarnation, incarnation, nil
 }
 
+// resolveSwapIdentities resolves both swap tables and rejects tables in another
+// warehouse: sys.sp_rename only renames objects in the connected warehouse.
+func (d *FabricDestination) resolveSwapIdentities(targetTable, stagingTable string) (fabricTargetIdentity, fabricTargetIdentity, error) {
+	targetID, err := d.resolveTargetIdentity(targetTable)
+	if err != nil {
+		return fabricTargetIdentity{}, fabricTargetIdentity{}, err
+	}
+	stagingID, err := d.resolveTargetIdentity(stagingTable)
+	if err != nil {
+		return fabricTargetIdentity{}, fabricTargetIdentity{}, err
+	}
+	for _, id := range []struct {
+		role  string
+		table string
+		id    fabricTargetIdentity
+	}{{"target", targetTable, targetID}, {"staging", stagingTable, stagingID}} {
+		if id.id.catalogPrefix(d.database) != "" {
+			return fabricTargetIdentity{}, fabricTargetIdentity{}, fmt.Errorf("fabric table swap %s %q is in warehouse %q; swaps are only supported within the connected warehouse %q", id.role, id.table, id.id.database, d.database)
+		}
+	}
+	return targetID, stagingID, nil
+}
+
 func (d *FabricDestination) takePreparedSwap(stagingTable string) (string, bool) {
 	d.swapMu.Lock()
 	defer d.swapMu.Unlock()
@@ -996,11 +1028,7 @@ func (d *FabricDestination) swapTable(ctx context.Context, opts destination.Swap
 		}
 	}
 
-	targetID, err := d.resolveTargetIdentity(opts.TargetTable)
-	if err != nil {
-		return err
-	}
-	stagingID, err := d.resolveTargetIdentity(opts.StagingTable)
+	targetID, stagingID, err := d.resolveSwapIdentities(opts.TargetTable, opts.StagingTable)
 	if err != nil {
 		return err
 	}
