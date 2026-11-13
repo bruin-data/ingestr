@@ -53,7 +53,17 @@ ERROR_COLOR=\033[31;01m
 
 .PHONY: all clean test test-full test-python build deps generate licenses licenses-check licenses-audit licenses-audit-update licenses-notices-check lint lint-fast lint-full format lint-ci format-ci test-ci setup test-db2-integration cdc-stress-test cdc-postgres-stress-test cdc-mysql-stress-test cdc-mssql-stress-test
 
+.PHONY: actions-lock-update actions-lock-verify
+
 all: clean deps test build
+
+actions-lock-update:
+	@echo "$(OK_COLOR)==> Updating GitHub Actions lockfile$(NO_COLOR)"
+	@gh actions-lock
+
+actions-lock-verify:
+	@echo "$(OK_COLOR)==> Verifying GitHub Actions lockfile$(NO_COLOR)"
+	@gh actions-lock --verify
 
 deps:
 	@printf "$(OK_COLOR)==> Installing dependencies$(NO_COLOR)\n"
