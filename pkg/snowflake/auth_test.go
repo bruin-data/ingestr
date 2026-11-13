@@ -562,6 +562,43 @@ func TestParseURI_NoHostKeepsAccountHost(t *testing.T) {
 	}
 }
 
+func TestToDSN_DisablesOCSPOnlyForLocalStackHosts(t *testing.T) {
+	t.Setenv("SF_DISABLE_OCSP_CHECKS", "")
+	for _, tt := range []struct {
+		query string
+		want  bool
+	}{
+		{"host=snowflake.localhost.localstack.cloud", true},
+		{"host=SNOWFLAKE.LocalHost.LocalStack.Cloud&port=4566", true},
+		{"host=localhost.localstack.cloud", true},
+		{"", false},
+		{"host=myaccount.privatelink.snowflakecomputing.com", false},
+		{"host=snowflake.example.com", false},
+		{"host=127.0.0.1", false},
+		{"host=mylocalhost.localstack.cloud", false},
+		{"host=localhost.localstack.cloud.example.com", false},
+	} {
+		auth, err := ParseURI("snowflake://myuser:mypass@myaccount/mydb?" + tt.query)
+		if err != nil {
+			t.Fatalf("%q: unexpected error: %v", tt.query, err)
+		}
+		dsn, err := auth.ToDSN()
+		if err != nil {
+			t.Fatalf("%q: unexpected error: %v", tt.query, err)
+		}
+		cfg, err := sf.ParseDSN(dsn)
+		if err != nil {
+			t.Fatalf("%q: unexpected error parsing DSN: %v", tt.query, err)
+		}
+		if cfg.DisableOCSPChecks != tt.want {
+			t.Errorf("%q: expected DisableOCSPChecks=%v, got %v (DSN %s)", tt.query, tt.want, cfg.DisableOCSPChecks, dsn)
+		}
+		if cfg.Transporter != nil || cfg.CertRevocationCheckMode != sf.CertRevocationCheckDisabled {
+			t.Errorf("%q: expected default TLS transport and no CRL mode", tt.query)
+		}
+	}
+}
+
 func TestParseURI_InvalidEndpoint(t *testing.T) {
 	for _, query := range []string{
 		"host=https://snowflake.example.com",
