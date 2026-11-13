@@ -445,6 +445,7 @@ type simTable struct {
 	columns    [][]any
 	tag        string
 	mutated    bool
+	version    int64
 }
 
 type mockCatalogConn struct {
@@ -557,6 +558,7 @@ func (c *mockCatalogConn) Exec(_ context.Context, query string, _ ...any) error 
 			return &clickhouse.Exception{Code: 60, Message: "Dest table doesn't exist"}
 		}
 		dst.partitions = append(dst.partitions, "cloned")
+		dst.version++
 		return nil
 	case strings.HasPrefix(norm, "ALTER TABLE ") && strings.Contains(norm, " MODIFY COMMENT "):
 		rest := strings.TrimPrefix(norm, "ALTER TABLE ")
@@ -593,6 +595,7 @@ func (c *mockCatalogConn) Exec(_ context.Context, query string, _ ...any) error 
 			return &clickhouse.Exception{Code: 60, Message: "Table doesn't exist"}
 		}
 		tbl.mutated = true
+		tbl.version++
 		return nil
 	case strings.HasPrefix(norm, "RENAME TABLE "):
 		rest := strings.TrimPrefix(norm, "RENAME TABLE ")
@@ -708,6 +711,12 @@ func (c *mockCatalogConn) QueryRow(_ context.Context, query string, args ...any)
 			return &mockRow{err: sql.ErrNoRows}
 		}
 		return &mockRow{vals: []any{tbl.sortingKey}}
+	case strings.Contains(norm, "FROM system.parts"):
+		tbl, ok := c.tables[simKey(args[0].(string), args[1].(string))]
+		if !ok {
+			return &mockRow{vals: []any{"0"}}
+		}
+		return &mockRow{vals: []any{fmt.Sprint(tbl.version)}}
 	case strings.Contains(norm, "WHERE `_cdc_deleted` = true"):
 		for stageRef, cnt := range c.deleteCount {
 			if strings.Contains(norm, stageRef) {
@@ -753,7 +762,7 @@ func TestMergeTable_CDCSoftHardAndFencing(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		var sawShadowInsert, sawShadowDelete, sawAtomicRename bool
+		var sawShadowInsert, sawShadowDelete, sawAtomicExchange bool
 		for _, q := range cat.execs {
 			require.False(t, strings.HasPrefix(q, "INSERT INTO `warehouse`.`users`"), "must not insert directly into live target")
 			require.False(t, strings.HasPrefix(q, "ALTER TABLE `warehouse`.`users` DELETE"), "must not mutate live target directly")
@@ -763,13 +772,14 @@ func TestMergeTable_CDCSoftHardAndFencing(t *testing.T) {
 			if strings.HasPrefix(q, "ALTER TABLE `_bruin_staging`.`__ingestr_cdc_shw_") && strings.Contains(q, "DELETE WHERE") {
 				sawShadowDelete = true
 			}
-			if strings.HasPrefix(q, "RENAME TABLE `warehouse`.`users` TO `_bruin_staging`.`__ingestr_cdc_bak_") {
-				sawAtomicRename = true
+			require.False(t, strings.HasPrefix(q, "RENAME TABLE "), "publication must not use non-atomic RENAME: %s", q)
+			if strings.HasPrefix(q, "EXCHANGE TABLES `_bruin_staging`.`__ingestr_cdc_shw_") && strings.Contains(q, " AND `warehouse`.`users`") {
+				sawAtomicExchange = true
 			}
 		}
 		require.True(t, sawShadowInsert)
 		require.True(t, sawShadowDelete)
-		require.True(t, sawAtomicRename)
+		require.True(t, sawAtomicExchange)
 
 		afterInc, exists, err := dest.CDCTargetIncarnation(t.Context(), "users")
 		require.NoError(t, err)
@@ -808,11 +818,11 @@ func TestMergeTable_CDCSoftHardAndFencing(t *testing.T) {
 		require.Empty(t, cat.execs)
 	})
 
-	t.Run("fenced merge restores replacement table untouched on race at RENAME", func(t *testing.T) {
+	t.Run("fenced merge restores replacement table untouched on race at EXCHANGE", func(t *testing.T) {
 		cat := makeCatalog(2, targetUUID)
 		var injected atomic.Bool
 		cat.beforeExec = func(norm string, c *mockCatalogConn) error {
-			if strings.HasPrefix(norm, "RENAME TABLE `warehouse`.`users` TO ") && injected.CompareAndSwap(false, true) {
+			if strings.HasPrefix(norm, "EXCHANGE TABLES `_bruin_staging`.`__ingestr_cdc_shw_") && injected.CompareAndSwap(false, true) {
 				c.putTable("warehouse", "users", &simTable{
 					uuid:       "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
 					modTime:    "2026-01-01 00:05:00",
@@ -911,7 +921,7 @@ func TestMergeCDCTablesAtomically_RollbackOnFailureAndReplacement(t *testing.T) 
 		})
 		var replaced atomic.Bool
 		cat.beforeExec = func(norm string, c *mockCatalogConn) error {
-			if strings.HasPrefix(norm, "RENAME TABLE ") && replaced.CompareAndSwap(false, true) {
+			if strings.HasPrefix(norm, "EXCHANGE TABLES ") && strings.Contains(norm, "`warehouse`.`orders`") && replaced.CompareAndSwap(false, true) {
 				c.putTable("warehouse", "orders", &simTable{
 					uuid: "ffffffff-ffff-ffff-ffff-ffffffffffff", modTime: "2026-01-01 00:05:00", engine: "ReplacingMergeTree", sortingKey: "id", tag: "orders-external",
 				})
@@ -993,10 +1003,10 @@ func TestConditionalTruncateAndSwapAndSchemaEvolution(t *testing.T) {
 	err := dest.TruncateCDCTableIfIncarnation(t.Context(), "users", "wrong")
 	require.ErrorContains(t, err, "physical incarnation changed")
 
-	// Replacement right before RENAME in TruncateCDCTableIfIncarnation must restore replacement table untouched.
+	// Replacement right before EXCHANGE in TruncateCDCTableIfIncarnation must restore replacement table untouched.
 	var truncRace atomic.Bool
 	cat.beforeExec = func(norm string, c *mockCatalogConn) error {
-		if strings.HasPrefix(norm, "RENAME TABLE `warehouse`.`users` TO ") && truncRace.CompareAndSwap(false, true) {
+		if strings.HasPrefix(norm, "EXCHANGE TABLES `_bruin_staging`.`__ingestr_cdc_shw_") && truncRace.CompareAndSwap(false, true) {
 			c.putTable("warehouse", "users", &simTable{
 				uuid: "cccc3333-3333-3333-3333-333333333333", modTime: "2026-01-01 00:02:00", engine: "ReplacingMergeTree", sortingKey: "id", tag: "trunc-replacement",
 			})

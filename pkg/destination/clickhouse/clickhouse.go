@@ -263,27 +263,12 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 	stagingDB, stagingName := d.parseTableName(stagingTable)
 	targetDB, targetName := d.parseTableName(targetTable)
 
-	fenced := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
-	var targetMeta clickHouseTableMeta
-	if fenced {
-		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+	if opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != "" {
+		if err := d.swapTableFenced(ctx, opts); err != nil {
 			return err
 		}
-		meta, targetExists, err := d.readTableMeta(ctx, targetDB, targetName)
-		if err != nil {
-			return err
-		}
-		if opts.CDCExpectedIncarnation != "" {
-			if !targetExists || destination.CDCTargetKey(targetDB, targetName, meta.incarnationID()) != opts.CDCExpectedIncarnation {
-				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
-			}
-			targetMeta = meta
-		} else if targetExists {
-			return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
-		}
-		if err := d.checkCDCIncarnation(ctx, stagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
-			return err
-		}
+		config.Debug("[CLICKHOUSE] Fenced table swap completed in %v", time.Since(startSwap))
+		return nil
 	}
 
 	// Replace only PrepareTables the staging side, so the target database may
@@ -293,33 +278,7 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 	}
 
 	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES %s.%s AND %s.%s%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
-	if err := d.conn.Exec(ctx, exchangeSQL); err == nil {
-		if fenced {
-			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			defer cancel()
-			if opts.CDCExpectedIncarnation == "" {
-				_ = d.conn.Exec(verifyCtx, exchangeSQL)
-				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
-			}
-			displacedMeta, displacedExists, displacedErr := d.readTableMeta(verifyCtx, stagingDB, stagingName)
-			if displacedErr != nil ||
-				!displacedExists ||
-				displacedMeta.physicalID() != targetMeta.physicalID() ||
-				destination.CDCTargetKey(targetDB, targetName, displacedMeta.incarnationID()) != opts.CDCExpectedIncarnation {
-				_ = d.conn.Exec(verifyCtx, exchangeSQL)
-				if displacedErr != nil {
-					return displacedErr
-				}
-				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
-			}
-			if opts.CDCExpectedResultIncarnation != "" {
-				if err := d.checkCDCIncarnation(verifyCtx, targetTable, opts.CDCExpectedResultIncarnation); err != nil {
-					_ = d.conn.Exec(verifyCtx, exchangeSQL)
-					return err
-				}
-			}
-		}
-	} else {
+	if err := d.conn.Exec(ctx, exchangeSQL); err != nil {
 		config.Debug("[CLICKHOUSE] EXCHANGE TABLES failed, falling back to RENAME: %v", err)
 
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
@@ -328,34 +287,12 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 		renameOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
 		renamedOld := false
 		if err := d.conn.Exec(ctx, renameOldSQL); err != nil {
-			if fenced && opts.CDCExpectedIncarnation != "" {
-				return fmt.Errorf("ClickHouse CDC target %q could not be fenced before swap: %w", targetTable, err)
-			}
 			config.Debug("[CLICKHOUSE] No existing table to rename (this is OK for first run)")
 		} else {
 			renamedOld = true
 		}
 
 		restoreOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
-		if renamedOld && fenced {
-			verifyCtx := context.WithoutCancel(ctx)
-			if opts.CDCExpectedIncarnation == "" {
-				_ = d.conn.Exec(verifyCtx, restoreOldSQL)
-				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
-			}
-			oldMeta, oldExists, checkErr := d.readTableMeta(verifyCtx, targetDB, oldName)
-			if checkErr != nil ||
-				!oldExists ||
-				oldMeta.physicalID() != targetMeta.physicalID() ||
-				destination.CDCTargetKey(targetDB, targetName, oldMeta.incarnationID()) != opts.CDCExpectedIncarnation {
-				_ = d.conn.Exec(verifyCtx, restoreOldSQL)
-				if checkErr != nil {
-					return checkErr
-				}
-				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed during swap", targetTable)
-			}
-		}
-
 		renameNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
 		if err := d.conn.Exec(ctx, renameNewSQL); err != nil {
 			if renamedOld {
@@ -365,17 +302,6 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 			return fmt.Errorf("failed to rename staging to target: %w", err)
 		}
 
-		if fenced && opts.CDCExpectedResultIncarnation != "" {
-			if err := d.checkCDCIncarnation(context.WithoutCancel(ctx), targetTable, opts.CDCExpectedResultIncarnation); err != nil {
-				revertNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(stagingDB), quoteIdentifier(stagingName), onClusterClause(d.cluster))
-				_ = d.conn.Exec(context.WithoutCancel(ctx), revertNewSQL)
-				if renamedOld {
-					_ = d.conn.Exec(context.WithoutCancel(ctx), restoreOldSQL)
-				}
-				return err
-			}
-		}
-
 		if renamedOld {
 			dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
 			_ = d.conn.Exec(context.WithoutCancel(ctx), dropOldSQL)
@@ -383,6 +309,95 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 	}
 
 	config.Debug("[CLICKHOUSE] Table swap completed in %v", time.Since(startSwap))
+	return nil
+}
+
+// swapTableFenced publishes a CDC full-refresh replacement with a single
+// atomic statement and never falls back to multi-step renames, so the target
+// name always resolves to a complete table. With an expected target it uses
+// EXCHANGE TABLES and verifies the displaced table is the expected
+// incarnation, exchanging back untouched otherwise. Without one it uses
+// RENAME TABLE, which fails atomically if any table took the target name.
+func (d *ClickHouseDestination) swapTableFenced(ctx context.Context, opts destination.SwapOptions) error {
+	stagingDB, stagingName := d.parseTableName(opts.StagingTable)
+	targetDB, targetName := d.parseTableName(opts.TargetTable)
+	stagingRef := fmt.Sprintf("%s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName))
+	targetRef := fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName))
+	changed := fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", opts.TargetTable)
+
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	targetMeta, targetExists, err := d.readTableMeta(ctx, targetDB, targetName)
+	if err != nil {
+		return err
+	}
+	if opts.CDCExpectedIncarnation != "" {
+		if !targetExists || destination.CDCTargetKey(targetDB, targetName, targetMeta.incarnationID()) != opts.CDCExpectedIncarnation {
+			return changed
+		}
+	} else if targetExists {
+		return changed
+	}
+	stagingMeta, stagingExists, err := d.readTableMeta(ctx, stagingDB, stagingName)
+	if err != nil {
+		return err
+	}
+	if !stagingExists {
+		return fmt.Errorf("ClickHouse swap staging table %q does not exist", opts.StagingTable)
+	}
+	if opts.CDCExpectedStagingIncarnation != "" && destination.CDCTargetKey(stagingDB, stagingName, stagingMeta.incarnationID()) != opts.CDCExpectedStagingIncarnation {
+		return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", opts.StagingTable)
+	}
+	if err := d.ensureDatabaseExists(ctx, targetDB); err != nil {
+		return fmt.Errorf("failed to ensure target database exists: %w", err)
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+
+	verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	if opts.CDCExpectedIncarnation == "" {
+		renameSQL := fmt.Sprintf("RENAME TABLE %s TO %s%s", stagingRef, targetRef, onClusterClause(d.cluster))
+		if err := d.conn.Exec(ctx, renameSQL); err != nil {
+			config.LogFailedQuery(renameSQL, err)
+			if _, exists, checkErr := d.readTableMeta(verifyCtx, targetDB, targetName); checkErr == nil && exists {
+				return changed
+			}
+			return fmt.Errorf("failed to rename staging to target: %w", err)
+		}
+		if opts.CDCExpectedResultIncarnation != "" {
+			if err := d.checkCDCIncarnation(verifyCtx, opts.TargetTable, opts.CDCExpectedResultIncarnation); err != nil {
+				revertSQL := fmt.Sprintf("RENAME TABLE %s TO %s%s", targetRef, stagingRef, onClusterClause(d.cluster))
+				return errors.Join(err, d.conn.Exec(verifyCtx, revertSQL))
+			}
+		}
+		return nil
+	}
+
+	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES %s AND %s%s", stagingRef, targetRef, onClusterClause(d.cluster))
+	if err := d.conn.Exec(ctx, exchangeSQL); err != nil {
+		config.LogFailedQuery(exchangeSQL, err)
+		return fmt.Errorf("fenced ClickHouse CDC swap of %s requires EXCHANGE TABLES (Atomic, Replicated, or Shared database): %w", opts.TargetTable, err)
+	}
+	displaced, displacedExists, verifyErr := d.readTableMeta(verifyCtx, stagingDB, stagingName)
+	if verifyErr == nil && (!displacedExists ||
+		displaced.physicalID() != targetMeta.physicalID() ||
+		destination.CDCTargetKey(targetDB, targetName, displaced.incarnationID()) != opts.CDCExpectedIncarnation) {
+		verifyErr = changed
+	}
+	if verifyErr == nil && opts.CDCExpectedResultIncarnation != "" {
+		verifyErr = d.checkCDCIncarnation(verifyCtx, opts.TargetTable, opts.CDCExpectedResultIncarnation)
+	}
+	if verifyErr != nil {
+		if err := d.conn.Exec(verifyCtx, exchangeSQL); err != nil {
+			config.LogFailedQuery(exchangeSQL, err)
+			return errors.Join(verifyErr, fmt.Errorf("restore ClickHouse CDC target %s after a failed fenced swap; the displaced table is at %s: %w", opts.TargetTable, opts.StagingTable, err))
+		}
+		return verifyErr
+	}
 	return nil
 }
 
@@ -760,6 +775,13 @@ func (d *ClickHouseDestination) SupportsAtomicSwap() bool           { return tru
 func (d *ClickHouseDestination) GetScheme() string { return "clickhouse" }
 
 func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
+	tableSchema, _, err := d.readTableColumns(ctx, table)
+	return tableSchema, err
+}
+
+// readTableColumns returns the table schema and each column's native
+// ClickHouse type keyed by lower-cased column name.
+func (d *ClickHouseDestination) readTableColumns(ctx context.Context, table string) (*schema.TableSchema, map[string]string, error) {
 	database, tableName := d.parseTableName(table)
 
 	query := `
@@ -771,18 +793,20 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 	rows, err := d.conn.Query(ctx, query, database, tableName)
 	if err != nil {
 		config.LogFailedQuery(query, err)
-		return nil, fmt.Errorf("failed to read table schema: %w", err)
+		return nil, nil, fmt.Errorf("failed to read table schema: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
 	var fallbackPKs []string
+	nativeTypes := make(map[string]string)
 	for rows.Next() {
 		var colName, colType string
 		var inPK uint8
 		if err := rows.Scan(&colName, &colType, &inPK); err != nil {
-			return nil, fmt.Errorf("failed to scan column: %w", err)
+			return nil, nil, fmt.Errorf("failed to scan column: %w", err)
 		}
+		nativeTypes[strings.ToLower(colName)] = colType
 
 		dataType, precision, scale, arrayType := srcclickhouse.MapClickHouseToDataType(colType)
 		// The shared mapper collapses every DateTime64 to TypeTimestamp, but the
@@ -806,11 +830,11 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, nil, fmt.Errorf("error iterating rows: %w", err)
 	}
 
 	if len(columns) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	primaryKeys := fallbackPKs
@@ -828,7 +852,7 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 		Schema:      database,
 		Columns:     columns,
 		PrimaryKeys: primaryKeys,
-	}, nil
+	}, nativeTypes, nil
 }
 
 func parseClickHouseURI(uri string) (*clickhouse.Options, string, string, string, map[string]string, error) {

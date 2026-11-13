@@ -16,7 +16,7 @@ func (d *ClickHouseDestination) evolutionDialect(ctx context.Context, table stri
 	if d.conn == nil {
 		return dialect, nil
 	}
-	current, err := d.GetTableSchema(ctx, table)
+	current, nativeTypes, err := d.readTableColumns(ctx, table)
 	if err != nil {
 		return nil, err
 	}
@@ -27,6 +27,7 @@ func (d *ClickHouseDestination) evolutionDialect(ctx context.Context, table stri
 	for _, col := range current.Columns {
 		dialect.columns[strings.ToLower(col.Name)] = col
 	}
+	dialect.nativeTypes = nativeTypes
 	return dialect, nil
 }
 

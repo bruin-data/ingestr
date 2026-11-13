@@ -188,37 +188,88 @@ func (d *ClickHouseDestination) checkCDCIncarnation(ctx context.Context, table, 
 	return nil
 }
 
+// Fenced CDC writes never mutate the live target. Each write builds a shadow
+// copy in _bruin_staging, applies the change there, and publishes it with
+// EXCHANGE TABLES, which atomically swaps exactly one pair of names in an
+// Atomic/Replicated/Shared database, so the target name always resolves to a
+// complete table. ClickHouse has no multi-table DDL transaction (a multi-pair
+// RENAME or EXCHANGE runs pair by pair), so a batch is published one atomic
+// exchange per table:
+//
+//   - every shadow is built, and every target's identity and data version are
+//     checked, before the first exchange, so a failing batch publishes nothing;
+//   - each exchange is verified by the table it displaced: if that is not the
+//     expected incarnation at its expected data version (the target was
+//     replaced or written concurrently), it is exchanged back untouched;
+//   - any failure exchanges every already-published table back in reverse
+//     order, so a failed batch leaves no table changed;
+//   - a crash between exchanges leaves CDC state uncommitted, and the next run
+//     replays the batch; LSN-ordered merges make the replay idempotent, as in
+//     the StarRocks destination.
 type cdcShadowPlan struct {
 	table               string
 	targetDB            string
 	targetName          string
 	expectedIncarnation string
 	expectedMeta        clickHouseTableMeta
+	expectedVersion     string
 	shadowDB            string
 	shadowName          string
-	bakName             string
-	discardName         string
+	shadowID            string
 	shadowConsumed      bool
+	keepShadow          bool
 }
 
 func (p *cdcShadowPlan) shadowTable() string {
 	return p.shadowDB + "." + p.shadowName
 }
 
-func newCDCShadowNames(targetDB, targetName string) (shadowName, bakName, discardName string, err error) {
+func (p *cdcShadowPlan) shadowRef() string {
+	return quoteIdentifier(p.shadowDB) + "." + quoteIdentifier(p.shadowName)
+}
+
+func (p *cdcShadowPlan) targetRef() string {
+	return quoteIdentifier(p.targetDB) + "." + quoteIdentifier(p.targetName)
+}
+
+func (p *cdcShadowPlan) incarnationChanged() error {
+	return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", p.table)
+}
+
+func newCDCShadowName(targetDB, targetName string) (string, error) {
 	var raw [8]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "", "", "", fmt.Errorf("generate ClickHouse CDC shadow nonce: %w", err)
+		return "", fmt.Errorf("generate ClickHouse CDC shadow nonce: %w", err)
 	}
-	nonce := hex.EncodeToString(raw[:])
 	digest := destination.CDCTargetKeyDigest(destination.CDCTargetKey(targetDB, targetName))
 	if len(digest) > 12 {
 		digest = digest[:12]
 	}
-	return fmt.Sprintf("__ingestr_cdc_shw_%s_%s", digest, nonce),
-		fmt.Sprintf("__ingestr_cdc_bak_%s_%s", digest, nonce),
-		fmt.Sprintf("__ingestr_cdc_dsc_%s_%s", digest, nonce),
-		nil
+	return fmt.Sprintf("__ingestr_cdc_shw_%s_%s", digest, hex.EncodeToString(raw[:])), nil
+}
+
+// tableDataVersion fingerprints a MergeTree table's committed data per
+// partition. Every INSERT, mutation (including lightweight DELETE), and
+// partition operation allocates a higher block number or data version, and
+// dropping parts changes a partition's block range or removes the partition,
+// while background merges keep each partition's lowest block and highest
+// version, so the value changes when the data changes but not when parts merge.
+func (d *ClickHouseDestination) tableDataVersion(ctx context.Context, db, name string) (string, error) {
+	var version string
+	err := d.conn.QueryRow(
+		ctx,
+		"SELECT arrayStringConcat(arraySort(groupArray(concat(partition_id, ':', toString(lo), ':', toString(hi)))), ',') "+
+			"FROM (SELECT partition_id, min(min_block_number) AS lo, max(greatest(max_block_number, data_version)) AS hi "+
+			"FROM system.parts WHERE database = ? AND table = ? AND active GROUP BY partition_id)",
+		db, name,
+	).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read ClickHouse data version of %s.%s: %w", db, name, err)
+	}
+	return version, nil
 }
 
 func (d *ClickHouseDestination) prepareCDCShadowPlan(ctx context.Context, table, expectedIncarnation string, copyData bool) (*cdcShadowPlan, error) {
@@ -245,7 +296,14 @@ func (d *ClickHouseDestination) prepareCDCShadowPlan(ctx context.Context, table,
 	if err := d.ensureDatabaseExists(ctx, clickHouseShadowStagingDB); err != nil {
 		return nil, fmt.Errorf("ensure ClickHouse CDC shadow staging database: %w", err)
 	}
-	shadowName, bakName, discardName, err := newCDCShadowNames(targetDB, targetName)
+	shadowName, err := newCDCShadowName(targetDB, targetName)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.waitForMutations(ctx, targetDB, targetName); err != nil {
+		return nil, err
+	}
+	version, err := d.tableDataVersion(ctx, targetDB, targetName)
 	if err != nil {
 		return nil, err
 	}
@@ -255,19 +313,16 @@ func (d *ClickHouseDestination) prepareCDCShadowPlan(ctx context.Context, table,
 		targetName:          targetName,
 		expectedIncarnation: expectedIncarnation,
 		expectedMeta:        meta,
+		expectedVersion:     version,
 		shadowDB:            clickHouseShadowStagingDB,
 		shadowName:          shadowName,
-		bakName:             bakName,
-		discardName:         discardName,
 	}
 
 	createSQL := fmt.Sprintf(
-		"CREATE TABLE %s.%s%s AS %s.%s",
-		quoteIdentifier(plan.shadowDB),
-		quoteIdentifier(plan.shadowName),
+		"CREATE TABLE %s%s AS %s",
+		plan.shadowRef(),
 		onClusterClause(d.cluster),
-		quoteIdentifier(targetDB),
-		quoteIdentifier(targetName),
+		plan.targetRef(),
 	)
 	if err := d.conn.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
@@ -279,23 +334,36 @@ func (d *ClickHouseDestination) prepareCDCShadowPlan(ctx context.Context, table,
 			_ = d.DropTable(context.WithoutCancel(ctx), plan.shadowTable())
 			return nil, err
 		}
-		afterMeta, afterExists, err := d.readTableMeta(ctx, targetDB, targetName)
-		if err != nil {
-			_ = d.DropTable(context.WithoutCancel(ctx), plan.shadowTable())
-			return nil, err
-		}
-		if !afterExists || afterMeta.physicalID() != meta.physicalID() || afterMeta.incarnationID() != meta.incarnationID() {
-			_ = d.DropTable(context.WithoutCancel(ctx), plan.shadowTable())
-			return nil, fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", table)
-		}
+	}
+	if err := d.verifyPlanSource(ctx, plan, targetDB, targetName); err != nil {
+		_ = d.DropTable(context.WithoutCancel(ctx), plan.shadowTable())
+		return nil, err
 	}
 	return plan, nil
 }
 
-func (d *ClickHouseDestination) cloneTablePartitions(ctx context.Context, srcDB, srcName, dstDB, dstName string) error {
-	if err := d.waitForMutations(ctx, srcDB, srcName); err != nil {
+// verifyPlanSource checks that db.name is still the table the plan was built
+// from: the same physical table and logical incarnation, with no data
+// committed since the shadow was cloned.
+func (d *ClickHouseDestination) verifyPlanSource(ctx context.Context, p *cdcShadowPlan, db, name string) error {
+	meta, exists, err := d.readTableMeta(ctx, db, name)
+	if err != nil {
 		return err
 	}
+	if !exists || meta.physicalID() != p.expectedMeta.physicalID() || meta.incarnationID() != p.expectedMeta.incarnationID() {
+		return p.incarnationChanged()
+	}
+	version, err := d.tableDataVersion(ctx, db, name)
+	if err != nil {
+		return err
+	}
+	if version != p.expectedVersion {
+		return fmt.Errorf("ClickHouse CDC target %q was written outside this run while its change was being prepared; retry the run", p.table)
+	}
+	return nil
+}
+
+func (d *ClickHouseDestination) cloneTablePartitions(ctx context.Context, srcDB, srcName, dstDB, dstName string) error {
 	rows, err := d.conn.Query(
 		ctx,
 		"SELECT DISTINCT partition_id FROM system.parts WHERE database = ? AND table = ? AND active ORDER BY partition_id",
@@ -345,10 +413,19 @@ func (d *ClickHouseDestination) cleanupCDCShadowPlans(ctx context.Context, plans
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	for _, p := range plans {
-		if p != nil && !p.shadowConsumed {
+		if p != nil && !p.shadowConsumed && !p.keepShadow {
 			_ = d.DropTable(cleanupCtx, p.shadowTable())
 		}
 	}
+}
+
+func (d *ClickHouseDestination) exchangeShadow(ctx context.Context, p *cdcShadowPlan) error {
+	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES %s AND %s%s", p.shadowRef(), p.targetRef(), onClusterClause(d.cluster))
+	if err := d.conn.Exec(ctx, exchangeSQL); err != nil {
+		config.LogFailedQuery(exchangeSQL, err)
+		return err
+	}
+	return nil
 }
 
 func (d *ClickHouseDestination) publishCDCShadowPlans(ctx context.Context, plans []*cdcShadowPlan) error {
@@ -364,99 +441,85 @@ func (d *ClickHouseDestination) publishCDCShadowPlans(ctx context.Context, plans
 			return err
 		}
 		if !exists {
-			return fmt.Errorf("ClickHouse CDC shadow table %s.%s disappeared before publish", p.shadowDB, p.shadowName)
+			return fmt.Errorf("ClickHouse CDC shadow table %s disappeared before publish", p.shadowTable())
 		}
 		stamped := formatBoundIncarnationComment(p.expectedMeta.comment, shadowMeta.commentBindingID(), p.expectedMeta.incarnationID())
-		commentSQL := fmt.Sprintf(
-			"ALTER TABLE %s.%s%s MODIFY COMMENT %s",
-			quoteIdentifier(p.shadowDB),
-			quoteIdentifier(p.shadowName),
-			onClusterClause(d.cluster),
-			sqlString(stamped),
-		)
+		commentSQL := fmt.Sprintf("ALTER TABLE %s%s MODIFY COMMENT %s", p.shadowRef(), onClusterClause(d.cluster), sqlString(stamped))
 		if err := d.conn.Exec(ctx, commentSQL); err != nil {
 			config.LogFailedQuery(commentSQL, err)
-			return fmt.Errorf("stamp ClickHouse CDC shadow incarnation on %s.%s: %w", p.shadowDB, p.shadowName, err)
+			return fmt.Errorf("stamp ClickHouse CDC shadow incarnation on %s: %w", p.shadowTable(), err)
 		}
-		curMeta, curExists, err := d.readTableMeta(ctx, p.targetDB, p.targetName)
-		if err != nil {
+		p.shadowID = shadowMeta.physicalID()
+		if err := d.waitForMutations(ctx, p.shadowDB, p.shadowName); err != nil {
 			return err
 		}
-		if !curExists || curMeta.physicalID() != p.expectedMeta.physicalID() || curMeta.incarnationID() != p.expectedMeta.incarnationID() {
-			return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", p.table)
+		if err := d.verifyPlanSource(ctx, p, p.targetDB, p.targetName); err != nil {
+			return err
 		}
 	}
 
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		return err
-	}
-
-	pairs := make([]string, 0, len(plans)*2)
+	published := make([]*cdcShadowPlan, 0, len(plans))
 	for _, p := range plans {
-		targetRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.targetDB), quoteIdentifier(p.targetName))
-		bakRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.bakName))
-		shadowRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.shadowName))
-		pairs = append(pairs, fmt.Sprintf("%s TO %s", targetRef, bakRef))
-		pairs = append(pairs, fmt.Sprintf("%s TO %s", shadowRef, targetRef))
-	}
-	renameSQL := fmt.Sprintf("RENAME TABLE %s%s", strings.Join(pairs, ", "), onClusterClause(d.cluster))
-	if err := d.conn.Exec(ctx, renameSQL); err != nil {
-		config.LogFailedQuery(renameSQL, err)
-		checkCtx := context.WithoutCancel(ctx)
-		for _, p := range plans {
-			curMeta, curExists, checkErr := d.readTableMeta(checkCtx, p.targetDB, p.targetName)
-			if checkErr == nil && (!curExists || curMeta.physicalID() != p.expectedMeta.physicalID() || curMeta.incarnationID() != p.expectedMeta.incarnationID()) {
-				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", p.table)
-			}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return errors.Join(err, d.rollbackPublishedShadows(ctx, published))
 		}
-		return fmt.Errorf("publish ClickHouse CDC shadow tables: %w", err)
+		if err := d.verifyPlanSource(ctx, p, p.targetDB, p.targetName); err != nil {
+			return errors.Join(err, d.rollbackPublishedShadows(ctx, published))
+		}
+		if err := d.exchangeShadow(ctx, p); err != nil {
+			publishErr := fmt.Errorf("publish ClickHouse CDC shadow table for %s (EXCHANGE TABLES requires an Atomic, Replicated, or Shared database): %w", p.table, err)
+			if checkErr := d.verifyPlanSource(context.WithoutCancel(ctx), p, p.targetDB, p.targetName); checkErr != nil {
+				publishErr = checkErr
+			}
+			return errors.Join(publishErr, d.rollbackPublishedShadows(ctx, published))
+		}
+		published = append(published, p)
+		if err := d.verifyPlanSource(context.WithoutCancel(ctx), p, p.shadowDB, p.shadowName); err != nil {
+			return errors.Join(err, d.rollbackPublishedShadows(ctx, published))
+		}
 	}
+
+	dropCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	for _, p := range plans {
 		p.shadowConsumed = true
-	}
-
-	verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancel()
-
-	var mismatchTable string
-	var verifyErr error
-	for _, p := range plans {
-		bakMeta, bakExists, err := d.readTableMeta(verifyCtx, p.shadowDB, p.bakName)
-		if err != nil {
-			verifyErr = err
-			mismatchTable = p.table
-			break
+		if err := d.DropTable(dropCtx, p.shadowTable()); err != nil {
+			config.Debug("[CLICKHOUSE CDC] Could not drop replaced table %s: %v", p.shadowTable(), err)
 		}
-		if !bakExists || bakMeta.physicalID() != p.expectedMeta.physicalID() || bakMeta.incarnationID() != p.expectedMeta.incarnationID() {
-			mismatchTable = p.table
-			break
-		}
-	}
-
-	if mismatchTable != "" {
-		restorePairs := make([]string, 0, len(plans)*2)
-		for _, p := range plans {
-			targetRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.targetDB), quoteIdentifier(p.targetName))
-			discardRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.discardName))
-			bakRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.bakName))
-			restorePairs = append(restorePairs, fmt.Sprintf("%s TO %s", targetRef, discardRef))
-			restorePairs = append(restorePairs, fmt.Sprintf("%s TO %s", bakRef, targetRef))
-		}
-		restoreSQL := fmt.Sprintf("RENAME TABLE %s%s", strings.Join(restorePairs, ", "), onClusterClause(d.cluster))
-		_ = d.conn.Exec(verifyCtx, restoreSQL)
-		for _, p := range plans {
-			_ = d.DropTable(verifyCtx, p.shadowDB+"."+p.discardName)
-		}
-		if verifyErr != nil {
-			return verifyErr
-		}
-		return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", mismatchTable)
-	}
-
-	for _, p := range plans {
-		_ = d.DropTable(verifyCtx, p.shadowDB+"."+p.bakName)
 	}
 	return nil
+}
+
+// rollbackPublishedShadows exchanges published tables back in reverse order,
+// verifying that the table each exchange displaced is back at the target name
+// and the shadow is back at its own name. A table that cannot be restored is
+// kept at its shadow name and reported.
+func (d *ClickHouseDestination) rollbackPublishedShadows(ctx context.Context, published []*cdcShadowPlan) error {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancel()
+	var errs []error
+	for i := len(published) - 1; i >= 0; i-- {
+		p := published[i]
+		displaced, displacedExists, displacedErr := d.readTableMeta(rollbackCtx, p.shadowDB, p.shadowName)
+		if err := d.exchangeShadow(rollbackCtx, p); err != nil {
+			p.keepShadow = true
+			errs = append(errs, fmt.Errorf("restore ClickHouse CDC target %s: the table it replaced is kept at %s: %w", p.table, p.shadowTable(), err))
+			continue
+		}
+		restored, restoredExists, restoredErr := d.readTableMeta(rollbackCtx, p.targetDB, p.targetName)
+		shadow, shadowExists, shadowErr := d.readTableMeta(rollbackCtx, p.shadowDB, p.shadowName)
+		if err := errors.Join(displacedErr, restoredErr, shadowErr); err != nil {
+			p.keepShadow = true
+			errs = append(errs, fmt.Errorf("verify restored ClickHouse CDC target %s (table kept at %s): %w", p.table, p.shadowTable(), err))
+			continue
+		}
+		if !displacedExists || !restoredExists || !shadowExists ||
+			restored.physicalID() != displaced.physicalID() || shadow.physicalID() != p.shadowID {
+			p.keepShadow = true
+			errs = append(errs, fmt.Errorf("restored ClickHouse CDC target %s does not hold the table the publish displaced; table kept at %s", p.table, p.shadowTable()))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (d *ClickHouseDestination) TruncateCDCTable(ctx context.Context, table string) error {
