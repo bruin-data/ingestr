@@ -43,7 +43,7 @@ func (d *ClickHouseDestination) PrepareCDCStateTable(ctx context.Context, table 
 	}
 	createSQL := buildCreateTableSQLWithOptions(
 		db, name, tableSchema.Columns, []string{"connector_id", "event_id"},
-		nil, false, false, engineType, d.engineSettings, d.cluster,
+		nil, false, false, false, engineType, d.engineSettings, d.cluster,
 	)
 	if err := d.conn.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)

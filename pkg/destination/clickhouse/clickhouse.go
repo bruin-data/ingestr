@@ -106,7 +106,7 @@ func (d *ClickHouseDestination) prepareTable(ctx context.Context, opts destinati
 
 	if opts.Schema != nil {
 		startCreate := time.Now()
-		createSQL := buildCreateTableSQLWithOptions(database, tableName, opts.Schema.Columns, opts.PrimaryKeys, opts.CDCKeys, opts.CDCMode, exclusive, d.engineType, d.engineSettings, d.cluster)
+		createSQL := buildCreateTableSQLWithOptions(database, tableName, opts.Schema.Columns, opts.PrimaryKeys, opts.CDCKeys, opts.CDCMode, isKeyedCDCTarget(opts), exclusive, d.engineType, d.engineSettings, d.cluster)
 		config.Debug("[CLICKHOUSE] CREATE SQL: %s", createSQL)
 		if err := d.conn.Exec(ctx, createSQL); err != nil {
 			config.LogFailedQuery(createSQL, err)
@@ -957,10 +957,10 @@ func (d *ClickHouseDestination) ListStagingTables(ctx context.Context, schemaNam
 }
 
 func buildCreateTableSQL(database, table string, columns []schema.Column, primaryKeys []string, engineType string, engineSettings map[string]string, cluster string) string {
-	return buildCreateTableSQLWithOptions(database, table, columns, primaryKeys, nil, false, false, engineType, engineSettings, cluster)
+	return buildCreateTableSQLWithOptions(database, table, columns, primaryKeys, nil, false, false, false, engineType, engineSettings, cluster)
 }
 
-func buildCreateTableSQLWithOptions(database, table string, columns []schema.Column, primaryKeys, cdcKeys []string, cdcMode, exclusive bool, engineType string, engineSettings map[string]string, cluster string) string {
+func buildCreateTableSQLWithOptions(database, table string, columns []schema.Column, primaryKeys, cdcKeys []string, cdcMode, keyedCDCTarget, exclusive bool, engineType string, engineSettings map[string]string, cluster string) string {
 	pkSet := make(map[string]bool, len(primaryKeys))
 	for _, pk := range primaryKeys {
 		pkSet[strings.ToLower(pk)] = true
@@ -985,6 +985,9 @@ func buildCreateTableSQLWithOptions(database, table string, columns []schema.Col
 	}
 
 	engine, isMergeTree := validateEngineType(engineType, len(primaryKeys) > 0)
+	if keyedCDCTarget && len(primaryKeys) > 0 {
+		engine = replacingEngine(engine)
+	}
 
 	createKeyword := "CREATE TABLE IF NOT EXISTS"
 	if exclusive {
@@ -1015,6 +1018,38 @@ func buildCreateTableSQLWithOptions(database, table string, columns []schema.Col
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+// isKeyedCDCTarget reports whether a table will receive keyed CDC merges, which
+// rely on ReplacingMergeTree collapsing rows by key. Soft-delete full refreshes
+// are not CDCMode but still carry _cdc_deleted; append keeps every change row.
+func isKeyedCDCTarget(opts destination.PrepareOptions) bool {
+	if len(opts.PrimaryKeys) == 0 || opts.Strategy == string(config.StrategyAppend) {
+		return false
+	}
+	if opts.CDCMode || opts.RequirePrimaryKeyMatch {
+		return true
+	}
+	for _, col := range opts.Schema.Columns {
+		if col.Name == destination.CDCDeletedColumn {
+			return true
+		}
+	}
+	return false
+}
+
+// replacingEngine maps a MergeTree-family engine to its replacing variant so
+// keyed CDC targets also work with engine=replicated_merge_tree or shared_merge_tree.
+func replacingEngine(engine string) string {
+	switch engine {
+	case "MergeTree()":
+		return "ReplacingMergeTree()"
+	case "ReplicatedMergeTree()":
+		return "ReplicatedReplacingMergeTree()"
+	case "SharedMergeTree()":
+		return "SharedReplacingMergeTree()"
+	}
+	return engine
 }
 
 func onClusterClause(cluster string) string {

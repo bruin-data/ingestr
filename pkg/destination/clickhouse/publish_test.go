@@ -291,6 +291,69 @@ func TestMergeCDCTablesAtomicallyPublishesWithPerTableExchange(t *testing.T) {
 		require.Empty(t, shadowTables(cat))
 	})
 
+	t.Run("write to a published table is not rolled back when a later table fails", func(t *testing.T) {
+		t.Parallel()
+		cat, merges := twoTableCatalog()
+		cat.beforeExec = func(norm string, c *mockCatalogConn) error {
+			if strings.HasPrefix(norm, "EXCHANGE TABLES ") && strings.Contains(norm, "`warehouse`.`orders`") {
+				c.mu.Lock()
+				c.tables["warehouse.users"].version++
+				c.mu.Unlock()
+				return errors.New("simulated exchange failure")
+			}
+			return nil
+		}
+		dest := &ClickHouseDestination{conn: cat, database: "warehouse"}
+		err := dest.MergeCDCTablesAtomically(t.Context(), merges)
+		require.ErrorContains(t, err, "simulated exchange failure")
+		require.ErrorContains(t, err, "left published so that write is kept")
+
+		users, ok := cat.getTable("warehouse", "users")
+		require.True(t, ok)
+		require.Equal(t, "clone-of-users-orig", users.tag, "the written published table must stay live")
+		requireOriginal(t, cat, "orders", "22222222-2222-2222-2222-222222222222", "orders-orig")
+		var usersExchanges int
+		for _, q := range cat.execs {
+			if strings.HasPrefix(q, "EXCHANGE TABLES ") && strings.Contains(q, "`warehouse`.`users`") {
+				usersExchanges++
+			}
+		}
+		require.Equal(t, 1, usersExchanges, "the written table must not be exchanged back")
+	})
+
+	t.Run("write racing the restore keeps the published table instead of dropping it", func(t *testing.T) {
+		t.Parallel()
+		cat, merges := twoTableCatalog()
+		var usersExchanges atomic.Int32
+		cat.beforeExec = func(norm string, c *mockCatalogConn) error {
+			if !strings.HasPrefix(norm, "EXCHANGE TABLES ") {
+				return nil
+			}
+			if strings.Contains(norm, "`warehouse`.`orders`") {
+				return errors.New("simulated exchange failure")
+			}
+			if usersExchanges.Add(1) > 1 {
+				c.mu.Lock()
+				c.tables["warehouse.users"].version++
+				c.mu.Unlock()
+			}
+			return nil
+		}
+		dest := &ClickHouseDestination{conn: cat, database: "warehouse"}
+		err := dest.MergeCDCTablesAtomically(t.Context(), merges)
+		require.ErrorContains(t, err, "simulated exchange failure")
+		require.ErrorContains(t, err, "while it was being restored; that table is kept at _bruin_staging.__ingestr_cdc_shw_")
+
+		requireOriginal(t, cat, "users", "11111111-1111-1111-1111-111111111111", "users-orig")
+		var kept bool
+		for _, tbl := range shadowTables(cat) {
+			if tbl.tag == "clone-of-users-orig" {
+				kept = true
+			}
+		}
+		require.True(t, kept, "the table holding the outside write must not be dropped")
+	})
+
 	t.Run("failed restore keeps the displaced original instead of dropping it", func(t *testing.T) {
 		t.Parallel()
 		cat, merges := twoTableCatalog()

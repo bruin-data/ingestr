@@ -234,7 +234,7 @@ func TestBuildCreateTableSQL_CDCModeAndKeys(t *testing.T) {
 
 	targetSQL := buildCreateTableSQLWithOptions(
 		"warehouse", "users", cols, []string{"id"}, []string{"id", "tenant"},
-		true, true, "", nil, "",
+		true, true, true, "", nil, "",
 	)
 	require.Contains(t, targetSQL, "CREATE TABLE `warehouse`.`users`")
 	require.NotContains(t, targetSQL, "IF NOT EXISTS")
@@ -249,13 +249,59 @@ func TestBuildCreateTableSQL_CDCModeAndKeys(t *testing.T) {
 
 	stagingSQL := buildCreateTableSQLWithOptions(
 		"warehouse", "users_stage", cols, nil, []string{"id"},
-		true, false, "", nil, "",
+		true, true, false, "", nil, "",
 	)
 	require.Contains(t, stagingSQL, "CREATE TABLE IF NOT EXISTS `warehouse`.`users_stage`")
 	require.Contains(t, stagingSQL, "`id` Int64")
 	require.Contains(t, stagingSQL, "`tenant` Nullable(String)")
 	require.Contains(t, stagingSQL, "ENGINE = MergeTree()")
 	require.Contains(t, stagingSQL, "ORDER BY (tuple())")
+}
+
+func TestPrepareTableUsesReplacingEngineForKeyedCDCTargets(t *testing.T) {
+	t.Parallel()
+
+	cdcCols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "name", DataType: schema.TypeString},
+		{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+		{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+	}
+	plainCols := cdcCols[:2]
+
+	tests := []struct {
+		name       string
+		engineType string
+		opts       destination.PrepareOptions
+		plain      bool
+		want       string
+	}{
+		{"replicated CDC merge target", "replicated_merge_tree", destination.PrepareOptions{PrimaryKeys: []string{"id"}, CDCMode: true}, false, "ReplicatedReplacingMergeTree()"},
+		{"shared CDC merge target", "shared_merge_tree", destination.PrepareOptions{PrimaryKeys: []string{"id"}, CDCMode: true}, false, "SharedReplacingMergeTree()"},
+		{"explicit merge_tree CDC target", "merge_tree", destination.PrepareOptions{PrimaryKeys: []string{"id"}, CDCMode: true}, false, "ReplacingMergeTree()"},
+		{"soft-delete full refresh carries _cdc_deleted", "replicated_merge_tree", destination.PrepareOptions{PrimaryKeys: []string{"id"}}, false, "ReplicatedReplacingMergeTree()"},
+		{"default engine unchanged", "", destination.PrepareOptions{PrimaryKeys: []string{"id"}, CDCMode: true}, false, "ReplacingMergeTree()"},
+		{"unkeyed CDC staging keeps engine", "replicated_merge_tree", destination.PrepareOptions{CDCMode: true}, false, "ReplicatedMergeTree()"},
+		{"CDC append keeps every change row", "replicated_merge_tree", destination.PrepareOptions{PrimaryKeys: []string{"id"}, CDCMode: true, Strategy: "append"}, false, "ReplicatedMergeTree()"},
+		{"non-CDC keyed table keeps engine", "replicated_merge_tree", destination.PrepareOptions{PrimaryKeys: []string{"id"}}, true, "ReplicatedMergeTree()"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := tt.opts
+			opts.Table = "users"
+			opts.Schema = &schema.TableSchema{Columns: cdcCols}
+			if tt.plain {
+				opts.Schema = &schema.TableSchema{Columns: plainCols}
+			}
+			conn := &mockCDCConn{}
+			dest := &ClickHouseDestination{conn: conn, database: "warehouse", engineType: tt.engineType}
+			require.NoError(t, dest.PrepareTable(t.Context(), opts))
+			createSQL := conn.execs[len(conn.execs)-1]
+			require.True(t, strings.HasPrefix(createSQL, "CREATE TABLE "), createSQL)
+			require.Contains(t, createSQL, "ENGINE = "+tt.want+" ")
+		})
+	}
 }
 
 func TestPrepareTable_RequirePrimaryKeyMatch(t *testing.T) {

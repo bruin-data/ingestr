@@ -202,7 +202,9 @@ func (d *ClickHouseDestination) checkCDCIncarnation(ctx context.Context, table, 
 //     expected incarnation at its expected data version (the target was
 //     replaced or written concurrently), it is exchanged back untouched;
 //   - any failure exchanges every already-published table back in reverse
-//     order, so a failed batch leaves no table changed;
+//     order, so a failed batch leaves no table changed, unless a published
+//     table was written after it went live: that table stays published so
+//     the outside write is not discarded, as after a crash between exchanges;
 //   - a crash between exchanges leaves CDC state uncommitted, and the next run
 //     replays the batch; LSN-ordered merges make the replay idempotent, as in
 //     the StarRocks destination.
@@ -216,6 +218,7 @@ type cdcShadowPlan struct {
 	shadowDB            string
 	shadowName          string
 	shadowID            string
+	shadowVersion       string
 	shadowConsumed      bool
 	keepShadow          bool
 }
@@ -453,6 +456,11 @@ func (d *ClickHouseDestination) publishCDCShadowPlans(ctx context.Context, plans
 		if err := d.waitForMutations(ctx, p.shadowDB, p.shadowName); err != nil {
 			return err
 		}
+		shadowVersion, err := d.tableDataVersion(ctx, p.shadowDB, p.shadowName)
+		if err != nil {
+			return err
+		}
+		p.shadowVersion = shadowVersion
 		if err := d.verifyPlanSource(ctx, p, p.targetDB, p.targetName); err != nil {
 			return err
 		}
@@ -492,14 +500,35 @@ func (d *ClickHouseDestination) publishCDCShadowPlans(ctx context.Context, plans
 
 // rollbackPublishedShadows exchanges published tables back in reverse order,
 // verifying that the table each exchange displaced is back at the target name
-// and the shadow is back at its own name. A table that cannot be restored is
-// kept at its shadow name and reported.
+// and the shadow is back at its own name. A published table that was replaced
+// or written since it went live is left in place, so an outside write is never
+// moved aside and dropped. A table that cannot be restored, or that is written
+// while being restored, is kept at its shadow name and reported.
 func (d *ClickHouseDestination) rollbackPublishedShadows(ctx context.Context, published []*cdcShadowPlan) error {
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 	defer cancel()
 	var errs []error
 	for i := len(published) - 1; i >= 0; i-- {
 		p := published[i]
+		live, liveExists, err := d.readTableMeta(rollbackCtx, p.targetDB, p.targetName)
+		var liveVersion string
+		if err == nil && liveExists {
+			liveVersion, err = d.tableDataVersion(rollbackCtx, p.targetDB, p.targetName)
+		}
+		if err != nil {
+			p.keepShadow = true
+			errs = append(errs, fmt.Errorf("inspect published ClickHouse CDC target %s before restoring it (the table it replaced is kept at %s): %w", p.table, p.shadowTable(), err))
+			continue
+		}
+		if !liveExists || live.physicalID() != p.shadowID {
+			p.keepShadow = true
+			errs = append(errs, fmt.Errorf("published ClickHouse CDC target %s was replaced outside this run and is not restored; the table it replaced is kept at %s", p.table, p.shadowTable()))
+			continue
+		}
+		if liveVersion != p.shadowVersion {
+			errs = append(errs, fmt.Errorf("published ClickHouse CDC target %s was written outside this run after it was published; it is left published so that write is kept, and the next run replays the batch", p.table))
+			continue
+		}
 		displaced, displacedExists, displacedErr := d.readTableMeta(rollbackCtx, p.shadowDB, p.shadowName)
 		if err := d.exchangeShadow(rollbackCtx, p); err != nil {
 			p.keepShadow = true
@@ -517,6 +546,12 @@ func (d *ClickHouseDestination) rollbackPublishedShadows(ctx context.Context, pu
 			restored.physicalID() != displaced.physicalID() || shadow.physicalID() != p.shadowID {
 			p.keepShadow = true
 			errs = append(errs, fmt.Errorf("restored ClickHouse CDC target %s does not hold the table the publish displaced; table kept at %s", p.table, p.shadowTable()))
+			continue
+		}
+		shadowVersion, err := d.tableDataVersion(rollbackCtx, p.shadowDB, p.shadowName)
+		if err != nil || shadowVersion != p.shadowVersion {
+			p.keepShadow = true
+			errs = append(errs, errors.Join(fmt.Errorf("published ClickHouse CDC target %s may have been written outside this run while it was being restored; that table is kept at %s", p.table, p.shadowTable()), err))
 		}
 	}
 	return errors.Join(errs...)
