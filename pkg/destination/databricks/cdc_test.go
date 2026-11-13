@@ -2,6 +2,8 @@ package databricks
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -650,83 +652,122 @@ func TestConditionalFencingAndSwapIncarnations(t *testing.T) {
 	require.ErrorContains(t, err, "physical incarnation changed")
 }
 
+// mockLeaseTable models the single owner/heartbeat row of a Databricks run
+// lease. Conditional UPDATEs only apply while their WHERE clause still matches,
+// which is how Delta resolves two takeovers racing for the same stale row.
+type mockLeaseTable struct {
+	owner      string
+	ageSeconds int64
+}
+
 func TestManagedCDCRunLeaseLifecycleAndExpiredTakeover(t *testing.T) {
 	ctx := context.Background()
 	var (
-		mu         sync.Mutex
-		leaseOwner string
-		leaseAge   = "45"
-		leaseLost  bool
-		dropped    string
+		mu            sync.Mutex
+		leases        = map[string]*mockLeaseTable{}
+		staleSnapshot *mockLeaseTable
+		structural    []string
 	)
+	leaseRe := regexp.MustCompile("`(cdc_lease_[0-9a-f]+)`")
+	quoted := regexp.MustCompile(`'([^']*)'`)
 
 	dest, _ := newTestDatabricksDestination(t, func(stmt string, _ dbsql.ExecuteStatementRequest) (dbsql.StatementResponse, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		switch {
-		case strings.HasPrefix(stmt, "CREATE TABLE `main`.`ingestr_staging`.`cdc_lease_"):
-			idx := strings.Index(stmt, "COMMENT '")
-			comment := strings.TrimSuffix(stmt[idx+len("COMMENT '"):], "'")
-			if leaseOwner != "" {
-				return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_ALREADY_EXISTS] Table already exists")
-			}
-			leaseOwner = comment
-			return dbsql.StatementResponse{}, nil
-		case strings.Contains(stmt, "DESCRIBE DETAIL `main`.`ingestr_staging`.`cdc_lease_") && strings.Contains(stmt, "_expired_"):
-			return makeQueryResponse([]string{"description", "createdAt"}, [][]string{{cdcLeaseCommentHead + "dead-holder", "2026-01-01T00:00:00Z"}}), nil
-		case strings.Contains(stmt, "DESCRIBE DETAIL `main`.`ingestr_staging`.`cdc_lease_") && strings.Contains(stmt, "_released_"):
-			return makeQueryResponse([]string{"description", "createdAt"}, [][]string{{leaseOwner, "2026-01-01T00:00:00Z"}}), nil
-		case strings.HasPrefix(stmt, "DESCRIBE DETAIL `main`.`ingestr_staging`.`cdc_lease_"):
-			if leaseOwner == "" {
-				return dbsql.StatementResponse{}, errors.New("TABLE_OR_VIEW_NOT_FOUND")
-			}
-			return makeQueryResponse([]string{"description", "createdAt"}, [][]string{{leaseOwner, "2026-01-01T00:00:00Z"}}), nil
-		case strings.Contains(stmt, "UNIX_TIMESTAMP(MAX(`heartbeat`))"):
-			return makeQueryResponse([]string{"age"}, [][]string{{leaseAge}}), nil
-		case strings.Contains(stmt, "RENAME TO") && strings.Contains(stmt, "_expired_"):
-			leaseOwner = ""
-			return dbsql.StatementResponse{}, nil
-		case strings.Contains(stmt, "RENAME TO") && strings.Contains(stmt, "_released_"):
-			return dbsql.StatementResponse{}, nil
-		case strings.HasPrefix(stmt, "DROP TABLE IF EXISTS"):
-			dropped = stmt
-			leaseOwner = ""
-			return dbsql.StatementResponse{}, nil
-		default:
-			if leaseLost {
-				return dbsql.StatementResponse{}, errors.New("unexpected")
-			}
+		m := leaseRe.FindStringSubmatch(stmt)
+		if m == nil {
 			return dbsql.StatementResponse{}, nil
 		}
+		name := m[1]
+		row := leases[name]
+		literals := quoted.FindAllStringSubmatch(stmt, -1)
+		switch {
+		case strings.Contains(stmt, " RENAME TO "), strings.HasPrefix(stmt, "DROP TABLE"):
+			structural = append(structural, stmt)
+			return dbsql.StatementResponse{}, nil
+		case strings.HasPrefix(stmt, "CREATE TABLE "):
+			if row != nil {
+				return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_ALREADY_EXISTS] Table already exists")
+			}
+			leases[name] = &mockLeaseTable{owner: literals[0][1]}
+		case row == nil:
+			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
+		case strings.HasPrefix(stmt, "SELECT `owner`, CAST("):
+			view := row
+			if staleSnapshot != nil {
+				view, staleSnapshot = staleSnapshot, nil
+			}
+			return makeQueryResponse([]string{"owner", "age"}, [][]string{{view.owner, strconv.FormatInt(view.ageSeconds, 10)}}), nil
+		case strings.HasPrefix(stmt, "SELECT `owner` FROM "):
+			return makeQueryResponse([]string{"owner"}, [][]string{{row.owner}}), nil
+		case strings.HasPrefix(stmt, "UPDATE ") && strings.Contains(stmt, "SET `owner` = "):
+			if row.owner == literals[1][1] && row.ageSeconds > int64(cdcLeaseTTL/time.Second) {
+				row.owner, row.ageSeconds = literals[0][1], 0
+			}
+		case strings.HasPrefix(stmt, "UPDATE ") && strings.Contains(stmt, "TIMESTAMP '1970-01-01"):
+			if row.owner == literals[1][1] {
+				row.ageSeconds = 1 << 40
+			}
+		case strings.HasPrefix(stmt, "UPDATE ") && strings.Contains(stmt, "SET `heartbeat` = CURRENT_TIMESTAMP()"):
+			if row.owner == literals[0][1] {
+				row.ageSeconds = 0
+			}
+		}
+		return dbsql.StatementResponse{}, nil
 	})
+	leaseName := func(connectorID string) string {
+		sum := sha256.Sum256([]byte(connectorID))
+		return "cdc_lease_" + hex.EncodeToString(sum[:10])
+	}
+	ownerOf := func(connectorID string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return leases[leaseName(connectorID)].owner
+	}
 
-	// Seed an expired lease held by a crashed previous process.
-	leaseOwner = cdcLeaseCommentHead + "dead-holder"
-	lease, err := dest.AcquireManagedCDCRunLease(ctx, "conn-lease-1")
+	// 1. An expired lease left by a crashed run is taken over in place.
+	leases[leaseName("conn-1")] = &mockLeaseTable{owner: "dead-holder", ageSeconds: 45}
+	acquired, err := dest.AcquireManagedCDCRunLease(ctx, "conn-1")
 	require.NoError(t, err)
-	require.NotEmpty(t, dropped)
+	holder := acquired.(*databricksCDCRunLease)
+	assert.Equal(t, holder.token, ownerOf("conn-1"))
 
-	// Normal release renames and drops the lease table.
-	require.NoError(t, lease.Release())
-	assert.Contains(t, dropped, "_released_")
-
-	// Acquiring a fresh lease and losing ownership causes Done() to close with ErrConnectorLeaseLost.
-	leaseOwner = ""
-	lease2, err := dest.AcquireManagedCDCRunLease(ctx, "conn-lease-2")
-	require.NoError(t, err)
-
+	// 2. A second waiter that read the same expired owner before the takeover
+	// must not displace the new holder: its conditional UPDATE no longer matches.
 	mu.Lock()
-	leaseOwner = cdcLeaseCommentHead + "hijacker"
+	staleSnapshot = &mockLeaseTable{owner: "dead-holder", ageSeconds: 45}
 	mu.Unlock()
+	waiter := &databricksCDCRunLease{d: dest, catalog: "main", schema: stagingSchema, name: leaseName("conn-1"), token: "late-waiter"}
+	won, err := waiter.tryAcquire(ctx)
+	require.NoError(t, err)
+	assert.False(t, won)
+	assert.Equal(t, holder.token, ownerOf("conn-1"))
+	require.NoError(t, holder.Err())
 
+	// 3. Release backdates the heartbeat so the next run takes over at once.
+	require.NoError(t, holder.Release())
+	next, err := dest.AcquireManagedCDCRunLease(ctx, "conn-1")
+	require.NoError(t, err)
+	assert.Equal(t, next.(*databricksCDCRunLease).token, ownerOf("conn-1"))
+	require.NoError(t, next.Release())
+
+	// 4. Losing ownership closes Done() with ErrConnectorLeaseLost and release fails.
+	lease2, err := dest.AcquireManagedCDCRunLease(ctx, "conn-2")
+	require.NoError(t, err)
+	mu.Lock()
+	leases[leaseName("conn-2")].owner = "hijacker"
+	mu.Unlock()
 	select {
 	case <-lease2.Done():
 	case <-time.After(4 * time.Second):
 		t.Fatal("timed out waiting for lease loss notification")
 	}
 	require.ErrorIs(t, lease2.Err(), source.ErrConnectorLeaseLost)
-	err = lease2.Release()
-	require.ErrorContains(t, err, "release Databricks CDC run lease")
+	require.ErrorContains(t, lease2.Release(), "release Databricks CDC run lease")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, structural, "lease tables must never be renamed or dropped")
 }
 
 func TestWriteParallelCDCFencing(t *testing.T) {

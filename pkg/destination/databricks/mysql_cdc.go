@@ -19,10 +19,9 @@ import (
 )
 
 const (
-	cdcLeaseTTL         = 30 * time.Second
-	cdcLeaseHeartbeat   = 5 * time.Second
-	cdcLeaseCheck       = time.Second
-	cdcLeaseCommentHead = "ingestr-cdc-lease:"
+	cdcLeaseTTL       = 30 * time.Second
+	cdcLeaseHeartbeat = 5 * time.Second
+	cdcLeaseCheck     = time.Second
 )
 
 var (
@@ -351,7 +350,6 @@ type databricksCDCRunLease struct {
 	catalog string
 	schema  string
 	name    string
-	comment string
 	token   string
 
 	lastHeartbeat atomic.Int64
@@ -383,7 +381,6 @@ func (d *DatabricksDestination) AcquireManagedCDCRunLease(ctx context.Context, c
 		catalog: strings.ToLower(d.effectiveCatalog()),
 		schema:  stagingSchema,
 		name:    "cdc_lease_" + hex.EncodeToString(sum[:10]),
-		comment: cdcLeaseCommentHead + token,
 		token:   token,
 		done:    make(chan struct{}),
 		stop:    make(chan struct{}),
@@ -416,135 +413,89 @@ func (d *DatabricksDestination) AcquireManagedCDCRunLease(ctx context.Context, c
 	}
 }
 
-func (l *databricksCDCRunLease) refOf(name string) string {
-	return quoteTableParts(l.catalog, l.schema, name)
-}
-
 func (l *databricksCDCRunLease) ref() string {
-	return l.refOf(l.name)
+	return quoteTableParts(l.catalog, l.schema, l.name)
 }
 
+// tryAcquire creates the lease table holding this run's owner row, or takes
+// over a stale row with an UPDATE conditioned on the stale owner it read.
+// Delta rejects one of two concurrent updates to the same row, so only one
+// waiter can replace a given expired owner, and the shared lease table is
+// never renamed or dropped while another run may hold it.
 func (l *databricksCDCRunLease) tryAcquire(ctx context.Context) (bool, error) {
-	createSQL := fmt.Sprintf("CREATE TABLE %s (`owner` STRING, `heartbeat` TIMESTAMP) COMMENT %s", l.ref(), sqlString(l.comment))
-	err := l.d.executeStatement(ctx, createSQL)
-	if err == nil {
-		if err := l.heartbeat(ctx); err != nil {
-			return false, fmt.Errorf("record Databricks CDC lease heartbeat: %w", err)
+	createSQL := fmt.Sprintf("CREATE TABLE %s AS SELECT %s AS `owner`, CURRENT_TIMESTAMP() AS `heartbeat`", l.ref(), sqlString(l.token))
+	if err := l.d.executeStatement(ctx, createSQL); err != nil {
+		if !isDatabricksAlreadyExistsError(err) {
+			return false, fmt.Errorf("acquire Databricks CDC run lease: %w", err)
 		}
-		owner, err := l.owner(ctx)
-		if err != nil {
+		staleOwner, err := l.staleHolder(ctx)
+		if err != nil || staleOwner == "" {
 			return false, err
 		}
-		return owner == l.comment, nil
-	}
-	if !isDatabricksAlreadyExistsError(err) {
-		return false, fmt.Errorf("acquire Databricks CDC run lease: %w", err)
+		takeoverSQL := fmt.Sprintf(
+			"UPDATE %s SET `owner` = %s, `heartbeat` = CURRENT_TIMESTAMP() WHERE `owner` = %s AND `heartbeat` < CURRENT_TIMESTAMP() - INTERVAL %d SECONDS",
+			l.ref(), sqlString(l.token), sqlString(staleOwner), int(cdcLeaseTTL/time.Second),
+		)
+		if err := l.d.executeStatement(ctx, takeoverSQL); err != nil {
+			config.Debug("[DATABRICKS] CDC run lease takeover of %s lost to a concurrent update: %v", l.ref(), err)
+			return false, nil
+		}
 	}
 
-	staleOwner, err := l.staleHolder(ctx)
-	if err != nil || staleOwner == "" {
+	owner, err := l.owner(ctx)
+	if err != nil {
+		if errors.Is(err, errLeaseTableNotFound) {
+			return false, nil
+		}
 		return false, err
 	}
-
-	dead := l.name + "_expired_" + l.token
-	if err := l.d.executeStatement(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", l.ref(), l.refOf(dead))); err != nil {
-		return false, nil
-	}
-	moved, _, err := l.leaseDetail(ctx, dead)
-	if err != nil || moved != staleOwner {
-		if renameErr := l.d.executeStatement(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", l.refOf(dead), l.ref())); renameErr != nil {
-			config.Debug("[DATABRICKS] Could not restore CDC run lease %s moved during takeover: %v", l.ref(), renameErr)
-		}
-		return false, nil
-	}
-	config.Debug("[DATABRICKS] Took over expired CDC run lease %s", l.ref())
-	l.d.dropQuietly(ctx, l.refOf(dead))
-	return false, nil
-}
-
-func (l *databricksCDCRunLease) leaseDetail(ctx context.Context, tableName string) (description, createdAt string, err error) {
-	res, err := l.d.queryStatement(ctx, "DESCRIBE DETAIL "+l.refOf(tableName))
-	if err != nil {
-		if isDatabricksMissingError(err) {
-			return "", "", errLeaseTableNotFound
-		}
-		return "", "", fmt.Errorf("read Databricks CDC lease detail: %w", err)
-	}
-	if len(res.rows) == 0 {
-		return "", "", errLeaseTableNotFound
-	}
-	row := res.rows[0]
-	if idx := res.columnIndex("description"); idx >= 0 && idx < len(row) {
-		description = row[idx]
-	}
-	if idx := res.columnIndex("createdAt"); idx >= 0 && idx < len(row) {
-		createdAt = row[idx]
-	}
-	return description, createdAt, nil
+	return owner == l.token, nil
 }
 
 func (l *databricksCDCRunLease) owner(ctx context.Context) (string, error) {
-	owner, _, err := l.leaseDetail(ctx, l.name)
-	return owner, err
+	res, err := l.d.queryStatement(ctx, "SELECT `owner` FROM "+l.ref())
+	if err != nil {
+		if isDatabricksMissingError(err) {
+			return "", errLeaseTableNotFound
+		}
+		return "", fmt.Errorf("read Databricks CDC lease owner: %w", err)
+	}
+	if len(res.rows) == 0 || len(res.rows[0]) == 0 {
+		return "", nil
+	}
+	return res.rows[0][0], nil
 }
 
+// staleHolder returns the lease row's owner when its heartbeat is older than
+// the TTL, and "" while the lease is live or absent.
 func (l *databricksCDCRunLease) staleHolder(ctx context.Context) (string, error) {
-	owner, createdAt, err := l.leaseDetail(ctx, l.name)
-	if err != nil {
-		if errors.Is(err, errLeaseTableNotFound) {
-			return "", nil
-		}
-		return "", err
-	}
-	holder := strings.TrimPrefix(owner, cdcLeaseCommentHead)
-
-	ageQuery := fmt.Sprintf(
-		"SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP()) - UNIX_TIMESTAMP(MAX(`heartbeat`)) AS BIGINT) FROM %s WHERE `owner` = %s",
-		l.ref(), sqlString(holder),
+	query := fmt.Sprintf(
+		"SELECT `owner`, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP()) - UNIX_TIMESTAMP(`heartbeat`) AS BIGINT) FROM %s",
+		l.ref(),
 	)
-	res, err := l.d.queryStatement(ctx, ageQuery)
+	res, err := l.d.queryStatement(ctx, query)
 	if err != nil {
 		if isDatabricksMissingError(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("read Databricks CDC lease heartbeat: %w", err)
 	}
-
-	var ageStr string
-	if len(res.rows) > 0 && len(res.rows[0]) > 0 {
-		ageStr = strings.TrimSpace(res.rows[0][0])
-	}
-	if ageStr == "" {
-		if createdAt == "" {
-			return "", nil
-		}
-		createdQuery := fmt.Sprintf(
-			"SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP()) - UNIX_TIMESTAMP(CAST(%s AS TIMESTAMP)) AS BIGINT)",
-			sqlString(createdAt),
-		)
-		res, err = l.d.queryStatement(ctx, createdQuery)
-		if err != nil {
-			return "", fmt.Errorf("read Databricks CDC lease creation age: %w", err)
-		}
-		if len(res.rows) > 0 && len(res.rows[0]) > 0 {
-			ageStr = strings.TrimSpace(res.rows[0][0])
-		}
-	}
-	if ageStr == "" {
+	if len(res.rows) == 0 || len(res.rows[0]) < 2 {
 		return "", nil
 	}
+	ageStr := strings.TrimSpace(res.rows[0][1])
 	ageSeconds, err := strconv.ParseInt(ageStr, 10, 64)
 	if err != nil {
 		return "", fmt.Errorf("parse Databricks CDC lease age %q: %w", ageStr, err)
 	}
-	if time.Duration(ageSeconds)*time.Second > cdcLeaseTTL {
-		return owner, nil
+	if ageSeconds > int64(cdcLeaseTTL/time.Second) {
+		return res.rows[0][0], nil
 	}
 	return "", nil
 }
 
 func (l *databricksCDCRunLease) heartbeat(ctx context.Context) error {
-	return l.d.executeStatement(ctx, fmt.Sprintf("INSERT INTO %s (`owner`, `heartbeat`) VALUES (%s, CURRENT_TIMESTAMP())", l.ref(), sqlString(l.token)))
+	return l.d.executeStatement(ctx, fmt.Sprintf("UPDATE %s SET `heartbeat` = CURRENT_TIMESTAMP() WHERE `owner` = %s", l.ref(), sqlString(l.token)))
 }
 
 func (l *databricksCDCRunLease) monitor() {
@@ -569,7 +520,7 @@ func (l *databricksCDCRunLease) monitor() {
 			lost = errors.New("the lease table no longer exists")
 		case err != nil:
 			config.Debug("[DATABRICKS] CDC lease check failed: %v", err)
-		case owner != l.comment:
+		case owner != l.token:
 			lost = errors.New("the lease was taken over by another run")
 		case time.Since(time.Unix(0, l.lastHeartbeat.Load())) >= cdcLeaseHeartbeat:
 			if err := l.heartbeat(ctx); err != nil {
@@ -621,6 +572,9 @@ func (l *databricksCDCRunLease) Err() error {
 	return l.err
 }
 
+// Release backdates this run's heartbeat so the next run can take the lease
+// over immediately. The lease table itself is kept: dropping or renaming the
+// shared name could remove a lease another run has just taken over.
 func (l *databricksCDCRunLease) Release() error {
 	l.releaseOnce.Do(func() {
 		l.stopping.Store(true)
@@ -629,26 +583,16 @@ func (l *databricksCDCRunLease) Release() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		owner, err := l.owner(ctx)
-		if err != nil || owner != l.comment {
+		if err != nil || owner != l.token {
 			if err == nil || errors.Is(err, errLeaseTableNotFound) {
 				err = errors.New("lease was not owned during release")
 			}
 			l.releaseErr = fmt.Errorf("release Databricks CDC run lease: %w", err)
 			return
 		}
-		released := l.name + "_released_" + l.token
-		if err := l.d.executeStatement(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", l.ref(), l.refOf(released))); err != nil {
+		releaseSQL := fmt.Sprintf("UPDATE %s SET `heartbeat` = TIMESTAMP '1970-01-01 00:00:00' WHERE `owner` = %s", l.ref(), sqlString(l.token))
+		if err := l.d.executeStatement(ctx, releaseSQL); err != nil {
 			l.releaseErr = fmt.Errorf("release Databricks CDC run lease: %w", err)
-			return
-		}
-		moved, _, err := l.leaseDetail(ctx, released)
-		if err != nil || moved != l.comment {
-			_ = l.d.executeStatement(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", l.refOf(released), l.ref()))
-			l.releaseErr = errors.New("release Databricks CDC run lease: the lease was taken over before release")
-			return
-		}
-		if err := l.d.DropTable(ctx, l.refOf(released)); err != nil {
-			l.releaseErr = fmt.Errorf("drop released Databricks CDC run lease: %w", err)
 		}
 	})
 	return l.releaseErr
