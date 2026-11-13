@@ -52,42 +52,51 @@ func (d *ClickHouseDestination) ApplySchemaEvolutionIfIncarnation(
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return nil, "", err
 	}
-	current, exists, err := d.CDCTargetIncarnation(ctx, table)
-	if err != nil {
-		return nil, "", err
-	}
-	if !exists || current != expectedIncarnation {
-		return nil, "", fmt.Errorf("ClickHouse CDC target %q physical incarnation changed before schema evolution", table)
+	if err := d.checkCDCIncarnation(ctx, table, expectedIncarnation); err != nil {
+		return nil, "", fmt.Errorf("ClickHouse CDC target %q physical incarnation changed before schema evolution: %w", table, err)
 	}
 
 	dialect, err := d.evolutionDialect(ctx, table)
 	if err != nil {
 		return nil, "", err
 	}
-	statements, warnings, err := destination.RenderEvolution(dialect, d.tableRef(table), comparison)
+	previewStmts, warnings, err := destination.RenderEvolution(dialect, d.tableRef(table), comparison)
 	if err != nil {
 		return nil, "", err
+	}
+	if len(previewStmts) == 0 {
+		if err := d.checkCDCIncarnation(ctx, table, expectedIncarnation); err != nil {
+			return warnings, "", fmt.Errorf("ClickHouse CDC target %q physical incarnation changed during schema evolution: %w", table, err)
+		}
+		return warnings, expectedIncarnation, nil
+	}
+
+	plan, err := d.prepareCDCShadowPlan(ctx, table, expectedIncarnation, true)
+	if err != nil {
+		return warnings, "", err
+	}
+	plans := []*cdcShadowPlan{plan}
+	defer d.cleanupCDCShadowPlans(ctx, plans)
+
+	statements, warnings, err := destination.RenderEvolution(dialect, d.tableRef(plan.shadowTable()), comparison)
+	if err != nil {
+		return warnings, "", err
 	}
 	for _, stmt := range statements {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return warnings, "", err
 		}
-		if err := d.checkCDCIncarnation(ctx, table, expectedIncarnation); err != nil {
-			return warnings, "", fmt.Errorf("ClickHouse CDC target %q physical incarnation changed during schema evolution: %w", table, err)
-		}
 		if err := d.Exec(ctx, stmt); err != nil {
 			return warnings, "", fmt.Errorf("apply schema evolution: %s: %w", stmt, err)
 		}
 	}
-
-	current, exists, err = d.CDCTargetIncarnation(ctx, table)
-	if err != nil {
+	if err := d.waitForMutations(ctx, plan.shadowDB, plan.shadowName); err != nil {
 		return warnings, "", err
 	}
-	if !exists || current != expectedIncarnation {
-		return warnings, "", fmt.Errorf("ClickHouse CDC target %q physical incarnation changed during schema evolution", table)
+	if err := d.publishCDCShadowPlans(ctx, plans); err != nil {
+		return warnings, "", err
 	}
-	return warnings, current, nil
+	return warnings, expectedIncarnation, nil
 }
 
 // SupportsColumnTypeChanges reports whether this destination can change a column's type.

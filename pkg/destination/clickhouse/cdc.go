@@ -2,7 +2,9 @@ package clickhouse
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -66,63 +68,110 @@ func (d *ClickHouseDestination) CanonicalCDCTarget(_ context.Context, table stri
 	return destination.CDCTargetKey(db, name), nil
 }
 
+const (
+	clickHouseShadowStagingDB          = "_bruin_staging"
+	clickHouseZeroUUID                 = "00000000-0000-0000-0000-000000000000"
+	clickHouseIncarnationCommentMarker = "__ingestr_cdc_incarnation="
+)
+
+type clickHouseTableMeta struct {
+	uuid    string
+	modTime string
+	comment string
+}
+
+func (m clickHouseTableMeta) physicalID() string {
+	return formatTableIdentity(m.uuid, m.modTime)
+}
+
+func (m clickHouseTableMeta) commentBindingID() string {
+	if m.uuid != "" && m.uuid != clickHouseZeroUUID {
+		return m.uuid
+	}
+	return "legacy"
+}
+
+func (m clickHouseTableMeta) incarnationID() string {
+	if logical, ok := parseBoundIncarnationComment(m.comment, m.commentBindingID()); ok {
+		return logical
+	}
+	return m.physicalID()
+}
+
 func (d *ClickHouseDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
 	db, name := d.parseTableName(table)
-	uuid, modTime, exists, err := d.tableIdentity(ctx, db, name)
+	meta, exists, err := d.readTableMeta(ctx, db, name)
 	if err != nil || !exists {
 		return "", false, err
 	}
-	return destination.CDCTargetKey(db, name, formatTableIdentity(uuid, modTime)), true, nil
+	return destination.CDCTargetKey(db, name, meta.incarnationID()), true, nil
 }
 
-func (d *ClickHouseDestination) tableIdentity(ctx context.Context, db, name string) (string, string, bool, error) {
-	var uuid, modTime string
+func (d *ClickHouseDestination) readTableMeta(ctx context.Context, db, name string) (clickHouseTableMeta, bool, error) {
+	var meta clickHouseTableMeta
 	err := d.conn.QueryRow(
 		ctx,
-		"SELECT toString(uuid), toString(metadata_modification_time) FROM system.tables WHERE database = ? AND name = ?",
+		"SELECT toString(uuid), toString(metadata_modification_time), comment FROM system.tables WHERE database = ? AND name = ?",
 		db, name,
-	).Scan(&uuid, &modTime)
+	).Scan(&meta.uuid, &meta.modTime, &meta.comment)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, nil
+		return clickHouseTableMeta{}, false, nil
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("read ClickHouse table identity for %s.%s: %w", db, name, err)
+		return clickHouseTableMeta{}, false, fmt.Errorf("read ClickHouse table identity for %s.%s: %w", db, name, err)
 	}
-	return uuid, modTime, true, nil
+	return meta, true, nil
 }
 
 func formatTableIdentity(uuid, modTime string) string {
-	if uuid != "" && uuid != "00000000-0000-0000-0000-000000000000" {
+	if uuid != "" && uuid != clickHouseZeroUUID {
 		return uuid
 	}
 	return "legacy:" + modTime
 }
 
-func extractIncarnationUUID(incarnation string) string {
-	idx := strings.LastIndex(incarnation, ":")
-	if idx == -1 || idx+1 >= len(incarnation) {
-		return ""
+func formatBoundIncarnationComment(existingComment, bindingID, logicalID string) string {
+	base := stripBoundIncarnationComment(existingComment)
+	marker := clickHouseIncarnationCommentMarker + hex.EncodeToString([]byte(bindingID)) + ":" + hex.EncodeToString([]byte(logicalID))
+	if base == "" {
+		return marker
 	}
-	raw, err := destinationDecodeHex(incarnation[idx+1:])
-	if err != nil {
-		return ""
-	}
-	return raw
+	return base + "\n" + marker
 }
 
-func destinationDecodeHex(s string) (string, error) {
-	if len(s)%2 != 0 {
-		return "", fmt.Errorf("invalid hex length %d", len(s))
+func stripBoundIncarnationComment(comment string) string {
+	idx := strings.LastIndex(comment, clickHouseIncarnationCommentMarker)
+	if idx == 0 {
+		return ""
 	}
-	out := make([]byte, len(s)/2)
-	for i := 0; i < len(out); i++ {
-		v, err := strconv.ParseUint(s[i*2:i*2+2], 16, 8)
-		if err != nil {
-			return "", err
-		}
-		out[i] = byte(v)
+	if idx > 0 && comment[idx-1] == '\n' {
+		return comment[:idx-1]
 	}
-	return string(out), nil
+	return comment
+}
+
+func parseBoundIncarnationComment(comment, expectedBindingID string) (string, bool) {
+	idx := strings.LastIndex(comment, clickHouseIncarnationCommentMarker)
+	if idx < 0 || (idx > 0 && comment[idx-1] != '\n') {
+		return "", false
+	}
+	rest := comment[idx+len(clickHouseIncarnationCommentMarker):]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	boundHex, logicalHex, ok := strings.Cut(rest, ":")
+	if !ok || boundHex == "" || logicalHex == "" {
+		return "", false
+	}
+	boundBytes, err := hex.DecodeString(boundHex)
+	if err != nil || string(boundBytes) != expectedBindingID {
+		return "", false
+	}
+	logicalBytes, err := hex.DecodeString(logicalHex)
+	if err != nil || len(logicalBytes) == 0 {
+		return "", false
+	}
+	return string(logicalBytes), true
 }
 
 func (d *ClickHouseDestination) checkCDCIncarnation(ctx context.Context, table, expected string) error {
@@ -139,6 +188,277 @@ func (d *ClickHouseDestination) checkCDCIncarnation(ctx context.Context, table, 
 	return nil
 }
 
+type cdcShadowPlan struct {
+	table               string
+	targetDB            string
+	targetName          string
+	expectedIncarnation string
+	expectedMeta        clickHouseTableMeta
+	shadowDB            string
+	shadowName          string
+	bakName             string
+	discardName         string
+	shadowConsumed      bool
+}
+
+func (p *cdcShadowPlan) shadowTable() string {
+	return p.shadowDB + "." + p.shadowName
+}
+
+func newCDCShadowNames(targetDB, targetName string) (shadowName, bakName, discardName string, err error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", "", "", fmt.Errorf("generate ClickHouse CDC shadow nonce: %w", err)
+	}
+	nonce := hex.EncodeToString(raw[:])
+	digest := destination.CDCTargetKeyDigest(destination.CDCTargetKey(targetDB, targetName))
+	if len(digest) > 12 {
+		digest = digest[:12]
+	}
+	return fmt.Sprintf("__ingestr_cdc_shw_%s_%s", digest, nonce),
+		fmt.Sprintf("__ingestr_cdc_bak_%s_%s", digest, nonce),
+		fmt.Sprintf("__ingestr_cdc_dsc_%s_%s", digest, nonce),
+		nil
+}
+
+func (d *ClickHouseDestination) prepareCDCShadowPlan(ctx context.Context, table, expectedIncarnation string, copyData bool) (*cdcShadowPlan, error) {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return nil, err
+	}
+	targetDB, targetName := d.parseTableName(table)
+	meta, exists, err := d.readTableMeta(ctx, targetDB, targetName)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		if expectedIncarnation != "" {
+			return nil, fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", table)
+		}
+		return nil, fmt.Errorf("ClickHouse CDC target %s does not exist", table)
+	}
+	if expectedIncarnation != "" {
+		actual := destination.CDCTargetKey(targetDB, targetName, meta.incarnationID())
+		if actual != expectedIncarnation {
+			return nil, fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", table)
+		}
+	}
+	if err := d.ensureDatabaseExists(ctx, clickHouseShadowStagingDB); err != nil {
+		return nil, fmt.Errorf("ensure ClickHouse CDC shadow staging database: %w", err)
+	}
+	shadowName, bakName, discardName, err := newCDCShadowNames(targetDB, targetName)
+	if err != nil {
+		return nil, err
+	}
+	plan := &cdcShadowPlan{
+		table:               table,
+		targetDB:            targetDB,
+		targetName:          targetName,
+		expectedIncarnation: expectedIncarnation,
+		expectedMeta:        meta,
+		shadowDB:            clickHouseShadowStagingDB,
+		shadowName:          shadowName,
+		bakName:             bakName,
+		discardName:         discardName,
+	}
+
+	createSQL := fmt.Sprintf(
+		"CREATE TABLE %s.%s%s AS %s.%s",
+		quoteIdentifier(plan.shadowDB),
+		quoteIdentifier(plan.shadowName),
+		onClusterClause(d.cluster),
+		quoteIdentifier(targetDB),
+		quoteIdentifier(targetName),
+	)
+	if err := d.conn.Exec(ctx, createSQL); err != nil {
+		config.LogFailedQuery(createSQL, err)
+		return nil, fmt.Errorf("create ClickHouse CDC shadow table for %s: %w", table, err)
+	}
+
+	if copyData {
+		if err := d.cloneTablePartitions(ctx, targetDB, targetName, plan.shadowDB, plan.shadowName); err != nil {
+			_ = d.DropTable(context.WithoutCancel(ctx), plan.shadowTable())
+			return nil, err
+		}
+		afterMeta, afterExists, err := d.readTableMeta(ctx, targetDB, targetName)
+		if err != nil {
+			_ = d.DropTable(context.WithoutCancel(ctx), plan.shadowTable())
+			return nil, err
+		}
+		if !afterExists || afterMeta.physicalID() != meta.physicalID() || afterMeta.incarnationID() != meta.incarnationID() {
+			_ = d.DropTable(context.WithoutCancel(ctx), plan.shadowTable())
+			return nil, fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", table)
+		}
+	}
+	return plan, nil
+}
+
+func (d *ClickHouseDestination) cloneTablePartitions(ctx context.Context, srcDB, srcName, dstDB, dstName string) error {
+	if err := d.waitForMutations(ctx, srcDB, srcName); err != nil {
+		return err
+	}
+	rows, err := d.conn.Query(
+		ctx,
+		"SELECT DISTINCT partition_id FROM system.parts WHERE database = ? AND table = ? AND active ORDER BY partition_id",
+		srcDB, srcName,
+	)
+	if err != nil {
+		return fmt.Errorf("list ClickHouse partitions of %s.%s: %w", srcDB, srcName, err)
+	}
+	var partitions []string
+	for rows.Next() {
+		var partID string
+		if err := rows.Scan(&partID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan ClickHouse partition of %s.%s: %w", srcDB, srcName, err)
+		}
+		partitions = append(partitions, partID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("read ClickHouse partitions of %s.%s: %w", srcDB, srcName, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close ClickHouse partition rows of %s.%s: %w", srcDB, srcName, err)
+	}
+	for _, partID := range partitions {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		replaceSQL := fmt.Sprintf(
+			"ALTER TABLE %s.%s%s REPLACE PARTITION ID %s FROM %s.%s",
+			quoteIdentifier(dstDB),
+			quoteIdentifier(dstName),
+			onClusterClause(d.cluster),
+			sqlString(partID),
+			quoteIdentifier(srcDB),
+			quoteIdentifier(srcName),
+		)
+		if err := d.conn.Exec(ctx, replaceSQL); err != nil {
+			config.LogFailedQuery(replaceSQL, err)
+			return fmt.Errorf("clone ClickHouse partition %q from %s.%s: %w", partID, srcDB, srcName, err)
+		}
+	}
+	return nil
+}
+
+func (d *ClickHouseDestination) cleanupCDCShadowPlans(ctx context.Context, plans []*cdcShadowPlan) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	for _, p := range plans {
+		if p != nil && !p.shadowConsumed {
+			_ = d.DropTable(cleanupCtx, p.shadowTable())
+		}
+	}
+}
+
+func (d *ClickHouseDestination) publishCDCShadowPlans(ctx context.Context, plans []*cdcShadowPlan) error {
+	if len(plans) == 0 {
+		return source.ConnectorLeaseLoss(ctx)
+	}
+	for _, p := range plans {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		shadowMeta, exists, err := d.readTableMeta(ctx, p.shadowDB, p.shadowName)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("ClickHouse CDC shadow table %s.%s disappeared before publish", p.shadowDB, p.shadowName)
+		}
+		stamped := formatBoundIncarnationComment(p.expectedMeta.comment, shadowMeta.commentBindingID(), p.expectedMeta.incarnationID())
+		commentSQL := fmt.Sprintf(
+			"ALTER TABLE %s.%s%s MODIFY COMMENT %s",
+			quoteIdentifier(p.shadowDB),
+			quoteIdentifier(p.shadowName),
+			onClusterClause(d.cluster),
+			sqlString(stamped),
+		)
+		if err := d.conn.Exec(ctx, commentSQL); err != nil {
+			config.LogFailedQuery(commentSQL, err)
+			return fmt.Errorf("stamp ClickHouse CDC shadow incarnation on %s.%s: %w", p.shadowDB, p.shadowName, err)
+		}
+		curMeta, curExists, err := d.readTableMeta(ctx, p.targetDB, p.targetName)
+		if err != nil {
+			return err
+		}
+		if !curExists || curMeta.physicalID() != p.expectedMeta.physicalID() || curMeta.incarnationID() != p.expectedMeta.incarnationID() {
+			return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", p.table)
+		}
+	}
+
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+
+	pairs := make([]string, 0, len(plans)*2)
+	for _, p := range plans {
+		targetRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.targetDB), quoteIdentifier(p.targetName))
+		bakRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.bakName))
+		shadowRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.shadowName))
+		pairs = append(pairs, fmt.Sprintf("%s TO %s", targetRef, bakRef))
+		pairs = append(pairs, fmt.Sprintf("%s TO %s", shadowRef, targetRef))
+	}
+	renameSQL := fmt.Sprintf("RENAME TABLE %s%s", strings.Join(pairs, ", "), onClusterClause(d.cluster))
+	if err := d.conn.Exec(ctx, renameSQL); err != nil {
+		config.LogFailedQuery(renameSQL, err)
+		checkCtx := context.WithoutCancel(ctx)
+		for _, p := range plans {
+			curMeta, curExists, checkErr := d.readTableMeta(checkCtx, p.targetDB, p.targetName)
+			if checkErr == nil && (!curExists || curMeta.physicalID() != p.expectedMeta.physicalID() || curMeta.incarnationID() != p.expectedMeta.incarnationID()) {
+				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", p.table)
+			}
+		}
+		return fmt.Errorf("publish ClickHouse CDC shadow tables: %w", err)
+	}
+	for _, p := range plans {
+		p.shadowConsumed = true
+	}
+
+	verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	var mismatchTable string
+	var verifyErr error
+	for _, p := range plans {
+		bakMeta, bakExists, err := d.readTableMeta(verifyCtx, p.shadowDB, p.bakName)
+		if err != nil {
+			verifyErr = err
+			mismatchTable = p.table
+			break
+		}
+		if !bakExists || bakMeta.physicalID() != p.expectedMeta.physicalID() || bakMeta.incarnationID() != p.expectedMeta.incarnationID() {
+			mismatchTable = p.table
+			break
+		}
+	}
+
+	if mismatchTable != "" {
+		restorePairs := make([]string, 0, len(plans)*2)
+		for _, p := range plans {
+			targetRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.targetDB), quoteIdentifier(p.targetName))
+			discardRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.discardName))
+			bakRef := fmt.Sprintf("%s.%s", quoteIdentifier(p.shadowDB), quoteIdentifier(p.bakName))
+			restorePairs = append(restorePairs, fmt.Sprintf("%s TO %s", targetRef, discardRef))
+			restorePairs = append(restorePairs, fmt.Sprintf("%s TO %s", bakRef, targetRef))
+		}
+		restoreSQL := fmt.Sprintf("RENAME TABLE %s%s", strings.Join(restorePairs, ", "), onClusterClause(d.cluster))
+		_ = d.conn.Exec(verifyCtx, restoreSQL)
+		for _, p := range plans {
+			_ = d.DropTable(verifyCtx, p.shadowDB+"."+p.discardName)
+		}
+		if verifyErr != nil {
+			return verifyErr
+		}
+		return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", mismatchTable)
+	}
+
+	for _, p := range plans {
+		_ = d.DropTable(verifyCtx, p.shadowDB+"."+p.bakName)
+	}
+	return nil
+}
+
 func (d *ClickHouseDestination) TruncateCDCTable(ctx context.Context, table string) error {
 	return d.TruncateTable(ctx, table)
 }
@@ -147,50 +467,98 @@ func (d *ClickHouseDestination) TruncateCDCTableIfIncarnation(ctx context.Contex
 	if expectedIncarnation == "" {
 		return errors.New("ClickHouse conditional CDC truncate requires an expected incarnation")
 	}
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+	plan, err := d.prepareCDCShadowPlan(ctx, table, expectedIncarnation, false)
+	if err != nil {
 		return err
 	}
-	if err := d.checkCDCIncarnation(ctx, table, expectedIncarnation); err != nil {
-		return err
-	}
-	if err := d.TruncateTable(ctx, table); err != nil {
-		return fmt.Errorf("truncate ClickHouse CDC target: %w", err)
-	}
-	return d.checkCDCIncarnation(ctx, table, expectedIncarnation)
+	plans := []*cdcShadowPlan{plan}
+	defer d.cleanupCDCShadowPlans(ctx, plans)
+	return d.publishCDCShadowPlans(ctx, plans)
 }
 
 func (d *ClickHouseDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if len(merges) == 0 {
+		return nil
+	}
+
+	for _, merge := range merges {
+		opts := merge.Options
+		if destination.HasCDCDeletedColumn(opts.Columns) && len(opts.PrimaryKeys) > 0 {
+			if opts.IncrementalPredicate != "" {
+				return fmt.Errorf("ClickHouse CDC merge does not support incremental predicates")
+			}
+			if err := d.validatePrimaryKey(ctx, "CDC target", opts.TargetTable, opts.PrimaryKeys); err != nil {
+				return err
+			}
+		}
+	}
+
+	plans := make([]*cdcShadowPlan, 0, len(merges))
+	planByKey := make(map[string]*cdcShadowPlan, len(merges))
+	defer func() { d.cleanupCDCShadowPlans(ctx, plans) }()
+
 	for _, merge := range merges {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
-		if merge.Truncate {
-			if merge.Options.CDCExpectedIncarnation != "" {
-				if err := d.TruncateCDCTableIfIncarnation(ctx, merge.Options.TargetTable, merge.Options.CDCExpectedIncarnation); err != nil {
-					return err
+		opts := merge.Options
+		targetDB, targetName := d.parseTableName(opts.TargetTable)
+		key := destination.CDCTargetKey(targetDB, targetName)
+		plan, exists := planByKey[key]
+		if !exists {
+			var err error
+			plan, err = d.prepareCDCShadowPlan(ctx, opts.TargetTable, opts.CDCExpectedIncarnation, !merge.Truncate)
+			if err != nil {
+				return err
+			}
+			planByKey[key] = plan
+			plans = append(plans, plan)
+		} else {
+			if opts.CDCExpectedIncarnation != "" {
+				actual := destination.CDCTargetKey(targetDB, targetName, plan.expectedMeta.incarnationID())
+				if actual != opts.CDCExpectedIncarnation {
+					return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", opts.TargetTable)
 				}
-			} else if err := d.TruncateTable(ctx, merge.Options.TargetTable); err != nil {
-				return fmt.Errorf("truncate ClickHouse CDC target: %w", err)
+				if plan.expectedIncarnation == "" {
+					plan.expectedIncarnation = opts.CDCExpectedIncarnation
+				}
+			}
+			if merge.Truncate {
+				if err := d.TruncateTable(ctx, plan.shadowTable()); err != nil {
+					return fmt.Errorf("truncate ClickHouse CDC shadow target: %w", err)
+				}
 			}
 		}
-		if err := d.MergeTable(ctx, merge.Options); err != nil {
-			return err
+
+		stagingDB, stagingName := d.parseTableName(opts.StagingTable)
+		if destination.HasCDCDeletedColumn(opts.Columns) && len(opts.PrimaryKeys) > 0 {
+			if err := d.mergeCDCInto(ctx, plan.shadowDB, plan.shadowName, stagingDB, stagingName, opts); err != nil {
+				return err
+			}
+		} else {
+			if err := d.insertStagingInto(ctx, plan.shadowDB, plan.shadowName, stagingDB, stagingName, destination.DestinationColumns(opts.Columns)); err != nil {
+				return err
+			}
 		}
 	}
-	return nil
+
+	return d.publishCDCShadowPlans(ctx, plans)
 }
 
 func (d *ClickHouseDestination) CDCConditionalSwapIncarnations(ctx context.Context, targetTable, stagingTable string) (string, string, error) {
 	targetDB, targetName := d.parseTableName(targetTable)
 	stageDB, stageName := d.parseTableName(stagingTable)
-	uuid, modTime, exists, err := d.tableIdentity(ctx, stageDB, stageName)
+	meta, exists, err := d.readTableMeta(ctx, stageDB, stageName)
 	if err != nil {
 		return "", "", err
 	}
 	if !exists {
 		return "", "", fmt.Errorf("ClickHouse swap staging table %q does not exist", stagingTable)
 	}
-	id := formatTableIdentity(uuid, modTime)
+	id := meta.incarnationID()
 	return destination.CDCTargetKey(stageDB, stageName, id), destination.CDCTargetKey(targetDB, targetName, id), nil
 }
 
@@ -208,13 +576,37 @@ func (d *ClickHouseDestination) mergeCDC(ctx context.Context, opts destination.M
 	if err := d.validatePrimaryKey(ctx, "CDC target", opts.TargetTable, opts.PrimaryKeys); err != nil {
 		return err
 	}
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
-		return err
-	}
 
 	stagingDB, stagingName := d.parseTableName(opts.StagingTable)
 	targetDB, targetName := d.parseTableName(opts.TargetTable)
 
+	if opts.CDCExpectedIncarnation == "" {
+		if err := d.mergeCDCInto(ctx, targetDB, targetName, stagingDB, stagingName, opts); err != nil {
+			return err
+		}
+		config.Debug("[CLICKHOUSE CDC MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
+	plan, err := d.prepareCDCShadowPlan(ctx, opts.TargetTable, opts.CDCExpectedIncarnation, true)
+	if err != nil {
+		return err
+	}
+	plans := []*cdcShadowPlan{plan}
+	defer d.cleanupCDCShadowPlans(ctx, plans)
+
+	if err := d.mergeCDCInto(ctx, plan.shadowDB, plan.shadowName, stagingDB, stagingName, opts); err != nil {
+		return err
+	}
+	if err := d.publishCDCShadowPlans(ctx, plans); err != nil {
+		return err
+	}
+
+	config.Debug("[CLICKHOUSE CDC MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
+
+func (d *ClickHouseDestination) mergeCDCInto(ctx context.Context, targetDB, targetName, stagingDB, stagingName string, opts destination.MergeOptions) error {
 	insertSQL := buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName, opts)
 	config.Debug("[CLICKHOUSE CDC MERGE] Executing INSERT: %s", insertSQL)
 
@@ -240,12 +632,6 @@ func (d *ClickHouseDestination) mergeCDC(ctx context.Context, opts destination.M
 		config.LogFailedQuery(optimizeSQL, err)
 		config.Debug("[CLICKHOUSE CDC MERGE] OPTIMIZE FINAL completed with note: %v", err)
 	}
-
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
-		return err
-	}
-
-	config.Debug("[CLICKHOUSE CDC MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
 }
 
@@ -563,12 +949,12 @@ func (d *ClickHouseDestination) tableHasColumn(ctx context.Context, database, ta
 
 func (d *ClickHouseDestination) validatePrimaryKey(ctx context.Context, role, table string, expected []string) error {
 	database, tableName := d.parseTableName(table)
-	var engine, primaryKey, sortingKey string
+	var engine, sortingKey string
 	err := d.conn.QueryRow(
 		ctx,
-		"SELECT engine, primary_key, sorting_key FROM system.tables WHERE database = ? AND name = ?",
+		"SELECT engine, sorting_key FROM system.tables WHERE database = ? AND name = ?",
 		database, tableName,
-	).Scan(&engine, &primaryKey, &sortingKey)
+	).Scan(&engine, &sortingKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("ClickHouse %s %s does not exist", role, table)
 	}
@@ -576,10 +962,7 @@ func (d *ClickHouseDestination) validatePrimaryKey(ctx context.Context, role, ta
 		return fmt.Errorf("read ClickHouse %s metadata for %s: %w", role, table, err)
 	}
 
-	actual := parseClickHouseKeyList(primaryKey)
-	if len(actual) == 0 {
-		actual = parseClickHouseKeyList(sortingKey)
-	}
+	actual := parseClickHouseKeyList(sortingKey)
 
 	normalize := func(cols []string) []string {
 		out := make([]string, len(cols))
@@ -591,7 +974,7 @@ func (d *ClickHouseDestination) validatePrimaryKey(ctx context.Context, role, ta
 	}
 
 	if !strings.Contains(engine, "ReplacingMergeTree") || !slices.Equal(normalize(actual), normalize(expected)) {
-		return fmt.Errorf("ClickHouse %s %s requires ReplacingMergeTree with primary key (%s); found %s (%s). If the key changed, rerun with --full-refresh to rebuild the table",
+		return fmt.Errorf("ClickHouse %s %s requires ReplacingMergeTree with primary key (%s); found %s (sorting key: %s). If the key changed, rerun with --full-refresh to rebuild the table",
 			role, table, strings.Join(expected, ", "), engine, strings.Join(actual, ", "))
 	}
 	return nil
@@ -605,6 +988,7 @@ func parseClickHouseKeyList(expr string) []string {
 	var out []string
 	var cur strings.Builder
 	inBacktick := false
+	parenDepth := 0
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
 		switch {
@@ -615,7 +999,13 @@ func parseClickHouseKeyList(expr string) []string {
 			} else {
 				inBacktick = !inBacktick
 			}
-		case ch == ',' && !inBacktick:
+		case ch == '(' && !inBacktick:
+			parenDepth++
+			cur.WriteByte(ch)
+		case ch == ')' && !inBacktick && parenDepth > 0:
+			parenDepth--
+			cur.WriteByte(ch)
+		case ch == ',' && !inBacktick && parenDepth == 0:
 			if part := strings.TrimSpace(cur.String()); part != "" {
 				out = append(out, part)
 			}

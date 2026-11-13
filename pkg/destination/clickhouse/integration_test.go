@@ -1633,6 +1633,283 @@ func TestClickHouseDestination_CDC_FencingAndLease(t *testing.T) {
 		require.True(t, exists)
 		require.Equal(t, sameResInc, curInc2)
 	})
+
+	t.Run("Sorting key validation, multi-table atomic rollback, and replacement preservation", func(t *testing.T) {
+		// 1. Greptile 4560489653: ReplacingMergeTree with PRIMARY KEY (id) ORDER BY (id, other) must be rejected when CDC key is (id).
+		_, err := db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS warehouse")
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, `
+			CREATE TABLE warehouse.pk_prefix_items (
+				id Int64,
+				other String,
+				_cdc_lsn String,
+				_cdc_deleted Bool
+			) ENGINE = ReplacingMergeTree()
+			PRIMARY KEY (id)
+			ORDER BY (id, other)`)
+		require.NoError(t, err)
+
+		err = d1.PrepareTable(ctx, destpkg.PrepareOptions{
+			Table:                  "warehouse.pk_prefix_items",
+			PrimaryKeys:            []string{"id"},
+			CDCMode:                true,
+			CDCKeys:                []string{"id"},
+			RequirePrimaryKeyMatch: true,
+		})
+		require.ErrorContains(t, err, "sorting key: id, other")
+
+		err = d1.MergeTable(ctx, destpkg.MergeOptions{
+			TargetTable:  "warehouse.pk_prefix_items",
+			StagingTable: "_bruin_staging.unused_stage",
+			PrimaryKeys:  []string{"id"},
+			Columns:      []string{"id", "other", destpkg.CDCLSNColumn, destpkg.CDCDeletedColumn},
+		})
+		require.ErrorContains(t, err, "sorting key: id, other")
+
+		// 2. Greptile 4560489643: MergeCDCTablesAtomically rolls back all tables (including Truncate: true) when a later table fails.
+		fullSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64},
+				{Name: "title", DataType: schema.TypeString, Nullable: false},
+				{Name: destpkg.CDCLSNColumn, DataType: schema.TypeString},
+				{Name: destpkg.CDCDeletedColumn, DataType: schema.TypeBoolean},
+				{Name: destpkg.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+			},
+			PrimaryKeys: []string{"id"},
+		}
+		targetSchema := destpkg.DestinationTableSchema(fullSchema)
+
+		writeTableRows := func(tbl string, rows []struct {
+			id      int64
+			title   string
+			lsn     string
+			deleted bool
+		},
+		) {
+			require.NoError(t, d1.PrepareTable(ctx, destpkg.PrepareOptions{
+				Table:     tbl,
+				Schema:    fullSchema,
+				DropFirst: true,
+				CDCMode:   true,
+				CDCKeys:   []string{"id"},
+			}))
+			rb := array.NewRecordBuilder(memory.DefaultAllocator, arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+				{Name: "title", Type: arrow.BinaryTypes.String, Nullable: true},
+				{Name: destpkg.CDCLSNColumn, Type: arrow.BinaryTypes.String},
+				{Name: destpkg.CDCDeletedColumn, Type: arrow.FixedWidthTypes.Boolean},
+				{Name: destpkg.CDCSyncedAtColumn, Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+			}, nil))
+			defer rb.Release()
+			now := arrow.Timestamp(time.Now().UnixMicro())
+			for _, r := range rows {
+				rb.Field(0).(*array.Int64Builder).Append(r.id)
+				rb.Field(1).(*array.StringBuilder).Append(r.title)
+				rb.Field(2).(*array.StringBuilder).Append(r.lsn)
+				rb.Field(3).(*array.BooleanBuilder).Append(r.deleted)
+				rb.Field(4).(*array.TimestampBuilder).Append(now)
+			}
+			ch := make(chan source.RecordBatchResult, 1)
+			ch <- source.RecordBatchResult{Batch: rb.NewRecordBatch()}
+			close(ch)
+			require.NoError(t, d1.Write(ctx, ch, destpkg.WriteOptions{Table: tbl, Schema: fullSchema}))
+		}
+
+		t1 := "warehouse.atomic_t1"
+		t2 := "warehouse.atomic_t2"
+		stg1 := "_bruin_staging.atomic_stg1"
+		stg2 := "_bruin_staging.atomic_stg2"
+		for _, tbl := range []string{t1, t2} {
+			require.NoError(t, d1.PrepareTable(ctx, destpkg.PrepareOptions{
+				Table:       tbl,
+				Schema:      targetSchema,
+				DropFirst:   true,
+				PrimaryKeys: []string{"id"},
+				CDCMode:     true,
+				CDCKeys:     []string{"id"},
+			}))
+		}
+		inc1, exists, err := d1.CDCTargetIncarnation(ctx, t1)
+		require.NoError(t, err)
+		require.True(t, exists)
+		inc2, exists, err := d1.CDCTargetIncarnation(ctx, t2)
+		require.NoError(t, err)
+		require.True(t, exists)
+
+		writeTableRows(stg1, []struct {
+			id      int64
+			title   string
+			lsn     string
+			deleted bool
+		}{
+			{id: 1, title: "orig-1", lsn: "0001"},
+			{id: 2, title: "orig-2", lsn: "0001"},
+			{id: 3, title: "orig-3", lsn: "0001"},
+		})
+		writeTableRows(stg2, []struct {
+			id      int64
+			title   string
+			lsn     string
+			deleted bool
+		}{
+			{id: 10, title: "orig-10", lsn: "0001"},
+			{id: 20, title: "orig-20", lsn: "0001"},
+		})
+		require.NoError(t, d1.MergeCDCTablesAtomically(ctx, []destpkg.CDCAtomicTableMerge{
+			{Options: destpkg.MergeOptions{TargetTable: t1, StagingTable: stg1, Columns: fullSchema.ColumnNames(), PrimaryKeys: []string{"id"}, CDCExpectedIncarnation: inc1}},
+			{Options: destpkg.MergeOptions{TargetTable: t2, StagingTable: stg2, Columns: fullSchema.ColumnNames(), PrimaryKeys: []string{"id"}, CDCExpectedIncarnation: inc2}},
+		}))
+		require.Equal(t, 3, countClickHouseRows(t, ctx, uri, t1))
+		require.Equal(t, 2, countClickHouseRows(t, ctx, uri, t2))
+
+		// Stage new row {99} for t1 with Truncate: true, and point t2 at a nonexistent staging table so table 2 fails.
+		writeTableRows(stg1, []struct {
+			id      int64
+			title   string
+			lsn     string
+			deleted bool
+		}{
+			{id: 99, title: "should-not-publish", lsn: "0002"},
+		})
+		err = d1.MergeCDCTablesAtomically(ctx, []destpkg.CDCAtomicTableMerge{
+			{
+				Truncate: true,
+				Options: destpkg.MergeOptions{
+					TargetTable:            t1,
+					StagingTable:           stg1,
+					Columns:                fullSchema.ColumnNames(),
+					PrimaryKeys:            []string{"id"},
+					CDCExpectedIncarnation: inc1,
+				},
+			},
+			{
+				Truncate: false,
+				Options: destpkg.MergeOptions{
+					TargetTable:            t2,
+					StagingTable:           "_bruin_staging.does_not_exist_stage",
+					Columns:                fullSchema.ColumnNames(),
+					PrimaryKeys:            []string{"id"},
+					CDCExpectedIncarnation: inc2,
+				},
+			},
+		})
+		require.Error(t, err)
+
+		// t1 must NOT be empty or mutated; all 3 original rows remain intact, and no shadow tables are leaked.
+		require.Equal(t, 3, countClickHouseRows(t, ctx, uri, t1))
+		require.Equal(t, 2, countClickHouseRows(t, ctx, uri, t2))
+		leakedShadows, err := d1.ListStagingTables(ctx, "_bruin_staging", "__ingestr_cdc_")
+		require.NoError(t, err)
+		require.Empty(t, leakedShadows)
+
+		// Now populate stg2 validly and verify atomic publish updates both tables and preserves incarnations.
+		writeTableRows(stg2, []struct {
+			id      int64
+			title   string
+			lsn     string
+			deleted bool
+		}{
+			{id: 10, title: "deleted-10", lsn: "0002", deleted: true},
+			{id: 30, title: "new-30", lsn: "0002"},
+		})
+		require.NoError(t, d1.MergeCDCTablesAtomically(ctx, []destpkg.CDCAtomicTableMerge{
+			{
+				Truncate: true,
+				Options: destpkg.MergeOptions{
+					TargetTable:            t1,
+					StagingTable:           stg1,
+					Columns:                fullSchema.ColumnNames(),
+					PrimaryKeys:            []string{"id"},
+					CDCExpectedIncarnation: inc1,
+				},
+			},
+			{
+				Truncate: false,
+				Options: destpkg.MergeOptions{
+					TargetTable:            t2,
+					StagingTable:           stg2,
+					Columns:                fullSchema.ColumnNames(),
+					PrimaryKeys:            []string{"id"},
+					CDCHardDelete:          true,
+					CDCExpectedIncarnation: inc2,
+				},
+			},
+		}))
+		require.Equal(t, 1, countClickHouseRows(t, ctx, uri, t1))
+		require.Equal(t, 2, countClickHouseRows(t, ctx, uri, t2))
+		afterInc1, _, err := d1.CDCTargetIncarnation(ctx, t1)
+		require.NoError(t, err)
+		require.Equal(t, inc1, afterInc1)
+		afterInc2, _, err := d1.CDCTargetIncarnation(ctx, t2)
+		require.NoError(t, err)
+		require.Equal(t, inc2, afterInc2)
+
+		// 3. Greptile 4560489667: External replacement table data is preserved (even if COMMENT is copied!) across conditional truncate, merge, schema evolution, and swap+drop.
+		var stampedComment string
+		require.NoError(t, db.QueryRowContext(ctx, "SELECT comment FROM system.tables WHERE database = 'warehouse' AND name = 'atomic_t1'").Scan(&stampedComment))
+		require.NotEmpty(t, stampedComment)
+
+		_, err = db.ExecContext(ctx, "DROP TABLE warehouse.atomic_t1")
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, fmt.Sprintf(`
+			CREATE TABLE warehouse.atomic_t1 (
+				id Int64,
+				title Nullable(String),
+				_cdc_lsn String,
+				_cdc_deleted Bool,
+				_cdc_synced_at DateTime64(6, 'UTC')
+			) ENGINE = ReplacingMergeTree()
+			ORDER BY (id)
+			COMMENT '%s'`, strings.ReplaceAll(stampedComment, `'`, `\'`)))
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "INSERT INTO warehouse.atomic_t1 VALUES (777, 'sentinel-a', '9999', false, now64(6)), (888, 'sentinel-b', '9999', false, now64(6))")
+		require.NoError(t, err)
+
+		require.ErrorContains(t, d1.TruncateCDCTableIfIncarnation(ctx, t1, inc1), "physical incarnation changed")
+		require.ErrorContains(t, d1.MergeTable(ctx, destpkg.MergeOptions{
+			TargetTable:            t1,
+			StagingTable:           stg1,
+			Columns:                fullSchema.ColumnNames(),
+			PrimaryKeys:            []string{"id"},
+			CDCExpectedIncarnation: inc1,
+		}), "physical incarnation changed")
+		_, _, err = d1.ApplySchemaEvolutionIfIncarnation(ctx, t1, &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{
+				{Type: schemaevolution.ChangeAddColumn, ColumnName: "extra_col", NewColumn: schema.Column{Name: "extra_col", DataType: schema.TypeString, Nullable: true}},
+			},
+		}, inc1)
+		require.ErrorContains(t, err, "physical incarnation changed")
+
+		replSwapStage := "_bruin_staging.repl_swap_stage"
+		require.NoError(t, d1.PrepareTable(ctx, destpkg.PrepareOptions{
+			Table:       replSwapStage,
+			Schema:      targetSchema,
+			DropFirst:   true,
+			PrimaryKeys: []string{"id"},
+			CDCMode:     true,
+			CDCKeys:     []string{"id"},
+		}))
+		replStageInc, replResInc, err := d1.CDCConditionalSwapIncarnations(ctx, t1, replSwapStage)
+		require.NoError(t, err)
+		require.ErrorContains(t, d1.SwapTable(ctx, destpkg.SwapOptions{
+			TargetTable:                   t1,
+			StagingTable:                  replSwapStage,
+			CDCExpectedIncarnation:        inc1,
+			CDCExpectedStagingIncarnation: replStageInc,
+			CDCExpectedResultIncarnation:  replResInc,
+		}), "physical incarnation changed")
+		require.NoError(t, d1.DropTable(ctx, replSwapStage))
+
+		// Sentinel rows and original 5-column schema on replacement table must remain 100% intact.
+		require.Equal(t, 2, countClickHouseRows(t, ctx, uri, t1))
+		var sentinelTitle string
+		require.NoError(t, db.QueryRowContext(ctx, "SELECT title FROM warehouse.atomic_t1 FINAL WHERE id = 777").Scan(&sentinelTitle))
+		require.Equal(t, "sentinel-a", sentinelTitle)
+		replSchema, err := d1.GetTableSchema(ctx, t1)
+		require.NoError(t, err)
+		require.Len(t, replSchema.Columns, 5)
+	})
 }
 
 func TestClickHouseDestination_PostgresCDC_EndToEnd(t *testing.T) {

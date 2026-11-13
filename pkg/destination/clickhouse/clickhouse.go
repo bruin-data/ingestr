@@ -153,19 +153,46 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+
+	if opts.CDCExpectedIncarnation == "" {
+		database, tableName := d.parseTableName(opts.Table)
+		totalRows, err := d.writeBatchesInto(ctx, records, database, tableName)
+		if err != nil {
+			return err
+		}
+		totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
+		config.Debug("[CLICKHOUSE] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
+		return nil
+	}
+
+	plan, err := d.prepareCDCShadowPlan(ctx, opts.Table, opts.CDCExpectedIncarnation, true)
+	if err != nil {
+		return err
+	}
+	plans := []*cdcShadowPlan{plan}
+	defer d.cleanupCDCShadowPlans(ctx, plans)
+
+	totalRows, err := d.writeBatchesInto(ctx, records, plan.shadowDB, plan.shadowName)
+	if err != nil {
+		return err
+	}
+	if err := d.publishCDCShadowPlans(ctx, plans); err != nil {
 		return err
 	}
 
-	database, tableName := d.parseTableName(opts.Table)
+	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
+	config.Debug("[CLICKHOUSE] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
+	return nil
+}
 
+func (d *ClickHouseDestination) writeBatchesInto(ctx context.Context, records <-chan source.RecordBatchResult, database, tableName string) (int64, error) {
 	var totalRows int64
 	batchNum := 0
 
 	for result := range records {
 		batchNum++
 		if result.Err != nil {
-			return result.Err
+			return totalRows, result.Err
 		}
 
 		record := result.Batch
@@ -183,11 +210,7 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			record.Release()
-			return err
-		}
-		if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
-			record.Release()
-			return err
+			return totalRows, err
 		}
 
 		config.Debug("[CLICKHOUSE] Batch %d: received %d rows, %d cols", batchNum, numRows, numCols)
@@ -203,7 +226,7 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 		batch, err := d.conn.PrepareBatch(ctx, insertSQL)
 		if err != nil {
 			record.Release()
-			return fmt.Errorf("failed to prepare batch: %w", err)
+			return totalRows, fmt.Errorf("failed to prepare batch: %w", err)
 		}
 
 		for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
@@ -213,13 +236,13 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 			}
 			if err := batch.Append(row...); err != nil {
 				record.Release()
-				return fmt.Errorf("failed to append row %d: %w", rowIdx, err)
+				return totalRows, fmt.Errorf("failed to append row %d: %w", rowIdx, err)
 			}
 		}
 
 		if err := batch.Send(); err != nil {
 			record.Release()
-			return fmt.Errorf("failed to send batch: %w", err)
+			return totalRows, fmt.Errorf("failed to send batch: %w", err)
 		}
 
 		record.Release()
@@ -229,13 +252,7 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 		config.Debug("[CLICKHOUSE] Batch %d: %d rows in %v (%.0f rows/sec)", batchNum, numRows, time.Since(startBatch), rate)
 	}
 
-	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
-		return err
-	}
-
-	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
-	config.Debug("[CLICKHOUSE] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
-	return nil
+	return totalRows, nil
 }
 
 func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
@@ -243,21 +260,31 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
+	stagingDB, stagingName := d.parseTableName(stagingTable)
+	targetDB, targetName := d.parseTableName(targetTable)
+
 	fenced := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
+	var targetMeta clickHouseTableMeta
 	if fenced {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
-		if err := d.checkCDCIncarnation(ctx, targetTable, opts.CDCExpectedIncarnation); err != nil {
+		meta, targetExists, err := d.readTableMeta(ctx, targetDB, targetName)
+		if err != nil {
 			return err
+		}
+		if opts.CDCExpectedIncarnation != "" {
+			if !targetExists || destination.CDCTargetKey(targetDB, targetName, meta.incarnationID()) != opts.CDCExpectedIncarnation {
+				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
+			}
+			targetMeta = meta
+		} else if targetExists {
+			return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
 		}
 		if err := d.checkCDCIncarnation(ctx, stagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
 			return err
 		}
 	}
-
-	stagingDB, stagingName := d.parseTableName(stagingTable)
-	targetDB, targetName := d.parseTableName(targetTable)
 
 	// Replace only PrepareTables the staging side, so the target database may
 	// not exist yet. Both EXCHANGE TABLES and RENAME TABLE require it.
@@ -266,12 +293,37 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 	}
 
 	exchangeSQL := fmt.Sprintf("EXCHANGE TABLES %s.%s AND %s.%s%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
-	if err := d.conn.Exec(ctx, exchangeSQL); err != nil {
+	if err := d.conn.Exec(ctx, exchangeSQL); err == nil {
+		if fenced {
+			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if opts.CDCExpectedIncarnation == "" {
+				_ = d.conn.Exec(verifyCtx, exchangeSQL)
+				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
+			}
+			displacedMeta, displacedExists, displacedErr := d.readTableMeta(verifyCtx, stagingDB, stagingName)
+			if displacedErr != nil ||
+				!displacedExists ||
+				displacedMeta.physicalID() != targetMeta.physicalID() ||
+				destination.CDCTargetKey(targetDB, targetName, displacedMeta.incarnationID()) != opts.CDCExpectedIncarnation {
+				_ = d.conn.Exec(verifyCtx, exchangeSQL)
+				if displacedErr != nil {
+					return displacedErr
+				}
+				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
+			}
+			if opts.CDCExpectedResultIncarnation != "" {
+				if err := d.checkCDCIncarnation(verifyCtx, targetTable, opts.CDCExpectedResultIncarnation); err != nil {
+					_ = d.conn.Exec(verifyCtx, exchangeSQL)
+					return err
+				}
+			}
+		}
+	} else {
 		config.Debug("[CLICKHOUSE] EXCHANGE TABLES failed, falling back to RENAME: %v", err)
 
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("clickhouse"))
-		oldTable := targetDB + "." + oldName
 
 		renameOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
 		renamedOld := false
@@ -284,12 +336,19 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 			renamedOld = true
 		}
 
-		if renamedOld && fenced && opts.CDCExpectedIncarnation != "" {
-			expectedMoved := destination.CDCTargetKey(targetDB, oldName, extractIncarnationUUID(opts.CDCExpectedIncarnation))
-			actualMoved, exists, checkErr := d.CDCTargetIncarnation(ctx, oldTable)
-			if checkErr != nil || !exists || actualMoved != expectedMoved {
-				restoreSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
-				_ = d.conn.Exec(ctx, restoreSQL)
+		restoreOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
+		if renamedOld && fenced {
+			verifyCtx := context.WithoutCancel(ctx)
+			if opts.CDCExpectedIncarnation == "" {
+				_ = d.conn.Exec(verifyCtx, restoreOldSQL)
+				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed", targetTable)
+			}
+			oldMeta, oldExists, checkErr := d.readTableMeta(verifyCtx, targetDB, oldName)
+			if checkErr != nil ||
+				!oldExists ||
+				oldMeta.physicalID() != targetMeta.physicalID() ||
+				destination.CDCTargetKey(targetDB, targetName, oldMeta.incarnationID()) != opts.CDCExpectedIncarnation {
+				_ = d.conn.Exec(verifyCtx, restoreOldSQL)
 				if checkErr != nil {
 					return checkErr
 				}
@@ -300,20 +359,26 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 		renameNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
 		if err := d.conn.Exec(ctx, renameNewSQL); err != nil {
 			if renamedOld {
-				restoreSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
-				_ = d.conn.Exec(ctx, restoreSQL)
+				_ = d.conn.Exec(context.WithoutCancel(ctx), restoreOldSQL)
 			}
 			config.LogFailedQuery(renameNewSQL, err)
 			return fmt.Errorf("failed to rename staging to target: %w", err)
 		}
 
-		dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
-		_ = d.conn.Exec(ctx, dropOldSQL)
-	}
+		if fenced && opts.CDCExpectedResultIncarnation != "" {
+			if err := d.checkCDCIncarnation(context.WithoutCancel(ctx), targetTable, opts.CDCExpectedResultIncarnation); err != nil {
+				revertNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(stagingDB), quoteIdentifier(stagingName), onClusterClause(d.cluster))
+				_ = d.conn.Exec(context.WithoutCancel(ctx), revertNewSQL)
+				if renamedOld {
+					_ = d.conn.Exec(context.WithoutCancel(ctx), restoreOldSQL)
+				}
+				return err
+			}
+		}
 
-	if fenced && opts.CDCExpectedResultIncarnation != "" {
-		if err := d.checkCDCIncarnation(ctx, targetTable, opts.CDCExpectedResultIncarnation); err != nil {
-			return err
+		if renamedOld {
+			dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
+			_ = d.conn.Exec(context.WithoutCancel(ctx), dropOldSQL)
 		}
 	}
 
@@ -330,8 +395,39 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 
 	stagingDB, stagingName := d.parseTableName(opts.StagingTable)
 	targetDB, targetName := d.parseTableName(opts.TargetTable)
+	cols := opts.Columns
+	if destination.HasCDCDeletedColumn(cols) {
+		cols = destination.DestinationColumns(cols)
+	}
 
-	quotedColumns := quoteColumns(opts.Columns)
+	if opts.CDCExpectedIncarnation == "" {
+		if err := d.insertStagingInto(ctx, targetDB, targetName, stagingDB, stagingName, cols); err != nil {
+			return err
+		}
+		config.Debug("[CLICKHOUSE MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
+	plan, err := d.prepareCDCShadowPlan(ctx, opts.TargetTable, opts.CDCExpectedIncarnation, true)
+	if err != nil {
+		return err
+	}
+	plans := []*cdcShadowPlan{plan}
+	defer d.cleanupCDCShadowPlans(ctx, plans)
+
+	if err := d.insertStagingInto(ctx, plan.shadowDB, plan.shadowName, stagingDB, stagingName, cols); err != nil {
+		return err
+	}
+	if err := d.publishCDCShadowPlans(ctx, plans); err != nil {
+		return err
+	}
+
+	config.Debug("[CLICKHOUSE MERGE] Merge completed in %v", time.Since(startMerge))
+	return nil
+}
+
+func (d *ClickHouseDestination) insertStagingInto(ctx context.Context, targetDB, targetName, stagingDB, stagingName string, columns []string) error {
+	quotedColumns := quoteColumns(columns)
 	insertSQL := fmt.Sprintf(
 		"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
 		quoteIdentifier(targetDB), quoteIdentifier(targetName),
@@ -351,8 +447,6 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 		config.LogFailedQuery(optimizeSQL, err)
 		config.Debug("[CLICKHOUSE MERGE] OPTIMIZE FINAL completed with note: %v", err)
 	}
-
-	config.Debug("[CLICKHOUSE MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
 }
 
