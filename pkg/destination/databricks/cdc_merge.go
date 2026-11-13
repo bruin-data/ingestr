@@ -1,14 +1,10 @@
 package databricks
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
-	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 func (d *DatabricksDestination) SupportsCDCMerge() bool         { return true }
@@ -18,32 +14,8 @@ func (d *DatabricksDestination) RequiresSerializedCDCRuns() bool {
 	return true
 }
 
-func (d *DatabricksDestination) mergeCDC(ctx context.Context, opts destination.MergeOptions) error {
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		return err
-	}
-	if len(opts.PrimaryKeys) == 0 {
-		return errors.New("databricks CDC merge requires at least one primary key")
-	}
-	if opts.CDCExpectedIncarnation != "" {
-		return d.executeFencedMerges(ctx, []destination.CDCAtomicTableMerge{{Options: opts}})
-	}
-
-	mergeSQL := d.buildCDCMergeSQL(opts)
-	config.Debug("[DATABRICKS] Executing CDC MERGE: %s", mergeSQL)
-
-	if err := d.executeStatement(ctx, mergeSQL); err != nil {
-		config.LogFailedQuery(mergeSQL, err)
-		return fmt.Errorf("failed to execute CDC merge: %w", err)
-	}
-	return nil
-}
-
 func (d *DatabricksDestination) buildCDCMergeSQL(opts destination.MergeOptions) string {
-	return d.buildCDCMergeSQLForTarget(opts, d.quoteTableRef(opts.TargetTable))
-}
-
-func (d *DatabricksDestination) buildCDCMergeSQLForTarget(opts destination.MergeOptions, targetFull string) string {
+	targetFull := d.quoteTableRef(opts.TargetTable)
 	allColumns := opts.Columns
 	destColumns := destination.DestinationColumns(allColumns)
 	stagingFull := d.quoteTableRef(opts.StagingTable)
