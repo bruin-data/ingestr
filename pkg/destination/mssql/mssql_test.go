@@ -422,7 +422,7 @@ func TestSwapTableUsesResolvedDefaultSchema(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`OBJECT_ID\('\[AppDB\]\.\[tenant_a\]\.\[orders\]', 'U'\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename 'tenant_a.orders_staging', 'orders'")).
+	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename N'[tenant_a].[orders_staging]', N'orders', N'OBJECT'")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
@@ -454,7 +454,7 @@ func TestSwapTableTransfersCaseDistinctSchemasUnderCaseSensitiveCollation(t *tes
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`OBJECT_ID\('\[AppDB\]\.\[Sales\]\.\[orders\]', 'U'\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename 'Sales.orders_staging', 'orders'")).
+	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename N'[Sales].[orders_staging]', N'orders', N'OBJECT'")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
@@ -482,13 +482,13 @@ func TestSwapTableCreatesDeferredPrimaryKey(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT kc.name
 FROM sys.key_constraints AS kc
 WHERE kc.parent_object_id = OBJECT_ID(@p1) AND kc.[type] = 'PK'`)).
-		WithArgs("AppDB.dbo.orders_staging").
+		WithArgs("[AppDB].[dbo].[orders_staging]").
 		WillReturnRows(sqlmock.NewRows([]string{"name"}))
 	mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE [AppDB].[dbo].[orders_staging] ADD PRIMARY KEY ([id]) WITH (SORT_IN_TEMPDB = ON)")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`OBJECT_ID\('\[AppDB\]\.\[dbo\]\.\[orders\]', 'U'\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(0))
-	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename 'dbo.orders_staging', 'orders'")).
+	mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename N'[dbo].[orders_staging]', N'orders', N'OBJECT'")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 

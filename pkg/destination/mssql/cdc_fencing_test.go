@@ -625,9 +625,9 @@ func TestConditionalSwapPlannerAndSwapTable(t *testing.T) {
 
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT CASE WHEN OBJECT_ID('[app].[dbo].[events]', 'U') IS NOT NULL THEN 1 ELSE 0 END")).
 			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
-		mock.ExpectExec("EXEC sys\\.sp_rename 'dbo\\.events'").
+		mock.ExpectExec(`EXEC sys\.sp_rename N'\[dbo\]\.\[events\]'`).
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec("EXEC sys\\.sp_rename 'dbo\\.events_stage', 'events'").
+		mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename N'[dbo].[events_stage]', N'events', N'OBJECT'")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec("DROP TABLE \\[app\\]\\.\\[dbo\\]\\.\\[events_old_").
 			WillReturnResult(sqlmock.NewResult(0, 0))
@@ -743,7 +743,7 @@ func TestApplySchemaEvolutionIfIncarnation(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
 			WithArgs("dbo", "items").
 			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(42), "2026-01-01T00:00:00"))
-		mock.ExpectExec("ALTER TABLE dbo\\.items ADD \\[note\\] NVARCHAR\\(MAX\\) NULL").
+		mock.ExpectExec("ALTER TABLE \\[dbo\\]\\.\\[items\\] ADD \\[note\\] NVARCHAR\\(MAX\\) NULL").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
 			WithArgs("dbo", "items").
@@ -813,4 +813,224 @@ func TestDeleteCDCStateEventsBatchesLargeEventLists(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestConditionalCDCOperationsPreserveQuotedDottedIdentifiers(t *testing.T) {
+	columns := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	expected := mssqlTestIncarnation("srv", "app", 101, "2026-01-01T00:00:00")
+	stagingInc := mssqlTestIncarnation("srv", "app", 202, "2026-01-01T00:01:00")
+	otherDBInc := mssqlTestIncarnation("srv", "other.db", 303, "2026-01-01T00:02:00")
+
+	t.Run("conditional_merge_and_atomic_truncate_quote_dotted_table", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		dest := &MSSQLDestination{db: db, server: "srv", database: "app", compatibilityLevel: 150}
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT TOP (1) 1 FROM [app].[dbo].[order.events] WITH (TABLOCKX, HOLDLOCK)")).
+			WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
+			WithArgs("dbo", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(101), "2026-01-01T00:00:00"))
+		mock.ExpectExec(regexp.QuoteMeta("MERGE [dbo].[order.events] AS target")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+
+		err = dest.MergeTable(t.Context(), destination.MergeOptions{
+			TargetTable:            "dbo.[order.events]",
+			StagingTable:           "_bruin_staging.[order.events_stage]",
+			PrimaryKeys:            []string{"id"},
+			Columns:                columns,
+			CDCExpectedIncarnation: expected,
+		})
+		if err != nil {
+			t.Fatalf("MergeTable on quoted dotted table failed: %v", err)
+		}
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT TOP (1) 1 FROM [app].[dbo].[order]]events] WITH (TABLOCKX, HOLDLOCK)")).
+			WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
+			WithArgs("dbo", "order]events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(101), "2026-01-01T00:00:00"))
+		mock.ExpectExec(regexp.QuoteMeta("TRUNCATE TABLE [app].[dbo].[order]]events]")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("MERGE [dbo].[order]]events] AS target")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+
+		err = dest.MergeCDCTablesAtomically(t.Context(), []destination.CDCAtomicTableMerge{{
+			Truncate: true,
+			Options: destination.MergeOptions{
+				TargetTable:            "dbo.[order]]events]",
+				StagingTable:           "_bruin_staging.[order.events_stage]",
+				PrimaryKeys:            []string{"id"},
+				Columns:                columns,
+				CDCExpectedIncarnation: expected,
+			},
+		}})
+		if err != nil {
+			t.Fatalf("MergeCDCTablesAtomically on quoted bracketed table failed: %v", err)
+		}
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT TOP (1) 1 FROM [app].[dbo].[order.events] WITH (TABLOCKX, HOLDLOCK)")).
+			WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
+			WithArgs("dbo", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(101), "2026-01-01T00:00:00"))
+		mock.ExpectExec(regexp.QuoteMeta("TRUNCATE TABLE [app].[dbo].[order.events]")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
+
+		if err := dest.TruncateCDCTableIfIncarnation(t.Context(), "dbo.[order.events]", expected); err != nil {
+			t.Fatalf("TruncateCDCTableIfIncarnation on quoted dotted table failed: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("claim_and_prepare_cross_db_dotted_target", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		dest := &MSSQLDestination{db: db, server: "srv", database: "app"}
+
+		claim := destination.CDCTargetClaim{
+			ConnectorID:      "mysql-conn",
+			SourceTable:      "orders",
+			DestinationTable: "[other.db].[sales.v1].[order.events]",
+		}
+		ownerID, err := claim.OwnerID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		canonical := destination.CDCTargetKeyDigest("srv", "other.db", "sales.v1", "order.events")
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM [other.db].sys.schemas WHERE name = @p1")).
+			WithArgs("sales.v1").
+			WillReturnRows(sqlmock.NewRows([]string{"cnt"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT [name], [collation_name] FROM [master].[sys].[databases] WHERE [name] = @p1")).
+			WithArgs("other.db").
+			WillReturnRows(sqlmock.NewRows([]string{"name", "collation_name"}).AddRow("other.db", "Latin1_General_100_CI_AS"))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT [connector_id] FROM [_bruin_staging].[cdc.targets] WITH (UPDLOCK, HOLDLOCK) WHERE [destination_table] = @p1")).
+			WithArgs(canonical).
+			WillReturnError(sql.ErrNoRows)
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO [_bruin_staging].[cdc.targets] ([destination_table], [connector_id], [claimed_at]) VALUES (@p1, @p2, SYSUTCDATETIME())")).
+			WithArgs(canonical, ownerID).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec(regexp.QuoteMeta("EXEC [other.db].sys.sp_executesql N'CREATE TABLE [sales.v1].[order.events]")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)\n\t\tFROM [other.db].sys.tables AS t")).
+			WithArgs("sales.v1", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(303), "2026-01-01T00:02:00"))
+		mock.ExpectCommit()
+
+		inc, err := dest.ClaimAndPrepareEmptyCDCTarget(t.Context(), "_bruin_staging.[cdc.targets]", claim, destination.PrepareOptions{
+			Table: claim.DestinationTable,
+			Schema: &schema.TableSchema{
+				Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt64, IsPrimaryKey: true}},
+				PrimaryKeys: []string{"id"},
+			},
+			PrimaryKeys: []string{"id"},
+		})
+		if err != nil {
+			t.Fatalf("ClaimAndPrepareEmptyCDCTarget on cross-db dotted target failed: %v", err)
+		}
+		if inc != otherDBInc {
+			t.Fatalf("incarnation = %q, want %q", inc, otherDBInc)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("conditional_swap_and_schema_evolution_quote_dotted_identifiers", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		dest := &MSSQLDestination{db: db, server: "srv", database: "app"}
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT TOP (1) 1 FROM [app].[dbo].[order.events] WITH (TABLOCKX, HOLDLOCK)")).
+			WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
+			WithArgs("dbo", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(101), "2026-01-01T00:00:00"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT TOP (1) 1 FROM [app].[_bruin_staging].[order.events_stage] WITH (TABLOCKX, HOLDLOCK)")).
+			WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
+			WithArgs("_bruin_staging", "order.events_stage").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(202), "2026-01-01T00:01:00"))
+		mock.ExpectExec(regexp.QuoteMeta("ALTER SCHEMA [dbo] TRANSFER [_bruin_staging].[order.events_stage]")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CASE WHEN OBJECT_ID('[app].[dbo].[order.events]', 'U') IS NOT NULL THEN 1 ELSE 0 END")).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(1))
+		mock.ExpectExec(`EXEC sys\.sp_rename N'\[dbo\]\.\[order\.events\]', N'order\.events_old_`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("EXEC sys.sp_rename N'[dbo].[order.events_stage]', N'order.events', N'OBJECT'")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`DROP TABLE \[app\]\.\[dbo\]\.\[order\.events_old_`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
+
+		err = dest.SwapTable(t.Context(), destination.SwapOptions{
+			TargetTable:                   "dbo.[order.events]",
+			StagingTable:                  "_bruin_staging.[order.events_stage]",
+			CDCExpectedIncarnation:        expected,
+			CDCExpectedStagingIncarnation: stagingInc,
+			CDCExpectedResultIncarnation:  stagingInc,
+		})
+		if err != nil {
+			t.Fatalf("conditional SwapTable on dotted identifiers failed: %v", err)
+		}
+
+		comparison := &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{{
+				Type:       schemaevolution.ChangeAddColumn,
+				ColumnName: "note",
+				NewColumn:  schema.Column{Name: "note", DataType: schema.TypeString, Nullable: true},
+			}},
+		}
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT TOP (1) 1 FROM [app].[dbo].[order.events] WITH (TABLOCKX, HOLDLOCK)")).
+			WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
+			WithArgs("dbo", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(202), "2026-01-01T00:01:00"))
+		mock.ExpectExec(regexp.QuoteMeta("ALTER TABLE [dbo].[order.events] ADD [note] NVARCHAR(MAX) NULL")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT CAST(t.object_id AS BIGINT), CONVERT(NVARCHAR(33), t.create_date, 126)")).
+			WithArgs("dbo", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(202), "2026-01-01T00:01:00"))
+		mock.ExpectCommit()
+
+		_, result, err := dest.ApplySchemaEvolutionIfIncarnation(t.Context(), `"dbo"."order.events"`, comparison, stagingInc)
+		if err != nil {
+			t.Fatalf("ApplySchemaEvolutionIfIncarnation on double-quoted dotted table failed: %v", err)
+		}
+		if result != stagingInc {
+			t.Fatalf("result incarnation = %q, want %q", result, stagingInc)
+		}
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT c.max_length FROM sys.columns AS c WHERE c.object_id = OBJECT_ID(@p1) AND c.name = '_cdc_lsn'")).
+			WithArgs("[_bruin_staging].[cdc.state]").
+			WillReturnRows(sqlmock.NewRows([]string{"max_length"}).AddRow(int64(-1)))
+		if err := dest.EnsureCDCStatePositionColumn(t.Context(), `"_bruin_staging"."cdc.state"`); err != nil {
+			t.Fatalf("EnsureCDCStatePositionColumn on double-quoted dotted state table failed: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

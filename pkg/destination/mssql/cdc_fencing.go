@@ -154,7 +154,7 @@ func (d *MSSQLDestination) ClaimAndPrepareEmptyCDCTarget(
 	if identity.database == "" || strings.EqualFold(identity.database, d.database) {
 		createSQL = buildExclusiveCreateTableSQLWithDeferredPrimaryKeys(resolvedTable, opts.Schema.Columns, opts.PrimaryKeys, opts.DeferredPrimaryKeys)
 	} else {
-		localCreate := buildExclusiveCreateTableSQLWithDeferredPrimaryKeys(identity.schema+"."+identity.table, opts.Schema.Columns, opts.PrimaryKeys, opts.DeferredPrimaryKeys)
+		localCreate := buildExclusiveCreateTableSQLWithDeferredPrimaryKeys(identity.schemaQualifiedTable(), opts.Schema.Columns, opts.PrimaryKeys, opts.DeferredPrimaryKeys)
 		createSQL, err = d.databaseScopedSQL(identity, localCreate)
 		if err != nil {
 			return "", err

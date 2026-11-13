@@ -30,7 +30,7 @@ func (d *MSSQLDestination) MaxDecimalPrecision() int {
 // ApplySchemaEvolution renders the abstract schema-change plan into this
 // destination's DDL using the local dialect and applies each statement.
 func (d *MSSQLDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
-	return destination.ApplyEvolution(ctx, d, &Dialect{}, table, comparison)
+	return destination.ApplyEvolution(ctx, d, &Dialect{}, quoteTable(table), comparison)
 }
 
 func (d *MSSQLDestination) ApplySchemaEvolutionIfIncarnation(
@@ -42,7 +42,7 @@ func (d *MSSQLDestination) ApplySchemaEvolutionIfIncarnation(
 	if expectedIncarnation == "" {
 		return nil, "", fmt.Errorf("cannot conditionally evolve %s without a destination incarnation", table)
 	}
-	statements, warnings, err := destination.RenderEvolution(&Dialect{}, table, comparison)
+	statements, warnings, err := destination.RenderEvolution(&Dialect{}, quoteTable(table), comparison)
 	if err != nil {
 		return nil, "", err
 	}

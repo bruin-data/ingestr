@@ -705,6 +705,131 @@ func TestMSSQLIntegration_TransactionalFencingAndIncarnations(t *testing.T) {
 		require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf("SELECT [payload] FROM %s WHERE [id] = 77", quoteQualified(targetB))).Scan(&swappedPayload))
 		require.Equal(t, "swapped", swappedPayload)
 	})
+
+	t.Run("quoted_dotted_table_names", func(t *testing.T) {
+		_, err := db.ExecContext(ctx, "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'sales.v1') EXEC('CREATE SCHEMA [sales.v1]')")
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = '_bruin_staging') EXEC('CREATE SCHEMA [_bruin_staging]')")
+		require.NoError(t, err)
+
+		claimTable := "_bruin_staging.[cdc.claims]"
+		_, err = db.ExecContext(ctx, `CREATE TABLE [_bruin_staging].[cdc.claims] (
+			[destination_table] NVARCHAR(450) NOT NULL PRIMARY KEY,
+			[connector_id] NVARCHAR(450) NOT NULL,
+			[claimed_at] DATETIME2(6) NOT NULL
+		)`)
+		require.NoError(t, err)
+
+		dottedTarget := "[sales.v1].[order.events]"
+		dottedStage := "_bruin_staging.[order.events_stg]"
+		targetSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64, Nullable: false, IsPrimaryKey: true},
+				{Name: "payload", DataType: schema.TypeString, Nullable: true},
+				{Name: destination.CDCLSNColumn, DataType: schema.TypeString, Nullable: true},
+				{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean, Nullable: true},
+				{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestamp, Nullable: true},
+			},
+			PrimaryKeys: []string{"id"},
+		}
+
+		inc, err := dest.ClaimAndPrepareEmptyCDCTarget(ctx, claimTable, destination.CDCTargetClaim{
+			DestinationTable: dottedTarget,
+			ConnectorID:      "conn-dotted",
+			SourceTable:      "public.order_events",
+		}, destination.PrepareOptions{
+			Table:       dottedTarget,
+			Schema:      targetSchema,
+			PrimaryKeys: []string{"id"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, inc)
+
+		readInc, exists, err := dest.CDCTargetIncarnation(ctx, `"sales.v1"."order.events"`)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, inc, readInc)
+
+		_, err = db.ExecContext(ctx, `CREATE TABLE [_bruin_staging].[order.events_stg] (
+			[id] BIGINT NOT NULL,
+			[payload] NVARCHAR(MAX) NULL,
+			[_cdc_lsn] NVARCHAR(MAX) NULL,
+			[_cdc_deleted] BIT NULL,
+			[_cdc_synced_at] DATETIME2(6) NULL,
+			[_cdc_unchanged_cols] NVARCHAR(MAX) NULL
+		)`)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, `INSERT INTO [_bruin_staging].[order.events_stg] VALUES (1, N'dotted-v1', N'000010', 0, '2026-01-01', N'[]')`)
+		require.NoError(t, err)
+
+		cols := []string{"id", "payload", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn, destination.CDCUnchangedColsColumn}
+		require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+			TargetTable:            dottedTarget,
+			StagingTable:           dottedStage,
+			PrimaryKeys:            []string{"id"},
+			Columns:                cols,
+			CDCExpectedIncarnation: inc,
+		}))
+
+		require.NoError(t, dest.MergeCDCTablesAtomically(ctx, []destination.CDCAtomicTableMerge{{
+			Truncate: true,
+			Options: destination.MergeOptions{
+				TargetTable:            dottedTarget,
+				StagingTable:           dottedStage,
+				PrimaryKeys:            []string{"id"},
+				Columns:                cols,
+				CDCHardDelete:          true,
+				CDCExpectedIncarnation: inc,
+			},
+		}}))
+
+		require.NoError(t, dest.TruncateCDCTableIfIncarnation(ctx, dottedTarget, inc))
+
+		comp := &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{{
+				Type:       schemaevolution.ChangeAddColumn,
+				ColumnName: "note",
+				NewColumn:  schema.Column{Name: "note", DataType: schema.TypeString, Nullable: true},
+			}},
+		}
+		_, evolvedInc, err := dest.ApplySchemaEvolutionIfIncarnation(ctx, `"sales.v1"."order.events"`, comp, inc)
+		require.NoError(t, err)
+		require.Equal(t, inc, evolvedInc)
+
+		swapStage := "_bruin_staging.[order.events_swap]"
+		_, err = db.ExecContext(ctx, `CREATE TABLE [_bruin_staging].[order.events_swap] (
+			[id] BIGINT NOT NULL,
+			[payload] NVARCHAR(MAX) NULL,
+			[_cdc_lsn] NVARCHAR(MAX) NULL,
+			[_cdc_deleted] BIT NULL,
+			[_cdc_synced_at] DATETIME2(6) NULL,
+			[note] NVARCHAR(MAX) NULL
+		)`)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, `INSERT INTO [_bruin_staging].[order.events_swap] VALUES (7, N'swapped-dotted', N'000077', 0, '2026-01-07', N'ok')`)
+		require.NoError(t, err)
+
+		stagingInc, resultInc, err := dest.CDCConditionalSwapIncarnations(ctx, dottedTarget, swapStage)
+		require.NoError(t, err)
+		require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+			TargetTable:                   dottedTarget,
+			StagingTable:                  swapStage,
+			PrimaryKeys:                   []string{"id"},
+			CDCExpectedIncarnation:        evolvedInc,
+			CDCExpectedStagingIncarnation: stagingInc,
+			CDCExpectedResultIncarnation:  resultInc,
+		}))
+
+		afterSwapInc, exists, err := dest.CDCTargetIncarnation(ctx, dottedTarget)
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, resultInc, afterSwapInc)
+
+		var gotPayload string
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT [payload] FROM [sales.v1].[order.events] WHERE [id] = 7`).Scan(&gotPayload))
+		require.Equal(t, "swapped-dotted", gotPayload)
+	})
 }
 
 func TestMSSQLIntegration_CompatibilityLevels_Below130AndAbove130(t *testing.T) {

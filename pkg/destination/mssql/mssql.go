@@ -679,7 +679,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		transferSQL, err := d.databaseScopedSQL(target, fmt.Sprintf(
 			"ALTER SCHEMA %s TRANSFER %s",
 			quoteColumn(target.schema),
-			quoteTable(staging.schema+"."+staging.table),
+			staging.schemaQualifiedTable(),
 		))
 		if err != nil {
 			return err
@@ -787,8 +787,8 @@ func (d *MSSQLDestination) databaseScopedSQL(identity mssqlTargetIdentity, state
 
 func (d *MSSQLDestination) renameTableSQL(identity mssqlTargetIdentity, newName string) (string, error) {
 	statement := fmt.Sprintf(
-		"EXEC sys.sp_rename '%s', '%s'",
-		escapeTableNameForRename(identity.schema+"."+identity.table),
+		"EXEC sys.sp_rename N'%s', N'%s', N'OBJECT'",
+		escapeTableNameForRename(identity.schemaQualifiedTable()),
 		strings.ReplaceAll(newName, "'", "''"),
 	)
 	return d.databaseScopedSQL(identity, statement)
@@ -1641,7 +1641,7 @@ func (d *MSSQLDestination) EnsureCDCStatePositionColumn(ctx context.Context, tab
 	var maxLength int64
 	err := d.db.QueryRowContext(ctx,
 		`SELECT c.max_length FROM sys.columns AS c WHERE c.object_id = OBJECT_ID(@p1) AND c.name = '_cdc_lsn'`,
-		table).Scan(&maxLength)
+		quoteTable(table)).Scan(&maxLength)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -1730,13 +1730,17 @@ type mssqlTargetIdentity struct {
 func (i mssqlTargetIdentity) qualifiedTable(defaultServer string) string {
 	parts := make([]string, 0, 4)
 	if i.server != "" && !strings.EqualFold(i.server, defaultServer) {
-		parts = append(parts, i.server)
+		parts = append(parts, quoteColumn(i.server))
 	}
 	if i.database != "" {
-		parts = append(parts, i.database)
+		parts = append(parts, quoteColumn(i.database))
 	}
-	parts = append(parts, i.schema, i.table)
+	parts = append(parts, quoteColumn(i.schema), quoteColumn(i.table))
 	return strings.Join(parts, ".")
+}
+
+func (i mssqlTargetIdentity) schemaQualifiedTable() string {
+	return quoteColumn(i.schema) + "." + quoteColumn(i.table)
 }
 
 func (i mssqlTargetIdentity) catalogPrefix(defaultServer string) string {
