@@ -77,11 +77,8 @@ func (i fabricTargetIdentity) catalogPrefix(defaultDatabase string) string {
 	return ""
 }
 
-func (i fabricTargetIdentity) qualifiedInSchema(tableName string) string {
-	if i.database != "" {
-		return quoteColumn(i.database) + "." + quoteColumn(i.schema) + "." + quoteColumn(tableName)
-	}
-	return quoteColumn(i.schema) + "." + quoteColumn(tableName)
+func (i fabricTargetIdentity) qualifiedInSchema(defaultDatabase, tableName string) string {
+	return i.catalogPrefix(defaultDatabase) + quoteColumn(i.schema) + "." + quoteColumn(tableName)
 }
 
 func (d *FabricDestination) SupportsCDCMerge() bool            { return true }
@@ -559,10 +556,9 @@ func (d *FabricDestination) CanonicalCDCTarget(ctx context.Context, table string
 	actualDatabase := identity.database
 	caseSensitive := true
 	if d.db != nil && identity.database != "" {
-		var dbName, collation string
-		err := d.db.QueryRowContext(ctx, "SELECT [name], [collation_name] FROM [sys].[databases] WHERE [name] = @p1", identity.database).Scan(&dbName, &collation)
+		dbName, collation, err := d.databaseCollation(ctx, identity.database)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve Fabric database collation for %q: %w", identity.database, err)
+			return "", err
 		}
 		actualDatabase = dbName
 		caseSensitive = fabricCollationCaseSensitive(collation)
@@ -572,6 +568,69 @@ func (d *FabricDestination) CanonicalCDCTarget(ctx context.Context, table string
 		identity.table = strings.ToLower(identity.table)
 	}
 	return destination.CDCTargetKeyDigest(actualDatabase, identity.schema, identity.table), nil
+}
+
+func (d *FabricDestination) databaseCollation(ctx context.Context, database string) (string, string, error) {
+	var dbName, collation string
+	var err error
+	if database != "" {
+		err = d.db.QueryRowContext(ctx, "SELECT [name], [collation_name] FROM [sys].[databases] WHERE [name] = @p1", database).Scan(&dbName, &collation)
+	} else {
+		err = d.db.QueryRowContext(ctx, "SELECT [name], [collation_name] FROM [sys].[databases] WHERE [name] = DB_NAME()").Scan(&dbName, &collation)
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve Fabric database collation for %q: %w", database, err)
+	}
+	return dbName, collation, nil
+}
+
+func (d *FabricDestination) sameSwapSchema(ctx context.Context, targetID, stagingID fabricTargetIdentity) (bool, error) {
+	if !strings.EqualFold(targetID.database, stagingID.database) {
+		return false, nil
+	}
+	var collation string
+	hasCollation := false
+	if targetID.database != stagingID.database {
+		if d.db == nil {
+			return false, nil
+		}
+		targetDB, targetCollation, err := d.databaseCollation(ctx, targetID.database)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		stagingDB, _, err := d.databaseCollation(ctx, stagingID.database)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if targetDB != stagingDB {
+			return false, nil
+		}
+		collation = targetCollation
+		hasCollation = true
+	}
+	if targetID.schema == stagingID.schema {
+		return true, nil
+	}
+	if !strings.EqualFold(targetID.schema, stagingID.schema) {
+		return false, nil
+	}
+	if !hasCollation {
+		if d.db == nil {
+			return false, nil
+		}
+		var err error
+		_, collation, err = d.databaseCollation(ctx, targetID.database)
+		if err != nil {
+			return false, err
+		}
+	}
+	return !fabricCollationCaseSensitive(collation), nil
 }
 
 func fabricCollationCaseSensitive(collation string) bool {
@@ -862,8 +921,13 @@ func (d *FabricDestination) CDCConditionalSwapIncarnations(ctx context.Context, 
 		return "", "", err
 	}
 
+	sameSchema, err := d.sameSwapSchema(ctx, targetID, stagingID)
+	if err != nil {
+		return "", "", err
+	}
+
 	physical := stagingTable
-	if !strings.EqualFold(targetID.schema, stagingID.schema) || !strings.EqualFold(targetID.database, stagingID.database) {
+	if !sameSchema {
 		cloned, err := d.cloneStagingIntoTargetSchema(ctx, targetID, stagingTable)
 		if err != nil {
 			return "", "", err
@@ -915,11 +979,8 @@ func (d *FabricDestination) cloneStagingIntoTargetSchema(ctx context.Context, ta
 	}
 	cloneCandidate := fmt.Sprintf("%s_swap_%d", targetID.table, time.Now().UnixNano())
 	cloneName := destination.ShortenIdentifier(cloneCandidate, cloneCandidate, destination.MaxIdentifierLength("fabric"))
-	cloneTable := targetID.schema + "." + cloneName
-	if targetID.database != "" && !strings.EqualFold(targetID.database, d.database) {
-		cloneTable = targetID.database + "." + cloneTable
-	}
-	cloneSQL := fmt.Sprintf("CREATE TABLE %s AS CLONE OF %s", quoteTable(cloneTable), quoteTable(stagingTable))
+	cloneTable := targetID.qualifiedInSchema(d.database, cloneName)
+	cloneSQL := fmt.Sprintf("CREATE TABLE %s AS CLONE OF %s", cloneTable, quoteTable(stagingTable))
 	if _, err := d.db.ExecContext(ctx, cloneSQL); err != nil {
 		config.LogFailedQuery(cloneSQL, err)
 		return "", fmt.Errorf("failed to clone Fabric staging table %s into target schema: %w", stagingTable, err)
@@ -944,22 +1005,29 @@ func (d *FabricDestination) swapTable(ctx context.Context, opts destination.Swap
 		return err
 	}
 
-	if err := d.ensureSchemaExists(ctx, targetID.schema); err != nil {
-		return fmt.Errorf("failed to ensure target schema exists: %w", err)
-	}
-
 	swapSource := opts.StagingTable
 	dropSourceAfterCommit := false
 	if prepared, ok := d.takePreparedSwap(opts.StagingTable); ok {
+		if err := d.ensureSchemaExists(ctx, targetID.schema); err != nil {
+			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+		}
 		swapSource = prepared
 		dropSourceAfterCommit = true
-	} else if !strings.EqualFold(targetID.schema, stagingID.schema) || !strings.EqualFold(targetID.database, stagingID.database) {
-		cloned, err := d.cloneStagingIntoTargetSchema(ctx, targetID, opts.StagingTable)
+	} else {
+		sameSchema, err := d.sameSwapSchema(ctx, targetID, stagingID)
 		if err != nil {
 			return err
 		}
-		swapSource = cloned
-		dropSourceAfterCommit = true
+		if !sameSchema {
+			cloned, err := d.cloneStagingIntoTargetSchema(ctx, targetID, opts.StagingTable)
+			if err != nil {
+				return err
+			}
+			swapSource = cloned
+			dropSourceAfterCommit = true
+		} else if err := d.ensureSchemaExists(ctx, targetID.schema); err != nil {
+			return fmt.Errorf("failed to ensure target schema exists: %w", err)
+		}
 	}
 
 	swapSourceID, err := d.resolveTargetIdentity(swapSource)
@@ -1003,7 +1071,7 @@ func (d *FabricDestination) swapTable(ctx context.Context, opts destination.Swap
 	if targetExists {
 		backupCandidate := fmt.Sprintf("%s_old_%d", targetID.table, time.Now().UnixNano())
 		backupName := destination.ShortenIdentifier(backupCandidate, backupCandidate, destination.MaxIdentifierLength("fabric"))
-		backupTable := targetID.qualifiedInSchema(backupName)
+		backupTable := targetID.qualifiedInSchema(d.database, backupName)
 
 		renameOldSQL := buildFabricSPRenameSQL(quoteColumn(targetID.schema)+"."+quoteColumn(targetID.table), backupName)
 		if _, err := tx.ExecContext(ctx, renameOldSQL); err != nil {
