@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,8 @@ type SnowflakeDestination struct {
 	database  string
 	warehouse string
 	role      string
+
+	clusterByWarning sync.Once
 }
 
 func NewSnowflakeDestination() *SnowflakeDestination {
@@ -120,8 +123,15 @@ func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destinatio
 		config.Debug("[DEST] DROP TABLE took %v", time.Since(startDrop))
 	}
 
+	clusterBy, missing := splitClusterByColumns(opts.Schema.Columns, opts.ClusterBy)
+	if len(missing) > 0 {
+		d.clusterByWarning.Do(func() {
+			output.Warnf("Snowflake: skipped cluster_by columns that are not in the table: %s\n", strings.Join(missing, ", "))
+		})
+	}
+
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys, clusterBy)
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
@@ -1831,7 +1841,21 @@ func buildChangeConditionsSnowflake(columns []string, targetAlias, sourceAlias s
 	return strings.Join(conditions, " OR ")
 }
 
-func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+// splitClusterByColumns separates cluster_by columns that exist in the table
+// from ones that don't, matching names case-insensitively like Snowflake does.
+func splitClusterByColumns(columns []schema.Column, clusterBy []string) ([]string, []string) {
+	var found, missing []string
+	for _, c := range clusterBy {
+		if slices.ContainsFunc(columns, func(col schema.Column) bool { return strings.EqualFold(col.Name, c) }) {
+			found = append(found, c)
+		} else {
+			missing = append(missing, c)
+		}
+	}
+	return found, missing
+}
+
+func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string, clusterBy []string) string {
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSnowflake(col)
@@ -1849,6 +1873,13 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	}
 
 	sql += "\n)"
+	if len(clusterBy) > 0 {
+		quotedCols := make([]string, len(clusterBy))
+		for i, c := range clusterBy {
+			quotedCols[i] = quoteIdentifier(c)
+		}
+		sql += fmt.Sprintf(" CLUSTER BY (%s)", strings.Join(quotedCols, ", "))
+	}
 	return sql
 }
 
