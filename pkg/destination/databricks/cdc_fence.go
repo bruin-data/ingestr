@@ -30,11 +30,6 @@ const (
 
 var errCDCIncarnationChanged = errors.New("physical incarnation changed")
 
-type cdcFenceSpec struct {
-	table               string
-	expectedIncarnation string
-}
-
 // cdcFence binds an expected physical incarnation (Delta table id from
 // DESCRIBE DETAIL) to SQL-visible Unity Catalog metadata: both the immutable
 // information_schema.tables.created timestamp and the stamped table comment
@@ -75,32 +70,37 @@ func formatCDCIncarnationComment(existingComment, deltaID string) string {
 	return prefix + " " + cdcIncarnationCommentMarker + deltaID
 }
 
-func (d *DatabricksDestination) newCDCFence(spec cdcFenceSpec) (*cdcFence, error) {
-	if spec.expectedIncarnation == "" {
+func (d *DatabricksDestination) newCDCFence(table, expectedIncarnation string) (*cdcFence, error) {
+	if expectedIncarnation == "" {
 		return nil, errors.New("databricks conditional CDC fence requires an expected incarnation")
 	}
-	cat, sch, tbl := d.parseTableParts(spec.table)
+	cat, sch, tbl := d.parseTableParts(table)
 	return &cdcFence{
 		canonKey:            canonicalTargetKey(cat, sch, tbl),
-		rawTable:            spec.table,
+		rawTable:            table,
 		catalog:             cat,
 		schemaName:          sch,
 		tableName:           tbl,
 		targetFull:          quoteTableParts(cat, sch, tbl),
-		expectedIncarnation: spec.expectedIncarnation,
+		expectedIncarnation: expectedIncarnation,
 	}, nil
 }
 
-func (d *DatabricksDestination) collectCDCFences(specs []cdcFenceSpec) ([]*cdcFence, error) {
-	byCanon := make(map[string]*cdcFence, len(specs))
-	for _, spec := range specs {
-		f, err := d.newCDCFence(spec)
+// collectCDCFences returns one fence per distinct fenced merge target, sorted
+// so concurrent batches bind targets in the same order.
+func (d *DatabricksDestination) collectCDCFences(merges []destination.CDCAtomicTableMerge) ([]*cdcFence, error) {
+	byCanon := make(map[string]*cdcFence, len(merges))
+	for _, m := range merges {
+		if m.Options.CDCExpectedIncarnation == "" {
+			continue
+		}
+		f, err := d.newCDCFence(m.Options.TargetTable, m.Options.CDCExpectedIncarnation)
 		if err != nil {
 			return nil, err
 		}
 		if existing, ok := byCanon[f.canonKey]; ok {
 			if existing.expectedIncarnation != f.expectedIncarnation {
-				return nil, fmt.Errorf("conflicting expected incarnations for Databricks CDC target %q", spec.table)
+				return nil, fmt.Errorf("conflicting expected incarnations for Databricks CDC target %q", m.Options.TargetTable)
 			}
 			continue
 		}
@@ -204,14 +204,8 @@ func (d *DatabricksDestination) ensureTableIncarnationStampLocked(
 		return "", "", "", false, nil
 	}
 
-	_, verifySchema, verifyTable, verifyID, verifyExists, err := d.tableIdentity(ctx, table)
-	_ = verifySchema
-	_ = verifyTable
-	if err != nil {
+	if err := d.requireTableID(ctx, table, id); err != nil {
 		return "", "", "", false, err
-	}
-	if !verifyExists || verifyID != id {
-		return "", "", "", false, incarnationChangedError(table)
 	}
 
 	if _, markerID := splitCDCIncarnationComment(beforeComment); markerID == id {
@@ -240,12 +234,8 @@ func (d *DatabricksDestination) ensureTableIncarnationStampLocked(
 		return "", "", "", false, fmt.Errorf("stamp Databricks CDC incarnation comment on %s: %w", fullTable, err)
 	}
 
-	_, _, _, postID, postExists, err := d.tableIdentity(ctx, table)
-	if err != nil {
+	if err := d.requireTableID(ctx, table, id); err != nil {
 		return "", "", "", false, err
-	}
-	if !postExists || postID != id {
-		return "", "", "", false, incarnationChangedError(table)
 	}
 
 	afterCreated, afterComment, afterExists, err := d.tableInfoSchemaMeta(ctx, catalog, schemaName, tableName)
@@ -256,15 +246,23 @@ func (d *DatabricksDestination) ensureTableIncarnationStampLocked(
 		return "", "", "", false, incarnationChangedError(table)
 	}
 
-	_, _, _, finalID, finalExists, err := d.tableIdentity(ctx, table)
-	if err != nil {
+	if err := d.requireTableID(ctx, table, id); err != nil {
 		return "", "", "", false, err
-	}
-	if !finalExists || finalID != id {
-		return "", "", "", false, incarnationChangedError(table)
 	}
 
 	return inc, afterCreated, afterComment, true, nil
+}
+
+// requireTableID re-reads the Delta table id and fails unless it is still id.
+func (d *DatabricksDestination) requireTableID(ctx context.Context, table, id string) error {
+	_, _, _, actual, exists, err := d.tableIdentity(ctx, table)
+	if err != nil {
+		return err
+	}
+	if !exists || actual != id {
+		return incarnationChangedError(table)
+	}
+	return nil
 }
 
 func (d *DatabricksDestination) EnsureCDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
@@ -287,10 +285,15 @@ func (d *DatabricksDestination) bindCDCFence(ctx context.Context, f *cdcFence) e
 	return nil
 }
 
+// bindCDCFences checks every target before stamping any of them, so a batch
+// with one replaced target fails before writing comments on the others.
+// Binding a single fence already performs that check.
 func (d *DatabricksDestination) bindCDCFences(ctx context.Context, fences []*cdcFence) error {
-	for _, f := range fences {
-		if err := d.checkCDCIncarnation(ctx, f.rawTable, f.expectedIncarnation); err != nil {
-			return err
+	if len(fences) > 1 {
+		for _, f := range fences {
+			if err := d.checkCDCIncarnation(ctx, f.rawTable, f.expectedIncarnation); err != nil {
+				return err
+			}
 		}
 	}
 	for _, f := range fences {
@@ -333,8 +336,12 @@ func (f *cdcFence) guardSQL() string {
 // buildFencedAtomicSQL checks every fence before and after the DML inside one
 // BEGIN ATOMIC block. The trailing guards catch a replacement that happened
 // between the leading guard and DML name resolution: SIGNAL aborts the block
-// and Databricks rolls back every statement in it.
+// and Databricks rolls back every statement in it. A single unfenced
+// statement is returned as-is.
 func buildFencedAtomicSQL(fences []*cdcFence, statements []string) string {
+	if len(fences) == 0 && len(statements) == 1 {
+		return statements[0]
+	}
 	var b strings.Builder
 	b.WriteString("BEGIN ATOMIC\n")
 	writeStmt := func(stmt string) {
@@ -363,6 +370,40 @@ func fenceGuardError(err error, operation string) error {
 	return fmt.Errorf("databricks CDC target %w during %s; the transaction was rolled back: %w", errCDCIncarnationChanged, operation, err)
 }
 
+// runFencedAtomic binds fences under fenceMu, lets build render the DML once
+// the targets are bound, and runs it as one guarded BEGIN ATOMIC block, then
+// re-checks every target after commit. Without fences the statements run
+// unguarded. failure prefixes non-guard execution errors.
+func (d *DatabricksDestination) runFencedAtomic(ctx context.Context, fences []*cdcFence, operation, failure string, build func() ([]string, error)) error {
+	if len(fences) > 0 {
+		d.fenceMu.Lock()
+		defer d.fenceMu.Unlock()
+		if err := d.bindCDCFences(ctx, fences); err != nil {
+			return err
+		}
+	}
+	statements, err := build()
+	if err != nil {
+		return err
+	}
+	if len(fences) > 0 {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+	}
+
+	sql := buildFencedAtomicSQL(fences, statements)
+	config.Debug("[DATABRICKS] Executing %s SQL: %s", operation, sql)
+	if err := d.executeStatement(ctx, sql); err != nil {
+		config.LogFailedQuery(sql, err)
+		if isCDCIncarnationGuardError(err) {
+			return fenceGuardError(err, operation)
+		}
+		return fmt.Errorf("%s: %w", failure, err)
+	}
+	return d.verifyCDCFencesAfterCommit(ctx, fences)
+}
+
 func randomTableSuffix() (string, error) {
 	var suffixBytes [8]byte
 	if _, err := rand.Read(suffixBytes[:]); err != nil {
@@ -371,21 +412,23 @@ func randomTableSuffix() (string, error) {
 	return hex.EncodeToString(suffixBytes[:]), nil
 }
 
+func shortTableName(candidate string) string {
+	return destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("databricks"))
+}
+
 func newPrivateTableName(tableName, op string) (string, error) {
 	suffix, err := randomTableSuffix()
 	if err != nil {
 		return "", err
 	}
-	candidate := fmt.Sprintf("__ingestr_%s_%s_%s", op, strings.ToLower(tableName), suffix)
-	return destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("databricks")), nil
+	return shortTableName(fmt.Sprintf("__ingestr_%s_%s_%s", op, strings.ToLower(tableName), suffix)), nil
 }
 
 // swapOldTableName is deterministic per target so a swap interrupted between
 // its two renames can be found and undone by a later process.
 func swapOldTableName(catalog, schemaName, tableName string) string {
 	sum := sha256.Sum256([]byte(canonicalTargetKey(catalog, schemaName, tableName)))
-	candidate := fmt.Sprintf("__ingestr_swap_old_%s_%s", strings.ToLower(tableName), hex.EncodeToString(sum[:6]))
-	return destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("databricks"))
+	return shortTableName(fmt.Sprintf("__ingestr_swap_old_%s_%s", strings.ToLower(tableName), hex.EncodeToString(sum[:6])))
 }
 
 // recoverInterruptedSwap restores a target that a crashed SwapTable left under
@@ -411,12 +454,10 @@ func (d *DatabricksDestination) recoverInterruptedSwap(ctx context.Context, cata
 		if !releaseName {
 			return false, nil
 		}
-		suffix, err := randomTableSuffix()
+		orphanName, err := newPrivateTableName(tableName, "swap_orphan")
 		if err != nil {
 			return false, err
 		}
-		orphanCandidate := fmt.Sprintf("__ingestr_swap_orphan_%s_%s", strings.ToLower(tableName), suffix)
-		orphanName := destination.ShortenIdentifier(orphanCandidate, orphanCandidate, destination.MaxIdentifierLength("databricks"))
 		orphanFull := quoteTableParts(catalog, schemaName, orphanName)
 		moveSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", oldFull, orphanFull)
 		if err := d.executeStatement(ctx, moveSQL); err != nil {
@@ -474,7 +515,9 @@ func (d *DatabricksDestination) describeColumns(ctx context.Context, tableFull s
 	query := "DESCRIBE TABLE " + tableFull
 	res, err := d.queryStatement(ctx, query)
 	if err != nil {
-		config.LogFailedQuery(query, err)
+		if !isDatabricksMissingError(err) {
+			config.LogFailedQuery(query, err)
+		}
 		return nil, fmt.Errorf("describe Databricks table %s: %w", tableFull, err)
 	}
 	colIdx := res.columnIndex("col_name")

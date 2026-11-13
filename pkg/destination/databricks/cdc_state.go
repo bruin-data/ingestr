@@ -120,7 +120,7 @@ func (d *DatabricksDestination) checkCDCIncarnation(ctx context.Context, table, 
 		return err
 	}
 	if !exists || actual != expected {
-		return fmt.Errorf("databricks CDC target %q physical incarnation changed", table)
+		return incarnationChangedError(table)
 	}
 	return nil
 }
