@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -169,6 +171,7 @@ func TestDatabricksCDCCapabilitiesAndInterfaces(t *testing.T) {
 	var _ destination.CDCLateTargetClaimPreparer = dest
 	var _ destination.CDCConditionalSwapCapable = dest
 	var _ destination.CDCConditionalSwapPlanner = dest
+	var _ destination.CDCTargetIncarnationInitializer = dest
 }
 
 func TestPrepareAndTableRefRespectSchemaAndDropFirst(t *testing.T) {
@@ -308,6 +311,8 @@ func TestCDCStateOperationsAndGetMaxCDCLSN(t *testing.T) {
 	tableID := "uuid-table-1"
 	dest, stmts := newTestDatabricksDestination(t, func(stmt string, _ dbsql.ExecuteStatementRequest) (dbsql.StatementResponse, error) {
 		switch {
+		case strings.HasPrefix(stmt, "DESCRIBE DETAIL `main`.`analytics`.`__ingestr_swap_old_"):
+			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
 		case strings.HasPrefix(stmt, "DESCRIBE DETAIL `main`.`analytics`.`missing`"):
 			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
 		case strings.HasPrefix(stmt, "DESCRIBE DETAIL `main`.`analytics`.`orders`"):
@@ -412,6 +417,7 @@ func TestClaimCDCTargetConflictAndClaimAndPrepareEmptyCDCTarget(t *testing.T) {
 	ctx := context.Background()
 	claimOwner := "other-connector"
 	var createdTarget bool
+	var lateComment string
 	var rolledBackView, rolledBackRow bool
 
 	dest, stmts := newTestDatabricksDestination(t, func(stmt string, _ dbsql.ExecuteStatementRequest) (dbsql.StatementResponse, error) {
@@ -429,11 +435,21 @@ func TestClaimCDCTargetConflictAndClaimAndPrepareEmptyCDCTarget(t *testing.T) {
 				return dbsql.StatementResponse{}, errors.New("TABLE_OR_VIEW_NOT_FOUND")
 			}
 			return makeQueryResponse([]string{"owner_id"}, [][]string{{claimOwner}}), nil
+		case strings.HasPrefix(stmt, "DESCRIBE DETAIL `main`.`analytics`.`__ingestr_swap_old_"):
+			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
+		case isMockInfoSchemaQuery(stmt):
+			if !createdTarget {
+				return makeQueryResponse([]string{"created", "comment"}, nil), nil
+			}
+			return makeQueryResponse([]string{"created", "comment"}, [][]string{{mockCreatedMicros("uuid-late-1"), lateComment}}), nil
+		case strings.HasPrefix(stmt, "COMMENT ON TABLE `main`.`analytics`.`late_orders` IS "):
+			lateComment = unquoteMockSQLString(strings.TrimPrefix(stmt, "COMMENT ON TABLE `main`.`analytics`.`late_orders` IS "))
+			return dbsql.StatementResponse{}, nil
 		case strings.HasPrefix(stmt, "DESCRIBE DETAIL `main`.`analytics`.`late_orders`"):
 			if !createdTarget {
 				return dbsql.StatementResponse{}, errors.New("TABLE_OR_VIEW_NOT_FOUND")
 			}
-			return makeQueryResponse([]string{"id"}, [][]string{{"uuid-late-1"}}), nil
+			return makeQueryResponse([]string{"id", "description"}, [][]string{{"uuid-late-1", lateComment}}), nil
 		case strings.HasPrefix(stmt, "CREATE TABLE `main`.`analytics`.`late_orders`"):
 			if strings.Contains(stmt, "fail_col") {
 				return dbsql.StatementResponse{}, errors.New("simulated create failure")
@@ -512,9 +528,25 @@ func TestConditionalFencingAndSwapIncarnations(t *testing.T) {
 		"`main`.`ingestr_staging`.`orders_stg`":      stagingID,
 		"`other_cat`.`ingestr_staging`.`orders_stg`": stagingID,
 	}
+	tableComments := map[string]string{}
 
 	dest, stmts := newTestDatabricksDestination(t, func(stmt string, _ dbsql.ExecuteStatementRequest) (dbsql.StatementResponse, error) {
 		switch {
+		case isMockInfoSchemaQuery(stmt):
+			return mockInfoSchemaResponse(stmt, func(ref string) (string, string, bool) {
+				id, ok := tableIDs[ref]
+				return mockCreatedMicros(id), tableComments[ref], ok
+			}), nil
+		case strings.HasPrefix(stmt, "COMMENT ON TABLE "):
+			ref, comment, ok := parseMockCommentOnTable(stmt)
+			if !ok {
+				return dbsql.StatementResponse{}, fmt.Errorf("malformed COMMENT ON TABLE: %s", stmt)
+			}
+			if _, exists := tableIDs[ref]; !exists {
+				return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
+			}
+			tableComments[ref] = comment
+			return dbsql.StatementResponse{}, nil
 		case strings.HasPrefix(stmt, "DESCRIBE DETAIL "):
 			ref := strings.TrimSpace(strings.TrimPrefix(stmt, "DESCRIBE DETAIL "))
 			if id, ok := tableIDs[ref]; ok {
@@ -539,6 +571,8 @@ func TestConditionalFencingAndSwapIncarnations(t *testing.T) {
 			}
 			delete(tableIDs, fromRef)
 			tableIDs[toRef] = id
+			tableComments[toRef] = tableComments[fromRef]
+			delete(tableComments, fromRef)
 			return dbsql.StatementResponse{}, nil
 		case strings.HasPrefix(stmt, "DROP TABLE IF EXISTS "):
 			ref := strings.TrimSpace(strings.TrimPrefix(stmt, "DROP TABLE IF EXISTS "))
@@ -546,6 +580,7 @@ func TestConditionalFencingAndSwapIncarnations(t *testing.T) {
 				droppedCopy = true
 			}
 			delete(tableIDs, ref)
+			delete(tableComments, ref)
 			return dbsql.StatementResponse{}, nil
 		default:
 			return dbsql.StatementResponse{}, nil
@@ -600,9 +635,10 @@ func TestConditionalFencingAndSwapIncarnations(t *testing.T) {
 	}}))
 	joined := strings.Join(*stmts, "\n")
 	assert.Contains(t, joined, "BEGIN ATOMIC")
-	assert.Contains(t, joined, "DELETE FROM `main`.`analytics`.`__ingestr_merge_orders_")
-	assert.Contains(t, joined, "MERGE INTO `main`.`analytics`.`__ingestr_merge_orders_")
-	assert.Contains(t, joined, "RENAME TO `main`.`analytics`.`orders`")
+	assert.Contains(t, joined, "DELETE FROM `main`.`analytics`.`orders`")
+	assert.Contains(t, joined, "MERGE INTO `main`.`analytics`.`orders` AS target")
+	assert.Contains(t, joined, "SET MESSAGE_TEXT = '"+cdcIncarnationGuardMarker)
+	assert.NotContains(t, joined, "RENAME TO")
 
 	err = dest.MergeTable(ctx, destination.MergeOptions{
 		TargetTable:            "main.analytics.orders",
@@ -703,6 +739,7 @@ func TestWriteParallelCDCFencing(t *testing.T) {
 		tableIDs    = map[string]string{
 			"`main`.`analytics`.`orders`": targetID,
 		}
+		tableComments = map[string]string{}
 	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -725,6 +762,22 @@ func TestWriteParallelCDCFencing(t *testing.T) {
 			mu.Lock()
 			statements = append(statements, req.Statement)
 			switch {
+			case isMockInfoSchemaQuery(req.Statement):
+				resp := mockInfoSchemaResponse(req.Statement, func(ref string) (string, string, bool) {
+					id, ok := tableIDs[ref]
+					return mockCreatedMicros(id), tableComments[ref], ok
+				})
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(resp)
+				return
+			case strings.HasPrefix(req.Statement, "COMMENT ON TABLE "):
+				if ref, comment, ok := parseMockCommentOnTable(req.Statement); ok {
+					tableComments[ref] = comment
+				}
+			case strings.HasPrefix(req.Statement, "DESCRIBE TABLE "):
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(makeQueryResponse([]string{"col_name", "data_type"}, [][]string{{"id", "bigint"}}))
+				return
 			case strings.HasPrefix(req.Statement, "DESCRIBE DETAIL "):
 				ref := strings.TrimSpace(strings.TrimPrefix(req.Statement, "DESCRIBE DETAIL "))
 				id, ok := tableIDs[ref]
@@ -800,7 +853,8 @@ func TestWriteParallelCDCFencing(t *testing.T) {
 	require.ErrorContains(t, err, "physical incarnation changed")
 	assert.False(t, uploaded)
 
-	// Matching incarnation succeeds through upload, guard rename, COPY INTO, publish rename, cleanup, and post-check.
+	// Matching incarnation loads a private table, appends it to the live target in a guarded
+	// BEGIN ATOMIC block, drops the private table, cleans the volume file, and never renames the target.
 	expectedInc := destination.CDCTargetKey("main", "analytics", "orders", targetID)
 	require.NoError(t, dest.WriteParallel(context.Background(), makeBatchChan(), destination.WriteOptions{
 		Table:                  "analytics.orders",
@@ -809,20 +863,35 @@ func TestWriteParallelCDCFencing(t *testing.T) {
 	assert.True(t, uploaded)
 	assert.True(t, deletedFile)
 	joined := strings.Join(statements, "\n")
-	assert.Contains(t, joined, "COPY INTO `main`.`analytics`.`__ingestr_write_orders_")
-	assert.Contains(t, joined, "RENAME TO `main`.`analytics`.`orders`")
+	assert.Contains(t, joined, "COPY INTO `main`.`ingestr_staging`.`__ingestr_load_orders_")
+	assert.Contains(t, joined, "INSERT INTO `main`.`analytics`.`orders` (`id`) SELECT `id` FROM `main`.`ingestr_staging`.`__ingestr_load_orders_")
+	assert.Contains(t, joined, "DROP TABLE IF EXISTS `main`.`ingestr_staging`.`__ingestr_load_orders_")
+	assert.NotContains(t, joined, "RENAME TO")
+	assert.NotContains(t, joined, "COPY INTO `main`.`analytics`.`orders`")
 }
 
 type mockUCState struct {
-	mu     sync.Mutex
-	tables map[string]mockUCTable
-	views  map[string]string
-	onStmt func(stmt string, uc *mockUCState) error
+	mu          sync.Mutex
+	tables      map[string]mockUCTable
+	views       map[string]string
+	columns     map[string][]describedColumn
+	loadColumns []describedColumn
+	onStmt      func(stmt string, uc *mockUCState) error
+	onAtomicSub func(sub string, uc *mockUCState)
 }
 
 type mockUCTable struct {
-	id   string
-	rows int
+	id            string
+	rows          int
+	comment       string
+	createdMicros string
+}
+
+func (t mockUCTable) effectiveCreatedMicros() string {
+	if t.createdMicros != "" {
+		return t.createdMicros
+	}
+	return mockCreatedMicros(t.id)
 }
 
 func newMockUCState(initial map[string]mockUCTable) *mockUCState {
@@ -831,9 +900,79 @@ func newMockUCState(initial map[string]mockUCTable) *mockUCState {
 		tables[normalizeMockUCRef(k)] = v
 	}
 	return &mockUCState{
-		tables: tables,
-		views:  make(map[string]string),
+		tables:  tables,
+		views:   make(map[string]string),
+		columns: make(map[string][]describedColumn),
 	}
+}
+
+func mockCreatedMicros(id string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(id))
+	return strconv.FormatInt(int64(h.Sum64()>>1), 10)
+}
+
+func unquoteMockSQLString(lit string) string {
+	lit = strings.TrimSpace(lit)
+	if len(lit) >= 2 && lit[0] == '\'' && lit[len(lit)-1] == '\'' {
+		lit = lit[1 : len(lit)-1]
+	}
+	lit = strings.ReplaceAll(lit, "''", "'")
+	lit = strings.ReplaceAll(lit, `\\`, `\`)
+	return lit
+}
+
+func parseMockCommentOnTable(stmt string) (ref, comment string, ok bool) {
+	if !strings.HasPrefix(stmt, "COMMENT ON TABLE ") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(stmt, "COMMENT ON TABLE ")
+	idx := strings.Index(rest, " IS '")
+	if idx < 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(rest[:idx]), unquoteMockSQLString(rest[idx+len(" IS "):]), true
+}
+
+var mockInfoSchemaPredicate = regexp.MustCompile(`lower\(table_catalog\) = '((?:[^']|'')*)' AND lower\(table_schema\) = '((?:[^']|'')*)' AND lower\(table_name\) = '((?:[^']|'')*)'(?: AND unix_micros\(created\) = (\d+) AND coalesce\(comment, ''\) = ('(?:[^']|'')*'))?`)
+
+func parseMockInfoSchemaPredicate(t testing.TB, stmt string) (ref, created, comment string, hasGuard bool) {
+	m := mockInfoSchemaPredicate.FindStringSubmatch(stmt)
+	if m == nil {
+		if t != nil {
+			t.Fatalf("statement has no information_schema predicate: %s", stmt)
+		}
+		return "", "", "", false
+	}
+	unq := func(v string) string { return strings.ReplaceAll(v, "''", "'") }
+	normRef := normalizeMockUCRef(quoteTableParts(unq(m[1]), unq(m[2]), unq(m[3])))
+	if m[4] == "" {
+		return normRef, "", "", false
+	}
+	return normRef, m[4], unquoteMockSQLString(m[5]), true
+}
+
+func mockInfoSchemaResponse(stmt string, lookup func(ref string) (created, comment string, ok bool)) dbsql.StatementResponse {
+	ref, _, _, _ := parseMockInfoSchemaPredicate(nil, stmt)
+	for kRef := range map[string]struct{}{ref: {}} {
+		if created, comment, ok := lookup(kRef); ok {
+			return makeQueryResponse([]string{"created", "comment"}, [][]string{{created, comment}})
+		}
+	}
+	// Also check exact-case ref from tableIDs map if caller stores non-normalized keys:
+	m := mockInfoSchemaPredicate.FindStringSubmatch(stmt)
+	if m != nil {
+		unq := func(v string) string { return strings.ReplaceAll(v, "''", "'") }
+		exactRef := quoteTableParts(unq(m[1]), unq(m[2]), unq(m[3]))
+		if created, comment, ok := lookup(exactRef); ok {
+			return makeQueryResponse([]string{"created", "comment"}, [][]string{{created, comment}})
+		}
+	}
+	return makeQueryResponse([]string{"created", "comment"}, nil)
+}
+
+func isMockInfoSchemaQuery(stmt string) bool {
+	return strings.HasPrefix(stmt, "SELECT CAST(unix_micros(created) AS STRING), COALESCE(comment, '') FROM ")
 }
 
 func normalizeMockUCRef(ref string) string {
@@ -870,7 +1009,21 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 		if !ok {
 			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
 		}
-		return makeQueryResponse([]string{"id"}, [][]string{{tbl.id}}), nil
+		return makeQueryResponse([]string{"id", "description"}, [][]string{{tbl.id, tbl.comment}}), nil
+
+	case strings.HasPrefix(stmt, "COMMENT ON TABLE "):
+		rawRef, comment, ok := parseMockCommentOnTable(stmt)
+		if !ok {
+			return dbsql.StatementResponse{}, fmt.Errorf("malformed COMMENT ON TABLE: %s", stmt)
+		}
+		ref := normalizeMockUCRef(rawRef)
+		tbl, exists := uc.tables[ref]
+		if !exists {
+			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
+		}
+		tbl.comment = comment
+		uc.tables[ref] = tbl
+		return dbsql.StatementResponse{}, nil
 
 	case strings.HasPrefix(stmt, "ALTER TABLE ") && strings.Contains(stmt, " RENAME TO "):
 		rest := strings.TrimPrefix(stmt, "ALTER TABLE ")
@@ -913,6 +1066,9 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 		}
 		tbl.rows++
 		uc.tables[ref] = tbl
+		if uc.loadColumns != nil && strings.Contains(ref, "`__ingestr_load_") {
+			uc.columns[ref] = uc.loadColumns
+		}
 		return dbsql.StatementResponse{}, nil
 
 	case strings.HasPrefix(stmt, "MERGE INTO ") && strings.Contains(stmt, " AS target\n"):
@@ -927,10 +1083,23 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 		return dbsql.StatementResponse{}, nil
 
 	case strings.HasPrefix(stmt, "BEGIN ATOMIC\n"):
-		// Snapshot tables so any error inside BEGIN ATOMIC rolls back all DML atomically.
-		snapshot := make(map[string]mockUCTable, len(uc.tables))
-		for k, v := range uc.tables {
-			snapshot[k] = v
+		undo := map[string]int{}
+		touch := func(ref string) (mockUCTable, bool) {
+			tbl, ok := uc.tables[ref]
+			if ok {
+				if _, seen := undo[tbl.id]; !seen {
+					undo[tbl.id] = tbl.rows
+				}
+			}
+			return tbl, ok
+		}
+		rollback := func() {
+			for ref, tbl := range uc.tables {
+				if rows, ok := undo[tbl.id]; ok {
+					tbl.rows = rows
+					uc.tables[ref] = tbl
+				}
+			}
 		}
 		body := strings.TrimPrefix(stmt, "BEGIN ATOMIC\n")
 		body = strings.TrimSuffix(strings.TrimSpace(body), "END;")
@@ -939,38 +1108,105 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 			if sub == "" {
 				continue
 			}
+			if uc.onAtomicSub != nil {
+				uc.onAtomicSub(sub, uc)
+			}
 			switch {
+			case strings.HasPrefix(sub, "IF NOT EXISTS (SELECT 1 FROM "):
+				ref, created, expectedComment, hasGuard := parseMockInfoSchemaPredicate(nil, sub)
+				tbl, ok := uc.tables[ref]
+				if !hasGuard || expectedComment == "" || !strings.Contains(sub, "THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '"+cdcIncarnationGuardMarker) {
+					rollback()
+					return dbsql.StatementResponse{}, fmt.Errorf("malformed guard: %s", sub)
+				}
+				if !ok || tbl.effectiveCreatedMicros() != created || tbl.comment != expectedComment {
+					rollback()
+					return dbsql.StatementResponse{}, fmt.Errorf("[USER_RAISED_EXCEPTION] %s: %s SQLSTATE: 45000", cdcIncarnationGuardMarker, ref)
+				}
 			case strings.HasPrefix(sub, "TRUNCATE TABLE "):
-				uc.tables = snapshot
+				rollback()
 				return dbsql.StatementResponse{}, errors.New("[MULTI_STATEMENT_TRANSACTION_NOT_SUPPORTED] DDL TRUNCATE is not allowed in BEGIN ATOMIC")
+			case strings.HasPrefix(sub, "COPY INTO "), strings.HasPrefix(sub, "ALTER TABLE "), strings.HasPrefix(sub, "COMMENT ON TABLE "):
+				rollback()
+				return dbsql.StatementResponse{}, fmt.Errorf("[UNSUPPORTED_FEATURE.SQL_SCRIPTING_WITH_UNSUPPORTED_COMMANDS_IN_ATOMIC_BODY] %s", sub)
 			case strings.HasPrefix(sub, "DELETE FROM "):
 				ref := normalizeMockUCRef(strings.TrimPrefix(sub, "DELETE FROM "))
-				tbl, ok := uc.tables[ref]
+				tbl, ok := touch(ref)
 				if !ok {
-					uc.tables = snapshot
+					rollback()
 					return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
 				}
 				tbl.rows = 0
 				uc.tables[ref] = tbl
+			case strings.HasPrefix(sub, "INSERT INTO "):
+				rest := strings.TrimPrefix(sub, "INSERT INTO ")
+				ref := normalizeMockUCRef(rest[:strings.Index(rest, " (")])
+				tbl, ok := touch(ref)
+				if !ok {
+					rollback()
+					return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
+				}
+				tbl.rows++
+				uc.tables[ref] = tbl
 			case strings.HasPrefix(sub, "MERGE INTO "):
 				if strings.Contains(sub, "`fail_staging`") {
-					uc.tables = snapshot
+					rollback()
 					return dbsql.StatementResponse{}, errors.New("simulated mid-batch merge failure")
 				}
 				idx := strings.Index(sub, " AS target\n")
 				ref := normalizeMockUCRef(strings.TrimPrefix(sub[:idx], "MERGE INTO "))
-				tbl, ok := uc.tables[ref]
+				tbl, ok := touch(ref)
 				if !ok {
-					uc.tables = snapshot
+					rollback()
 					return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
 				}
 				tbl.rows += 10
 				uc.tables[ref] = tbl
 			default:
-				uc.tables = snapshot
+				rollback()
 				return dbsql.StatementResponse{}, fmt.Errorf("unexpected statement in BEGIN ATOMIC: %s", sub)
 			}
 		}
+		return dbsql.StatementResponse{}, nil
+
+	case isMockInfoSchemaQuery(stmt):
+		return mockInfoSchemaResponse(stmt, func(ref string) (string, string, bool) {
+			tbl, ok := uc.tables[normalizeMockUCRef(ref)]
+			return tbl.effectiveCreatedMicros(), tbl.comment, ok
+		}), nil
+
+	case strings.HasPrefix(stmt, "DESCRIBE TABLE "):
+		ref := normalizeMockUCRef(strings.TrimPrefix(stmt, "DESCRIBE TABLE "))
+		if _, ok := uc.tables[ref]; !ok {
+			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
+		}
+		cols, ok := uc.columns[ref]
+		if !ok {
+			cols = []describedColumn{{name: "id", dataType: "bigint"}}
+		}
+		rows := make([][]string, len(cols))
+		for i, c := range cols {
+			rows[i] = []string{c.name, c.dataType, ""}
+		}
+		return makeQueryResponse([]string{"col_name", "data_type", "comment"}, rows), nil
+
+	case strings.HasPrefix(stmt, "ALTER TABLE ") && strings.Contains(stmt, " ADD COLUMNS ("):
+		rest := strings.TrimPrefix(stmt, "ALTER TABLE ")
+		idx := strings.Index(rest, " ADD COLUMNS (")
+		ref := normalizeMockUCRef(rest[:idx])
+		if _, ok := uc.tables[ref]; !ok {
+			return dbsql.StatementResponse{}, errors.New("[TABLE_OR_VIEW_NOT_FOUND] Table or view not found")
+		}
+		cols, ok := uc.columns[ref]
+		if !ok {
+			cols = []describedColumn{{name: "id", dataType: "bigint"}}
+		}
+		defs := strings.TrimSuffix(rest[idx+len(" ADD COLUMNS ("):], ")")
+		for _, def := range strings.Split(defs, ", ") {
+			parts := strings.SplitN(def, " ", 2)
+			cols = append(cols, describedColumn{name: strings.Trim(parts[0], "`"), dataType: parts[1]})
+		}
+		uc.columns[ref] = cols
 		return dbsql.StatementResponse{}, nil
 
 	case strings.HasPrefix(stmt, "CREATE VIEW IF NOT EXISTS "):
@@ -997,11 +1233,26 @@ func (uc *mockUCState) handle(stmt string, _ dbsql.ExecuteStatementRequest) (dbs
 		delete(uc.views, viewRef)
 		return dbsql.StatementResponse{}, nil
 
+	case strings.HasPrefix(stmt, "CREATE TABLE IF NOT EXISTS `"):
+		rest := strings.TrimPrefix(stmt, "CREATE TABLE IF NOT EXISTS ")
+		idx := strings.Index(rest, " (")
+		if idx < 0 {
+			idx = len(rest)
+		}
+		ref := normalizeMockUCRef(rest[:idx])
+		if _, exists := uc.tables[ref]; !exists {
+			uc.tables[ref] = mockUCTable{id: "uuid-created-" + strconv.Itoa(len(uc.tables)+1), rows: 0}
+		}
+		return dbsql.StatementResponse{}, nil
+
 	case strings.HasPrefix(stmt, "CREATE TABLE `") && !strings.HasPrefix(stmt, "CREATE TABLE IF NOT EXISTS"):
 		rest := strings.TrimPrefix(stmt, "CREATE TABLE ")
 		idx := strings.Index(rest, " (")
 		if idx < 0 {
 			idx = strings.Index(rest, " AS SELECT ")
+		}
+		if idx < 0 {
+			idx = len(rest)
 		}
 		ref := normalizeMockUCRef(rest[:idx])
 		if _, exists := uc.tables[ref]; exists {
@@ -1079,11 +1330,11 @@ func TestMergeCDCTablesAtomically_SingleAtomicBatchAndRollbackOnFailure(t *testi
 
 	ordersTbl, ok := uc.getTable("`main`.`analytics`.`orders`")
 	require.True(t, ok)
-	assert.Equal(t, mockUCTable{id: "uuid-orders-1", rows: 25}, ordersTbl, "truncated table must roll back to original 25 rows")
+	assert.Equal(t, mockUCTable{id: "uuid-orders-1", rows: 25, comment: cdcIncarnationCommentMarker + "uuid-orders-1"}, ordersTbl, "truncated table must roll back to original 25 rows")
 
 	customersTbl, ok := uc.getTable("`main`.`analytics`.`customers`")
 	require.True(t, ok)
-	assert.Equal(t, mockUCTable{id: "uuid-customers-1", rows: 12}, customersTbl)
+	assert.Equal(t, mockUCTable{id: "uuid-customers-1", rows: 12, comment: cdcIncarnationCommentMarker + "uuid-customers-1"}, customersTbl)
 
 	// 3. Single-table Truncate: true + failed MERGE also wraps DELETE + MERGE in BEGIN ATOMIC and preserves rows.
 	err = dest.MergeCDCTablesAtomically(ctx, []destination.CDCAtomicTableMerge{{
@@ -1099,7 +1350,7 @@ func TestMergeCDCTablesAtomically_SingleAtomicBatchAndRollbackOnFailure(t *testi
 	require.ErrorContains(t, err, "simulated mid-batch merge failure")
 	ordersTbl, ok = uc.getTable("`main`.`analytics`.`orders`")
 	require.True(t, ok)
-	assert.Equal(t, mockUCTable{id: "uuid-orders-1", rows: 25}, ordersTbl, "single-table truncate+merge failure must not leave target empty")
+	assert.Equal(t, mockUCTable{id: "uuid-orders-1", rows: 25, comment: cdcIncarnationCommentMarker + "uuid-orders-1"}, ordersTbl, "single-table truncate+merge failure must not leave target empty")
 
 	// 4. Successful multi-table batch (CDC + non-CDC, with and without Truncate) executes in ONE BEGIN ATOMIC block.
 	*stmts = nil
@@ -1145,63 +1396,240 @@ func TestMergeCDCTablesAtomically_SingleAtomicBatchAndRollbackOnFailure(t *testi
 
 	ordersTbl, ok = uc.getTable("`main`.`analytics`.`orders`")
 	require.True(t, ok)
-	assert.Equal(t, mockUCTable{id: "uuid-orders-1", rows: 10}, ordersTbl)
+	assert.Equal(t, mockUCTable{id: "uuid-orders-1", rows: 10, comment: cdcIncarnationCommentMarker + "uuid-orders-1"}, ordersTbl)
 
 	customersTbl, ok = uc.getTable("`main`.`analytics`.`customers`")
 	require.True(t, ok)
-	assert.Equal(t, mockUCTable{id: "uuid-customers-1", rows: 22}, customersTbl)
+	assert.Equal(t, mockUCTable{id: "uuid-customers-1", rows: 22, comment: cdcIncarnationCommentMarker + "uuid-customers-1"}, customersTbl)
 
 	auditTbl, ok := uc.getTable("`main`.`analytics`.`audit_log`")
 	require.True(t, ok)
-	assert.Equal(t, mockUCTable{id: "uuid-audit-1", rows: 15}, auditTbl)
+	assert.Equal(t, mockUCTable{id: "uuid-audit-1", rows: 15, comment: cdcIncarnationCommentMarker + "uuid-audit-1"}, auditTbl)
+}
+
+func newMockUCWriteDestination(t *testing.T, uc *mockUCState) (*DatabricksDestination, func() []string, *atomic.Bool) {
+	t.Helper()
+	var (
+		mu       sync.Mutex
+		sqlStmts []string
+		deleted  atomic.Bool
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/2.0/fs/files/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/2.0/fs/files/"):
+			deleted.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/2.0/sql/statements":
+			var req dbsql.ExecuteStatementRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			sqlStmts = append(sqlStmts, req.Statement)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			resp, err := uc.handle(req.Statement, req)
+			if err != nil {
+				resp = dbsql.StatementResponse{
+					StatementId: "stmt-err",
+					Status: &dbsql.StatementStatus{
+						State: dbsql.StatementStateFailed,
+						Error: &dbsql.ServiceError{Message: err.Error()},
+					},
+				}
+			} else if resp.Status == nil {
+				resp.Status = &dbsql.StatementStatus{State: dbsql.StatementStateSucceeded}
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := databricks.NewWorkspaceClient(&databricks.Config{
+		Host: server.URL, Token: "test-token", AuthType: "pat",
+	})
+	require.NoError(t, err)
+	dest := &DatabricksDestination{
+		client: client, catalog: "main", schemaName: "analytics", httpPath: "/sql/1.0/warehouses/test",
+	}
+	return dest, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), sqlStmts...)
+	}, &deleted
+}
+
+func singleRowBatch() <-chan source.RecordBatchResult {
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil))
+	bldr.Field(0).(*array.Int64Builder).Append(1)
+	rec := bldr.NewRecordBatch()
+	bldr.Release()
+	ch := make(chan source.RecordBatchResult, 1)
+	ch <- source.RecordBatchResult{Batch: rec}
+	close(ch)
+	return ch
+}
+
+const liveOrdersRef = "`main`.`analytics`.`orders`"
+
+func assertLiveTargetNeverRenamed(t *testing.T, stmts []string) {
+	t.Helper()
+	for _, s := range stmts {
+		assert.False(t, strings.HasPrefix(s, "ALTER TABLE "+liveOrdersRef+" RENAME TO "), "live target must never be renamed away: %s", s)
+		assert.False(t, strings.HasPrefix(s, "TRUNCATE TABLE "), "fenced truncate must use guarded DELETE inside BEGIN ATOMIC: %s", s)
+	}
+}
+
+// installLivenessProbe records every statement (top-level or inside BEGIN
+// ATOMIC) that ran while the live target name was missing.
+func installLivenessProbe(uc *mockUCState) *[]string {
+	var missing []string
+	prevStmt := uc.onStmt
+	prevSub := uc.onAtomicSub
+	uc.onStmt = func(stmt string, state *mockUCState) error {
+		if _, ok := state.tables[normalizeMockUCRef(liveOrdersRef)]; !ok {
+			missing = append(missing, stmt)
+		}
+		if prevStmt != nil {
+			return prevStmt(stmt, state)
+		}
+		return nil
+	}
+	uc.onAtomicSub = func(sub string, state *mockUCState) {
+		if _, ok := state.tables[normalizeMockUCRef(liveOrdersRef)]; !ok {
+			missing = append(missing, sub)
+		}
+		if prevSub != nil {
+			prevSub(sub, state)
+		}
+	}
+	return &missing
+}
+
+func countAtomicBlocks(stmts []string) int {
+	n := 0
+	for _, s := range stmts {
+		if strings.HasPrefix(s, "BEGIN ATOMIC\n") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestBuildFencedAtomicSQLGuardsBeforeAndAfterDML(t *testing.T) {
+	t.Parallel()
+	fence := &cdcFence{
+		catalog:         "Main",
+		schemaName:      "Analytics",
+		tableName:       "Orders",
+		targetFull:      quoteTableParts("Main", "Analytics", "Orders"),
+		createdMicros:   "1700000000123456",
+		expectedComment: "User's table __ingestr_cdc_incarnation=uuid-orders-1",
+	}
+	guard := "IF NOT EXISTS (SELECT 1 FROM `Main`.`information_schema`.`tables` WHERE lower(table_catalog) = 'main' AND lower(table_schema) = 'analytics' AND lower(table_name) = 'orders' AND unix_micros(created) = 1700000000123456 AND coalesce(comment, '') = 'User''s table __ingestr_cdc_incarnation=uuid-orders-1') THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'INGESTR_CDC_INCARNATION_CHANGED: `Main`.`Analytics`.`Orders`'; END IF"
+	assert.Equal(t, guard, fence.guardSQL())
+
+	got := buildFencedAtomicSQL([]*cdcFence{fence}, []string{"DELETE FROM `Main`.`Analytics`.`Orders`;", "MERGE INTO `Main`.`Analytics`.`Orders` AS target\nUSING s AS source\nON x"})
+	want := "BEGIN ATOMIC\n  " + guard + ";\n  DELETE FROM `Main`.`Analytics`.`Orders`;\n  MERGE INTO `Main`.`Analytics`.`Orders` AS target\nUSING s AS source\nON x;\n  " + guard + ";\nEND;"
+	assert.Equal(t, want, got)
+	assert.NotContains(t, got, "RENAME")
 }
 
 func TestTruncateCDCTableIfIncarnation_ProtectsReplacementTable(t *testing.T) {
 	ctx := context.Background()
+	expected := destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig")
 
-	t.Run("outside replacement between initial check and guard rename is restored untouched", func(t *testing.T) {
-		uc := newMockUCState(map[string]mockUCTable{
-			"`main`.`analytics`.`orders`": {id: "uuid-orig", rows: 10},
-		})
-		swappedBeforeRename := false
+	t.Run("matching incarnation deletes rows in place without hiding the live table", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 10}})
+		missing := installLivenessProbe(uc)
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		require.NoError(t, dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", expected))
+		tbl, ok := uc.getTable(liveOrdersRef)
+		require.True(t, ok)
+		assert.Equal(t, mockUCTable{id: "uuid-orig", rows: 0, comment: cdcIncarnationCommentMarker + "uuid-orig"}, tbl)
+		assert.Empty(t, *missing, "live target must stay visible during the truncate")
+		assertLiveTargetNeverRenamed(t, *stmts)
+		assert.Equal(t, 1, countAtomicBlocks(*stmts))
+		joined := strings.Join(*stmts, "\n")
+		assert.Contains(t, joined, "DELETE FROM "+liveOrdersRef)
+		assert.Equal(t, 2, strings.Count(joined, cdcIncarnationGuardMarker), "guard must run before and after DELETE")
+	})
+
+	t.Run("stale incarnation fails before any DML", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-replacement", rows: 77}})
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		err := dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", expected)
+		require.ErrorContains(t, err, "physical incarnation changed")
+		assert.Zero(t, countAtomicBlocks(*stmts))
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-replacement", rows: 77}, tbl)
+	})
+
+	t.Run("replacement between identity reads is detected before any DML", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 10}})
+		reads := 0
 		uc.onStmt = func(stmt string, state *mockUCState) error {
-			if !swappedBeforeRename && strings.HasPrefix(stmt, "ALTER TABLE `main`.`analytics`.`orders` RENAME TO ") {
-				swappedBeforeRename = true
-				state.tables["`main`.`analytics`.`orders`"] = mockUCTable{id: "uuid-replacement", rows: 77}
+			if isMockInfoSchemaQuery(stmt) {
+				reads++
+				if reads == 2 {
+					state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{id: "uuid-replacement", rows: 77}
+				}
 			}
 			return nil
 		}
 		dest, stmts := newTestDatabricksDestination(t, uc.handle)
 
-		err := dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"))
+		err := dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", expected)
 		require.ErrorContains(t, err, "physical incarnation changed")
-
-		for _, s := range *stmts {
-			assert.False(t, strings.HasPrefix(s, "TRUNCATE TABLE "), "replacement table must never be truncated")
-		}
-		tbl, ok := uc.getTable("`main`.`analytics`.`orders`")
-		require.True(t, ok)
+		assert.Zero(t, countAtomicBlocks(*stmts))
+		tbl, _ := uc.getTable(liveOrdersRef)
 		assert.Equal(t, mockUCTable{id: "uuid-replacement", rows: 77}, tbl)
 	})
 
-	t.Run("outside replacement created while truncating guard is preserved untouched", func(t *testing.T) {
-		uc := newMockUCState(map[string]mockUCTable{
-			"`main`.`analytics`.`orders`": {id: "uuid-orig", rows: 10},
-		})
+	t.Run("replacement before the atomic block is rejected by the leading guard", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 10}})
 		uc.onStmt = func(stmt string, state *mockUCState) error {
-			if strings.HasPrefix(stmt, "TRUNCATE TABLE ") {
-				state.tables["`main`.`analytics`.`orders`"] = mockUCTable{id: "uuid-concurrent-new", rows: 99}
+			if strings.HasPrefix(stmt, "BEGIN ATOMIC\n") {
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{id: "uuid-replacement", rows: 77}
 			}
 			return nil
 		}
-		dest, _ := newTestDatabricksDestination(t, uc.handle)
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
 
-		err := dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"))
+		err := dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", expected)
 		require.ErrorContains(t, err, "physical incarnation changed")
+		require.ErrorContains(t, err, cdcIncarnationGuardMarker)
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-replacement", rows: 77}, tbl)
+		assertLiveTargetNeverRenamed(t, *stmts)
+	})
 
-		tbl, ok := uc.getTable("`main`.`analytics`.`orders`")
-		require.True(t, ok)
-		assert.Equal(t, mockUCTable{id: "uuid-concurrent-new", rows: 99}, tbl)
+	t.Run("replacement after the leading guard is rolled back by the trailing guard", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 10}})
+		replaced := false
+		uc.onAtomicSub = func(sub string, state *mockUCState) {
+			if !replaced && strings.HasPrefix(sub, "DELETE FROM ") {
+				replaced = true
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{id: "uuid-concurrent-new", rows: 99}
+			}
+		}
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		err := dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", expected)
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.True(t, replaced)
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-concurrent-new", rows: 99}, tbl, "DELETE on the replacement must be rolled back")
+		assertLiveTargetNeverRenamed(t, *stmts)
 	})
 }
 
@@ -1209,17 +1637,33 @@ func TestMergeAndSwapAndWrite_ProtectReplacementTables(t *testing.T) {
 	ctx := context.Background()
 	cdcCols := []string{"id", "val", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
 
-	t.Run("MergeTable restores replacement table without executing MERGE INTO", func(t *testing.T) {
-		uc := newMockUCState(map[string]mockUCTable{
-			"`main`.`analytics`.`orders`": {id: "uuid-orig", rows: 30},
-		})
+	t.Run("MergeTable merges the live table in place", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 30}})
+		missing := installLivenessProbe(uc)
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+			TargetTable:            "analytics.orders",
+			StagingTable:           "ingestr_staging.stg_orders",
+			PrimaryKeys:            []string{"id"},
+			CDCExpectedIncarnation: destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"),
+			Columns:                cdcCols,
+		}))
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-orig", rows: 40, comment: cdcIncarnationCommentMarker + "uuid-orig"}, tbl)
+		assert.Empty(t, *missing)
+		assertLiveTargetNeverRenamed(t, *stmts)
+		assert.Contains(t, strings.Join(*stmts, "\n"), "MERGE INTO "+liveOrdersRef+" AS target")
+	})
+
+	t.Run("MergeTable rolls back a merge that hit a replacement table", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 30}})
 		replaced := false
-		uc.onStmt = func(stmt string, state *mockUCState) error {
-			if !replaced && strings.HasPrefix(stmt, "ALTER TABLE `main`.`analytics`.`orders` RENAME TO ") {
+		uc.onAtomicSub = func(sub string, state *mockUCState) {
+			if !replaced && strings.HasPrefix(sub, "MERGE INTO ") {
 				replaced = true
-				state.tables["`main`.`analytics`.`orders`"] = mockUCTable{id: "uuid-replaced", rows: 88}
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{id: "uuid-replaced", rows: 88}
 			}
-			return nil
 		}
 		dest, stmts := newTestDatabricksDestination(t, uc.handle)
 
@@ -1231,26 +1675,22 @@ func TestMergeAndSwapAndWrite_ProtectReplacementTables(t *testing.T) {
 			Columns:                cdcCols,
 		})
 		require.ErrorContains(t, err, "physical incarnation changed")
-		for _, s := range *stmts {
-			assert.False(t, strings.HasPrefix(s, "MERGE INTO "), "MERGE INTO must never execute against a replacement table")
-		}
-		tbl, ok := uc.getTable("`main`.`analytics`.`orders`")
-		require.True(t, ok)
+		tbl, _ := uc.getTable(liveOrdersRef)
 		assert.Equal(t, mockUCTable{id: "uuid-replaced", rows: 88}, tbl)
+		assertLiveTargetNeverRenamed(t, *stmts)
 	})
 
-	t.Run("MergeCDCTablesAtomically restores all earlier guarded tables when later table was replaced", func(t *testing.T) {
+	t.Run("MergeCDCTablesAtomically rolls back every table when one target is replaced mid-transaction", func(t *testing.T) {
 		uc := newMockUCState(map[string]mockUCTable{
 			"`main`.`analytics`.`customers`": {id: "uuid-cust", rows: 15},
-			"`main`.`analytics`.`orders`":    {id: "uuid-ord", rows: 40},
+			liveOrdersRef:                    {id: "uuid-ord", rows: 40},
 		})
 		replaced := false
-		uc.onStmt = func(stmt string, state *mockUCState) error {
-			if !replaced && strings.HasPrefix(stmt, "ALTER TABLE `main`.`analytics`.`orders` RENAME TO ") {
+		uc.onAtomicSub = func(sub string, state *mockUCState) {
+			if !replaced && strings.HasPrefix(sub, "MERGE INTO "+liveOrdersRef) {
 				replaced = true
-				state.tables["`main`.`analytics`.`orders`"] = mockUCTable{id: "uuid-ord-replaced", rows: 120}
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{id: "uuid-ord-replaced", rows: 120}
 			}
-			return nil
 		}
 		dest, stmts := newTestDatabricksDestination(t, uc.handle)
 
@@ -1276,16 +1716,48 @@ func TestMergeAndSwapAndWrite_ProtectReplacementTables(t *testing.T) {
 			},
 		})
 		require.ErrorContains(t, err, "physical incarnation changed")
+		require.True(t, replaced)
+		assert.Equal(t, 1, countAtomicBlocks(*stmts))
+		custTbl, _ := uc.getTable("`main`.`analytics`.`customers`")
+		assert.Equal(t, mockUCTable{id: "uuid-cust", rows: 15, comment: cdcIncarnationCommentMarker + "uuid-cust"}, custTbl, "earlier DELETE+MERGE must roll back")
+		ordTbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-ord-replaced", rows: 120}, ordTbl, "replacement must be left untouched")
 		for _, s := range *stmts {
-			assert.False(t, strings.HasPrefix(s, "BEGIN ATOMIC"), "BEGIN ATOMIC must not run when any target incarnation changed")
+			assert.NotContains(t, s, "RENAME TO")
 		}
-		custTbl, ok := uc.getTable("`main`.`analytics`.`customers`")
-		require.True(t, ok)
-		assert.Equal(t, mockUCTable{id: "uuid-cust", rows: 15}, custTbl)
+	})
 
-		ordTbl, ok := uc.getTable("`main`.`analytics`.`orders`")
-		require.True(t, ok)
-		assert.Equal(t, mockUCTable{id: "uuid-ord-replaced", rows: 120}, ordTbl)
+	t.Run("MergeCDCTablesAtomically with a stale incarnation runs no transaction", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{
+			"`main`.`analytics`.`items`":     {id: "uuid-item", rows: 8},
+			"`main`.`analytics`.`customers`": {id: "uuid-cust", rows: 15},
+			liveOrdersRef:                    {id: "uuid-ord-replaced", rows: 120},
+		})
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		err := dest.MergeCDCTablesAtomically(ctx, []destination.CDCAtomicTableMerge{
+			{Options: destination.MergeOptions{
+				TargetTable: "analytics.items", StagingTable: "ingestr_staging.stg_items", PrimaryKeys: []string{"id"},
+				CDCExpectedIncarnation: destination.CDCTargetKey("main", "analytics", "items", "uuid-item"), Columns: cdcCols,
+			}},
+			{Truncate: true, Options: destination.MergeOptions{
+				TargetTable: "analytics.customers", StagingTable: "ingestr_staging.stg_customers", PrimaryKeys: []string{"id"},
+				CDCExpectedIncarnation: destination.CDCTargetKey("main", "analytics", "customers", "uuid-cust"), Columns: cdcCols,
+			}},
+			{Options: destination.MergeOptions{
+				TargetTable: "analytics.orders", StagingTable: "ingestr_staging.stg_orders", PrimaryKeys: []string{"id"},
+				CDCExpectedIncarnation: destination.CDCTargetKey("main", "analytics", "orders", "uuid-ord"), Columns: cdcCols,
+			}},
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
+		assert.Zero(t, countAtomicBlocks(*stmts))
+		for _, s := range *stmts {
+			assert.NotContains(t, s, "COMMENT ON TABLE")
+		}
+		itemTbl, _ := uc.getTable("`main`.`analytics`.`items`")
+		assert.Equal(t, mockUCTable{id: "uuid-item", rows: 8}, itemTbl)
+		custTbl, _ := uc.getTable("`main`.`analytics`.`customers`")
+		assert.Equal(t, mockUCTable{id: "uuid-cust", rows: 15}, custTbl)
 	})
 
 	t.Run("SwapTable restores replacement target without dropping it or renaming staging", func(t *testing.T) {
@@ -1377,82 +1849,414 @@ func TestMergeAndSwapAndWrite_ProtectReplacementTables(t *testing.T) {
 		assert.Equal(t, mockUCTable{id: "uuid-created-outside", rows: 33}, targetTbl)
 	})
 
-	t.Run("WriteParallel restores replacement table without running COPY INTO and cleans volume file", func(t *testing.T) {
-		uc := newMockUCState(map[string]mockUCTable{
-			"`main`.`analytics`.`orders`": {id: "uuid-orig", rows: 20},
-		})
-		replaced := false
-		uc.onStmt = func(stmt string, state *mockUCState) error {
-			if !replaced && strings.HasPrefix(stmt, "ALTER TABLE `main`.`analytics`.`orders` RENAME TO ") {
-				replaced = true
-				state.tables["`main`.`analytics`.`orders`"] = mockUCTable{id: "uuid-after-upload", rows: 64}
-			}
-			return nil
-		}
+	t.Run("WriteParallel appends through a private load table without hiding the live table", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 20}})
+		missing := installLivenessProbe(uc)
+		dest, stmts, deleted := newMockUCWriteDestination(t, uc)
 
-		var deletedVolume bool
-		var sqlStmts []string
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/2.0/fs/files/"):
-				w.WriteHeader(http.StatusNoContent)
-			case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/2.0/fs/files/"):
-				deletedVolume = true
-				w.WriteHeader(http.StatusNoContent)
-			case r.Method == http.MethodPost && r.URL.Path == "/api/2.0/sql/statements":
-				var req dbsql.ExecuteStatementRequest
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-				sqlStmts = append(sqlStmts, req.Statement)
-				w.Header().Set("Content-Type", "application/json")
-				resp, err := uc.handle(req.Statement, req)
-				if err != nil {
-					resp = dbsql.StatementResponse{
-						StatementId: "stmt-err",
-						Status: &dbsql.StatementStatus{
-							State: dbsql.StatementStateFailed,
-							Error: &dbsql.ServiceError{Message: err.Error()},
-						},
-					}
-				} else if resp.Status == nil {
-					resp.Status = &dbsql.StatementStatus{State: dbsql.StatementStateSucceeded}
-				}
-				_ = json.NewEncoder(w).Encode(resp)
-			default:
-				http.Error(w, "unexpected", http.StatusBadRequest)
-			}
+		require.NoError(t, dest.WriteParallel(ctx, singleRowBatch(), destination.WriteOptions{
+			Table:                  "analytics.orders",
+			CDCExpectedIncarnation: destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"),
 		}))
-		defer server.Close()
-
-		client, err := databricks.NewWorkspaceClient(&databricks.Config{
-			Host: server.URL, Token: "test-token", AuthType: "pat",
-		})
-		require.NoError(t, err)
-		dest := &DatabricksDestination{
-			client: client, catalog: "main", schemaName: "analytics", httpPath: "/sql/1.0/warehouses/test",
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-orig", rows: 21, comment: cdcIncarnationCommentMarker + "uuid-orig"}, tbl)
+		assert.True(t, deleted.Load())
+		assert.Empty(t, *missing)
+		all := stmts()
+		assertLiveTargetNeverRenamed(t, all)
+		for _, s := range all {
+			assert.False(t, strings.HasPrefix(s, "COPY INTO "+liveOrdersRef), "COPY INTO must not target the live table directly")
 		}
+		for ref := range uc.tables {
+			assert.NotContains(t, ref, "__ingestr_load_", "private load table must be dropped")
+		}
+	})
 
-		bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrow.NewSchema([]arrow.Field{
-			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-		}, nil))
-		bldr.Field(0).(*array.Int64Builder).Append(1)
-		rec := bldr.NewRecordBatch()
-		bldr.Release()
-		ch := make(chan source.RecordBatchResult, 1)
-		ch <- source.RecordBatchResult{Batch: rec}
-		close(ch)
+	t.Run("WriteParallel never appends to a replacement table and cleans up", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 20}})
+		replaced := false
+		uc.onAtomicSub = func(sub string, state *mockUCState) {
+			if !replaced && strings.HasPrefix(sub, "INSERT INTO ") {
+				replaced = true
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{id: "uuid-after-upload", rows: 64}
+			}
+		}
+		dest, stmts, deleted := newMockUCWriteDestination(t, uc)
 
-		err = dest.WriteParallel(ctx, ch, destination.WriteOptions{
+		err := dest.WriteParallel(ctx, singleRowBatch(), destination.WriteOptions{
 			Table:                  "analytics.orders",
 			CDCExpectedIncarnation: destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"),
 		})
 		require.ErrorContains(t, err, "physical incarnation changed")
-		assert.True(t, deletedVolume, "uploaded volume file must be cleaned up on fence failure")
-		for _, s := range sqlStmts {
-			assert.False(t, strings.HasPrefix(s, "COPY INTO "), "COPY INTO must never run against a replacement table")
-		}
-		targetTbl, ok := uc.getTable("`main`.`analytics`.`orders`")
-		require.True(t, ok)
+		require.True(t, replaced)
+		assert.True(t, deleted.Load(), "uploaded volume file must be cleaned up on fence failure")
+		targetTbl, _ := uc.getTable(liveOrdersRef)
 		assert.Equal(t, mockUCTable{id: "uuid-after-upload", rows: 64}, targetTbl)
+		assertLiveTargetNeverRenamed(t, stmts())
+		for ref := range uc.tables {
+			assert.NotContains(t, ref, "__ingestr_load_")
+		}
+	})
+
+	t.Run("WriteParallel rejects missing target columns without running unfenced ALTER TABLE", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 20}})
+		uc.loadColumns = []describedColumn{{name: "id", dataType: "bigint"}, {name: "new_col", dataType: "string"}}
+		dest, stmts, deleted := newMockUCWriteDestination(t, uc)
+
+		err := dest.WriteParallel(ctx, singleRowBatch(), destination.WriteOptions{
+			Table:                  "analytics.orders",
+			CDCExpectedIncarnation: destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"),
+		})
+		require.ErrorContains(t, err, "missing columns required by fenced write: new_col")
+		assert.True(t, deleted.Load(), "uploaded volume file must be cleaned up")
+		for _, s := range stmts() {
+			assert.False(t, strings.HasPrefix(s, "ALTER TABLE "), "fenced write must never emit unfenced ALTER TABLE DDL: %s", s)
+			assert.False(t, strings.HasPrefix(s, "BEGIN ATOMIC"), "fenced write must abort before BEGIN ATOMIC when schema is missing columns")
+		}
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-orig", rows: 20, comment: cdcIncarnationCommentMarker + "uuid-orig"}, tbl)
+		for ref := range uc.tables {
+			assert.NotContains(t, ref, "__ingestr_load_")
+		}
+	})
+}
+
+func TestSwapTableRecoversInterruptedSwap(t *testing.T) {
+	ctx := context.Background()
+	oldRef := quoteTableParts("main", "analytics", swapOldTableName("main", "analytics", "orders"))
+
+	t.Run("CDCTargetIncarnation restores a target stranded between swap renames", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{oldRef: {id: "uuid-orig", rows: 10}})
+		dest, _ := newTestDatabricksDestination(t, uc.handle)
+
+		inc, exists, err := dest.CDCTargetIncarnation(ctx, "analytics.orders")
+		require.NoError(t, err)
+		assert.True(t, exists)
+		assert.Equal(t, destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"), inc)
+		tbl, ok := uc.getTable(liveOrdersRef)
+		require.True(t, ok)
+		assert.Equal(t, mockUCTable{id: "uuid-orig", rows: 10}, tbl)
+		_, ok = uc.getTable(oldRef)
+		assert.False(t, ok)
+	})
+
+	t.Run("in-progress swap in this process is not undone", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{oldRef: {id: "uuid-orig", rows: 10}})
+		dest, _ := newTestDatabricksDestination(t, uc.handle)
+		release := dest.markSwapActive("main", "analytics", "orders")
+		defer release()
+
+		_, exists, err := dest.CDCTargetIncarnation(ctx, "analytics.orders")
+		require.NoError(t, err)
+		assert.False(t, exists)
+		_, ok := uc.getTable(oldRef)
+		assert.True(t, ok)
+	})
+
+	t.Run("SwapTable restores a stranded target before a fenced swap", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{
+			oldRef:                                  {id: "uuid-orig", rows: 10},
+			"`main`.`ingestr_staging`.`stg_orders`": {id: "uuid-stg", rows: 50},
+		})
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+			TargetTable:                   "analytics.orders",
+			StagingTable:                  "ingestr_staging.stg_orders",
+			CDCExpectedIncarnation:        destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig"),
+			CDCExpectedStagingIncarnation: destination.CDCTargetKey("main", "ingestr_staging", "stg_orders", "uuid-stg"),
+			CDCExpectedResultIncarnation:  destination.CDCTargetKey("main", "analytics", "orders", "uuid-stg"),
+		}))
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-stg", rows: 50, comment: cdcIncarnationCommentMarker + "uuid-stg"}, tbl)
+		_, ok := uc.getTable(oldRef)
+		assert.False(t, ok)
+		assert.Contains(t, strings.Join(*stmts, "\n"), "ALTER TABLE "+liveOrdersRef+" RENAME TO "+oldRef)
+	})
+
+	t.Run("SwapTable preserves a leftover from an earlier swap under an orphan name and swaps normally", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{
+			liveOrdersRef:                           {id: "uuid-current", rows: 5},
+			oldRef:                                  {id: "uuid-previous", rows: 3},
+			"`main`.`ingestr_staging`.`stg_orders`": {id: "uuid-stg", rows: 50},
+		})
+		dest, _ := newTestDatabricksDestination(t, uc.handle)
+
+		require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+			TargetTable:  "analytics.orders",
+			StagingTable: "ingestr_staging.stg_orders",
+		}))
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-stg", rows: 50}, tbl)
+		_, ok := uc.getTable(oldRef)
+		assert.False(t, ok)
+		var orphans []mockUCTable
+		for ref, t := range uc.tables {
+			if strings.Contains(ref, "`__ingestr_swap_orphan_orders_") {
+				orphans = append(orphans, t)
+			}
+		}
+		assert.Equal(t, []mockUCTable{{id: "uuid-previous", rows: 3}}, orphans, "leftover data must never be dropped")
+	})
+
+	t.Run("GetTableSchema recovers a target stranded by an interrupted swap", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{oldRef: {id: "uuid-orig", rows: 42}})
+		uc.columns[normalizeMockUCRef(oldRef)] = []describedColumn{
+			{name: "id", dataType: "bigint"},
+			{name: "amount", dataType: "double"},
+		}
+		// Copy column metadata across RENAME TO so DESCRIBE TABLE sees restored columns.
+		uc.onStmt = func(stmt string, state *mockUCState) error {
+			if strings.HasPrefix(stmt, "ALTER TABLE ") && strings.Contains(stmt, " RENAME TO ") {
+				rest := strings.TrimPrefix(stmt, "ALTER TABLE ")
+				parts := strings.SplitN(rest, " RENAME TO ", 2)
+				fromRef := normalizeMockUCRef(parts[0])
+				toRef := normalizeMockUCRef(parts[1])
+				if cols, ok := state.columns[fromRef]; ok {
+					state.columns[toRef] = cols
+					delete(state.columns, fromRef)
+				}
+			}
+			return nil
+		}
+		dest, _ := newTestDatabricksDestination(t, uc.handle)
+
+		tblSchema, err := dest.GetTableSchema(ctx, "analytics.orders")
+		require.NoError(t, err)
+		require.NotNil(t, tblSchema)
+		require.Len(t, tblSchema.Columns, 2)
+		assert.Equal(t, "id", tblSchema.Columns[0].Name)
+		assert.Equal(t, "amount", tblSchema.Columns[1].Name)
+
+		tbl, ok := uc.getTable(liveOrdersRef)
+		require.True(t, ok)
+		assert.Equal(t, mockUCTable{id: "uuid-orig", rows: 42}, tbl)
+		_, ok = uc.getTable(oldRef)
+		assert.False(t, ok)
+	})
+
+	t.Run("PrepareTable without DropFirst recovers a target stranded by an interrupted swap before CREATE TABLE IF NOT EXISTS", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{oldRef: {id: "uuid-orig", rows: 42}})
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table:     "analytics.orders",
+			DropFirst: false,
+			Schema: &schema.TableSchema{
+				Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}},
+			},
+		}))
+
+		tbl, ok := uc.getTable(liveOrdersRef)
+		require.True(t, ok)
+		assert.Equal(t, mockUCTable{id: "uuid-orig", rows: 42}, tbl, "restored table and its rows must not be replaced by an empty table")
+		_, ok = uc.getTable(oldRef)
+		assert.False(t, ok)
+
+		renameIdx, createIdx := -1, -1
+		for i, stmt := range *stmts {
+			if strings.HasPrefix(stmt, "ALTER TABLE "+oldRef+" RENAME TO "+liveOrdersRef) {
+				renameIdx = i
+			}
+			if strings.HasPrefix(stmt, "CREATE TABLE IF NOT EXISTS "+liveOrdersRef) {
+				createIdx = i
+			}
+		}
+		require.NotEqual(t, -1, renameIdx, "must rename stranded swap table back to live target")
+		require.NotEqual(t, -1, createIdx, "must still execute CREATE TABLE IF NOT EXISTS")
+		assert.Less(t, renameIdx, createIdx, "recovery rename must happen before CREATE TABLE IF NOT EXISTS")
+	})
+}
+
+func TestEnsureCDCTargetIncarnationAndCreateOrReplaceProtection(t *testing.T) {
+	ctx := context.Background()
+	cdcCols := []string{"id", "val", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+	origCreated := mockCreatedMicros("uuid-orig")
+	expected := destination.CDCTargetKey("main", "analytics", "orders", "uuid-orig")
+
+	t.Run("EnsureCDCTargetIncarnation returns false on missing table, preserves user comment prefix, and is idempotent", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{
+			liveOrdersRef: {id: "uuid-orig", rows: 5, comment: "Owner's orders table"},
+		})
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		missingInc, exists, err := dest.EnsureCDCTargetIncarnation(ctx, "analytics.does_not_exist")
+		require.NoError(t, err)
+		assert.False(t, exists)
+		assert.Empty(t, missingInc)
+
+		inc, exists, err := dest.EnsureCDCTargetIncarnation(ctx, "analytics.orders")
+		require.NoError(t, err)
+		assert.True(t, exists)
+		assert.Equal(t, expected, inc)
+
+		tbl, ok := uc.getTable(liveOrdersRef)
+		require.True(t, ok)
+		assert.Equal(t, "Owner's orders table __ingestr_cdc_incarnation=uuid-orig", tbl.comment)
+
+		// Second call is a no-op (no COMMENT ON TABLE emitted).
+		*stmts = nil
+		inc2, exists, err := dest.EnsureCDCTargetIncarnation(ctx, "analytics.orders")
+		require.NoError(t, err)
+		assert.True(t, exists)
+		assert.Equal(t, expected, inc2)
+		for _, s := range *stmts {
+			assert.False(t, strings.HasPrefix(s, "COMMENT ON TABLE "), "already-stamped table must not be re-commented: %s", s)
+		}
+
+		// Subsequent fenced merge also emits zero COMMENT ON TABLE statements and guards with full preserved comment.
+		*stmts = nil
+		require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+			TargetTable:            "analytics.orders",
+			StagingTable:           "ingestr_staging.stg_orders",
+			PrimaryKeys:            []string{"id"},
+			CDCExpectedIncarnation: expected,
+			Columns:                cdcCols,
+		}))
+		for _, s := range *stmts {
+			assert.False(t, strings.HasPrefix(s, "COMMENT ON TABLE "), "steady-state fenced merge must not run COMMENT ON TABLE")
+		}
+		assert.Contains(t, strings.Join(*stmts, "\n"), "coalesce(comment, '') = 'Owner''s orders table __ingestr_cdc_incarnation=uuid-orig'")
+	})
+
+	t.Run("COMMENT ON TABLE racing with an outside replacement is rejected by post-comment DESCRIBE DETAIL check", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 10}})
+		uc.onStmt = func(stmt string, state *mockUCState) error {
+			if strings.HasPrefix(stmt, "COMMENT ON TABLE ") {
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{
+					id:            "uuid-cor-race",
+					rows:          88,
+					createdMicros: origCreated,
+					comment:       "",
+				}
+			}
+			return nil
+		}
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		err := dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", expected)
+		require.ErrorContains(t, err, "physical incarnation changed")
+		assert.Zero(t, countAtomicBlocks(*stmts), "BEGIN ATOMIC must not execute when post-comment check detects replacement")
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, 88, tbl.rows)
+	})
+
+	t.Run("external CREATE OR REPLACE TABLE keeping the same created timestamp is rejected by leading guard", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 10}})
+		dest, stmts := newTestDatabricksDestination(t, uc.handle)
+
+		_, exists, err := dest.EnsureCDCTargetIncarnation(ctx, "analytics.orders")
+		require.NoError(t, err)
+		require.True(t, exists)
+
+		// Simulate CREATE OR REPLACE TABLE right before BEGIN ATOMIC: same createdMicros, new Delta id, cleared comment.
+		uc.onStmt = func(stmt string, state *mockUCState) error {
+			if strings.HasPrefix(stmt, "BEGIN ATOMIC\n") {
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{
+					id:            "uuid-cor-new",
+					rows:          77,
+					createdMicros: origCreated,
+					comment:       "",
+				}
+			}
+			return nil
+		}
+
+		err = dest.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", expected)
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.ErrorContains(t, err, cdcIncarnationGuardMarker)
+		tbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-cor-new", rows: 77, createdMicros: origCreated, comment: ""}, tbl)
+		assertLiveTargetNeverRenamed(t, *stmts)
+	})
+
+	t.Run("external CREATE OR REPLACE TABLE mid-batch rolls back all tables via trailing guard", func(t *testing.T) {
+		custExpected := destination.CDCTargetKey("main", "analytics", "customers", "uuid-cust")
+		uc := newMockUCState(map[string]mockUCTable{
+			"`main`.`analytics`.`customers`": {id: "uuid-cust", rows: 15},
+			liveOrdersRef:                    {id: "uuid-orig", rows: 40},
+		})
+		dest, _ := newTestDatabricksDestination(t, uc.handle)
+		_, _, err := dest.EnsureCDCTargetIncarnation(ctx, "analytics.customers")
+		require.NoError(t, err)
+		_, _, err = dest.EnsureCDCTargetIncarnation(ctx, "analytics.orders")
+		require.NoError(t, err)
+
+		replaced := false
+		uc.onAtomicSub = func(sub string, state *mockUCState) {
+			if !replaced && strings.HasPrefix(sub, "MERGE INTO "+liveOrdersRef) {
+				replaced = true
+				// Simulate CREATE OR REPLACE TABLE preserving Unity Catalog created timestamp!
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{
+					id:            "uuid-cor-mid",
+					rows:          120,
+					createdMicros: origCreated,
+					comment:       "",
+				}
+			}
+		}
+
+		err = dest.MergeCDCTablesAtomically(ctx, []destination.CDCAtomicTableMerge{
+			{
+				Truncate: true,
+				Options: destination.MergeOptions{
+					TargetTable:            "analytics.customers",
+					StagingTable:           "ingestr_staging.stg_customers",
+					PrimaryKeys:            []string{"id"},
+					CDCExpectedIncarnation: custExpected,
+					Columns:                cdcCols,
+				},
+			},
+			{
+				Options: destination.MergeOptions{
+					TargetTable:            "analytics.orders",
+					StagingTable:           "ingestr_staging.stg_orders",
+					PrimaryKeys:            []string{"id"},
+					CDCExpectedIncarnation: expected,
+					Columns:                cdcCols,
+				},
+			},
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.ErrorContains(t, err, cdcIncarnationGuardMarker)
+		require.True(t, replaced)
+
+		custTbl, _ := uc.getTable("`main`.`analytics`.`customers`")
+		assert.Equal(t, 15, custTbl.rows, "earlier DELETE+MERGE on customers must roll back")
+		ordTbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-cor-mid", rows: 120, createdMicros: origCreated, comment: ""}, ordTbl, "CREATE OR REPLACE replacement must remain untouched")
+	})
+
+	t.Run("WriteParallel rolls back when external CREATE OR REPLACE TABLE keeps created timestamp", func(t *testing.T) {
+		uc := newMockUCState(map[string]mockUCTable{liveOrdersRef: {id: "uuid-orig", rows: 20}})
+		dest, _, deleted := newMockUCWriteDestination(t, uc)
+		_, _, err := dest.EnsureCDCTargetIncarnation(ctx, "analytics.orders")
+		require.NoError(t, err)
+
+		replaced := false
+		uc.onAtomicSub = func(sub string, state *mockUCState) {
+			if !replaced && strings.HasPrefix(sub, "INSERT INTO ") {
+				replaced = true
+				state.tables[normalizeMockUCRef(liveOrdersRef)] = mockUCTable{
+					id:            "uuid-cor-write",
+					rows:          64,
+					createdMicros: origCreated,
+					comment:       "replacement user comment",
+				}
+			}
+		}
+
+		err = dest.WriteParallel(ctx, singleRowBatch(), destination.WriteOptions{
+			Table:                  "analytics.orders",
+			CDCExpectedIncarnation: expected,
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.ErrorContains(t, err, cdcIncarnationGuardMarker)
+		require.True(t, replaced)
+		assert.True(t, deleted.Load())
+
+		ordTbl, _ := uc.getTable(liveOrdersRef)
+		assert.Equal(t, mockUCTable{id: "uuid-cor-write", rows: 64, createdMicros: origCreated, comment: "replacement user comment"}, ordTbl)
 	})
 }
 
