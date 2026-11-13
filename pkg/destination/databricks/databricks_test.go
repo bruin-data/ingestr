@@ -60,7 +60,7 @@ func TestMergeTableSQL(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := fmt.Sprintf("MERGE INTO `main`.`analytics`.`orders` AS target\n"+
-				"USING (SELECT `tenant`, `order``id`, `updated``at` FROM (SELECT `tenant`, `order``id`, `updated``at`, ROW_NUMBER() OVER (PARTITION BY `tenant`, `order``id` ORDER BY %s) AS __bruin_dedup_rn FROM `main`.`ingestr_staging`.`orders_merge`) AS _numbered WHERE __bruin_dedup_rn = 1) AS source\n"+
+				"USING (SELECT `tenant`, `order``id`, `updated``at` FROM (SELECT `tenant`, `order``id`, `updated``at`, ROW_NUMBER() OVER (PARTITION BY `tenant`, `order``id` ORDER BY %s) AS __bruin_dedup_rn FROM `main`.`scratch`.`orders_merge`) AS _numbered WHERE __bruin_dedup_rn = 1) AS source\n"+
 				"ON target.`tenant` = source.`tenant` AND target.`order``id` = source.`order``id`\n"+
 				"WHEN MATCHED THEN\n  UPDATE SET target.`updated``at` = source.`updated``at`\n"+
 				"WHEN NOT MATCHED THEN\n  INSERT (`tenant`, `order``id`, `updated``at`)\n"+
@@ -116,7 +116,7 @@ func TestBuildDeleteInsertSQLUsesAtomicBlock(t *testing.T) {
 	wantInsert := "INSERT INTO `main`.`analytics`.`orders` (`id`, `name`, `updated_at`) " +
 		"SELECT `id`, `name`, `updated_at` FROM (SELECT `id`, `name`, `updated_at`, " +
 		"ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `updated_at` DESC) AS __bruin_dedup_rn " +
-		"FROM `main`.`ingestr_staging`.`orders_di`) AS _numbered WHERE __bruin_dedup_rn = 1"
+		"FROM `main`.`scratch`.`orders_di`) AS _numbered WHERE __bruin_dedup_rn = 1"
 	if insertSQL != wantInsert {
 		t.Fatalf("insertSQL = %q, want %q", insertSQL, wantInsert)
 	}
