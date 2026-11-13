@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,179 +40,6 @@ var errLeaseTableNotFound = errors.New("lease table not found")
 func (d *DatabricksDestination) SupportsCDCConditionalMerge() bool { return true }
 func (d *DatabricksDestination) SupportsCDCConditionalSwap() bool  { return true }
 
-type cdcFenceSpec struct {
-	table               string
-	expectedIncarnation string
-}
-
-func newGuardTableName(tableName, op string) (string, error) {
-	var suffixBytes [8]byte
-	if _, err := rand.Read(suffixBytes[:]); err != nil {
-		return "", fmt.Errorf("generate Databricks guard table suffix: %w", err)
-	}
-	suffix := hex.EncodeToString(suffixBytes[:])
-	candidate := fmt.Sprintf("__ingestr_%s_%s_%s", op, tableName, suffix)
-	return destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("databricks")), nil
-}
-
-func (d *DatabricksDestination) withFencedCDCTarget(ctx context.Context, table, expectedIncarnation, op string, fn func(guardFull string) error) error {
-	if expectedIncarnation == "" {
-		return errors.New("databricks conditional CDC fence requires an expected incarnation")
-	}
-	cat, sch, tbl := d.parseTableParts(table)
-	canonKey := canonicalTargetKey(cat, sch, tbl)
-	return d.withFencedCDCTargets(ctx, []cdcFenceSpec{{
-		table:               table,
-		expectedIncarnation: expectedIncarnation,
-	}}, op, func(guardedRefs map[string]string) error {
-		return fn(guardedRefs[canonKey])
-	})
-}
-
-func (d *DatabricksDestination) withFencedCDCTargets(ctx context.Context, specs []cdcFenceSpec, op string, fn func(guardedRefs map[string]string) error) error {
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		return err
-	}
-	if len(specs) == 0 {
-		return fn(nil)
-	}
-
-	d.fenceMu.Lock()
-	defer d.fenceMu.Unlock()
-
-	type targetFence struct {
-		canonKey            string
-		rawTable            string
-		catalog             string
-		schemaName          string
-		tableName           string
-		targetFull          string
-		guardFull           string
-		expectedIncarnation string
-	}
-
-	byCanon := make(map[string]*targetFence, len(specs))
-	for _, spec := range specs {
-		if spec.expectedIncarnation == "" {
-			return errors.New("databricks conditional CDC fence requires an expected incarnation")
-		}
-		cat, sch, tbl := d.parseTableParts(spec.table)
-		canonKey := canonicalTargetKey(cat, sch, tbl)
-		if existing, ok := byCanon[canonKey]; ok {
-			if existing.expectedIncarnation != spec.expectedIncarnation {
-				return fmt.Errorf("conflicting expected incarnations for Databricks CDC target %q", spec.table)
-			}
-			continue
-		}
-		guardName, err := newGuardTableName(tbl, op)
-		if err != nil {
-			return err
-		}
-		byCanon[canonKey] = &targetFence{
-			canonKey:            canonKey,
-			rawTable:            spec.table,
-			catalog:             cat,
-			schemaName:          sch,
-			tableName:           tbl,
-			targetFull:          quoteTableParts(cat, sch, tbl),
-			guardFull:           quoteTableParts(cat, sch, guardName),
-			expectedIncarnation: spec.expectedIncarnation,
-		}
-	}
-
-	ordered := make([]*targetFence, 0, len(byCanon))
-	for _, f := range byCanon {
-		ordered = append(ordered, f)
-	}
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].canonKey < ordered[j].canonKey
-	})
-
-	for _, f := range ordered {
-		if err := d.checkCDCIncarnation(ctx, f.rawTable, f.expectedIncarnation); err != nil {
-			return err
-		}
-	}
-
-	moved := make([]*targetFence, 0, len(ordered))
-	restoreMoved := func() error {
-		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		var restoreErr error
-		for i := len(moved) - 1; i >= 0; i-- {
-			m := moved[i]
-			renameBackSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", m.guardFull, m.targetFull)
-			if err := d.executeStatement(restoreCtx, renameBackSQL); err != nil {
-				config.LogFailedQuery(renameBackSQL, err)
-				restoreErr = errors.Join(restoreErr, fmt.Errorf("restore Databricks CDC target %s: %w", m.rawTable, err))
-			}
-		}
-		return restoreErr
-	}
-
-	for _, f := range ordered {
-		renameToGuardSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", f.targetFull, f.guardFull)
-		if err := d.executeStatement(ctx, renameToGuardSQL); err != nil {
-			config.LogFailedQuery(renameToGuardSQL, err)
-			restoreErr := restoreMoved()
-			if isDatabricksMissingError(err) {
-				return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", f.rawTable, err), restoreErr)
-			}
-			return errors.Join(fmt.Errorf("lock Databricks CDC target %q: %w", f.rawTable, err), restoreErr)
-		}
-		moved = append(moved, f)
-
-		_, _, _, guardID, exists, idErr := d.tableIdentity(ctx, f.guardFull)
-		movedInc := canonicalIncarnationKey(f.catalog, f.schemaName, f.tableName, guardID)
-		if idErr != nil || !exists || movedInc != f.expectedIncarnation {
-			restoreErr := restoreMoved()
-			if idErr != nil {
-				return errors.Join(idErr, restoreErr)
-			}
-			return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed", f.rawTable), restoreErr)
-		}
-	}
-
-	if err := source.ConnectorLeaseLoss(ctx); err != nil {
-		return errors.Join(err, restoreMoved())
-	}
-
-	guardedRefs := make(map[string]string, len(ordered))
-	for _, f := range ordered {
-		guardedRefs[f.canonKey] = f.guardFull
-	}
-
-	if err := fn(guardedRefs); err != nil {
-		return errors.Join(err, restoreMoved())
-	}
-
-	publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancel()
-	var publishErr error
-	for i := len(moved) - 1; i >= 0; i-- {
-		m := moved[i]
-		renameBackSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", m.guardFull, m.targetFull)
-		if err := d.executeStatement(publishCtx, renameBackSQL); err != nil {
-			config.LogFailedQuery(renameBackSQL, err)
-			if isDatabricksAlreadyExistsError(err) {
-				publishErr = errors.Join(publishErr, fmt.Errorf("databricks CDC target %q physical incarnation changed: %w", m.rawTable, err))
-			} else {
-				publishErr = errors.Join(publishErr, fmt.Errorf("publish Databricks CDC target %q: %w", m.rawTable, err))
-			}
-		}
-	}
-	if publishErr != nil {
-		return publishErr
-	}
-
-	for _, f := range ordered {
-		if err := d.checkCDCIncarnation(publishCtx, f.rawTable, f.expectedIncarnation); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func buildAtomicStatementsSQL(statements []string) string {
 	if len(statements) == 1 {
 		return statements[0]
@@ -238,7 +64,6 @@ func (d *DatabricksDestination) executeFencedMerges(ctx context.Context, merges 
 		return nil
 	}
 
-	expectedByCanon := make(map[string]string, len(merges))
 	fenceSpecs := make([]cdcFenceSpec, 0, len(merges))
 	for _, m := range merges {
 		if len(m.Options.PrimaryKeys) == 0 {
@@ -248,54 +73,62 @@ func (d *DatabricksDestination) executeFencedMerges(ctx context.Context, merges 
 			return errors.New("merge requires at least one primary key")
 		}
 		if m.Options.CDCExpectedIncarnation != "" {
-			cat, sch, tbl := d.parseTableParts(m.Options.TargetTable)
-			canonKey := canonicalTargetKey(cat, sch, tbl)
-			if prev, ok := expectedByCanon[canonKey]; ok && prev != m.Options.CDCExpectedIncarnation {
-				return fmt.Errorf("conflicting expected incarnations for Databricks CDC target %q", m.Options.TargetTable)
-			}
-			expectedByCanon[canonKey] = m.Options.CDCExpectedIncarnation
 			fenceSpecs = append(fenceSpecs, cdcFenceSpec{
 				table:               m.Options.TargetTable,
 				expectedIncarnation: m.Options.CDCExpectedIncarnation,
 			})
 		}
 	}
+	fences, err := d.collectCDCFences(fenceSpecs)
+	if err != nil {
+		return err
+	}
 
-	return d.withFencedCDCTargets(ctx, fenceSpecs, "merge", func(guardedRefs map[string]string) error {
-		statements := make([]string, 0, len(merges)*2)
-		for _, m := range merges {
-			cat, sch, tbl := d.parseTableParts(m.Options.TargetTable)
-			canonKey := canonicalTargetKey(cat, sch, tbl)
-			targetRef := quoteTableParts(cat, sch, tbl)
-			if guardedRefs != nil {
-				if guardedRef, ok := guardedRefs[canonKey]; ok {
-					targetRef = guardedRef
-				}
-			}
-			if m.Truncate {
-				statements = append(statements, fmt.Sprintf("DELETE FROM %s", targetRef))
-			}
-			if destination.HasCDCDeletedColumn(m.Options.Columns) {
-				statements = append(statements, d.buildCDCMergeSQLForTarget(m.Options, targetRef))
-			} else {
-				statements = append(statements, d.buildNonCDCMergeSQLForTarget(m.Options, targetRef))
-			}
+	statements := make([]string, 0, len(merges)*2)
+	for _, m := range merges {
+		targetRef := d.quoteTableRef(m.Options.TargetTable)
+		if m.Truncate {
+			statements = append(statements, "DELETE FROM "+targetRef)
 		}
+		if destination.HasCDCDeletedColumn(m.Options.Columns) {
+			statements = append(statements, d.buildCDCMergeSQLForTarget(m.Options, targetRef))
+		} else {
+			statements = append(statements, d.buildNonCDCMergeSQLForTarget(m.Options, targetRef))
+		}
+	}
 
-		sql := buildAtomicStatementsSQL(statements)
-		config.Debug("[DATABRICKS] Executing merge SQL: %s", sql)
-		if err := d.executeStatement(ctx, sql); err != nil {
-			config.LogFailedQuery(sql, err)
-			if len(statements) == 1 {
-				if destination.HasCDCDeletedColumn(merges[0].Options.Columns) {
-					return fmt.Errorf("failed to execute CDC merge: %w", err)
-				}
-				return fmt.Errorf("failed to execute merge: %w", err)
-			}
-			return fmt.Errorf("failed to execute atomic CDC merge batch: %w", err)
+	if len(fences) > 0 {
+		d.fenceMu.Lock()
+		defer d.fenceMu.Unlock()
+		if err := d.bindCDCFences(ctx, fences); err != nil {
+			return err
 		}
-		return nil
-	})
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+	}
+
+	var sql string
+	if len(fences) > 0 {
+		sql = buildFencedAtomicSQL(fences, statements)
+	} else {
+		sql = buildAtomicStatementsSQL(statements)
+	}
+	config.Debug("[DATABRICKS] Executing merge SQL: %s", sql)
+	if err := d.executeStatement(ctx, sql); err != nil {
+		config.LogFailedQuery(sql, err)
+		if isCDCIncarnationGuardError(err) {
+			return fenceGuardError(err, "merge")
+		}
+		if len(merges) == 1 && !merges[0].Truncate {
+			if destination.HasCDCDeletedColumn(merges[0].Options.Columns) {
+				return fmt.Errorf("failed to execute CDC merge: %w", err)
+			}
+			return fmt.Errorf("failed to execute merge: %w", err)
+		}
+		return fmt.Errorf("failed to execute atomic CDC merge batch: %w", err)
+	}
+	return d.verifyCDCFencesAfterCommit(ctx, fences)
 }
 
 func (d *DatabricksDestination) TruncateCDCTableIfIncarnation(ctx context.Context, table, expectedIncarnation string) error {
@@ -305,14 +138,120 @@ func (d *DatabricksDestination) TruncateCDCTableIfIncarnation(ctx context.Contex
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	return d.withFencedCDCTarget(ctx, table, expectedIncarnation, "trunc", func(guardFull string) error {
-		truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s", guardFull)
-		if err := d.executeStatement(ctx, truncateSQL); err != nil {
-			config.LogFailedQuery(truncateSQL, err)
-			return fmt.Errorf("truncate Databricks CDC target: %w", err)
+	fence, err := d.newCDCFence(cdcFenceSpec{table: table, expectedIncarnation: expectedIncarnation})
+	if err != nil {
+		return err
+	}
+
+	d.fenceMu.Lock()
+	defer d.fenceMu.Unlock()
+	if err := d.bindCDCFence(ctx, fence); err != nil {
+		return err
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+
+	fences := []*cdcFence{fence}
+	sql := buildFencedAtomicSQL(fences, []string{"DELETE FROM " + fence.targetFull})
+	if err := d.executeStatement(ctx, sql); err != nil {
+		config.LogFailedQuery(sql, err)
+		if isCDCIncarnationGuardError(err) {
+			return fenceGuardError(err, "truncate")
 		}
-		return nil
-	})
+		return fmt.Errorf("truncate Databricks CDC target: %w", err)
+	}
+	return d.verifyCDCFencesAfterCommit(ctx, fences)
+}
+
+// fencedCopyInto loads a volume file into a private table first, because
+// COPY INTO cannot run inside BEGIN ATOMIC, then appends it to the live
+// target with a guarded atomic INSERT.
+func (d *DatabricksDestination) fencedCopyInto(ctx context.Context, table, expectedIncarnation, volumePath string) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	fence, err := d.newCDCFence(cdcFenceSpec{table: table, expectedIncarnation: expectedIncarnation})
+	if err != nil {
+		return err
+	}
+
+	loadName, err := newPrivateTableName(fence.tableName, "load")
+	if err != nil {
+		return err
+	}
+	loadFull := quoteTableParts(d.effectiveCatalog(), stagingSchema, loadName)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		dropSQL := "DROP TABLE IF EXISTS " + loadFull
+		if err := d.executeStatement(cleanupCtx, dropSQL); err != nil {
+			config.Debug("[DATABRICKS] Failed to drop load table %s: %v", loadFull, err)
+		}
+	}()
+
+	createSQL := "CREATE TABLE " + loadFull
+	if err := d.executeStatement(ctx, createSQL); err != nil {
+		config.LogFailedQuery(createSQL, err)
+		return fmt.Errorf("create Databricks load table %s: %w", loadFull, err)
+	}
+	copySQL := fmt.Sprintf(
+		"COPY INTO %s FROM %s FILEFORMAT = PARQUET FORMAT_OPTIONS ('mergeSchema' = 'true') COPY_OPTIONS ('mergeSchema' = 'true')",
+		loadFull, sqlString(volumePath),
+	)
+	if err := d.executeStatement(ctx, copySQL); err != nil {
+		config.LogFailedQuery(copySQL, err)
+		return fmt.Errorf("COPY INTO failed: %w", err)
+	}
+	loadCols, err := d.describeColumns(ctx, loadFull)
+	if err != nil {
+		return err
+	}
+	if len(loadCols) == 0 {
+		return fmt.Errorf("databricks load table %s has no columns", loadFull)
+	}
+
+	d.fenceMu.Lock()
+	defer d.fenceMu.Unlock()
+	if err := d.bindCDCFence(ctx, fence); err != nil {
+		return err
+	}
+
+	targetCols, err := d.describeColumns(ctx, fence.targetFull)
+	if err != nil {
+		if isDatabricksMissingError(err) {
+			return incarnationChangedError(fence.rawTable)
+		}
+		return err
+	}
+	if missing := missingColumns(loadCols, targetCols); len(missing) > 0 {
+		names := make([]string, len(missing))
+		for i, col := range missing {
+			names[i] = col.name
+		}
+		return fmt.Errorf("databricks CDC target %s is missing columns required by fenced write: %s", fence.targetFull, strings.Join(names, ", "))
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+
+	colList := make([]string, len(loadCols))
+	for i, col := range loadCols {
+		colList[i] = quoteIdentifier(col.name)
+	}
+	joined := strings.Join(colList, ", ")
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", fence.targetFull, joined, joined, loadFull)
+	fences := []*cdcFence{fence}
+	sql := buildFencedAtomicSQL(fences, []string{insertSQL})
+	config.Debug("[DATABRICKS] Executing fenced append: %s", sql)
+	if err := d.executeStatement(ctx, sql); err != nil {
+		config.LogFailedQuery(sql, err)
+		if isCDCIncarnationGuardError(err) {
+			return fenceGuardError(err, "write")
+		}
+		return fmt.Errorf("append Databricks CDC load into %s: %w", fence.targetFull, err)
+	}
+	return d.verifyCDCFencesAfterCommit(ctx, fences)
 }
 
 func (d *DatabricksDestination) MergeCDCTablesAtomically(ctx context.Context, merges []destination.CDCAtomicTableMerge) error {
@@ -375,7 +314,7 @@ func (d *DatabricksDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Contex
 		return "", err
 	}
 
-	incarnation, exists, err := d.CDCTargetIncarnation(ctx, opts.Table)
+	incarnation, exists, err := d.EnsureCDCTargetIncarnation(ctx, opts.Table)
 	if err != nil {
 		return "", err
 	}
@@ -412,6 +351,14 @@ func (d *DatabricksDestination) CDCConditionalSwapIncarnations(ctx context.Conte
 	physCat, physSchema, physName, id, exists, err := d.tableIdentity(ctx, physical)
 	if err == nil && !exists {
 		err = fmt.Errorf("databricks swap staging table %q does not exist", physical)
+	}
+	if err == nil {
+		expectedStageInc := canonicalIncarnationKey(physCat, physSchema, physName, id)
+		var stampedInc string
+		stampedInc, exists, err = d.EnsureCDCTargetIncarnation(ctx, physical)
+		if err == nil && (!exists || stampedInc != expectedStageInc) {
+			err = fmt.Errorf("databricks swap staging table %q physical incarnation changed", physical)
+		}
 	}
 	if err != nil {
 		if physical != stagingTable {

@@ -13,22 +13,23 @@ import (
 )
 
 var (
-	_ destination.CDCMergeAware                  = (*DatabricksDestination)(nil)
-	_ destination.CDCHardDeleteCapable           = (*DatabricksDestination)(nil)
-	_ destination.CDCUnchangedColsAware          = (*DatabricksDestination)(nil)
-	_ destination.SerializedCDCRunsRequired      = (*DatabricksDestination)(nil)
-	_ destination.CDCStateReader                 = (*DatabricksDestination)(nil)
-	_ destination.CDCStateFenceReader            = (*DatabricksDestination)(nil)
-	_ destination.CDCStatePruner                 = (*DatabricksDestination)(nil)
-	_ destination.CDCTargetClaimer               = (*DatabricksDestination)(nil)
-	_ destination.CDCTargetIdentityProvider      = (*DatabricksDestination)(nil)
-	_ destination.CDCTargetIncarnationProvider   = (*DatabricksDestination)(nil)
-	_ destination.CDCTruncateCapable             = (*DatabricksDestination)(nil)
-	_ destination.CDCResumeProvider              = (*DatabricksDestination)(nil)
-	_ destination.ManagedCDCStateCatalogProvider = (*DatabricksDestination)(nil)
-	_ destination.StagingTableLister             = (*DatabricksDestination)(nil)
-	_ destination.ReplaceStagingPolicyProvider   = (*DatabricksDestination)(nil)
-	_ destination.ManagedStagingPolicyProvider   = (*DatabricksDestination)(nil)
+	_ destination.CDCMergeAware                   = (*DatabricksDestination)(nil)
+	_ destination.CDCHardDeleteCapable            = (*DatabricksDestination)(nil)
+	_ destination.CDCUnchangedColsAware           = (*DatabricksDestination)(nil)
+	_ destination.SerializedCDCRunsRequired       = (*DatabricksDestination)(nil)
+	_ destination.CDCStateReader                  = (*DatabricksDestination)(nil)
+	_ destination.CDCStateFenceReader             = (*DatabricksDestination)(nil)
+	_ destination.CDCStatePruner                  = (*DatabricksDestination)(nil)
+	_ destination.CDCTargetClaimer                = (*DatabricksDestination)(nil)
+	_ destination.CDCTargetIdentityProvider       = (*DatabricksDestination)(nil)
+	_ destination.CDCTargetIncarnationInitializer = (*DatabricksDestination)(nil)
+	_ destination.CDCTargetIncarnationProvider    = (*DatabricksDestination)(nil)
+	_ destination.CDCTruncateCapable              = (*DatabricksDestination)(nil)
+	_ destination.CDCResumeProvider               = (*DatabricksDestination)(nil)
+	_ destination.ManagedCDCStateCatalogProvider  = (*DatabricksDestination)(nil)
+	_ destination.StagingTableLister              = (*DatabricksDestination)(nil)
+	_ destination.ReplaceStagingPolicyProvider    = (*DatabricksDestination)(nil)
+	_ destination.ManagedStagingPolicyProvider    = (*DatabricksDestination)(nil)
 )
 
 const cdcStateDeleteBatchSize = 200
@@ -103,7 +104,7 @@ func (d *DatabricksDestination) tableIdentity(ctx context.Context, table string)
 }
 
 func (d *DatabricksDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
-	catalog, schemaName, tableName, id, exists, err := d.tableIdentity(ctx, table)
+	catalog, schemaName, tableName, id, exists, err := d.tableIdentityWithRecovery(ctx, table)
 	if err != nil || !exists {
 		return "", false, err
 	}

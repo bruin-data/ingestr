@@ -44,6 +44,7 @@ type DatabricksDestination struct {
 	swapMu        sync.Mutex
 	preparedSwaps map[string]string
 	keptSwaps     map[string]bool
+	activeSwaps   map[string]int
 }
 
 func NewDatabricksDestination() *DatabricksDestination {
@@ -153,6 +154,12 @@ func (d *DatabricksDestination) prepareTable(ctx context.Context, opts destinati
 			if err := d.executeStatement(ctx, dropSQL); err != nil && !isDatabricksMissingError(err) {
 				config.LogFailedQuery(dropSQL, err)
 				return fmt.Errorf("failed to drop table %s before prepare: %w", opts.Table, err)
+			}
+		}
+
+		if !opts.DropFirst {
+			if _, err := d.recoverInterruptedSwap(ctx, catalog, targetSchema, tableName, false); err != nil {
+				return err
 			}
 		}
 
@@ -357,7 +364,7 @@ func (d *DatabricksDestination) WriteParallel(ctx context.Context, records <-cha
 	}
 
 	if opts.CDCExpectedIncarnation != "" {
-		if err := d.withFencedCDCTarget(ctx, opts.Table, opts.CDCExpectedIncarnation, "write", copyIntoTarget); err != nil {
+		if err := d.fencedCopyInto(ctx, opts.Table, opts.CDCExpectedIncarnation, volumePath); err != nil {
 			cleanupVolume()
 			return err
 		}
@@ -405,6 +412,12 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 		return fmt.Errorf("failed to ensure target schema exists: %w", err)
 	}
 
+	if _, err := d.recoverInterruptedSwap(ctx, targetCat, targetSchema, targetName, true); err != nil {
+		return err
+	}
+	release := d.markSwapActive(targetCat, targetSchema, targetName)
+	defer release()
+
 	targetExists := true
 	if fenced {
 		targetInc, exists, err := d.CDCTargetIncarnation(ctx, opts.TargetTable)
@@ -430,11 +443,7 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 		}
 	}
 
-	tempName, err := newGuardTableName(targetName, "swap_old")
-	if err != nil {
-		return err
-	}
-	tempFull := quoteTableParts(targetCat, targetSchema, tempName)
+	tempFull := quoteTableParts(targetCat, targetSchema, swapOldTableName(targetCat, targetSchema, targetName))
 
 	restoreOldTarget := func() error {
 		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -495,7 +504,7 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 	}
 
 	if opts.CDCExpectedResultIncarnation != "" {
-		resultInc, exists, err := d.CDCTargetIncarnation(ctx, opts.TargetTable)
+		resultInc, _, _, exists, err := d.ensureTableIncarnationStampLocked(ctx, opts.TargetTable, opts.CDCExpectedResultIncarnation)
 		if err != nil || !exists || resultInc != opts.CDCExpectedResultIncarnation {
 			undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			undoErr := d.executeStatement(undoCtx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFull, stagingFull))
@@ -504,7 +513,7 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 			if targetMoved && undoErr == nil {
 				restoreErr = restoreOldTarget()
 			}
-			if err != nil {
+			if err != nil && !errors.Is(err, errCDCIncarnationChanged) {
 				return errors.Join(err, undoErr, restoreErr)
 			}
 			return errors.Join(fmt.Errorf("databricks CDC target %q physical incarnation changed after swap", opts.TargetTable), undoErr, restoreErr)
@@ -516,7 +525,9 @@ func (d *DatabricksDestination) SwapTable(ctx context.Context, opts destination.
 	}
 
 	if targetMoved {
-		_ = d.executeStatement(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tempFull))
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = d.executeStatement(cleanupCtx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tempFull))
+		cancel()
 	}
 
 	config.Debug("[DATABRICKS] Table swap completed in %v", time.Since(startSwap))
@@ -782,15 +793,30 @@ func (d *DatabricksDestination) ListStagingTables(ctx context.Context, schemaNam
 func (d *DatabricksDestination) GetScheme() string { return "databricks" }
 
 func (d *DatabricksDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
-	fullTable := d.quoteTableRef(table)
+	catalog, schemaName, tableName := d.parseTableParts(table)
+	fullTable := quoteTableParts(catalog, schemaName, tableName)
 	query := fmt.Sprintf("DESCRIBE TABLE %s", fullTable)
 	res, err := d.queryStatement(ctx, query)
 	if err != nil {
-		if isDatabricksMissingError(err) {
+		if !isDatabricksMissingError(err) {
+			config.LogFailedQuery(query, err)
+			return nil, fmt.Errorf("failed to describe Databricks table %s: %w", table, err)
+		}
+		recovered, recErr := d.recoverInterruptedSwap(ctx, catalog, schemaName, tableName, false)
+		if recErr != nil {
+			return nil, recErr
+		}
+		if !recovered {
 			return nil, nil
 		}
-		config.LogFailedQuery(query, err)
-		return nil, fmt.Errorf("failed to describe Databricks table %s: %w", table, err)
+		res, err = d.queryStatement(ctx, query)
+		if err != nil {
+			if isDatabricksMissingError(err) {
+				return nil, nil
+			}
+			config.LogFailedQuery(query, err)
+			return nil, fmt.Errorf("failed to describe Databricks table %s: %w", table, err)
+		}
 	}
 
 	colIdx := res.columnIndex("col_name")
@@ -822,7 +848,6 @@ func (d *DatabricksDestination) GetTableSchema(ctx context.Context, table string
 	if len(columns) == 0 {
 		return nil, nil
 	}
-	_, schemaName, tableName := d.parseTableParts(table)
 	return &schema.TableSchema{
 		Name:    tableName,
 		Schema:  schemaName,
