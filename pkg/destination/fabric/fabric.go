@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -16,6 +17,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/tablename"
 	mssqldb "github.com/microsoft/go-mssqldb"   // also registers the "sqlserver" driver
 	_ "github.com/microsoft/go-mssqldb/azuread" // registers the "azuresql" driver (Microsoft Entra auth)
 )
@@ -35,10 +37,12 @@ const (
 )
 
 type FabricDestination struct {
-	db        *sql.DB
-	uri       string
-	database  string
-	writeMode string
+	db            *sql.DB
+	uri           string
+	database      string
+	writeMode     string
+	swapMu        sync.Mutex
+	preparedSwaps map[string]string
 }
 
 func NewFabricDestination() *FabricDestination {
@@ -186,6 +190,10 @@ func (d *FabricDestination) Close(ctx context.Context) error {
 }
 
 func (d *FabricDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	return d.prepareTable(ctx, opts, false)
+}
+
+func (d *FabricDestination) prepareTable(ctx context.Context, opts destination.PrepareOptions, strictCreate bool) error {
 	schemaName, _ := parseTableName(opts.Table)
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
@@ -201,14 +209,46 @@ func (d *FabricDestination) PrepareTable(ctx context.Context, opts destination.P
 	}
 
 	if opts.Schema != nil {
-		createSQL := buildCreateTableSQL(opts.Table, opts.Schema.Columns, opts.PrimaryKeys)
-		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
-			config.LogFailedQuery(createSQL, err)
-			return fmt.Errorf("failed to create table: %w", err)
+		createSQL := buildCreateTableSQLWithOptions(opts.Table, opts.Schema.Columns, opts.PrimaryKeys, opts.DeferredPrimaryKeys, strictCreate)
+		if strictCreate {
+			// Strict creation adds the primary key in a second statement; run both in
+			// one transaction so a failed constraint does not leave an empty table
+			// that later CDC discovery refuses to adopt.
+			if err := d.execInTransaction(ctx, createSQL); err != nil {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		} else if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			alreadyExists := isObjectAlreadyExistsError(err)
+			if alreadyExists && !opts.RequirePrimaryKeyMatch {
+				return nil
+			}
+			if !alreadyExists {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		}
+	}
+
+	if opts.RequirePrimaryKeyMatch {
+		if err := d.validateTargetPrimaryKey(ctx, opts.Table, opts.PrimaryKeys); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+func (d *FabricDestination) execInTransaction(ctx context.Context, query string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *FabricDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {
@@ -230,11 +270,15 @@ func (d *FabricDestination) ensureSchemaExists(ctx context.Context, schemaName s
 }
 
 func parseTableName(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	parts := tablename.Split(table)
+	switch len(parts) {
+	case 0:
+		return "dbo", table
+	case 1:
+		return "dbo", parts[0]
+	default:
+		return parts[len(parts)-2], parts[len(parts)-1]
 	}
-	return "dbo", table
 }
 
 func (d *FabricDestination) TruncateTable(ctx context.Context, table string) error {
@@ -286,9 +330,25 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 
 	config.Debug("[Fabric] Starting write to %s", opts.Table)
 
+	if opts.CDCExpectedIncarnation != "" {
+		if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+	}
+
 	for result := range records {
 		if result.Err != nil {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
 			return result.Err
+		}
+		if result.Batch == nil {
+			continue
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			result.Batch.Release()
+			return err
 		}
 
 		batchNum++
@@ -297,10 +357,11 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 		var rows int64
 		var err error
 		if d.writeMode == writeModeCopy {
-			rows, err = d.writeRecordBatchCopy(ctx, result.Batch, opts.Table, opts.Schema)
+			rows, err = d.writeRecordBatchCopy(ctx, result.Batch, opts.Table, opts.Schema, opts.CDCExpectedIncarnation)
 		} else {
-			rows, err = d.writeRecordBatchInsert(ctx, result.Batch, opts.Table)
+			rows, err = d.writeRecordBatchInsert(ctx, result.Batch, opts.Table, opts.CDCExpectedIncarnation)
 		}
+		result.Batch.Release()
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -309,8 +370,12 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 		rate := float64(rows) / time.Since(startBatch).Seconds()
 		config.Debug("[Fabric] Batch %d: %d rows in %v (%.0f rows/sec, total: %d)",
 			batchNum, rows, time.Since(startBatch), rate, totalRows)
+	}
 
-		result.Batch.Release()
+	if opts.CDCExpectedIncarnation != "" {
+		if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
 	}
 
 	totalRate := float64(totalRows) / time.Since(startTime).Seconds()
@@ -318,11 +383,14 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 	return nil
 }
 
-func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table, expectedIncarnation string) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
 	if numRows == 0 || numCols == 0 {
+		if expectedIncarnation != "" {
+			return 0, d.checkCDCIncarnation(ctx, table, expectedIncarnation)
+		}
 		return 0, nil
 	}
 
@@ -344,8 +412,24 @@ func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record a
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
 
 	for batchStart := int64(0); batchStart < numRows; batchStart += int64(maxRowsPerBatch) {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return batchStart, err
+		}
+
 		batchEnd := batchStart + int64(maxRowsPerBatch)
 		if batchEnd > numRows {
 			batchEnd = numRows
@@ -370,14 +454,23 @@ func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record a
 
 		if _, err := tx.ExecContext(ctx, insertSQL, allValues...); err != nil {
 			config.LogFailedQuery(insertSQL, err)
-			_ = tx.Rollback()
 			return batchStart, fmt.Errorf("failed to insert rows %d-%d: %w", batchStart, batchEnd-1, err)
 		}
+	}
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
+	committed = true
 
 	return numRows, nil
 }
@@ -385,11 +478,14 @@ func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record a
 // writeRecordBatchCopy streams the batch through Fabric's TDS bulk-copy path
 // (mssqldb.CopyIn) instead of parameterised INSERT ... VALUES. It keeps the same
 // one-transaction-per-Arrow-batch boundary as the insert path.
-func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema) (int64, error) {
+func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema, expectedIncarnation string) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
 	if numRows == 0 || numCols == 0 {
+		if expectedIncarnation != "" {
+			return 0, d.checkCDCIncarnation(ctx, table, expectedIncarnation)
+		}
 		return 0, nil
 	}
 
@@ -409,6 +505,12 @@ func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arr
 			_ = tx.Rollback()
 		}
 	}()
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
 
 	stmt, err := tx.PrepareContext(ctx, mssqldb.CopyIn(quoteTable(table), mssqldb.BulkOptions{
 		RowsPerBatch: int(numRows),
@@ -434,6 +536,10 @@ func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arr
 		}
 	}
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return 0, err
+	}
+
 	result, err := stmt.ExecContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to flush bulk copy: %w", err)
@@ -442,6 +548,19 @@ func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arr
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		rowsAffected = numRows
+	}
+
+	if err := stmt.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close bulk copy statement: %w", err)
+	}
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -475,29 +594,15 @@ func columnsForRecord(record arrow.RecordBatch, tableSchema *schema.TableSchema)
 	return columns
 }
 
-// SwapTable is intentionally unsupported for Fabric. SupportsAtomicSwap returns
-// false, so the replace strategy writes directly to the target and never calls
-// this method. An atomic swap would require moving the staging table across
-// schemas (ALTER SCHEMA ... TRANSFER), which is not part of Fabric Warehouse's
-// documented T-SQL surface area.
 func (d *FabricDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
-	return fmt.Errorf("atomic table swap is not supported for Fabric; replace writes directly to the target")
+	return d.swapTable(ctx, opts)
 }
 
 func (d *FabricDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	startMerge := time.Now()
-
-	quotedColumns := quoteColumns(opts.Columns)
-	nonPKColumns := filterColumns(opts.Columns, opts.PrimaryKeys)
-
-	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, quotedColumns, nonPKColumns, opts.IncrementalPredicate)
-	config.Debug("[Fabric MERGE] Executing MERGE: %s", mergeSQL)
-
-	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
-		config.LogFailedQuery(mergeSQL, err)
-		return fmt.Errorf("failed to execute merge: %w", err)
+	if err := d.mergeTable(ctx, opts); err != nil {
+		return err
 	}
-
 	config.Debug("[Fabric MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
 }
@@ -729,10 +834,7 @@ func (d *FabricDestination) SupportsIncrementalPredicate() bool { return true }
 func (d *FabricDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *FabricDestination) SupportsSCD2Strategy() bool         { return true }
 
-// SupportsAtomicSwap is false: staging tables live in a separate schema and
-// Fabric does not document ALTER SCHEMA ... TRANSFER, so the replace strategy
-// writes directly to the target instead of swapping a staging table.
-func (d *FabricDestination) SupportsAtomicSwap() bool { return false }
+func (d *FabricDestination) SupportsAtomicSwap() bool { return true }
 
 func (d *FabricDestination) GetScheme() string { return "fabric" }
 
@@ -741,7 +843,19 @@ func (d *FabricDestination) GetTableSchema(ctx context.Context, table string) (*
 
 	query := `
 		SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE,
-		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH
+		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH,
+		       CASE WHEN EXISTS (
+		           SELECT 1 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+		           JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+		             ON tc.CONSTRAINT_CATALOG = kcu.CONSTRAINT_CATALOG
+		            AND tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+		            AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+		           WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+		             AND kcu.TABLE_CATALOG = c.TABLE_CATALOG
+		             AND kcu.TABLE_SCHEMA = c.TABLE_SCHEMA
+		             AND kcu.TABLE_NAME = c.TABLE_NAME
+		             AND kcu.COLUMN_NAME = c.COLUMN_NAME
+		       ) THEN 1 ELSE 0 END AS IS_PRIMARY_KEY
 		FROM INFORMATION_SCHEMA.COLUMNS c
 		JOIN INFORMATION_SCHEMA.TABLES t ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
 		WHERE c.TABLE_SCHEMA = @p1 AND c.TABLE_NAME = @p2
@@ -755,18 +869,24 @@ func (d *FabricDestination) GetTableSchema(ctx context.Context, table string) (*
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	var primaryKeys []string
 	for rows.Next() {
 		var colName, dataType, isNullable string
 		var numPrecision, numScale, charMaxLen *int
+		var isPrimaryKey bool
 
-		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen); err != nil {
+		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &isPrimaryKey); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
 		col := schema.Column{
-			Name:     colName,
-			DataType: mapFabricTypeToSchema(dataType),
-			Nullable: isNullable == "YES",
+			Name:         colName,
+			DataType:     mapFabricTypeToSchema(dataType),
+			Nullable:     isNullable == "YES",
+			IsPrimaryKey: isPrimaryKey,
+		}
+		if isPrimaryKey {
+			primaryKeys = append(primaryKeys, colName)
 		}
 
 		if numPrecision != nil {
@@ -791,9 +911,10 @@ func (d *FabricDestination) GetTableSchema(ctx context.Context, table string) (*
 	}
 
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  schemaName,
-		Columns: columns,
+		Name:        tableName,
+		Schema:      schemaName,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 
@@ -831,11 +952,15 @@ func mapFabricTypeToSchema(dataType string) schema.DataType {
 }
 
 func quoteTable(table string) string {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return fmt.Sprintf("[%s].[%s]", strings.ReplaceAll(parts[0], "]", "]]"), strings.ReplaceAll(parts[1], "]", "]]"))
+	parts := tablename.Split(table)
+	if len(parts) == 0 {
+		return fmt.Sprintf("[%s]", strings.ReplaceAll(table, "]", "]]"))
 	}
-	return fmt.Sprintf("[%s]", strings.ReplaceAll(table, "]", "]]"))
+	quoted := make([]string, len(parts))
+	for i, part := range parts {
+		quoted[i] = quoteColumn(part)
+	}
+	return strings.Join(quoted, ".")
 }
 
 func quoteColumn(col string) string {
@@ -897,15 +1022,23 @@ func escapeTableName(table string) string {
 }
 
 func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
-	primaryKeySet := make(map[string]struct{}, len(primaryKeys))
+	return buildCreateTableSQLWithOptions(table, columns, primaryKeys, nil, false)
+}
+
+func buildCreateTableSQLWithOptions(table string, columns []schema.Column, primaryKeys, deferredPrimaryKeys []string, strictCreate bool) string {
+	primaryKeySet := make(map[string]struct{}, len(primaryKeys)+len(deferredPrimaryKeys))
 	for _, key := range primaryKeys {
+		primaryKeySet[strings.ToLower(key)] = struct{}{}
+	}
+	for _, key := range deferredPrimaryKeys {
 		primaryKeySet[strings.ToLower(key)] = struct{}{}
 	}
 
 	var colDefs []string
 	for _, col := range columns {
-		colType := MapDataTypeToFabric(col)
-		if _, ok := primaryKeySet[strings.ToLower(col.Name)]; ok {
+		_, isPK := primaryKeySet[strings.ToLower(col.Name)]
+		colType := mapFabricColumnTypeForCreate(col, isPK)
+		if isPK {
 			colType += " NOT NULL"
 		}
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteColumn(col.Name), colType))
@@ -913,6 +1046,13 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 
 	createPart := fmt.Sprintf("CREATE TABLE %s (\n  %s", quoteTable(table), strings.Join(colDefs, ",\n  "))
 	createPart += "\n)"
+
+	if strictCreate {
+		if len(primaryKeys) > 0 {
+			return fmt.Sprintf("%s;\n%s", createPart, buildAddPrimaryKeySQL(table, primaryKeys))
+		}
+		return createPart
+	}
 
 	if len(primaryKeys) > 0 {
 		return fmt.Sprintf(
@@ -926,6 +1066,30 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	}
 
 	return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s", escapeTableName(table), createPart)
+}
+
+const maxFabricPrimaryKeyLength = 8000
+
+func mapFabricColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
+	mapped := MapDataTypeToFabric(col)
+	if !isPrimaryKey {
+		return mapped
+	}
+
+	switch mapped {
+	case "VARCHAR(MAX)":
+		if col.MaxLength > 0 && col.MaxLength <= maxFabricPrimaryKeyLength {
+			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
+		}
+		return fmt.Sprintf("VARCHAR(%d)", maxFabricPrimaryKeyLength)
+	case "VARBINARY(MAX)":
+		if col.MaxLength > 0 && col.MaxLength <= maxFabricPrimaryKeyLength {
+			return fmt.Sprintf("VARBINARY(%d)", col.MaxLength)
+		}
+		return fmt.Sprintf("VARBINARY(%d)", maxFabricPrimaryKeyLength)
+	default:
+		return mapped
+	}
 }
 
 func buildAddPrimaryKeySQL(table string, primaryKeys []string) string {
