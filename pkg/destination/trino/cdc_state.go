@@ -953,6 +953,14 @@ func isTrinoMissingObject(err error) bool {
 		strings.Contains(msg, "not found") && strings.Contains(msg, "table")
 }
 
+func isTrinoAccessDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "access denied") || strings.Contains(msg, "permission_denied")
+}
+
 func isTrinoAlreadyExists(err error) bool {
 	if err == nil {
 		return false

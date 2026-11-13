@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -81,7 +82,7 @@ func (d *TrinoDestination) PrepareTable(ctx context.Context, opts destination.Pr
 		return fmt.Errorf("schema is required")
 	}
 	var err error
-	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, opts.Table); err != nil {
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatchesForLoad(ctx, opts.CDCMode, opts.Table); err != nil {
 		return err
 	}
 
@@ -288,8 +289,9 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	if d.db == nil {
 		return errors.New("trino destination is not connected")
 	}
+	conditional := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
 	var err error
-	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, opts.TargetTable, opts.StagingTable); err != nil {
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatchesForLoad(ctx, conditional, opts.TargetTable, opts.StagingTable); err != nil {
 		return err
 	}
 	startSwap := time.Now()
@@ -299,7 +301,6 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
 	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
 
-	conditional := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
 	if conditional {
 		if err := d.swapTableConditionally(ctx, opts); err != nil {
 			return err
@@ -1140,33 +1141,27 @@ func selectTrinoSwapColumnSpecs(staging []trinoSwapColumnSpec, selectCols []stri
 		}
 		selected = append(selected, spec)
 	}
-	projected := len(selected) != len(staging)
-	for i := 0; !projected && i < len(selected); i++ {
-		projected = !strings.EqualFold(selected[i].name, staging[i].name)
-	}
+	projected := !slices.EqualFunc(selected, staging, func(a, b trinoSwapColumnSpec) bool {
+		return strings.EqualFold(a.name, b.name)
+	})
 	return selected, projected, nil
 }
 
 func trinoSwapColumnSpecsEqual(a, b []trinoSwapColumnSpec) bool {
-	if len(a) == 0 || len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !strings.EqualFold(a[i].name, b[i].name) ||
-			normalizeTrinoTypeSpec(a[i].dataType) != normalizeTrinoTypeSpec(b[i].dataType) ||
-			a[i].nullable != b[i].nullable {
-			return false
-		}
-	}
-	return true
+	return len(a) > 0 && slices.EqualFunc(a, b, func(x, y trinoSwapColumnSpec) bool {
+		return strings.EqualFold(x.name, y.name) &&
+			normalizeTrinoTypeSpec(x.dataType) == normalizeTrinoTypeSpec(y.dataType) &&
+			x.nullable == y.nullable
+	})
 }
 
 func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
 	if d.db == nil {
 		return errors.New("trino destination is not connected")
 	}
+	cdc := destination.HasCDCDeletedColumn(opts.Columns) || opts.CDCExpectedIncarnation != ""
 	var err error
-	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, opts.TargetTable, opts.StagingTable); err != nil {
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatchesForLoad(ctx, cdc, opts.TargetTable, opts.StagingTable); err != nil {
 		return err
 	}
 	if destination.HasCDCDeletedColumn(opts.Columns) {
@@ -1466,7 +1461,7 @@ func (d *TrinoDestination) GetTableSchema(ctx context.Context, table string) (*s
 		return nil, errors.New("trino destination is not connected")
 	}
 	var err error
-	if ctx, err = d.maybeRecoverInterruptedAtomicBatches(ctx, table); err != nil {
+	if ctx, err = d.maybeRecoverInterruptedAtomicBatchesForLoad(ctx, false, table); err != nil {
 		return nil, err
 	}
 	catalog, schemaName, tableName, err := d.resolveTableName(table)

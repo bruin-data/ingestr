@@ -153,3 +153,47 @@ func TestSwapTableWithoutReplaceSupport(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
+
+func TestAtomicRecoveryAccessDeniedOnlyBlocksCDCWork(t *testing.T) {
+	t.Parallel()
+
+	accessDenied := errors.New(`trino: query failed (200 OK): "Access Denied: Cannot select from table hive._bruin_staging.__ingestr_cdc_batch_journal"`)
+	tableSchema := &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}}
+
+	t.Run("ordinary prepare proceeds", func(t *testing.T) {
+		t.Parallel()
+		d, mock := newFallbackSwapMock(t)
+		d.atomicRecoveryEnabled = true
+
+		mock.ExpectQuery(regexp.QuoteMeta(`FROM "hive"."_bruin_staging"."__ingestr_cdc_batch_journal"`)).WillReturnError(accessDenied)
+		mock.ExpectExec(regexp.QuoteMeta(`CREATE SCHEMA IF NOT EXISTS "hive"."analytics"`)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta(`CREATE TABLE IF NOT EXISTS "hive"."analytics"."orders"`)).WillReturnResult(sqlmock.NewResult(0, 0))
+
+		require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "analytics.orders", Schema: tableSchema}))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("CDC prepare still fails", func(t *testing.T) {
+		t.Parallel()
+		d, mock := newFallbackSwapMock(t)
+		d.atomicRecoveryEnabled = true
+
+		mock.ExpectQuery(regexp.QuoteMeta(`FROM "hive"."_bruin_staging"."__ingestr_cdc_batch_journal"`)).WillReturnError(accessDenied)
+
+		err := d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "analytics.orders", Schema: tableSchema, CDCMode: true})
+		require.ErrorContains(t, err, "Access Denied")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("other recovery errors still fail ordinary loads", func(t *testing.T) {
+		t.Parallel()
+		d, mock := newFallbackSwapMock(t)
+		d.atomicRecoveryEnabled = true
+
+		mock.ExpectQuery(regexp.QuoteMeta(`FROM "hive"."_bruin_staging"."__ingestr_cdc_batch_journal"`)).WillReturnError(errors.New("connection reset"))
+
+		err := d.PrepareTable(t.Context(), destination.PrepareOptions{Table: "analytics.orders", Schema: tableSchema})
+		require.ErrorContains(t, err, "connection reset")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}

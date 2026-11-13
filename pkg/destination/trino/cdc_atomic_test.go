@@ -380,10 +380,10 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("mid-publish failure rolls back t1 via inline-guarded MERGE and skips externally replaced target", func(t *testing.T) {
+	t.Run("mid-publish failure rolls back t1 via inline-guarded MERGE and skips externally replaced or superseded target", func(t *testing.T) {
 		t.Parallel()
 
-		for _, replacedExternally := range []bool{false, true} {
+		for _, mode := range []string{"restore", "replacedExternally", "superseded"} {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
 
@@ -453,13 +453,21 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 			// Step 0 records t1's journal row right before publishing t1 via inline-guarded MERGE INTO, advancing snapshot 101 -> 105.
 			mock.ExpectExec(`INSERT INTO "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."t1" AS t`).WillReturnResult(sqlmock.NewResult(0, 2))
+			mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t1\$refs"`).
+				WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(105)))
 			expectIncarnationLookup(mock, "iceberg", "analytics", "t1", true, trinoIncarnationCommentPrefix+m1)
 
 			// Step 1 fails via beforeAtomicPublishStep -> rollback t1!
-			if replacedExternally {
+			switch mode {
+			case "replacedExternally":
 				// External replacement changed t1's table comment -> rollback skips MERGE INTO!
 				expectIncarnationLookup(mock, "iceberg", "analytics", "t1", true, "outside-owner-comment")
-			} else {
+			case "superseded":
+				// Another writer committed after our publish -> rollback must not undo it.
+				expectIncarnationLookup(mock, "iceberg", "analytics", "t1", true, trinoIncarnationCommentPrefix+m1)
+				mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t1\$refs"`).
+					WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(107)))
+			default:
 				expectIncarnationLookup(mock, "iceberg", "analytics", "t1", true, trinoIncarnationCommentPrefix+m1)
 				mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t1\$refs"`).
 					WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(105)))
@@ -501,6 +509,11 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 				},
 			})
 			require.ErrorContains(t, err, "injected mid-publish failure before t2")
+			if mode == "superseded" {
+				require.ErrorContains(t, err, "rollback skipped for analytics.t1")
+			} else {
+				require.NotContains(t, err.Error(), "rollback skipped")
+			}
 			require.NoError(t, mock.ExpectationsWereMet())
 			_ = db.Close()
 		}
@@ -679,10 +692,14 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 		// Both steps record their journal row and publish cleanly.
 		mock.ExpectExec(`INSERT INTO "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."t1" AS t`).WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t1\$refs"`).
+			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(109)))
 		expectIncarnationLookup(mock, "iceberg", "analytics", "t1", true, trinoIncarnationCommentPrefix+m1)
 
 		mock.ExpectExec(`INSERT INTO "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."t2" AS t`).WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t2\$refs"`).
+			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(209)))
 		expectIncarnationLookup(mock, "iceberg", "analytics", "t2", true, trinoIncarnationCommentPrefix+m2)
 
 		// Commit-point DELETE FROM journal fails -> MUST NOT return nil; enters rollback across t2 then t1!
@@ -810,6 +827,8 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 			// Step 0 publishes t1.
 			mock.ExpectExec(`INSERT INTO "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."t1" AS t`).WillReturnResult(sqlmock.NewResult(0, 2))
+			mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t1\$refs"`).
+				WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(109)))
 
 			// Step 1 inserts t2's journal row, then publishSQL fails with guard sentinel because external INSERT advanced t2's snapshot_id!
 			mock.ExpectExec(`INSERT INTO "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).WillReturnResult(sqlmock.NewResult(0, 1))

@@ -48,6 +48,7 @@ type trinoAtomicTargetPlan struct {
 	hasRefs             bool
 	hasPreSnapshot      bool
 	preSnapshotID       int64
+	postSnapshotID      *int64
 	backupName          string
 	backupFQN           string
 	backupMarker        string
@@ -76,7 +77,13 @@ type trinoAtomicJournalEntry struct {
 	backupName          string
 	backupMarker        string
 	shadowName          string
+
+	// Set only for in-process rollback: restore only while main still points at
+	// the snapshot this batch published, so newer writes are never undone.
+	publishedSnapshotID *int64
 }
+
+var errTrinoAtomicRollbackSuperseded = errors.New("target changed after this batch published")
 
 type trinoAtomicJournalHeartbeat struct {
 	d             *TrinoDestination
@@ -114,6 +121,17 @@ func (d *TrinoDestination) maybeRecoverInterruptedAtomicBatches(ctx context.Cont
 		}
 	}
 	return subCtx, nil
+}
+
+// maybeRecoverInterruptedAtomicBatchesForLoad lets ordinary loads proceed when
+// the account cannot read CDC bookkeeping it never uses; CDC work stays strict.
+func (d *TrinoDestination) maybeRecoverInterruptedAtomicBatchesForLoad(ctx context.Context, cdc bool, tableHints ...string) (context.Context, error) {
+	recoveredCtx, err := d.maybeRecoverInterruptedAtomicBatches(ctx, tableHints...)
+	if err == nil || cdc || !isTrinoAccessDenied(err) {
+		return recoveredCtx, err
+	}
+	config.Debug("[TRINO] Skipping CDC atomic batch recovery for non-CDC operation: %v", err)
+	return context.WithValue(ctx, atomicRecoveryCtxKey{}, true), nil
 }
 
 func (d *TrinoDestination) collectAtomicRecoveryCatalogs(tableHints ...string) []string {
@@ -514,6 +532,12 @@ func (d *TrinoDestination) MergeCDCTablesAtomically(ctx context.Context, merges 
 				break
 			}
 			mutatedPlans = append(mutatedPlans, plan)
+			if plan.hasRefs {
+				_, hasSnap, snapID, snapErr := d.readTrinoMainSnapshotRef(ctx, plan.catalog, plan.schemaName, plan.tableName)
+				if snapErr == nil && hasSnap && verifyLocks() == nil {
+					plan.postSnapshotID = &snapID
+				}
+			}
 
 			if plan.expectedIncarnation != "" {
 				if err := d.checkCDCIncarnation(ctx, plan.table, plan.expectedIncarnation); err != nil {
@@ -549,9 +573,21 @@ func (d *TrinoDestination) MergeCDCTablesAtomically(ctx context.Context, merges 
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		defer cancel()
 
+		lockLost := verifyLocks() != nil
 		var rbErrs []error
+		var skippedTables []string
+		var skippedSteps []int
+		skip := func(p *trinoAtomicTargetPlan) {
+			skippedTables = append(skippedTables, p.table)
+			skippedSteps = append(skippedSteps, p.index)
+		}
+		restorePlans := make([]*trinoAtomicTargetPlan, 0, len(mutatedPlans))
 		for i := len(mutatedPlans) - 1; i >= 0; i-- {
 			p := mutatedPlans[i]
+			if lockLost && p.postSnapshotID == nil {
+				skip(p)
+				continue
+			}
 			entry := trinoAtomicJournalEntry{
 				batchID:             batchID,
 				stepOrd:             int64(p.index),
@@ -568,10 +604,24 @@ func (d *TrinoDestination) MergeCDCTablesAtomically(ctx context.Context, merges 
 				backupName:          p.backupName,
 				backupMarker:        p.backupMarker,
 				shadowName:          p.shadowName,
+				publishedSnapshotID: p.postSnapshotID,
 			}
 			if rbErr := d.restoreAtomicTargetEntry(cleanupCtx, batchCatalog, entry); rbErr != nil {
+				if errors.Is(rbErr, errTrinoAtomicRollbackSuperseded) {
+					skip(p)
+					continue
+				}
 				rbErrs = append(rbErrs, rbErr)
+				restorePlans = append(restorePlans, p)
 			}
+		}
+		if len(skippedTables) > 0 {
+			// The checkpoint has not advanced, so replaying the batch converges
+			// these targets without undoing another writer's commits.
+			batchErr = errors.Join(batchErr, fmt.Errorf(
+				"trino atomic CDC rollback skipped for %s: target lock lost or target changed after publish",
+				strings.Join(skippedTables, ", "),
+			))
 		}
 		rollbackErr := errors.Join(rbErrs...)
 		if rollbackErr == nil {
@@ -587,13 +637,13 @@ func (d *TrinoDestination) MergeCDCTablesAtomically(ctx context.Context, merges 
 
 		retainBackups = true
 		if journalWritten {
-			for _, stepOrd := range unmutatedJournalSteps {
+			for _, stepOrd := range slices.Concat(unmutatedJournalSteps, skippedSteps) {
 				_ = d.deleteAtomicBatchJournalStepRow(cleanupCtx, journalFQN, batchID, stepOrd)
 			}
 			_ = d.expireAtomicBatchJournalRows(cleanupCtx, journalFQN, batchID, ownerToken)
-		} else if len(mutatedPlans) > 0 {
+		} else if len(restorePlans) > 0 {
 			if tblErr := d.ensureAtomicBatchJournalTable(cleanupCtx, journalFQN); tblErr == nil {
-				_ = d.insertAtomicBatchJournalRows(cleanupCtx, journalFQN, batchID, ownerToken, 0, mutatedPlans)
+				_ = d.insertAtomicBatchJournalRows(cleanupCtx, journalFQN, batchID, ownerToken, 0, restorePlans)
 			}
 		}
 		return errors.Join(batchErr, rollbackErr)
@@ -1287,6 +1337,9 @@ func (d *TrinoDestination) restoreAtomicTargetEntry(
 			}
 			if hasRefs && hasSnap == entry.hasPreSnapshot && (!hasSnap || snapID == entry.preSnapshotID) {
 				return nil
+			}
+			if entry.publishedSnapshotID != nil && (!hasSnap || snapID != *entry.publishedSnapshotID) {
+				return fmt.Errorf("restore Trino CDC target %s: %w", targetFQN, errTrinoAtomicRollbackSuperseded)
 			}
 			curHasSnap = hasSnap
 			curSnapID = snapID
