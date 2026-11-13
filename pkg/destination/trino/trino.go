@@ -21,11 +21,12 @@ import (
 )
 
 type TrinoDestination struct {
-	db           *sql.DB
-	catalog      string
-	schema       string
-	jsonType     jsonTypeMode
-	transactions *transactionRegistry
+	db            *sql.DB
+	catalog       string
+	schema        string
+	jsonType      jsonTypeMode
+	transactions  *transactionRegistry
+	newLeaseToken func() (string, error)
 }
 
 func NewTrinoDestination() *TrinoDestination {
@@ -273,59 +274,84 @@ func (d *TrinoDestination) writeBatch(ctx context.Context, records <-chan source
 }
 
 func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
+	if d.db == nil {
+		return errors.New("trino destination is not connected")
+	}
 	startSwap := time.Now()
 
+	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
+	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
+	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
+	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
+
 	conditional := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
+	var verifyLocks func() error
+	var tableComment string
 	if conditional {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
+		releaseLocks, checkHeld, err := d.acquireCDCTargetLocks(ctx, opts.TargetTable)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = releaseLocks() }()
+		verifyLocks = checkHeld
+
 		if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
 			return err
 		}
-		if err := d.checkCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
+		var resultMarker string
+		if opts.CDCExpectedStagingIncarnation != "" {
+			_, stagingMarker, err := d.ensureCheckedCDCIncarnation(ctx, opts.StagingTable, opts.CDCExpectedStagingIncarnation)
+			if err != nil {
+				return err
+			}
+			resultMarker = stagingMarker
+		}
+		if opts.CDCExpectedResultIncarnation != "" {
+			expectedMarker, ok := markerFromTableIncarnation(targetCatalog, targetSchema, targetName, opts.CDCExpectedResultIncarnation)
+			if !ok {
+				return fmt.Errorf("trino CDC target %q expected result incarnation is invalid", opts.TargetTable)
+			}
+			if resultMarker != "" && resultMarker != expectedMarker {
+				return fmt.Errorf("trino CDC swap staging and result incarnations disagree for %q", opts.TargetTable)
+			}
+			resultMarker = expectedMarker
+		}
+		if resultMarker != "" {
+			tableComment = trinoIncarnationCommentPrefix + resultMarker
+		}
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
 	}
 
-	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
-	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
-
-	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
-	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
-	oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
-	oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("trino"))
-	oldFQN := qualifyTrinoTable(targetCatalog, targetSchema, oldName)
-
-	// Replace only PrepareTables the staging side, so the target schema may
-	// not exist yet on first run with the _bruin_staging design.
 	if err := d.ensureSchemaExists(ctx, targetCatalog, targetSchema); err != nil {
 		return fmt.Errorf("failed to ensure target schema exists: %w", err)
 	}
 
-	movedOld := false
-	renameOldSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFQN, oldFQN)
-	if _, err := d.db.ExecContext(ctx, renameOldSQL); err != nil {
-		if opts.CDCExpectedIncarnation != "" {
-			config.LogFailedQuery(renameOldSQL, err)
-			return fmt.Errorf("failed to rename fenced target table %s: %w", opts.TargetTable, err)
+	selectList := "*"
+	if opts.Schema != nil {
+		if destCols := destination.DestinationColumns(opts.Schema.ColumnNames()); len(destCols) > 0 {
+			selectList = strings.Join(quoteColumns(destCols), ", ")
 		}
-		config.Debug("[TRINO] No existing table to rename (this is OK for first run): %v", err)
-	} else {
-		movedOld = true
 	}
 
-	// Cross-schema move: Trino requires the new name to be fully qualified when
-	// renaming across schemas; a bare identifier renames in-place within the
-	// staging schema and the table never reaches the target schema.
-	renameNewSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingFQN, targetFQN)
-	if _, err := d.db.ExecContext(ctx, renameNewSQL); err != nil {
-		config.LogFailedQuery(renameNewSQL, err)
-		if movedOld {
-			restoreSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", oldFQN, targetFQN)
-			_, _ = d.db.ExecContext(context.WithoutCancel(ctx), restoreSQL)
+	replaceSQL := buildReplaceTableFromStagingSQL(targetFQN, stagingFQN, selectList, d.jsonType, tableComment)
+	if _, err := d.db.ExecContext(ctx, replaceSQL); err != nil {
+		if !conditional && isTrinoReplaceTableUnsupported(err) {
+			if fallbackErr := d.swapTableWithoutReplaceSupport(ctx, targetCatalog, targetSchema, targetName, targetFQN, stagingFQN, selectList); fallbackErr != nil {
+				return fallbackErr
+			}
+			config.Debug("[TRINO] Table swap completed via fallback in %v", time.Since(startSwap))
+			return nil
 		}
-		return fmt.Errorf("failed to rename staging to target: %w", err)
+		config.LogFailedQuery(replaceSQL, err)
+		return fmt.Errorf("failed to replace target table %s from staging: %w", opts.TargetTable, err)
 	}
 
 	if opts.CDCExpectedResultIncarnation != "" {
@@ -333,11 +359,96 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 			return err
 		}
 	}
+	if verifyLocks != nil {
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+	}
+	if conditional {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+	}
 
-	dropOldSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", oldFQN)
-	_, _ = d.db.ExecContext(ctx, dropOldSQL)
-
+	_, _ = d.db.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+stagingFQN)
 	config.Debug("[TRINO] Table swap completed in %v", time.Since(startSwap))
+	return nil
+}
+
+func buildReplaceTableFromStagingSQL(targetFQN, stagingFQN, selectList string, jsonType jsonTypeMode, tableComment string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE OR REPLACE TABLE %s", targetFQN)
+	if tableComment != "" {
+		fmt.Fprintf(&b, "\nCOMMENT %s", escapeString(tableComment))
+	}
+	if jsonType.normalized() == jsonTypeVariant {
+		b.WriteString("\nWITH (format_version = 3)")
+	}
+	fmt.Fprintf(&b, "\nAS SELECT %s FROM %s", selectList, stagingFQN)
+	return b.String()
+}
+
+func isTrinoReplaceTableUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "does not support replacing tables") ||
+		strings.Contains(msg, "replace table is not supported")
+}
+
+func (d *TrinoDestination) swapTableWithoutReplaceSupport(
+	ctx context.Context,
+	targetCatalog, targetSchema, targetName, targetFQN, stagingFQN, selectList string,
+) error {
+	existsSQL := fmt.Sprintf(
+		`SELECT 1 FROM %s.information_schema.tables
+		WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s) AND table_type = 'BASE TABLE'`,
+		quoteIdentifier(targetCatalog),
+		escapeString(targetSchema),
+		escapeString(targetName),
+	)
+	var one int
+	err := d.db.QueryRowContext(ctx, existsSQL).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) || isTrinoMissingObject(err) {
+		renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingFQN, targetFQN)
+		if _, renameErr := d.db.ExecContext(ctx, renameSQL); renameErr != nil {
+			config.LogFailedQuery(renameSQL, renameErr)
+			return fmt.Errorf("failed to move staging table to absent target %s: %w", targetFQN, renameErr)
+		}
+		return nil
+	}
+	if err != nil {
+		config.LogFailedQuery(existsSQL, err)
+		return fmt.Errorf("failed to inspect target table %s before swap: %w", targetFQN, err)
+	}
+
+	tx, err := d.BeginTransaction(ctx)
+	if err != nil {
+		return fmt.Errorf("atomic table replacement is not supported by Trino catalog %q: %w", targetCatalog, err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+
+	if err := tx.Exec(ctx, "DELETE FROM "+targetFQN); err != nil {
+		return fmt.Errorf("atomic table replacement is not supported by Trino catalog %q: %w", targetCatalog, err)
+	}
+	insertSQL := fmt.Sprintf("INSERT INTO %s SELECT %s FROM %s", targetFQN, selectList, stagingFQN)
+	if err := tx.Exec(ctx, insertSQL); err != nil {
+		return fmt.Errorf("failed to populate target table %s during transactional swap: %w", targetFQN, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transactional swap for %s: %w", targetFQN, err)
+	}
+	committed = true
+	_, _ = d.db.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+stagingFQN)
 	return nil
 }
 
@@ -345,12 +456,52 @@ func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.Merg
 	if destination.HasCDCDeletedColumn(opts.Columns) {
 		return d.mergeCDC(ctx, opts)
 	}
-
-	startMerge := time.Now()
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
-		return err
+	if d.db == nil {
+		return errors.New("trino destination is not connected")
+	}
+	if opts.CDCExpectedIncarnation == "" {
+		return d.mergeTableLocked(ctx, opts, "", d.defaultExec, nil)
 	}
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	releaseLocks, verifyLocks, err := d.acquireCDCTargetLocks(ctx, opts.TargetTable)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = releaseLocks() }()
+
+	meta, marker, err := d.ensureCheckedCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
+	if err != nil {
+		return err
+	}
+	incarnationPred := trinoIncarnationExistsPredicate(meta.catalog, meta.schemaName, meta.tableName, marker)
+	if err := d.mergeTableLocked(ctx, opts, incarnationPred, d.defaultExec, verifyLocks); err != nil {
+		return err
+	}
+	return d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
+}
+
+func (d *TrinoDestination) mergeTableLocked(
+	ctx context.Context,
+	opts destination.MergeOptions,
+	incarnationPred string,
+	execFn trinoExecFunc,
+	verifyLocks func() error,
+) error {
+	if opts.CDCExpectedIncarnation != "" {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+	}
+	if verifyLocks != nil {
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+	}
+
+	startMerge := time.Now()
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 
@@ -371,17 +522,21 @@ func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.Merg
 		insertVals = append(insertVals, fmt.Sprintf("s.%s", quoteIdentifier(col)))
 	}
 
-	// Build dedup subquery to handle duplicate PKs in staging
 	quotedPKsForPartition := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
 		quotedPKsForPartition[i] = quoteIdentifier(pk)
 	}
+	dedupWhere := "__bruin_dedup_rn = 1"
+	if incarnationPred != "" {
+		dedupWhere += " AND " + incarnationPred
+	}
 	dedupSource := fmt.Sprintf(
-		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1)`,
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE %s)`,
 		strings.Join(insertCols, ", "),
 		strings.Join(insertCols, ", "),
 		strings.Join(quotedPKsForPartition, ", "),
 		stagingFQN,
+		dedupWhere,
 	)
 
 	mergeSQL := fmt.Sprintf(
@@ -400,12 +555,19 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)`,
 
 	config.Debug("[TRINO MERGE] Executing: %s", mergeSQL)
 
-	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
+	if err := execFn(ctx, mergeSQL); err != nil {
 		config.LogFailedQuery(mergeSQL, err)
 		return fmt.Errorf("failed to merge tables: %w", err)
 	}
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
-		return err
+	if verifyLocks != nil {
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+	}
+	if opts.CDCExpectedIncarnation != "" {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
 	}
 
 	config.Debug("[TRINO MERGE] Merge completed in %v", time.Since(startMerge))
@@ -822,6 +984,9 @@ func buildCreateTableSQLWithOptions(catalog, schemaName, table string, columns [
 		qualifyTrinoTable(catalog, schemaName, table),
 		strings.Join(colDefs, ",\n  "),
 	)
+	if lsnComment != "" {
+		sqlStr += "\nCOMMENT " + escapeString(lsnComment)
+	}
 	if jsonType.normalized() == jsonTypeVariant {
 		sqlStr += "\nWITH (format_version = 3)"
 	}

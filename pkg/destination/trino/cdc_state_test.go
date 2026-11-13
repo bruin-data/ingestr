@@ -1,10 +1,13 @@
 package trino
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -298,6 +301,8 @@ func TestCDCTargetIncarnationAndEnsure(t *testing.T) {
 		d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
 
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, "spoofed comment")
+		mock.ExpectExec(`COMMENT ON TABLE "iceberg"."analytics"."orders" IS '__ingestr_cdc_incarnation=`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(`COMMENT ON COLUMN "iceberg"."analytics"."orders"."_cdc_lsn" IS '__ingestr_cdc_incarnation=`).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
@@ -309,6 +314,25 @@ func TestCDCTargetIncarnationAndEnsure(t *testing.T) {
 		marker := "abcdef0123456789abcdef0123456789"
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
 		got, exists, err := d.CDCTargetIncarnation(t.Context(), "orders")
+		require.NoError(t, err)
+		require.True(t, exists)
+		require.Equal(t, trinoTableIncarnation("iceberg", "analytics", "orders", marker), got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("legacy column-only marker is migrated to table comment without changing incarnation", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
+
+		marker := "abcdef0123456789abcdef0123456789"
+		expectIncarnationLookupWithComments(mock, "iceberg", "analytics", "orders", true, "", trinoIncarnationCommentPrefix+marker)
+		mock.ExpectExec(regexp.QuoteMeta(`COMMENT ON TABLE "iceberg"."analytics"."orders" IS '` + trinoIncarnationCommentPrefix + marker + `'`)).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		got, exists, err := d.EnsureCDCTargetIncarnation(t.Context(), "orders")
 		require.NoError(t, err)
 		require.True(t, exists)
 		require.Equal(t, trinoTableIncarnation("iceberg", "analytics", "orders", marker), got)
@@ -524,12 +548,17 @@ func TestClaimCDCTargetAndLatePrepare(t *testing.T) {
 func TestConditionalSwapAndTruncateAndAtomicMultiTableMerge(t *testing.T) {
 	t.Parallel()
 
-	t.Run("CDCConditionalSwapIncarnations and fenced SwapTable", func(t *testing.T) {
+	t.Run("CDCConditionalSwapIncarnations and fenced SwapTable use atomic CREATE OR REPLACE", func(t *testing.T) {
 		t.Parallel()
 		db, mock, err := sqlmock.New()
 		require.NoError(t, err)
 		defer func() { _ = db.Close() }()
-		d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("swaptok1"),
+		}
 
 		oldMarker := "11111111111111111111111111111111"
 		newMarker := "22222222222222222222222222222222"
@@ -543,13 +572,17 @@ func TestConditionalSwapAndTruncateAndAtomicMultiTableMerge(t *testing.T) {
 		require.Equal(t, trinoTableIncarnation("iceberg", "analytics", "orders", newMarker), resInc)
 
 		targetInc := trinoTableIncarnation("iceberg", "analytics", "orders", oldMarker)
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "swaptok1")
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+oldMarker)
 		expectIncarnationLookup(mock, "iceberg", "_bruin_staging", "orders_stg", true, trinoIncarnationCommentPrefix+newMarker)
 		mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "iceberg"."analytics"`).WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(`ALTER TABLE "iceberg"."analytics"."orders" RENAME TO "iceberg"."analytics"."orders_old_`).WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(`ALTER TABLE "iceberg"."_bruin_staging"."orders_stg" RENAME TO "iceberg"."analytics"."orders"`).WillReturnResult(sqlmock.NewResult(0, 0))
+		expectedReplaceSQL := `CREATE OR REPLACE TABLE "iceberg"."analytics"."orders"` + "\n" +
+			`COMMENT '` + trinoIncarnationCommentPrefix + newMarker + `'` + "\n" +
+			`AS SELECT "id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at" FROM "iceberg"."_bruin_staging"."orders_stg"`
+		mock.ExpectExec(regexp.QuoteMeta(expectedReplaceSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+newMarker)
-		mock.ExpectExec(`DROP TABLE IF EXISTS "iceberg"."analytics"."orders_old_`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta(`DROP TABLE IF EXISTS "iceberg"."_bruin_staging"."orders_stg"`)).WillReturnResult(sqlmock.NewResult(0, 0))
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "swaptok1")
 
 		require.NoError(t, d.SwapTable(t.Context(), destination.SwapOptions{
 			TargetTable:                   "analytics.orders",
@@ -557,27 +590,115 @@ func TestConditionalSwapAndTruncateAndAtomicMultiTableMerge(t *testing.T) {
 			CDCExpectedIncarnation:        targetInc,
 			CDCExpectedStagingIncarnation: stgInc,
 			CDCExpectedResultIncarnation:  resInc,
+			Schema: &schema.TableSchema{Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64},
+				{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+				{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+				{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+				{Name: destination.CDCUnchangedColsColumn, DataType: schema.TypeString},
+			}},
 		}))
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("TruncateCDCTableIfIncarnation and MergeCDCTablesAtomically", func(t *testing.T) {
+	t.Run("SwapTable failure never renames existing target away", func(t *testing.T) {
 		t.Parallel()
 		db, mock, err := sqlmock.New()
 		require.NoError(t, err)
 		defer func() { _ = db.Close() }()
 		d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
 
+		mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "iceberg"."analytics"`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta(`CREATE OR REPLACE TABLE "iceberg"."analytics"."orders"` + "\n" + `AS SELECT * FROM "iceberg"."_bruin_staging"."orders_stg"`)).
+			WillReturnError(errors.New("catalog commit failed"))
+
+		err = d.SwapTable(t.Context(), destination.SwapOptions{
+			TargetTable:  "analytics.orders",
+			StagingTable: "_bruin_staging.orders_stg",
+		})
+		require.ErrorContains(t, err, "catalog commit failed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("TruncateCDCTableIfIncarnation uses inline incarnation guard under target lock", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("trunctok1"),
+		}
+
+		marker := "44444444444444444444444444444444"
+		inc := trinoTableIncarnation("iceberg", "analytics", "orders", marker)
+		guard := trinoIncarnationExistsPredicate("iceberg", "analytics", "orders", marker)
+
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "trunctok1")
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+		mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "iceberg"."analytics"."orders" WHERE ` + guard)).
+			WillReturnResult(sqlmock.NewResult(0, 5))
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "trunctok1")
+
+		require.NoError(t, d.TruncateCDCTableIfIncarnation(t.Context(), "analytics.orders", inc))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("TruncateCDCTableIfIncarnation blocks on contended target lock", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("contendedtok"),
+		}
+
+		lockName := targetLockTableName("iceberg", "analytics", "orders")
+		mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "iceberg"."_bruin_staging"`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`CREATE TABLE "iceberg"."_bruin_staging"."` + lockName + `"`).
+			WillReturnError(errors.New("Table already exists"))
+		mock.ExpectQuery(`FROM "iceberg"."_bruin_staging"."` + lockName + `"`).
+			WillReturnRows(sqlmock.NewRows([]string{"owner", "age"}).AddRow("other-holder", int64(1)))
+
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		err = d.TruncateCDCTableIfIncarnation(ctx, "analytics.orders", trinoTableIncarnation("iceberg", "analytics", "orders", "44444444444444444444444444444444"))
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("MergeCDCTablesAtomically succeeds with Truncate and Merge under snapshot protection", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("atomictok1"),
+		}
+
 		marker := "33333333333333333333333333333333"
 		inc := trinoTableIncarnation("iceberg", "analytics", "orders", marker)
+		guard := trinoIncarnationExistsPredicate("iceberg", "analytics", "orders", marker)
 
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "atomictok1")
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
-		mock.ExpectExec(`TRUNCATE TABLE "iceberg"."analytics"."orders"`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT snapshot_id FROM "iceberg"."analytics"."orders$refs" WHERE name = 'main'`)).
+			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(9001)))
+		mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "iceberg"."analytics"."orders" WHERE ` + guard)).
+			WillReturnResult(sqlmock.NewResult(0, 3))
+		mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."orders" AS t .* ` + regexp.QuoteMeta(guard)).
+			WillReturnResult(sqlmock.NewResult(0, 2))
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
-
-		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
-		mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."orders" AS t`).WillReturnResult(sqlmock.NewResult(0, 2))
-		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "atomictok1")
 
 		err = d.MergeCDCTablesAtomically(t.Context(), []destination.CDCAtomicTableMerge{
 			{
@@ -592,6 +713,165 @@ func TestConditionalSwapAndTruncateAndAtomicMultiTableMerge(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("MergeCDCTablesAtomically rolls back first table snapshot when second table merge fails", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("lock-items", "lock-orders"),
+		}
+
+		ordersMarker := "55555555555555555555555555555555"
+		itemsMarker := "66666666666666666666666666666666"
+		ordersInc := trinoTableIncarnation("iceberg", "analytics", "orders", ordersMarker)
+		itemsInc := trinoTableIncarnation("iceberg", "analytics", "items", itemsMarker)
+
+		// Sorted canonical target order: analytics.items < analytics.orders
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "items", "lock-items")
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "lock-orders")
+
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+ordersMarker)
+		expectIncarnationLookup(mock, "iceberg", "analytics", "items", true, trinoIncarnationCommentPrefix+itemsMarker)
+
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT snapshot_id FROM "iceberg"."analytics"."orders$refs" WHERE name = 'main'`)).
+			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(1001)))
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT snapshot_id FROM "iceberg"."analytics"."items$refs" WHERE name = 'main'`)).
+			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(2002)))
+
+		mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."orders" AS t`).WillReturnResult(sqlmock.NewResult(0, 4))
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+ordersMarker)
+
+		mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."items" AS t`).WillReturnError(errors.New("items merge failed"))
+
+		// Rollback orders to its pre-batch snapshot 1001; items was not mutated.
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+ordersMarker)
+		mock.ExpectExec(regexp.QuoteMeta(`ALTER TABLE "iceberg"."analytics"."orders" EXECUTE rollback_to_snapshot(1001)`)).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "lock-orders")
+		expectTargetLockRelease(mock, "iceberg", "analytics", "items", "lock-items")
+
+		err = d.MergeCDCTablesAtomically(t.Context(), []destination.CDCAtomicTableMerge{
+			{
+				Options: destination.MergeOptions{
+					TargetTable:            "analytics.orders",
+					StagingTable:           "_bruin_staging.orders_stg",
+					PrimaryKeys:            []string{"id"},
+					Columns:                []string{"id", "val", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+					CDCExpectedIncarnation: ordersInc,
+				},
+			},
+			{
+				Options: destination.MergeOptions{
+					TargetTable:            "analytics.items",
+					StagingTable:           "_bruin_staging.items_stg",
+					PrimaryKeys:            []string{"id"},
+					Columns:                []string{"id", "sku", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+					CDCExpectedIncarnation: itemsInc,
+				},
+			},
+		})
+		require.ErrorContains(t, err, "items merge failed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("MergeCDCTablesAtomically rolls back truncated table when subsequent merge fails", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("lock-trunc-rb"),
+		}
+
+		marker := "77777777777777777777777777777777"
+		inc := trinoTableIncarnation("iceberg", "analytics", "orders", marker)
+
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "lock-trunc-rb")
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT snapshot_id FROM "iceberg"."analytics"."orders$refs" WHERE name = 'main'`)).
+			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(3003)))
+		mock.ExpectExec(`DELETE FROM "iceberg"."analytics"."orders" WHERE EXISTS`).
+			WillReturnResult(sqlmock.NewResult(0, 10))
+		mock.ExpectExec(`MERGE INTO "iceberg"."analytics"."orders" AS t`).
+			WillReturnError(errors.New("merge after truncate failed"))
+
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+		mock.ExpectExec(regexp.QuoteMeta(`ALTER TABLE "iceberg"."analytics"."orders" EXECUTE rollback_to_snapshot(3003)`)).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "lock-trunc-rb")
+
+		err = d.MergeCDCTablesAtomically(t.Context(), []destination.CDCAtomicTableMerge{
+			{
+				Truncate: true,
+				Options: destination.MergeOptions{
+					TargetTable:            "analytics.orders",
+					StagingTable:           "_bruin_staging.orders_stg",
+					PrimaryKeys:            []string{"id"},
+					Columns:                []string{"id", "val", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+					CDCExpectedIncarnation: inc,
+				},
+			},
+		})
+		require.ErrorContains(t, err, "merge after truncate failed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("MergeCDCTablesAtomically rejects stale second table pre-flight before mutating first table", func(t *testing.T) {
+		t.Parallel()
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("lock-items-pf", "lock-orders-pf"),
+		}
+
+		ordersMarker := "88888888888888888888888888888888"
+		itemsMarker := "99999999999999999999999999999999"
+		staleMarker := "00000000000000000000000000000000"
+
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "items", "lock-items-pf")
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "lock-orders-pf")
+		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+ordersMarker)
+		expectIncarnationLookup(mock, "iceberg", "analytics", "items", true, trinoIncarnationCommentPrefix+staleMarker)
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "lock-orders-pf")
+		expectTargetLockRelease(mock, "iceberg", "analytics", "items", "lock-items-pf")
+
+		err = d.MergeCDCTablesAtomically(t.Context(), []destination.CDCAtomicTableMerge{
+			{
+				Truncate: true,
+				Options: destination.MergeOptions{
+					TargetTable:            "analytics.orders",
+					StagingTable:           "_bruin_staging.orders_stg",
+					PrimaryKeys:            []string{"id"},
+					Columns:                []string{"id", "val", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+					CDCExpectedIncarnation: trinoTableIncarnation("iceberg", "analytics", "orders", ordersMarker),
+				},
+			},
+			{
+				Options: destination.MergeOptions{
+					TargetTable:            "analytics.items",
+					StagingTable:           "_bruin_staging.items_stg",
+					PrimaryKeys:            []string{"id"},
+					Columns:                []string{"id", "sku", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+					CDCExpectedIncarnation: trinoTableIncarnation("iceberg", "analytics", "items", itemsMarker),
+				},
+			},
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }

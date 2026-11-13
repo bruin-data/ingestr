@@ -8,28 +8,35 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 const (
-	trinoCDCLeaseSchema    = "_bruin_staging"
-	trinoCDCLeaseTTL       = 30 * time.Second
-	trinoCDCLeaseHeartbeat = 10 * time.Second
-	trinoCDCLeaseCheck     = 2 * time.Second
-	trinoCDCLeasePoll      = 2 * time.Second
+	trinoCDCLeaseSchema     = "_bruin_staging"
+	trinoCDCLeaseTTL        = 30 * time.Second
+	trinoCDCLeaseHeartbeat  = 10 * time.Second
+	trinoCDCLeaseCheck      = 2 * time.Second
+	trinoCDCLeasePoll       = 2 * time.Second
+	trinoCDCTargetLockPoll  = 200 * time.Millisecond
+	trinoCDCTargetLockLabel = "target lock"
 )
 
 type trinoCDCRunLease struct {
-	d       *TrinoDestination
-	catalog string
-	schema  string
-	name    string
-	token   string
+	d          *TrinoDestination
+	catalog    string
+	schema     string
+	name       string
+	token      string
+	label      string
+	notRunLoss bool
 
 	ttl         time.Duration
 	heartbeatIv time.Duration
@@ -76,16 +83,142 @@ func (d *TrinoDestination) acquireManagedCDCRunLeaseWithTimings(
 	}
 
 	sum := sha256.Sum256([]byte(connectorID))
-	tokenBytes := make([]byte, 12)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return nil, fmt.Errorf("generate Trino CDC lease token: %w", err)
+	return d.acquireTrinoTableLease(
+		ctx,
+		d.catalog,
+		"cdc_lease_"+hex.EncodeToString(sum[:10]),
+		"CDC run lease",
+		false,
+		fmt.Sprintf("another CDC run already owns connector %s", connectorID),
+		ttl,
+		heartbeatIv,
+		checkIv,
+		pollIv,
+	)
+}
+
+type trinoTargetLockSpec struct {
+	canonicalKey string
+	catalog      string
+	table        string
+}
+
+func (d *TrinoDestination) acquireCDCTargetLocks(
+	ctx context.Context,
+	tables ...string,
+) (func() error, func() error, error) {
+	return d.acquireCDCTargetLocksWithTimings(
+		ctx,
+		trinoCDCLeaseTTL,
+		trinoCDCLeaseHeartbeat,
+		trinoCDCLeaseCheck,
+		trinoCDCTargetLockPoll,
+		tables...,
+	)
+}
+
+func (d *TrinoDestination) acquireCDCTargetLocksWithTimings(
+	ctx context.Context,
+	ttl, heartbeatIv, checkIv, pollIv time.Duration,
+	tables ...string,
+) (func() error, func() error, error) {
+	if d.db == nil {
+		return nil, nil, errors.New("trino destination is not connected")
+	}
+	seen := make(map[string]struct{}, len(tables))
+	specs := make([]trinoTargetLockSpec, 0, len(tables))
+	for _, table := range tables {
+		catalog, schemaName, tableName, err := d.resolveTableName(table)
+		if err != nil {
+			return nil, nil, err
+		}
+		key := destination.CDCTargetKey(strings.ToLower(catalog), strings.ToLower(schemaName), strings.ToLower(tableName))
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		specs = append(specs, trinoTargetLockSpec{
+			canonicalKey: key,
+			catalog:      catalog,
+			table:        table,
+		})
+	}
+	slices.SortFunc(specs, func(a, b trinoTargetLockSpec) int {
+		return strings.Compare(a.canonicalKey, b.canonicalKey)
+	})
+
+	acquired := make([]*trinoCDCRunLease, 0, len(specs))
+	releaseAll := func() error {
+		var errs []error
+		for i := len(acquired) - 1; i >= 0; i-- {
+			if err := acquired[i].Release(); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	for _, spec := range specs {
+		leaseIface, err := d.acquireTrinoTableLease(
+			ctx,
+			spec.catalog,
+			"cdc_tlock_"+destination.CDCTargetKeyDigest(spec.canonicalKey),
+			trinoCDCTargetLockLabel,
+			true,
+			fmt.Sprintf("another operation is mutating Trino target %s", spec.table),
+			ttl,
+			heartbeatIv,
+			checkIv,
+			pollIv,
+		)
+		if err != nil {
+			_ = releaseAll()
+			return nil, nil, err
+		}
+		acquired = append(acquired, leaseIface.(*trinoCDCRunLease))
+	}
+
+	verifyHeld := func() error {
+		for _, l := range acquired {
+			select {
+			case <-l.Done():
+				return l.Err()
+			default:
+			}
+		}
+		return nil
+	}
+	return releaseAll, verifyHeld, nil
+}
+
+func (d *TrinoDestination) acquireTrinoTableLease(
+	ctx context.Context,
+	catalog, name, label string,
+	notRunLoss bool,
+	timeoutReason string,
+	ttl, heartbeatIv, checkIv, pollIv time.Duration,
+) (source.ConnectorLease, error) {
+	var token string
+	if d.newLeaseToken != nil {
+		var err error
+		token, err = d.newLeaseToken()
+		if err != nil {
+			return nil, fmt.Errorf("generate Trino %s token: %w", label, err)
+		}
+	} else {
+		tokenBytes := make([]byte, 12)
+		if _, err := rand.Read(tokenBytes); err != nil {
+			return nil, fmt.Errorf("generate Trino %s token: %w", label, err)
+		}
+		token = hex.EncodeToString(tokenBytes)
 	}
 	lease := &trinoCDCRunLease{
 		d:           d,
-		catalog:     d.catalog,
+		catalog:     catalog,
 		schema:      trinoCDCLeaseSchema,
-		name:        "cdc_lease_" + hex.EncodeToString(sum[:10]),
-		token:       hex.EncodeToString(tokenBytes),
+		name:        name,
+		token:       token,
+		label:       label,
+		notRunLoss:  notRunLoss,
 		ttl:         ttl,
 		heartbeatIv: heartbeatIv,
 		checkIv:     checkIv,
@@ -96,7 +229,7 @@ func (d *TrinoDestination) acquireManagedCDCRunLeaseWithTimings(
 	}
 
 	if err := d.ensureSchemaExists(ctx, lease.catalog, lease.schema); err != nil {
-		return nil, fmt.Errorf("ensure Trino CDC lease schema: %w", err)
+		return nil, fmt.Errorf("ensure Trino %s schema: %w", label, err)
 	}
 
 	deadline := time.Now().Add(lease.ttl + 15*time.Second)
@@ -111,7 +244,7 @@ func (d *TrinoDestination) acquireManagedCDCRunLeaseWithTimings(
 			return lease, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("another CDC run already owns connector %s (Trino lease %s)", connectorID, lease.fqn())
+			return nil, fmt.Errorf("%s (Trino lease %s)", timeoutReason, lease.fqn())
 		}
 		select {
 		case <-ctx.Done():
@@ -286,7 +419,11 @@ func (l *trinoCDCRunLease) monitor() {
 
 func (l *trinoCDCRunLease) markLost(cause error) {
 	l.mu.Lock()
-	l.err = errors.Join(source.ErrConnectorLeaseLost, fmt.Errorf("trino CDC run lease lost: %w", cause))
+	if l.notRunLoss {
+		l.err = fmt.Errorf("trino %s %s lost: %w", l.label, l.fqn(), cause)
+	} else {
+		l.err = errors.Join(source.ErrConnectorLeaseLost, fmt.Errorf("trino CDC run lease lost: %w", cause))
+	}
 	l.mu.Unlock()
 	l.doneOnce.Do(func() { close(l.done) })
 }
@@ -313,6 +450,10 @@ func (l *trinoCDCRunLease) Release() error {
 		l.stopping.Store(true)
 		close(l.stop)
 		<-l.stopped
+		leaseDesc := "CDC run lease"
+		if l.notRunLoss && l.label != "" {
+			leaseDesc = l.label
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		owner, err := l.owner(ctx)
@@ -320,21 +461,21 @@ func (l *trinoCDCRunLease) Release() error {
 			if err == nil || errors.Is(err, sql.ErrNoRows) || isTrinoMissingObject(err) {
 				err = errors.New("lease was not owned during release")
 			}
-			l.releaseErr = fmt.Errorf("release Trino CDC run lease: %w", err)
+			l.releaseErr = fmt.Errorf("release Trino %s: %w", leaseDesc, err)
 			return
 		}
 		releasedFQN := qualifyTrinoTable(l.catalog, l.schema, l.name+"_released_"+l.token)
 		if _, err := l.d.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", l.fqn(), releasedFQN)); err != nil {
-			l.releaseErr = fmt.Errorf("release Trino CDC run lease: %w", err)
+			l.releaseErr = fmt.Errorf("release Trino %s: %w", leaseDesc, err)
 			return
 		}
 		if moved, err := l.ownerOf(ctx, releasedFQN); err != nil || moved != l.token {
 			_, _ = l.d.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", releasedFQN, l.fqn()))
-			l.releaseErr = errors.New("release Trino CDC run lease: the lease was taken over before release")
+			l.releaseErr = fmt.Errorf("release Trino %s: the lease was taken over before release", leaseDesc)
 			return
 		}
 		if _, err := l.d.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+releasedFQN); err != nil {
-			l.releaseErr = fmt.Errorf("drop released Trino CDC run lease: %w", err)
+			l.releaseErr = fmt.Errorf("drop released Trino %s: %w", leaseDesc, err)
 		}
 	})
 	return l.releaseErr

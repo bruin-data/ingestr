@@ -139,7 +139,8 @@ func TestTrinoPostgresCDCPipeline(t *testing.T) {
 		CREATE TABLE public.orders (
 			id INT PRIMARY KEY,
 			name VARCHAR(100) NOT NULL,
-			big_payload TEXT NOT NULL
+			big_payload TEXT NOT NULL,
+			meta JSONB NOT NULL DEFAULT '{"tier":"gold"}'::jsonb
 		);
 		CREATE TABLE public.orders_hard (
 			id INT PRIMARY KEY,
@@ -285,9 +286,10 @@ func TestTrinoMySQLCDCPipeline(t *testing.T) {
 		CREATE TABLE items (
 			id INT NOT NULL PRIMARY KEY,
 			name VARCHAR(100) NOT NULL,
-			val INT NOT NULL
+			val INT NOT NULL,
+			meta JSON
 		);
-		INSERT INTO items (id, name, val) VALUES (1, 'one', 10), (2, 'two', 20), (3, 'three', 30);
+		INSERT INTO items (id, name, val, meta) VALUES (1, 'one', 10, '{"a":1}'), (2, 'two', 20, '{"a":2}'), (3, 'three', 30, NULL);
 	`)
 	require.NoError(t, err)
 

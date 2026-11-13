@@ -28,19 +28,57 @@ func (d *TrinoDestination) mergeCDC(ctx context.Context, opts destination.MergeO
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+	if opts.CDCExpectedIncarnation == "" {
+		return d.mergeCDCLocked(ctx, opts, "", d.defaultExec, nil)
+	}
+
+	releaseLocks, verifyLocks, err := d.acquireCDCTargetLocks(ctx, opts.TargetTable)
+	if err != nil {
 		return err
+	}
+	defer func() { _ = releaseLocks() }()
+
+	meta, marker, err := d.ensureCheckedCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
+	if err != nil {
+		return err
+	}
+	incarnationPred := trinoIncarnationExistsPredicate(meta.catalog, meta.schemaName, meta.tableName, marker)
+	if err := d.mergeCDCLocked(ctx, opts, incarnationPred, d.defaultExec, verifyLocks); err != nil {
+		return err
+	}
+	return d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
+}
+
+func (d *TrinoDestination) mergeCDCLocked(
+	ctx context.Context,
+	opts destination.MergeOptions,
+	incarnationPred string,
+	execFn trinoExecFunc,
+	verifyLocks func() error,
+) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if verifyLocks != nil {
+		if err := verifyLocks(); err != nil {
+			return err
+		}
 	}
 
 	startMerge := time.Now()
-	mergeSQL := d.buildCDCMergeSQL(opts)
+	mergeSQL := d.buildCDCMergeSQLWithGuard(opts, incarnationPred)
 	config.Debug("[TRINO CDC MERGE] Executing: %s", mergeSQL)
 
-	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
+	if err := execFn(ctx, mergeSQL); err != nil {
 		config.LogFailedQuery(mergeSQL, err)
 		return fmt.Errorf("failed to execute Trino CDC merge: %w", err)
 	}
-	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+	if verifyLocks != nil {
+		if err := verifyLocks(); err != nil {
+			return err
+		}
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
 
@@ -49,6 +87,10 @@ func (d *TrinoDestination) mergeCDC(ctx context.Context, opts destination.MergeO
 }
 
 func (d *TrinoDestination) buildCDCMergeSQL(opts destination.MergeOptions) string {
+	return d.buildCDCMergeSQLWithGuard(opts, "")
+}
+
+func (d *TrinoDestination) buildCDCMergeSQLWithGuard(opts destination.MergeOptions, incarnationPred string) string {
 	stagingCatalog, stagingSchema, stagingName := d.parseTableName(opts.StagingTable)
 	targetCatalog, targetSchema, targetName := d.parseTableName(opts.TargetTable)
 	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
@@ -113,6 +155,7 @@ func (d *TrinoDestination) buildCDCMergeSQL(opts destination.MergeOptions) strin
 			matAliases,
 			rnCol,
 			opts.CDCHardDelete,
+			incarnationPred,
 		)
 		fmt.Fprintf(&sqlBuilder, "USING %s AS s\n", usingSubquery)
 		fmt.Fprintf(&sqlBuilder, "ON %s\n", strings.Join(onConditions, " AND "))
@@ -171,16 +214,20 @@ func (d *TrinoDestination) buildCDCMergeSQL(opts destination.MergeOptions) strin
 	}
 
 	if opts.CDCHardDelete {
+		hardWhere := rnCol + " = 1"
+		if incarnationPred != "" {
+			hardWhere += " AND " + incarnationPred
+		}
 		fmt.Fprintf(
 			&sqlBuilder,
-			"USING (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1) AS s\n",
+			"USING (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s) AS s\n",
 			allColsList,
 			allColsList,
 			pkList,
 			destination.CDCLatestOverallOrderBy(quoteIdentifier),
 			rnCol,
 			stagingFQN,
-			rnCol,
+			hardWhere,
 		)
 		fmt.Fprintf(&sqlBuilder, "ON %s\n", strings.Join(onConditions, " AND "))
 
@@ -234,9 +281,13 @@ func (d *TrinoDestination) buildCDCMergeSQL(opts destination.MergeOptions) strin
 	selectCols = append(selectCols, fmt.Sprintf("act.%s IS NOT NULL AS %s", lsnCol, hasActiveCol))
 	selectCols = append(selectCols, fmt.Sprintf("act.%s AS %s", lsnCol, activeLSNCol))
 
+	softWhere := ""
+	if incarnationPred != "" {
+		softWhere = " WHERE " + incarnationPred
+	}
 	fmt.Fprintf(
 		&sqlBuilder,
-		"USING (SELECT %s FROM (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _la_numbered WHERE %s = 1) AS la LEFT JOIN (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s DESC) AS %s FROM %s WHERE %s = false) AS _act_numbered WHERE %s = 1) AS act ON %s) AS s\n",
+		"USING (SELECT %s FROM (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _la_numbered WHERE %s = 1) AS la LEFT JOIN (SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s DESC) AS %s FROM %s WHERE %s = false) AS _act_numbered WHERE %s = 1) AS act ON %s%s) AS s\n",
 		strings.Join(selectCols, ", "),
 		allColsList,
 		allColsList,
@@ -254,6 +305,7 @@ func (d *TrinoDestination) buildCDCMergeSQL(opts destination.MergeOptions) strin
 		deletedCol,
 		rnCol,
 		strings.Join(laActJoin, " AND "),
+		softWhere,
 	)
 	fmt.Fprintf(&sqlBuilder, "ON %s\n", strings.Join(onConditions, " AND "))
 
@@ -287,6 +339,7 @@ func buildCDCUnchangedUsingSubquery(
 	matAliases map[string]string,
 	rnCol string,
 	hardDelete bool,
+	incarnationPred string,
 ) string {
 	lsnCol := quoteIdentifier(destination.CDCLSNColumn)
 	deletedCol := quoteIdentifier(destination.CDCDeletedColumn)
@@ -397,11 +450,16 @@ func buildCDCUnchangedUsingSubquery(
 		selectCols = append(selectCols, fmt.Sprintf("act.%s AS %s", lsnCol, activeLSNCol))
 	}
 
+	whereClause := ""
+	if incarnationPred != "" {
+		whereClause = " WHERE " + incarnationPred
+	}
 	return fmt.Sprintf(
-		"(WITH %s\nSELECT %s FROM __ingestr_la AS la %s)",
+		"(WITH %s\nSELECT %s FROM __ingestr_la AS la %s%s)",
 		strings.Join(ctes, ",\n"),
 		strings.Join(selectCols, ", "),
 		strings.Join(joins, " "),
+		whereClause,
 	)
 }
 

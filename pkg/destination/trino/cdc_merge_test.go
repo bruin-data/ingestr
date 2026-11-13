@@ -2,6 +2,8 @@ package trino
 
 import (
 	"errors"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -119,19 +121,98 @@ func TestMergeCDC_ExecutesWithIncarnationFencing(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
+	d := &TrinoDestination{
+		db:            db,
+		catalog:       "iceberg",
+		schema:        "analytics",
+		newLeaseToken: deterministicTokenGen("locktok01"),
+	}
 	marker := "0123456789abcdef0123456789abcdef"
 	expectedIncarnation := trinoTableIncarnation("iceberg", "analytics", "orders", marker)
+	expectedGuard := trinoIncarnationExistsPredicate("iceberg", "analytics", "orders", marker)
 
+	expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "locktok01")
 	expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
-	mock.ExpectExec("MERGE INTO").WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectExec("MERGE INTO .* " + regexp.QuoteMeta(expectedGuard)).WillReturnResult(sqlmock.NewResult(0, 3))
 	expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+	expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "locktok01")
 
 	err = d.MergeTable(t.Context(), destination.MergeOptions{
 		TargetTable:            "orders",
 		StagingTable:           "_bruin_staging.orders_stage",
 		PrimaryKeys:            []string{"id"},
 		Columns:                []string{"id", "val", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+		CDCExpectedIncarnation: expectedIncarnation,
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBuildCDCMergeSQLWithGuard_AllBranches(t *testing.T) {
+	t.Parallel()
+
+	d := &TrinoDestination{catalog: "iceberg", schema: "analytics"}
+	marker := "0123456789abcdef0123456789abcdef"
+	guard := trinoIncarnationExistsPredicate("iceberg", "analytics", "orders", marker)
+
+	softSQL := d.buildCDCMergeSQLWithGuard(destination.MergeOptions{
+		TargetTable:  "orders",
+		StagingTable: "_bruin_staging.orders_stage",
+		PrimaryKeys:  []string{"id"},
+		Columns:      []string{"id", "val", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+	}, guard)
+	require.Contains(t, softSQL, "WHERE "+guard+") AS s")
+
+	hardSQL := d.buildCDCMergeSQLWithGuard(destination.MergeOptions{
+		TargetTable:   "orders",
+		StagingTable:  "_bruin_staging.orders_stage",
+		PrimaryKeys:   []string{"id"},
+		Columns:       []string{"id", "val", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+		CDCHardDelete: true,
+	}, guard)
+	require.Contains(t, hardSQL, `WHERE "__ingestr_cdc_rn" = 1 AND `+guard+`) AS s`)
+
+	for _, hardDelete := range []bool{false, true} {
+		toastSQL := d.buildCDCMergeSQLWithGuard(destination.MergeOptions{
+			TargetTable:   "orders",
+			StagingTable:  "_bruin_staging.orders_stage",
+			PrimaryKeys:   []string{"id"},
+			Columns:       []string{"id", "payload", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", "_cdc_unchanged_cols"},
+			CDCHardDelete: hardDelete,
+		}, guard)
+		require.Contains(t, toastSQL, "WHERE "+guard+") AS s")
+	}
+}
+
+func TestMergeTable_FencedNonCDC(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	d := &TrinoDestination{
+		db:            db,
+		catalog:       "iceberg",
+		schema:        "analytics",
+		newLeaseToken: deterministicTokenGen("locktok-noncdc"),
+	}
+	marker := "fedcba9876543210fedcba9876543210"
+	expectedIncarnation := trinoTableIncarnation("iceberg", "analytics", "orders", marker)
+	expectedGuard := trinoIncarnationExistsPredicate("iceberg", "analytics", "orders", marker)
+
+	expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "locktok-noncdc")
+	expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+	mock.ExpectExec("MERGE INTO .* " + regexp.QuoteMeta("WHERE __bruin_dedup_rn = 1 AND "+expectedGuard)).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
+	expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "locktok-noncdc")
+
+	err = d.MergeTable(t.Context(), destination.MergeOptions{
+		TargetTable:            "orders",
+		StagingTable:           "_bruin_staging.orders_stage",
+		PrimaryKeys:            []string{"id"},
+		Columns:                []string{"id", "val", "_cdc_lsn"},
 		CDCExpectedIncarnation: expectedIncarnation,
 	})
 	require.NoError(t, err)
@@ -178,9 +259,16 @@ func TestMergeCDC_Errors(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		require.NoError(t, err)
 		defer func() { _ = db.Close() }()
-		d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("locktok-pre"),
+		}
 
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "locktok-pre")
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "locktok-pre")
 
 		err = d.MergeTable(t.Context(), destination.MergeOptions{
 			TargetTable:            "orders",
@@ -198,12 +286,19 @@ func TestMergeCDC_Errors(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		require.NoError(t, err)
 		defer func() { _ = db.Close() }()
-		d := &TrinoDestination{db: db, catalog: "iceberg", schema: "analytics"}
+		d := &TrinoDestination{
+			db:            db,
+			catalog:       "iceberg",
+			schema:        "analytics",
+			newLeaseToken: deterministicTokenGen("locktok-post"),
+		}
 
 		marker := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		expectTargetLockAcquire(mock, "iceberg", "analytics", "orders", "locktok-post")
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+marker)
 		mock.ExpectExec("MERGE INTO").WillReturnResult(sqlmock.NewResult(0, 1))
 		expectIncarnationLookup(mock, "iceberg", "analytics", "orders", true, trinoIncarnationCommentPrefix+"cccccccccccccccccccccccccccccccc")
+		expectTargetLockRelease(mock, "iceberg", "analytics", "orders", "locktok-post")
 
 		err = d.MergeTable(t.Context(), destination.MergeOptions{
 			TargetTable:            "orders",
@@ -217,17 +312,67 @@ func TestMergeCDC_Errors(t *testing.T) {
 	})
 }
 
+func deterministicTokenGen(tokens ...string) func() (string, error) {
+	idx := 0
+	return func() (string, error) {
+		if idx >= len(tokens) {
+			return "", errors.New("unexpected lease token request")
+		}
+		tok := tokens[idx]
+		idx++
+		return tok, nil
+	}
+}
+
+func targetLockTableName(catalog, schemaName, tableName string) string {
+	key := destination.CDCTargetKey(strings.ToLower(catalog), strings.ToLower(schemaName), strings.ToLower(tableName))
+	return "cdc_tlock_" + destination.CDCTargetKeyDigest(key)
+}
+
+func expectTargetLockAcquire(mock sqlmock.Sqlmock, catalog, schemaName, tableName, token string) {
+	lockName := targetLockTableName(catalog, schemaName, tableName)
+	lockFQN := qualifyTrinoTable(catalog, trinoCDCLeaseSchema, lockName)
+	mock.ExpectExec(regexp.QuoteMeta(`CREATE SCHEMA IF NOT EXISTS "` + catalog + `"."` + trinoCDCLeaseSchema + `"`)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta(`CREATE TABLE ` + lockFQN + ` AS SELECT CAST('` + token + `' AS VARCHAR) AS "owner", CURRENT_TIMESTAMP AS "heartbeat"`)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT MAX("owner") FROM ` + lockFQN)).
+		WillReturnRows(sqlmock.NewRows([]string{"owner"}).AddRow(token))
+}
+
+func expectTargetLockRelease(mock sqlmock.Sqlmock, catalog, schemaName, tableName, token string) {
+	lockName := targetLockTableName(catalog, schemaName, tableName)
+	lockFQN := qualifyTrinoTable(catalog, trinoCDCLeaseSchema, lockName)
+	releasedFQN := qualifyTrinoTable(catalog, trinoCDCLeaseSchema, lockName+"_released_"+token)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT MAX("owner") FROM ` + lockFQN)).
+		WillReturnRows(sqlmock.NewRows([]string{"owner"}).AddRow(token))
+	mock.ExpectExec(regexp.QuoteMeta(`ALTER TABLE ` + lockFQN + ` RENAME TO ` + releasedFQN)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT MAX("owner") FROM ` + releasedFQN)).
+		WillReturnRows(sqlmock.NewRows([]string{"owner"}).AddRow(token))
+	mock.ExpectExec(regexp.QuoteMeta(`DROP TABLE IF EXISTS ` + releasedFQN)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
 func expectIncarnationLookup(mock sqlmock.Sqlmock, catalog, schemaName, tableName string, hasLSN bool, comment string) {
-	tableRows := sqlmock.NewRows([]string{"table_catalog", "table_schema", "table_name"}).
-		AddRow(catalog, schemaName, tableName)
+	expectIncarnationLookupWithComments(mock, catalog, schemaName, tableName, hasLSN, comment, comment)
+}
+
+func expectIncarnationLookupWithComments(mock sqlmock.Sqlmock, catalog, schemaName, tableName string, hasLSN bool, tableComment, lsnComment string) {
+	var tableCommentVal any
+	if tableComment != "" {
+		tableCommentVal = tableComment
+	}
+	tableRows := sqlmock.NewRows([]string{"table_catalog", "table_schema", "table_name", "comment"}).
+		AddRow(catalog, schemaName, tableName, tableCommentVal)
 	mock.ExpectQuery(`FROM "` + catalog + `".information_schema.tables`).WillReturnRows(tableRows)
 
 	colRows := sqlmock.NewRows([]string{"Column", "Type", "Extra", "Comment"}).
 		AddRow("id", "bigint", "", nil)
 	if hasLSN {
 		var commentVal any
-		if comment != "" {
-			commentVal = comment
+		if lsnComment != "" {
+			commentVal = lsnComment
 		}
 		colRows.AddRow(destination.CDCLSNColumn, "varchar", "", commentVal)
 	}

@@ -14,6 +14,7 @@ import (
 	_ "github.com/bruin-data/ingestr/internal/testutil/quiettc"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -624,6 +625,202 @@ func TestTrinoCDCIntegration(t *testing.T) {
 		require.NoError(t, dest.db.QueryRowContext(ctx, `SELECT id, val FROM "iceberg"."cdc_it"."swap_target"`).Scan(&swappedID, &swappedVal))
 		require.Equal(t, int64(99), swappedID)
 		require.Equal(t, "atomic", swappedVal)
+	})
+
+	t.Run("atomic rollback, replacement-table SQL guard, continuous swap visibility, and JSON freeze resume", func(t *testing.T) {
+		cols := []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "val", DataType: schema.TypeString},
+			{Name: destination.CDCLSNColumn, DataType: schema.TypeString},
+			{Name: destination.CDCDeletedColumn, DataType: schema.TypeBoolean},
+			{Name: destination.CDCSyncedAtColumn, DataType: schema.TypeTimestampTZ},
+		}
+		colNames := []string{"id", "val", destination.CDCLSNColumn, destination.CDCDeletedColumn, destination.CDCSyncedAtColumn}
+
+		// 1. MergeCDCTablesAtomically rolls back populated & initially-empty tables when a later table fails.
+		rbOrders := "cdc_it.rb_orders"
+		rbEmpty := "cdc_it.rb_empty"
+		rbItems := "cdc_it.rb_items"
+		rbOrdersStage := "_bruin_staging.rb_orders_stage"
+		rbEmptyStage := "_bruin_staging.rb_empty_stage"
+
+		for _, tbl := range []string{rbOrders, rbEmpty, rbItems, rbOrdersStage, rbEmptyStage} {
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table:     tbl,
+				Schema:    &schema.TableSchema{Columns: cols},
+				DropFirst: true,
+			}))
+		}
+		require.NoError(t, dest.Exec(ctx, `INSERT INTO "iceberg"."cdc_it"."rb_orders" VALUES (1, 'before-1', '010', false, CURRENT_TIMESTAMP), (2, 'before-2', '010', false, CURRENT_TIMESTAMP)`))
+		require.NoError(t, dest.Exec(ctx, `INSERT INTO "iceberg"."_bruin_staging"."rb_orders_stage" VALUES (9, 'mutated', '020', false, CURRENT_TIMESTAMP)`))
+		require.NoError(t, dest.Exec(ctx, `INSERT INTO "iceberg"."_bruin_staging"."rb_empty_stage" VALUES (5, 'should-rollback', '020', false, CURRENT_TIMESTAMP)`))
+
+		rbOrdersInc, _, err := dest.EnsureCDCTargetIncarnation(ctx, rbOrders)
+		require.NoError(t, err)
+		rbEmptyInc, _, err := dest.EnsureCDCTargetIncarnation(ctx, rbEmpty)
+		require.NoError(t, err)
+		rbItemsInc, _, err := dest.EnsureCDCTargetIncarnation(ctx, rbItems)
+		require.NoError(t, err)
+
+		err = dest.MergeCDCTablesAtomically(ctx, []destination.CDCAtomicTableMerge{
+			{
+				Truncate: true,
+				Options: destination.MergeOptions{
+					TargetTable:            rbOrders,
+					StagingTable:           rbOrdersStage,
+					PrimaryKeys:            []string{"id"},
+					Columns:                colNames,
+					CDCExpectedIncarnation: rbOrdersInc,
+				},
+			},
+			{
+				Options: destination.MergeOptions{
+					TargetTable:            rbEmpty,
+					StagingTable:           rbEmptyStage,
+					PrimaryKeys:            []string{"id"},
+					Columns:                colNames,
+					CDCExpectedIncarnation: rbEmptyInc,
+				},
+			},
+			{
+				Options: destination.MergeOptions{
+					TargetTable:            rbItems,
+					StagingTable:           "_bruin_staging.nonexistent_stage_table",
+					PrimaryKeys:            []string{"id"},
+					Columns:                colNames,
+					CDCExpectedIncarnation: rbItemsInc,
+				},
+			},
+		})
+		require.Error(t, err)
+
+		var ordersCount, emptyCount int
+		require.NoError(t, dest.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_it"."rb_orders"`).Scan(&ordersCount))
+		require.Equal(t, 2, ordersCount)
+		var firstVal string
+		require.NoError(t, dest.db.QueryRowContext(ctx, `SELECT val FROM "iceberg"."cdc_it"."rb_orders" WHERE id = 1`).Scan(&firstVal))
+		require.Equal(t, "before-1", firstVal)
+		require.NoError(t, dest.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_it"."rb_empty"`).Scan(&emptyCount))
+		require.Zero(t, emptyCount)
+
+		gotOrdersInc, _, err := dest.CDCTargetIncarnation(ctx, rbOrders)
+		require.NoError(t, err)
+		require.Equal(t, rbOrdersInc, gotOrdersInc)
+		gotEmptyInc, _, err := dest.CDCTargetIncarnation(ctx, rbEmpty)
+		require.NoError(t, err)
+		require.Equal(t, rbEmptyInc, gotEmptyInc)
+
+		// 2. Inline SQL incarnation predicate leaves an externally replaced table completely untouched.
+		guardTarget := "cdc_it.guard_target"
+		guardStage := "_bruin_staging.guard_stage"
+		require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{Table: guardTarget, Schema: &schema.TableSchema{Columns: cols}, DropFirst: true}))
+		require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{Table: guardStage, Schema: &schema.TableSchema{Columns: cols}, DropFirst: true}))
+		oldGuardInc, _, err := dest.EnsureCDCTargetIncarnation(ctx, guardTarget)
+		require.NoError(t, err)
+		metaBefore, oldMarker, err := dest.ensureCheckedCDCIncarnation(ctx, guardTarget, oldGuardInc)
+		require.NoError(t, err)
+		stalePred := trinoIncarnationExistsPredicate(metaBefore.catalog, metaBefore.schemaName, metaBefore.tableName, oldMarker)
+
+		require.NoError(t, dest.Exec(ctx, `INSERT INTO "iceberg"."_bruin_staging"."guard_stage" VALUES (1, 'intruder-update', '999', false, CURRENT_TIMESTAMP), (2, 'intruder-insert', '999', false, CURRENT_TIMESTAMP)`))
+		// External process replaces guard_target with a brand-new table carrying row (1, 'replacement-safe').
+		require.NoError(t, dest.Exec(ctx, `CREATE OR REPLACE TABLE "iceberg"."cdc_it"."guard_target" AS SELECT CAST(1 AS BIGINT) AS id, CAST('replacement-safe' AS VARCHAR) AS val, CAST('050' AS VARCHAR) AS "_cdc_lsn", false AS "_cdc_deleted", CURRENT_TIMESTAMP AS "_cdc_synced_at"`))
+
+		require.NoError(t, dest.truncateCDCTableIfIncarnationLocked(ctx, guardTarget, metaBefore.fqn, oldGuardInc, stalePred, dest.defaultExec, nil))
+		require.NoError(t, dest.mergeCDCLocked(ctx, destination.MergeOptions{
+			TargetTable:            guardTarget,
+			StagingTable:           guardStage,
+			PrimaryKeys:            []string{"id"},
+			Columns:                colNames,
+			CDCExpectedIncarnation: oldGuardInc,
+		}, stalePred, dest.defaultExec, nil))
+		require.ErrorContains(t, dest.checkCDCIncarnation(ctx, guardTarget, oldGuardInc), "physical incarnation changed")
+
+		var replacementCount int
+		var replacementVal string
+		require.NoError(t, dest.db.QueryRowContext(ctx, `SELECT COUNT(*), MAX(val) FROM "iceberg"."cdc_it"."guard_target"`).Scan(&replacementCount, &replacementVal))
+		require.Equal(t, 1, replacementCount)
+		require.Equal(t, "replacement-safe", replacementVal)
+
+		// 3. SwapTable keeps target continuously queryable and strips _cdc_unchanged_cols.
+		visTarget := "cdc_it.vis_swap_target"
+		stageWithToastCols := append(slicesClone(cols), schema.Column{Name: destination.CDCUnchangedColsColumn, DataType: schema.TypeString})
+		require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{Table: visTarget, Schema: &schema.TableSchema{Columns: cols}, DropFirst: true}))
+		require.NoError(t, dest.Exec(ctx, `INSERT INTO "iceberg"."cdc_it"."vis_swap_target" VALUES (1, 'v0', '001', false, CURRENT_TIMESTAMP)`))
+
+		stopReader := make(chan struct{})
+		readerErrCh := make(chan error, 1)
+		go func() {
+			defer close(readerErrCh)
+			for {
+				select {
+				case <-stopReader:
+					return
+				default:
+				}
+				var c int
+				if qErr := dest.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."cdc_it"."vis_swap_target"`).Scan(&c); qErr != nil {
+					readerErrCh <- qErr
+					return
+				}
+				if c < 1 {
+					readerErrCh <- fmt.Errorf("expected at least 1 visible row during swap, got %d", c)
+					return
+				}
+			}
+		}()
+
+		for round := 1; round <= 3; round++ {
+			stg := fmt.Sprintf("_bruin_staging.vis_swap_stage_%d", round)
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table:     stg,
+				Schema:    &schema.TableSchema{Columns: stageWithToastCols},
+				DropFirst: true,
+			}))
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf(
+				`INSERT INTO "iceberg"."_bruin_staging"."vis_swap_stage_%d" VALUES (%d, 'v%d', '01%d', false, CURRENT_TIMESTAMP, '[]')`,
+				round, round, round, round,
+			)))
+			require.NoError(t, dest.SwapTable(ctx, destination.SwapOptions{
+				TargetTable:  visTarget,
+				StagingTable: stg,
+				Schema:       &schema.TableSchema{Columns: stageWithToastCols},
+			}))
+		}
+		close(stopReader)
+		require.NoError(t, <-readerErrCh)
+
+		visSchema, err := dest.GetTableSchema(ctx, visTarget)
+		require.NoError(t, err)
+		require.False(t, destination.HasCDCUnchangedColsColumn(visSchema.ColumnNames()))
+
+		// 4. JSON, JSON array, interval, and unconstrained decimal survive GetTableSchema + ContractFreeze resume.
+		jsonResumeTable := "cdc_it.json_resume_target"
+		sourceResumeSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+				{Name: "payload", DataType: schema.TypeJSON, Nullable: true},
+				{Name: "payloads", DataType: schema.TypeArray, ArrayType: schema.TypeJSON, Nullable: true},
+				{Name: "span", DataType: schema.TypeInterval, Nullable: true},
+				{Name: "amt", DataType: schema.TypeDecimal, Nullable: true},
+				{Name: "label", DataType: schema.TypeString, Nullable: true},
+			},
+		}
+		require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+			Table:     jsonResumeTable,
+			Schema:    sourceResumeSchema,
+			DropFirst: true,
+		}))
+		inspectedSchema, err := dest.GetTableSchema(ctx, jsonResumeTable)
+		require.NoError(t, err)
+		require.NotNil(t, inspectedSchema)
+
+		cmp, err := schemaevolution.Compare(sourceResumeSchema, inspectedSchema, &schemaevolution.CompareOptions{
+			NormalizeSourceColumn: dest.NormalizeSchemaEvolutionSourceColumn,
+		})
+		require.NoError(t, err)
+		require.False(t, cmp.HasChanges)
+		contractRes := schemaevolution.ApplyContract(schemaevolution.SchemaContract{Mode: schemaevolution.ContractFreeze}, cmp)
+		require.False(t, contractRes.HasViolations())
 	})
 }
 

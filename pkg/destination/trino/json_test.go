@@ -8,6 +8,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/stretchr/testify/require"
 )
 
@@ -131,4 +132,98 @@ func TestValidateExistingVariantTableAllowsMissingTable(t *testing.T) {
 
 	require.NoError(t, dest.validateExistingVariantTable(t.Context(), "iceberg", "events", "records", []schema.Column{{Name: "payload", DataType: schema.TypeJSON}}))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestNormalizeSchemaEvolutionSourceColumn(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default json_type=varchar allows unchanged JSON, JSON array, interval, and unconstrained decimal on freeze resume", func(t *testing.T) {
+		t.Parallel()
+		dest := NewTrinoDestination()
+
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64},
+				{Name: "payload", DataType: schema.TypeJSON, Nullable: true},
+				{Name: "payload_list", DataType: schema.TypeArray, ArrayType: schema.TypeJSON, Nullable: true},
+				{Name: "duration", DataType: schema.TypeInterval, Nullable: true},
+				{Name: "durations", DataType: schema.TypeArray, ArrayType: schema.TypeInterval, Nullable: true},
+				{Name: "amount", DataType: schema.TypeDecimal, Nullable: true},
+				{Name: "note", DataType: schema.TypeString, Nullable: true},
+			},
+		}
+		destSchema := &schema.TableSchema{
+			Columns: []schema.Column{
+				{Name: "id", DataType: schema.TypeInt64, Nullable: true},
+				mapTrinoTypeToColumn("varchar"),
+				mapTrinoTypeToColumn("array(varchar)"),
+				mapTrinoTypeToColumn("varchar"),
+				mapTrinoTypeToColumn("array(varchar)"),
+				mapTrinoTypeToColumn("decimal(38, 9)"),
+				mapTrinoTypeToColumn("varchar"),
+			},
+		}
+		for i := range destSchema.Columns {
+			destSchema.Columns[i].Name = sourceSchema.Columns[i].Name
+			destSchema.Columns[i].Nullable = true
+		}
+
+		// Plain VARCHAR columns remain TypeString in GetTableSchema.
+		require.Equal(t, schema.TypeString, destSchema.Columns[6].DataType)
+
+		cmp, err := schemaevolution.Compare(sourceSchema, destSchema, &schemaevolution.CompareOptions{
+			NormalizeSourceColumn: dest.NormalizeSchemaEvolutionSourceColumn,
+		})
+		require.NoError(t, err)
+		require.False(t, cmp.HasChanges)
+		res := schemaevolution.ApplyContract(schemaevolution.SchemaContract{Mode: schemaevolution.ContractFreeze}, cmp)
+		require.False(t, res.HasViolations())
+	})
+
+	t.Run("narrow bounded varchar destination still triggers widening against JSON source", func(t *testing.T) {
+		t.Parallel()
+		dest := NewTrinoDestination()
+
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{{Name: "payload", DataType: schema.TypeJSON, Nullable: true}},
+		}
+		narrowCol := mapTrinoTypeToColumn("varchar(16)")
+		narrowCol.Name = "payload"
+		narrowCol.Nullable = true
+		destSchema := &schema.TableSchema{Columns: []schema.Column{narrowCol}}
+
+		cmp, err := schemaevolution.Compare(sourceSchema, destSchema, &schemaevolution.CompareOptions{
+			NormalizeSourceColumn: dest.NormalizeSchemaEvolutionSourceColumn,
+		})
+		require.NoError(t, err)
+		require.True(t, cmp.HasChanges)
+	})
+
+	t.Run("json_type=variant keeps TypeJSON distinct from VARCHAR destination", func(t *testing.T) {
+		t.Parallel()
+		dest := &TrinoDestination{jsonType: jsonTypeVariant}
+
+		sourceSchema := &schema.TableSchema{
+			Columns: []schema.Column{{Name: "payload", DataType: schema.TypeJSON, Nullable: true}},
+		}
+		varcharCol := mapTrinoTypeToColumn("varchar")
+		varcharCol.Name = "payload"
+		varcharCol.Nullable = true
+		destSchema := &schema.TableSchema{Columns: []schema.Column{varcharCol}}
+
+		cmp, err := schemaevolution.Compare(sourceSchema, destSchema, &schemaevolution.CompareOptions{
+			NormalizeSourceColumn: dest.NormalizeSchemaEvolutionSourceColumn,
+		})
+		require.NoError(t, err)
+		require.True(t, cmp.HasChanges)
+
+		variantCol := mapTrinoTypeToColumn("variant")
+		variantCol.Name = "payload"
+		variantCol.Nullable = true
+		cmpVariant, err := schemaevolution.Compare(sourceSchema, &schema.TableSchema{Columns: []schema.Column{variantCol}}, &schemaevolution.CompareOptions{
+			NormalizeSourceColumn: dest.NormalizeSchemaEvolutionSourceColumn,
+		})
+		require.NoError(t, err)
+		require.False(t, cmpVariant.HasChanges)
+	})
 }
