@@ -313,8 +313,10 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	}
 
 	selectList := "*"
+	var selectCols []string
 	if opts.Schema != nil {
 		if destCols := destination.DestinationColumns(opts.Schema.ColumnNames()); len(destCols) > 0 {
+			selectCols = destCols
 			selectList = strings.Join(quoteColumns(destCols), ", ")
 		}
 	}
@@ -322,7 +324,7 @@ func (d *TrinoDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	replaceSQL := buildReplaceTableFromStagingSQL(targetFQN, stagingFQN, selectList, d.jsonType)
 	if _, err := d.db.ExecContext(ctx, replaceSQL); err != nil {
 		if isTrinoReplaceTableUnsupported(err) {
-			if fallbackErr := d.swapTableWithoutReplaceSupport(ctx, targetCatalog, targetSchema, targetName, targetFQN, stagingFQN, selectList); fallbackErr != nil {
+			if fallbackErr := d.swapTableWithoutReplaceSupport(ctx, stagingCatalog, stagingSchema, stagingName, targetCatalog, targetSchema, targetName, selectCols); fallbackErr != nil {
 				return fallbackErr
 			}
 			config.Debug("[TRINO] Table swap completed via fallback in %v", time.Since(startSwap))
@@ -981,8 +983,11 @@ func isTrinoReplaceTableUnsupported(err error) bool {
 
 func (d *TrinoDestination) swapTableWithoutReplaceSupport(
 	ctx context.Context,
-	targetCatalog, targetSchema, targetName, targetFQN, stagingFQN, selectList string,
+	stagingCatalog, stagingSchema, stagingName, targetCatalog, targetSchema, targetName string,
+	selectCols []string,
 ) error {
+	stagingFQN := qualifyTrinoTable(stagingCatalog, stagingSchema, stagingName)
+	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
 	existsSQL := fmt.Sprintf(
 		`SELECT 1 FROM %s.information_schema.tables
 		WHERE lower(table_schema) = lower(%s) AND lower(table_name) = lower(%s) AND table_type = 'BASE TABLE'`,
@@ -1005,9 +1010,41 @@ func (d *TrinoDestination) swapTableWithoutReplaceSupport(
 		return fmt.Errorf("failed to inspect target table %s before swap: %w", targetFQN, err)
 	}
 
+	stagingSpecs, err := d.readTrinoSwapColumnSpecs(ctx, stagingCatalog, stagingSchema, stagingName)
+	if err != nil {
+		return err
+	}
+	targetSpecs, err := d.readTrinoSwapColumnSpecs(ctx, targetCatalog, targetSchema, targetName)
+	if err != nil {
+		return err
+	}
+	selectedSpecs, projected, err := selectTrinoSwapColumnSpecs(stagingSpecs, selectCols)
+	if err != nil {
+		return fmt.Errorf("failed to resolve staging columns for %s: %w", stagingFQN, err)
+	}
+	names := make([]string, len(selectedSpecs))
+	for i, spec := range selectedSpecs {
+		names[i] = spec.name
+	}
+	selectList := strings.Join(quoteColumns(names), ", ")
+
+	// Rewriting rows in place keeps the target readable throughout, but is only
+	// equivalent to a replace when the target already has the staging layout.
+	if trinoSwapColumnSpecsEqual(targetSpecs, selectedSpecs) {
+		txErr := d.replaceTargetRowsInTransaction(ctx, targetFQN, stagingFQN, selectList)
+		if txErr == nil {
+			_, _ = d.db.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+stagingFQN)
+			return nil
+		}
+		config.Debug("[TRINO] Transactional replace of %s unavailable, falling back to rename swap: %v", targetFQN, txErr)
+	}
+	return d.swapTableByRename(ctx, targetCatalog, targetSchema, targetName, stagingFQN, selectList, projected)
+}
+
+func (d *TrinoDestination) replaceTargetRowsInTransaction(ctx context.Context, targetFQN, stagingFQN, selectList string) error {
 	tx, err := d.BeginTransaction(ctx)
 	if err != nil {
-		return fmt.Errorf("atomic table replacement is not supported by Trino catalog %q: %w", targetCatalog, err)
+		return err
 	}
 	committed := false
 	defer func() {
@@ -1020,9 +1057,9 @@ func (d *TrinoDestination) swapTableWithoutReplaceSupport(
 	}()
 
 	if err := tx.Exec(ctx, "DELETE FROM "+targetFQN); err != nil {
-		return fmt.Errorf("atomic table replacement is not supported by Trino catalog %q: %w", targetCatalog, err)
+		return fmt.Errorf("failed to clear target table %s during transactional swap: %w", targetFQN, err)
 	}
-	insertSQL := fmt.Sprintf("INSERT INTO %s SELECT %s FROM %s", targetFQN, selectList, stagingFQN)
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", targetFQN, selectList, selectList, stagingFQN)
 	if err := tx.Exec(ctx, insertSQL); err != nil {
 		return fmt.Errorf("failed to populate target table %s during transactional swap: %w", targetFQN, err)
 	}
@@ -1030,8 +1067,98 @@ func (d *TrinoDestination) swapTableWithoutReplaceSupport(
 		return fmt.Errorf("failed to commit transactional swap for %s: %w", targetFQN, err)
 	}
 	committed = true
-	_, _ = d.db.ExecContext(context.WithoutCancel(ctx), "DROP TABLE IF EXISTS "+stagingFQN)
 	return nil
+}
+
+func (d *TrinoDestination) swapTableByRename(
+	ctx context.Context,
+	targetCatalog, targetSchema, targetName, stagingFQN, selectList string,
+	projected bool,
+) error {
+	targetFQN := qualifyTrinoTable(targetCatalog, targetSchema, targetName)
+	maxLen := destination.MaxIdentifierLength("trino")
+	suffix := time.Now().UnixNano()
+	cleanupCtx := context.WithoutCancel(ctx)
+
+	replacementFQN := stagingFQN
+	if projected {
+		newName := fmt.Sprintf("%s_new_%d", targetName, suffix)
+		replacementFQN = qualifyTrinoTable(targetCatalog, targetSchema, destination.ShortenIdentifier(newName, newName, maxLen))
+		createSQL := buildCreateTableFromStagingSQL(replacementFQN, stagingFQN, selectList, d.jsonType, "", "")
+		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+			config.LogFailedQuery(createSQL, err)
+			return fmt.Errorf("failed to build replacement table for %s: %w", targetFQN, err)
+		}
+	}
+	dropReplacement := func() {
+		if projected {
+			_, _ = d.db.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS "+replacementFQN)
+		}
+	}
+
+	oldName := fmt.Sprintf("%s_old_%d", targetName, suffix)
+	oldFQN := qualifyTrinoTable(targetCatalog, targetSchema, destination.ShortenIdentifier(oldName, oldName, maxLen))
+	renameOldSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", targetFQN, oldFQN)
+	if _, err := d.db.ExecContext(ctx, renameOldSQL); err != nil {
+		config.LogFailedQuery(renameOldSQL, err)
+		dropReplacement()
+		return fmt.Errorf("failed to move target table %s aside for swap: %w", targetFQN, err)
+	}
+	renameNewSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", replacementFQN, targetFQN)
+	if _, err := d.db.ExecContext(ctx, renameNewSQL); err != nil {
+		config.LogFailedQuery(renameNewSQL, err)
+		restoreSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", oldFQN, targetFQN)
+		if _, restoreErr := d.db.ExecContext(cleanupCtx, restoreSQL); restoreErr != nil {
+			config.LogFailedQuery(restoreSQL, restoreErr)
+			return fmt.Errorf("failed to rename replacement to %s (original preserved as %s): %w", targetFQN, oldFQN, errors.Join(err, restoreErr))
+		}
+		dropReplacement()
+		return fmt.Errorf("failed to rename replacement to %s: %w", targetFQN, err)
+	}
+	_, _ = d.db.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS "+oldFQN)
+	if projected {
+		_, _ = d.db.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS "+stagingFQN)
+	}
+	return nil
+}
+
+// selectTrinoSwapColumnSpecs orders staging columns as the replace projection
+// would and reports whether that projection differs from the staging table.
+func selectTrinoSwapColumnSpecs(staging []trinoSwapColumnSpec, selectCols []string) ([]trinoSwapColumnSpec, bool, error) {
+	if len(selectCols) == 0 {
+		return staging, false, nil
+	}
+	byName := make(map[string]trinoSwapColumnSpec, len(staging))
+	for _, spec := range staging {
+		byName[strings.ToLower(spec.name)] = spec
+	}
+	selected := make([]trinoSwapColumnSpec, 0, len(selectCols))
+	for _, col := range selectCols {
+		spec, ok := byName[strings.ToLower(col)]
+		if !ok {
+			return nil, false, fmt.Errorf("column %q is missing from staging table", col)
+		}
+		selected = append(selected, spec)
+	}
+	projected := len(selected) != len(staging)
+	for i := 0; !projected && i < len(selected); i++ {
+		projected = !strings.EqualFold(selected[i].name, staging[i].name)
+	}
+	return selected, projected, nil
+}
+
+func trinoSwapColumnSpecsEqual(a, b []trinoSwapColumnSpec) bool {
+	if len(a) == 0 || len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i].name, b[i].name) ||
+			normalizeTrinoTypeSpec(a[i].dataType) != normalizeTrinoTypeSpec(b[i].dataType) ||
+			a[i].nullable != b[i].nullable {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *TrinoDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
