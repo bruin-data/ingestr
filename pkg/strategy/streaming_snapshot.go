@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -69,10 +70,25 @@ func (l *flushLoop) loadContinuousSnapshot(ctx context.Context, records <-chan s
 	}
 	st, _ := l.tableState(first.TableName)
 	sourceTable := l.stateSourceTable(first.TableName)
+	displayName := first.TableName
+	if displayName == "" {
+		displayName = st.destTable
+	}
+	var reportedRows atomic.Int64
+	var reportedBytes atomic.Uint64
 	opts := destination.WriteOptions{
 		Table: st.destTable, Schema: st.schema, PrimaryKeys: st.primaryKeys,
 		Parallelism: l.cfg.EffectiveDestinationParallelism(), CDCSnapshot: true, SkipCDCResume: true,
 		StagingBucket: l.cfg.StagingBucket, LoaderFileSize: l.cfg.LoaderFileSize, LoaderFileFormat: l.cfg.LoaderFileFormat,
+	}
+	opts.CDCSnapshotCommitted = func(ctx context.Context, rows int64, bytes uint64) error {
+		if err := connectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		metrics.RecordSync(map[string]metrics.SyncStats{displayName: {Rows: rows, Bytes: bytes}}, time.Now())
+		reportedRows.Add(rows)
+		reportedBytes.Add(bytes)
+		return nil
 	}
 	if l.opts.StateManager != nil {
 		manager := l.opts.StateManager
@@ -171,11 +187,9 @@ func (l *flushLoop) loadContinuousSnapshot(ctx context.Context, records <-chan s
 		releaseCDCSnapshotBatchResult(boundary.next)
 		return nil, fmt.Errorf("streaming snapshot: failed to write table %s: %w", st.destTable, writeErr)
 	}
-	displayName := first.TableName
-	if displayName == "" {
-		displayName = st.destTable
+	if remaining := rows - reportedRows.Load(); remaining > 0 {
+		metrics.RecordSync(map[string]metrics.SyncStats{displayName: {Rows: remaining, Bytes: bytes - reportedBytes.Load()}}, time.Now())
 	}
-	metrics.RecordSync(map[string]metrics.SyncStats{displayName: {Rows: rows, Bytes: bytes}}, time.Now())
 	output.Statusf("[STREAM] %s | loaded %d snapshot rows for %s in %s\n", time.Now().Format("15:04:05"), rows, displayName, time.Since(start).Round(time.Millisecond))
 	return boundary.next, nil
 }

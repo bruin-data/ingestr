@@ -49,6 +49,12 @@ type WriteOptions struct {
 	// CDCSnapshotProgress persists a cumulative snapshot cursor only after all
 	// preceding rows are committed and query-visible. It must not acknowledge WAL.
 	CDCSnapshotProgress func(context.Context, source.CDCStateCommitToken) error
+	// CDCSnapshotCommitted reports original Arrow rows and payload bytes from
+	// complete pages after they are committed, query-visible, and any covered
+	// progress is persisted. Each page is counted once, in its final commit
+	// window if it spans windows. Calls are serialized and finish before
+	// WriteParallel returns.
+	CDCSnapshotCommitted func(context.Context, int64, uint64) error
 
 	// Reverse-ETL fields. Strategy names the write behavior (merge/update/
 	// delete/append/replace) so an API destination can pick the right endpoint;

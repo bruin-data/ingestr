@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/bruin-data/ingestr/internal/metrics"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
@@ -18,6 +20,7 @@ type continuousSnapshotDestination struct {
 	progressCalls  int
 	beforeWrite    func(destination.WriteOptions) error
 	beforeProgress func(context.Context, int) error
+	afterProgress  func(int)
 }
 
 func (d *continuousSnapshotDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
@@ -33,11 +36,24 @@ func (d *continuousSnapshotDestination) WriteParallel(ctx context.Context, recor
 	}
 	load := len(d.loaded)
 	d.loaded = append(d.loaded, nil)
+	var rows int64
+	var bytes uint64
+	committed := func() error {
+		if opts.CDCSnapshotCommitted != nil && rows > 0 {
+			if err := opts.CDCSnapshotCommitted(ctx, rows, bytes); err != nil {
+				return err
+			}
+		}
+		rows, bytes = 0, 0
+		return nil
+	}
 	for result := range records {
 		if result.CDCSnapshotRangeEnd {
 			d.rangeEnds++
 		}
 		if result.Batch != nil {
+			rows += result.Batch.NumRows()
+			bytes += recordBatchPayloadBytes(result.Batch)
 			d.loaded[load] = append(d.loaded[load], result.Batch.Column(0).(*array.Int64).Int64Values()...)
 			result.Batch.Release()
 		}
@@ -57,9 +73,15 @@ func (d *continuousSnapshotDestination) WriteParallel(ctx context.Context, recor
 				return err
 			}
 			d.progressCalls++
+			if err := committed(); err != nil {
+				return err
+			}
+			if d.afterProgress != nil {
+				d.afterProgress(d.progressCalls)
+			}
 		}
 	}
-	return nil
+	return committed()
 }
 
 func continuousSnapshotLoop(t *testing.T) (*flushLoop, *continuousSnapshotDestination) {
@@ -97,6 +119,33 @@ func TestStreamingContinuousSnapshotUsesOneLoad(t *testing.T) {
 	require.Equal(t, 4, dest.rangeEnds, "range ends must reach the active writer without restarting it")
 	require.EqualValues(t, len(want), tableRowsSynced(t, "public.items")-beforeRows)
 	require.EqualValues(t, wantBytes, tableBytesSynced(t, "public.items")-beforeBytes)
+}
+
+func TestStreamingContinuousSnapshotReportsCommittedProgress(t *testing.T) {
+	loop, dest := continuousSnapshotLoop(t)
+	metrics.RecordSync(map[string]metrics.SyncStats{"public.items": {}}, time.Unix(1, 0))
+	beforeRows := tableRowsSynced(t, "public.items")
+	beforeBytes := tableBytesSynced(t, "public.items")
+	first := directSnapshotBatch(t, "public.items", 1)
+	pageBytes := recordBatchPayloadBytes(first.Batch)
+	dest.afterProgress = func(commits int) {
+		require.EqualValues(t, commits, tableRowsSynced(t, "public.items")-beforeRows)
+		require.EqualValues(t, uint64(commits)*pageBytes, tableBytesSynced(t, "public.items")-beforeBytes)
+		require.Greater(t, gatherValue(t, "ingestr_stream_table_last_synced_timestamp_seconds", map[string]string{"table": "public.items"}), float64(1))
+		_, ok := persistedStreamingSnapshotProgress(t, dest.softReplaceDestination)
+		require.True(t, ok, "metrics must follow persisted progress")
+	}
+	progress := snapshotRangeProgress()
+	progress.Ranges[0].Key = []string{"1"}
+	later := progress.Clone()
+	later.Ranges[0].Key = []string{"2"}
+	records := mustClosedRecords(softMarker(), first, snapshotRangeProgressResult(progress),
+		directSnapshotBatch(t, "public.items", 2), snapshotRangeProgressResult(later),
+		directSnapshotBatch(t, "public.items", 3), snapshotRangeCompletionResult())
+	require.NoError(t, loop.run(t.Context(), records))
+	require.Equal(t, 2, dest.progressCalls)
+	require.EqualValues(t, 3, tableRowsSynced(t, "public.items")-beforeRows)
+	require.EqualValues(t, 3*pageBytes, tableBytesSynced(t, "public.items")-beforeBytes)
 }
 
 func TestStreamingContinuousSnapshotCompletesBeforeWAL(t *testing.T) {
@@ -251,8 +300,12 @@ func TestStreamingContinuousSnapshotFailureKeepsCommittedProgress(t *testing.T) 
 			token := completion.CommitToken.(source.CDCStateCommitToken)
 			token.Position, token.SourceCommitToken = softCheckpoint, "uncommitted-completion"
 			completion.CommitToken = token
+			beforeRows := tableRowsSynced(t, "public.items")
+			beforeBytes := tableBytesSynced(t, "public.items")
+			firstBatch := directSnapshotBatch(t, "public.items", 1)
+			pageBytes := recordBatchPayloadBytes(firstBatch.Batch)
 			records := mustClosedRecords(softMarker(),
-				directSnapshotBatch(t, "public.items", 1), snapshotRangeProgressResult(first),
+				firstBatch, snapshotRangeProgressResult(first),
 				directSnapshotBatch(t, "public.items", 2), snapshotRangeProgressResult(later), completion)
 			t.Cleanup(func() { drainAndRelease(records) })
 			err := loop.run(ctx, records)
@@ -264,6 +317,8 @@ func TestStreamingContinuousSnapshotFailureKeepsCommittedProgress(t *testing.T) 
 			require.True(t, ok)
 			require.Equal(t, first, durable)
 			require.Equal(t, 1, dest.progressCalls)
+			require.EqualValues(t, 1, tableRowsSynced(t, "public.items")-beforeRows)
+			require.EqualValues(t, pageBytes, tableBytesSynced(t, "public.items")-beforeBytes)
 			require.Len(t, dest.writeCalls, 1)
 			require.Empty(t, dest.retireCalls)
 			require.Empty(t, resumedSnapshotPosition(t, dest.softReplaceDestination))

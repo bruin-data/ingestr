@@ -78,9 +78,11 @@ type snapshotWriteCommand struct {
 }
 
 type snapshotWindow struct {
-	id    int64
-	parts []*snapshotWindowPart
-	bytes atomic.Int64
+	id         int64
+	parts      []*snapshotWindowPart
+	bytes      atomic.Int64
+	rows       atomic.Int64
+	arrowBytes atomic.Uint64
 	// open counts workers that may still load into the window.
 	open  sync.WaitGroup
 	token *source.CDCStateCommitToken
@@ -425,15 +427,25 @@ func (s *snapshotWriter) checkpointWindow(ctx context.Context, window *snapshotW
 		return err
 	}
 	since(&s.stats.visibleWait, start)
-	if window.token != nil && s.opts.CDCSnapshotProgress != nil {
-		start := time.Now()
+	persistProgress := window.token != nil && s.opts.CDCSnapshotProgress != nil
+	rows := window.rows.Load()
+	reportCommitted := rows > 0 && s.opts.CDCSnapshotCommitted != nil
+	if persistProgress || reportCommitted {
 		if err := s.dest.checkCDCIncarnation(ctx, s.opts.Table, s.opts.CDCExpectedIncarnation); err != nil {
 			return err
 		}
+	}
+	if persistProgress {
+		start := time.Now()
 		if err := s.opts.CDCSnapshotProgress(ctx, *window.token); err != nil {
 			return fmt.Errorf("persist committed StarRocks snapshot progress: %w", err)
 		}
 		since(&s.stats.persist, start)
+	}
+	if reportCommitted {
+		if err := s.opts.CDCSnapshotCommitted(ctx, rows, window.arrowBytes.Load()); err != nil {
+			return fmt.Errorf("report committed StarRocks snapshot metrics: %w", err)
+		}
 	}
 	window.token = nil
 	s.mu.Lock()
@@ -669,6 +681,7 @@ func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan snapshotWri
 				return nil
 			}
 			since(&s.stats.idle, idleStart)
+			rows, bytes := job.result.Batch.NumRows(), snapshotRecordPayloadBytes(job.result.Batch)
 			prepStart := time.Now()
 			batch, err := prepareCDCSnapshotRecord(job.result.Batch, s.opts)
 			since(&s.stats.prepare, prepStart)
@@ -681,6 +694,9 @@ func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan snapshotWri
 			if err != nil {
 				return err
 			}
+			// A page spanning windows is fully durable only with its final window.
+			w.window.rows.Add(rows)
+			w.window.arrowBytes.Add(bytes)
 			select {
 			case completed <- job.sequence:
 			case <-ctx.Done():
@@ -688,6 +704,17 @@ func (w *snapshotLoadWorker) encode(ctx context.Context, jobs <-chan snapshotWri
 			}
 		}
 	}
+}
+
+func snapshotRecordPayloadBytes(batch arrow.RecordBatch) uint64 {
+	var total uint64
+	for i := 0; i < int(batch.NumCols()); i++ {
+		column := batch.Column(i)
+		if column != nil && column.Data() != nil {
+			total += column.Data().SizeInBytes()
+		}
+	}
+	return total
 }
 
 func (w *snapshotLoadWorker) handle(ctx context.Context, command snapshotWriteCommand) error {
