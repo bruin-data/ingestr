@@ -3,6 +3,7 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -655,6 +656,21 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != "" {
+		if opts.CDCExpectedIncarnation == "" || opts.CDCExpectedStagingIncarnation == "" || opts.CDCExpectedResultIncarnation == "" {
+			return errors.New("SQL Server CDC conditional swap requires target, staging, and result incarnations")
+		}
+		if opts.CDCExpectedResultIncarnation != opts.CDCExpectedStagingIncarnation {
+			return fmt.Errorf("SQL Server CDC swap result incarnation %q cannot match the staging table %q", opts.CDCExpectedResultIncarnation, opts.CDCExpectedStagingIncarnation)
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, targetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, staging.qualifiedTable(d.server), opts.CDCExpectedStagingIncarnation); err != nil {
+			return err
+		}
+	}
+
 	if err := addPrimaryKeyIfMissing(ctx, tx, staging.qualifiedTable(d.server), opts.PrimaryKeys); err != nil {
 		return err
 	}
@@ -782,6 +798,26 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 	defer func() { err = explainWriteError(err, nil) }()
 	startMerge := time.Now()
 
+	if opts.CDCExpectedIncarnation != "" {
+		tx, err := d.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		if err := d.mergeTableInTx(ctx, tx, opts); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit merge transaction: %w", err)
+		}
+		config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
+
 	if len(opts.PrimaryKeys) > 0 && !destination.HasCDCDeletedColumn(opts.Columns) {
 		directInsertSQL := buildInsertDirectSQL(opts.TargetTable, opts.StagingTable, opts.Columns)
 		dedupInsertSQL := buildInsertDedupSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey)
@@ -795,10 +831,7 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		}
 	}
 
-	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, opts.IncrementalPredicate)
-	if opts.CDCHardDelete && destination.HasCDCDeletedColumn(opts.Columns) {
-		mergeSQL = buildCDCHardDeleteMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalPredicate)
-	}
+	mergeSQL := d.mergeSQL(opts)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -808,6 +841,28 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func (d *MSSQLDestination) mergeTableInTx(ctx context.Context, tx *sql.Tx, opts destination.MergeOptions) error {
+	mergeSQL := d.mergeSQL(opts)
+	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
+	if _, err := tx.ExecContext(ctx, mergeSQL); err != nil {
+		config.LogFailedQuery(mergeSQL, err)
+		return fmt.Errorf("failed to execute merge: %w", err)
+	}
+	return nil
+}
+
+func (d *MSSQLDestination) supportsOpenJSON() bool {
+	return d.compatibilityLevel == 0 || d.compatibilityLevel >= 130
+}
+
+func (d *MSSQLDestination) mergeSQL(opts destination.MergeOptions) string {
+	useOpenJSON := d.supportsOpenJSON()
+	if opts.CDCHardDelete && destination.HasCDCDeletedColumn(opts.Columns) {
+		return buildCDCHardDeleteMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalPredicate, useOpenJSON)
+	}
+	return buildMergeSQLWithOptions(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, opts.IncrementalPredicate, useOpenJSON)
 }
 
 func tableIsEmptyForUpdate(ctx context.Context, tx *sql.Tx, table string) (bool, error) {
@@ -1079,6 +1134,10 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []stri
 }
 
 func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey, incrementalPredicate string) string {
+	return buildMergeSQLWithOptions(targetTable, stagingTable, primaryKeys, columns, incrementalKey, incrementalPredicate, true)
+}
+
+func buildMergeSQLWithOptions(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey, incrementalPredicate string, useOpenJSON bool) string {
 	quotedColumns := quoteColumns(columns)
 	targetColumns := destination.DestinationColumns(columns)
 	quotedTargetColumns := quoteColumns(targetColumns)
@@ -1106,7 +1165,7 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 	if isCDC {
 		hasActiveColumn := quoteColumn(uniqueInternalName("__ingestr_has_active"))
 		activeLSNColumn := quoteColumn(uniqueInternalName("__ingestr_active_lsn"))
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn)
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn, useOpenJSON)
 	}
 
 	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
@@ -1161,7 +1220,25 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn string) string {
+func buildCDCUnchangedPredicate(col string, useOpenJSON bool) string {
+	if useOpenJSON {
+		return fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
+			quoteColumn(destination.CDCUnchangedColsColumn),
+			strings.ReplaceAll(col, "'", "''"),
+		)
+	}
+	member, _ := json.Marshal(col)
+	first := strings.ReplaceAll("["+string(member), "'", "''")
+	second := strings.ReplaceAll(","+string(member), "'", "''")
+	unchangedColExpr := fmt.Sprintf("COALESCE(source.%s, N'[]') COLLATE Latin1_General_100_BIN2", quoteColumn(destination.CDCUnchangedColsColumn))
+	return fmt.Sprintf(
+		"(CHARINDEX(N'%s' COLLATE Latin1_General_100_BIN2, %s) > 0 OR CHARINDEX(N'%s' COLLATE Latin1_General_100_BIN2, %s) > 0)",
+		first, unchangedColExpr, second, unchangedColExpr,
+	)
+}
+
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn string, useOpenJSON bool) string {
 	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
@@ -1214,11 +1291,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		}
 		condition := hasFreshRowData
 		if hasUnchangedCols {
-			unchanged := fmt.Sprintf(
-				"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
-				quoteColumn(destination.CDCUnchangedColsColumn),
-				strings.ReplaceAll(col, "'", "''"),
-			)
+			unchanged := buildCDCUnchangedPredicate(col, useOpenJSON)
 			condition = fmt.Sprintf("%s AND NOT %s", hasFreshRowData, unchanged)
 		}
 		updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, condition, quoted, quoted)
@@ -1243,7 +1316,7 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // buildCDCHardDeleteMergeSQL builds a CDC MERGE that applies the latest change
 // per PK: a live change upserts the row, a delete removes it. Neither touches a
 // target row that already carries a newer position.
-func buildCDCHardDeleteMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalPredicate string) string {
+func buildCDCHardDeleteMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalPredicate string, useOpenJSON bool) string {
 	quotedColumns := quoteColumns(columns)
 	targetColumns := destination.DestinationColumns(columns)
 	quotedTargetColumns := quoteColumns(targetColumns)
@@ -1272,11 +1345,7 @@ func buildCDCHardDeleteMergeSQL(targetTable, stagingTable string, primaryKeys, c
 			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
 			continue
 		}
-		unchanged := fmt.Sprintf(
-			"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
-			quoteColumn(destination.CDCUnchangedColsColumn),
-			strings.ReplaceAll(col, "'", "''"),
-		)
+		unchanged := buildCDCUnchangedPredicate(col, useOpenJSON)
 		updates[i] = fmt.Sprintf("target.%s = CASE WHEN NOT %s THEN source.%s ELSE target.%s END", quoted, unchanged, quoted, quoted)
 	}
 	updateClause := ""
@@ -1523,8 +1592,8 @@ func (d *MSSQLDestination) ValidateManagedCDCTarget(ctx context.Context, table s
 }
 
 func validateMSSQLCompatibilityLevel(database string, compatibilityLevel int) error {
-	if compatibilityLevel < 130 {
-		return fmt.Errorf("SQL Server database %q has compatibility level %d; managed CDC requires level 130 or newer for OPENJSON", database, compatibilityLevel)
+	if compatibilityLevel > 0 && compatibilityLevel < 100 {
+		return fmt.Errorf("SQL Server database %q has compatibility level %d; managed CDC requires level 100 or newer", database, compatibilityLevel)
 	}
 	return nil
 }
@@ -1621,8 +1690,16 @@ func (d *MSSQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string
 	return tx.Commit()
 }
 
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
-	identity, err := d.resolveTargetIdentity(ctx, table)
+	return d.cdcTargetIncarnationWith(ctx, d.db, table)
+}
+
+func (d *MSSQLDestination) cdcTargetIncarnationWith(ctx context.Context, q queryRower, table string) (string, bool, error) {
+	identity, err := d.resolveTargetIdentityWith(ctx, q, table)
 	if err != nil {
 		return "", false, err
 	}
@@ -1636,7 +1713,7 @@ func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		WHERE s.name = @p1 AND t.name = @p2`, prefix, prefix)
 	var objectID int64
 	var createdAt string
-	err = d.db.QueryRowContext(ctx, query, identity.schema, identity.table).Scan(&objectID, &createdAt)
+	err = q.QueryRowContext(ctx, query, identity.schema, identity.table).Scan(&objectID, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -1674,6 +1751,10 @@ func (i mssqlTargetIdentity) catalogPrefix(defaultServer string) string {
 }
 
 func (d *MSSQLDestination) resolveTargetIdentity(ctx context.Context, target string) (mssqlTargetIdentity, error) {
+	return d.resolveTargetIdentityWith(ctx, d.db, target)
+}
+
+func (d *MSSQLDestination) resolveTargetIdentityWith(ctx context.Context, q queryRower, target string) (mssqlTargetIdentity, error) {
 	parts := tablename.Split(target)
 	if len(parts) == 0 || len(parts) > 4 {
 		return mssqlTargetIdentity{}, fmt.Errorf("SQL Server table name must contain between one and four components, %q given", target)
@@ -1685,7 +1766,7 @@ func (d *MSSQLDestination) resolveTargetIdentity(ctx context.Context, target str
 	}
 	defaultSchema := "dbo"
 	if len(parts) == 1 {
-		if err := d.db.QueryRowContext(ctx, "SELECT COALESCE(SCHEMA_NAME(), 'dbo')").Scan(&defaultSchema); err != nil {
+		if err := q.QueryRowContext(ctx, "SELECT COALESCE(SCHEMA_NAME(), 'dbo')").Scan(&defaultSchema); err != nil {
 			return mssqlTargetIdentity{}, fmt.Errorf("failed to resolve SQL Server default schema: %w", err)
 		}
 	}
@@ -1709,24 +1790,28 @@ func resolveMSSQLTargetIdentity(defaultServer, defaultDatabase, defaultSchema, t
 }
 
 func (d *MSSQLDestination) canonicalCDCTarget(ctx context.Context, target string) (string, error) {
-	identity, err := d.resolveTargetIdentity(ctx, target)
+	return d.canonicalCDCTargetWith(ctx, d.db, target)
+}
+
+func (d *MSSQLDestination) canonicalCDCTargetWith(ctx context.Context, q queryRower, target string) (string, error) {
+	identity, err := d.resolveTargetIdentityWith(ctx, q, target)
 	if err != nil {
 		return "", err
 	}
 	var actualDatabase, collation string
 	if strings.EqualFold(identity.server, d.server) {
 		query := "SELECT [name], [collation_name] FROM [master].[sys].[databases] WHERE [name] = @p1"
-		if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
+		if err := q.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
 			return "", fmt.Errorf("failed to resolve SQL Server database collation for %q: %w", identity.database, err)
 		}
 	} else {
 		var actualServer string
-		if err := d.db.QueryRowContext(ctx, "SELECT [name] FROM [sys].[servers] WHERE [name] = @p1", identity.server).Scan(&actualServer); err != nil {
+		if err := q.QueryRowContext(ctx, "SELECT [name] FROM [sys].[servers] WHERE [name] = @p1", identity.server).Scan(&actualServer); err != nil {
 			return "", fmt.Errorf("failed to resolve linked SQL Server name %q: %w", identity.server, err)
 		}
 		identity.server = actualServer
 		query := fmt.Sprintf("SELECT [name], [collation_name] FROM %s.[master].[sys].[databases] WHERE [name] = @p1", quoteColumn(identity.server))
-		if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
+		if err := q.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
 			return "", fmt.Errorf("failed to resolve linked SQL Server database collation for %q: %w", identity.database, err)
 		}
 	}
@@ -1776,15 +1861,36 @@ func (d *MSSQLDestination) DeleteCDCStateEvents(ctx context.Context, table, conn
 	if len(eventIDs) == 0 {
 		return nil
 	}
-	args := make([]any, 0, len(eventIDs)+1)
-	args = append(args, connectorID)
-	placeholders := make([]string, len(eventIDs))
-	for i, eventID := range eventIDs {
-		placeholders[i] = fmt.Sprintf("@p%d", i+2)
-		args = append(args, eventID)
+	const maxBatch = 1000
+	execDelete := func(execCtx context.Context, execer interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}, batch []string,
+	) error {
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, connectorID)
+		placeholders := make([]string, len(batch))
+		for i, eventID := range batch {
+			placeholders[i] = fmt.Sprintf("@p%d", i+2)
+			args = append(args, eventID)
+		}
+		_, err := execer.ExecContext(execCtx, fmt.Sprintf("DELETE FROM %s WHERE [connector_id] = @p1 AND [event_id] IN (%s)", quoteTable(table), strings.Join(placeholders, ", ")), args...)
+		return err
 	}
-	_, err := d.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE [connector_id] = @p1 AND [event_id] IN (%s)", quoteTable(table), strings.Join(placeholders, ", ")), args...)
-	return err
+	if len(eventIDs) <= maxBatch {
+		return execDelete(ctx, d.db, eventIDs)
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for start := 0; start < len(eventIDs); start += maxBatch {
+		end := min(start+maxBatch, len(eventIDs))
+		if err := execDelete(ctx, tx, eventIDs[start:end]); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (d *MSSQLDestination) GetScheme() string { return "mssql" }
@@ -2029,6 +2135,12 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 }
 
 func buildCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.Column, primaryKeys, deferredPrimaryKeys []string) string {
+	createPart := buildExclusiveCreateTableSQLWithDeferredPrimaryKeys(table, columns, primaryKeys, deferredPrimaryKeys)
+	return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s",
+		escapeTableNameForObjectID(table), createPart)
+}
+
+func buildExclusiveCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.Column, primaryKeys, deferredPrimaryKeys []string) string {
 	columnNames := make([]string, len(columns))
 	for i := range columns {
 		columnNames[i] = columns[i].Name
@@ -2056,11 +2168,7 @@ func buildCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.C
 		createPart += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}
 
-	createPart += "\n)"
-
-	sql := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s",
-		escapeTableNameForObjectID(table), createPart)
-	return sql
+	return createPart + "\n)"
 }
 
 func mapColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {

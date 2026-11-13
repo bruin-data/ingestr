@@ -87,13 +87,14 @@ func TestResolveMSSQLTargetIdentityIncludesServerAndDatabase(t *testing.T) {
 	}
 }
 
-func TestValidateManagedCDCStateRequiresOpenJSONCompatibility(t *testing.T) {
-	err := (&MSSQLDestination{database: "warehouse", compatibilityLevel: 120}).ValidateManagedCDCState()
-	if err == nil || !strings.Contains(err.Error(), "requires level 130") {
-		t.Fatalf("compatibility level 120 error = %v", err)
+func TestValidateManagedCDCStateAllowsCompatibilityLevels100AndNewer(t *testing.T) {
+	if err := (&MSSQLDestination{database: "warehouse", compatibilityLevel: 90}).ValidateManagedCDCState(); err == nil || !strings.Contains(err.Error(), "requires level 100") {
+		t.Fatalf("compatibility level 90 error = %v", err)
 	}
-	if err := (&MSSQLDestination{database: "warehouse", compatibilityLevel: 130}).ValidateManagedCDCState(); err != nil {
-		t.Fatalf("compatibility level 130 rejected: %v", err)
+	for _, level := range []int{100, 110, 120, 130, 160} {
+		if err := (&MSSQLDestination{database: "warehouse", compatibilityLevel: level}).ValidateManagedCDCState(); err != nil {
+			t.Fatalf("compatibility level %d rejected: %v", level, err)
+		}
 	}
 }
 
@@ -105,11 +106,16 @@ func TestValidateManagedCDCTargetChecksCrossDatabaseCompatibility(t *testing.T) 
 	defer func() { _ = db.Close() }()
 	dest := &MSSQLDestination{db: db, server: "local", database: "default", compatibilityLevel: 160}
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT [compatibility_level] FROM [master].sys.databases WHERE [name] = @p1")).
-		WithArgs("legacy").WillReturnRows(sqlmock.NewRows([]string{"compatibility_level"}).AddRow(120))
+		WithArgs("legacy120").WillReturnRows(sqlmock.NewRows([]string{"compatibility_level"}).AddRow(120))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT [compatibility_level] FROM [master].sys.databases WHERE [name] = @p1")).
+		WithArgs("legacy90").WillReturnRows(sqlmock.NewRows([]string{"compatibility_level"}).AddRow(90))
 
-	err = dest.ValidateManagedCDCTarget(t.Context(), "legacy.dbo.items")
-	if err == nil || !strings.Contains(err.Error(), "requires level 130") {
-		t.Fatalf("cross-database compatibility error = %v", err)
+	if err := dest.ValidateManagedCDCTarget(t.Context(), "legacy120.dbo.items"); err != nil {
+		t.Fatalf("cross-database compatibility level 120 rejected: %v", err)
+	}
+	err = dest.ValidateManagedCDCTarget(t.Context(), "legacy90.dbo.items")
+	if err == nil || !strings.Contains(err.Error(), "requires level 100") {
+		t.Fatalf("cross-database compatibility level 90 error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
