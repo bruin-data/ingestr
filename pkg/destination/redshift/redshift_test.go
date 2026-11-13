@@ -40,10 +40,16 @@ WHEN NOT MATCHED THEN
 	})
 }
 
-func TestValidateManagedCDCStateFailsClosed(t *testing.T) {
+func TestValidateManagedCDCStateSupported(t *testing.T) {
 	dest := NewRedshiftDestination()
 
-	require.ErrorContains(t, dest.ValidateManagedCDCState(), "does not support destination-managed CDC state")
+	require.NoError(t, dest.ValidateManagedCDCState())
+	require.True(t, dest.RequiresSerializedCDCRuns())
+	require.True(t, dest.SupportsCDCConditionalMerge())
+	require.True(t, dest.SupportsCDCConditionalSwap())
+	require.True(t, dest.SupportsCDCHardDelete())
+	require.True(t, dest.SupportsCDCMerge())
+	require.True(t, dest.SupportsCDCUnchangedCols())
 }
 
 func TestBuildPredicateMergeStatements(t *testing.T) {
