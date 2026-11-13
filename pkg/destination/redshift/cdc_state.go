@@ -19,7 +19,7 @@ import (
 
 const (
 	defaultRedshiftLeaseTTL           = 45 * time.Second
-	defaultRedshiftLeaseRenewInterval = 15 * time.Second
+	defaultRedshiftLeaseRenewInterval = 7500 * time.Millisecond
 	cdcRunLeasesTableName             = "cdc_run_leases"
 	cdcStateDeleteBatchSize           = 500
 )
@@ -221,7 +221,7 @@ func (d *RedshiftDestination) WriteCDCState(ctx context.Context, records <-chan 
 			}
 			record.Release()
 		}
-		return nil
+		return source.ConnectorLeaseLoss(ctx)
 	})
 
 	for result := range records {
@@ -569,7 +569,11 @@ func (d *RedshiftDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Context,
 
 	var incarnation string
 	err = d.withTx(ctx, func(tx redshiftTx) error {
-		_, exists, incErr := d.targetIncarnationInTx(ctx, tx, targetSchema, targetTable)
+		resolvedSchema, resolvedTable, resolveErr := d.resolveSchemaTable(ctx, tx, opts.Table)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		_, exists, incErr := d.targetIncarnationInTx(ctx, tx, resolvedSchema, resolvedTable)
 		if incErr != nil {
 			return incErr
 		}
@@ -583,9 +587,9 @@ func (d *RedshiftDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Context,
 
 		createOpts := opts
 		createOpts.DropFirst = false
-		createSQL := buildRedshiftCreateTableSQL(targetSchema, targetTable, createOpts)
+		createSQL := buildRedshiftCreateTableSQLWithMode(targetSchema, targetTable, createOpts, false)
 		if _, execErr := tx.Exec(ctx, createSQL); execErr != nil {
-			return fmt.Errorf("failed to create Redshift CDC target %s: %w", opts.Table, execErr)
+			return fmt.Errorf("failed to exclusively create Redshift CDC target %s: %w", opts.Table, execErr)
 		}
 
 		inc, created, incErr := d.targetIncarnationInTx(ctx, tx, targetSchema, targetTable)
@@ -594,6 +598,9 @@ func (d *RedshiftDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Context,
 		}
 		if !created || inc == "" {
 			return fmt.Errorf("created Redshift CDC target %s has no physical incarnation", opts.Table)
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
 		}
 		incarnation = inc
 		return nil
@@ -650,7 +657,7 @@ func (d *RedshiftDestination) TruncateCDCTableIfIncarnation(ctx context.Context,
 		if _, err := tx.Exec(ctx, "DELETE FROM "+targetRef); err != nil {
 			return fmt.Errorf("failed to clear CDC target %s: %w", table, err)
 		}
-		return nil
+		return source.ConnectorLeaseLoss(ctx)
 	})
 }
 
@@ -711,23 +718,32 @@ func (d *RedshiftDestination) lockAndValidateCDCIncarnation(ctx context.Context,
 }
 
 type redshiftManagedCDCRunLease struct {
-	d           *RedshiftDestination
-	leaseRef    string
-	connectorID string
-	token       string
-	ttlSeconds  int
-	ttl         time.Duration
-	renewEvery  time.Duration
+	d            *RedshiftDestination
+	leaseRef     string
+	connectorID  string
+	token        string
+	ttlSeconds   int
+	ttl          time.Duration
+	overdueAfter time.Duration
+	renewEvery   time.Duration
 
-	done   chan struct{}
-	stop   chan struct{}
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	err    error
-	closed bool
+	done        chan struct{}
+	stop        chan struct{}
+	wg          sync.WaitGroup
+	mu          sync.Mutex
+	lastRenewal time.Time
+	releasing   bool
+	err         error
+	closed      bool
 
 	releaseOnce sync.Once
 	releaseErr  error
+}
+
+func leaseElapsed(now, since time.Time) time.Duration {
+	mono := now.Sub(since)
+	wall := time.Duration(now.UnixNano() - since.UnixNano())
+	return max(mono, wall)
 }
 
 func (d *RedshiftDestination) AcquireManagedCDCRunLease(ctx context.Context, connectorID string) (source.ConnectorLease, error) {
@@ -749,9 +765,10 @@ func (d *RedshiftDestination) AcquireManagedCDCRunLease(ctx context.Context, con
 	if ttl <= 0 {
 		ttl = defaultRedshiftLeaseTTL
 	}
+	overdueAfter := max(time.Millisecond, ttl/2)
 	renewEvery := d.leaseRenewInterval
-	if renewEvery <= 0 || renewEvery >= ttl {
-		renewEvery = max(time.Millisecond, ttl/3)
+	if renewEvery <= 0 || renewEvery >= overdueAfter {
+		renewEvery = max(time.Millisecond, ttl/6)
 	}
 	ttlSeconds := max(1, int(math.Ceil(ttl.Seconds())))
 
@@ -771,6 +788,7 @@ func (d *RedshiftDestination) AcquireManagedCDCRunLease(ctx context.Context, con
 		return nil, fmt.Errorf("failed to prepare Redshift CDC run lease table: %w", err)
 	}
 
+	var acquiredAt time.Time
 	err = d.withTx(ctx, func(tx redshiftTx) error {
 		if _, execErr := tx.Exec(ctx, "LOCK "+leaseRef); execErr != nil {
 			return fmt.Errorf("failed to lock Redshift CDC run lease table: %w", execErr)
@@ -791,6 +809,7 @@ func (d *RedshiftDestination) AcquireManagedCDCRunLease(ctx context.Context, con
 		if _, execErr := tx.Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE "connector_id" = $1`, leaseRef), connectorID); execErr != nil {
 			return fmt.Errorf("failed to clear expired Redshift CDC run lease for %q: %w", connectorID, execErr)
 		}
+		acquiredAt = d.now()
 		insertSQL := fmt.Sprintf(
 			`INSERT INTO %s ("connector_id", "lease_token", "acquired_at", "expires_at") VALUES ($1, $2, CURRENT_TIMESTAMP, DATEADD(second, %d, CURRENT_TIMESTAMP))`,
 			leaseRef, ttlSeconds,
@@ -805,15 +824,17 @@ func (d *RedshiftDestination) AcquireManagedCDCRunLease(ctx context.Context, con
 	}
 
 	lease := &redshiftManagedCDCRunLease{
-		d:           d,
-		leaseRef:    leaseRef,
-		connectorID: connectorID,
-		token:       token,
-		ttlSeconds:  ttlSeconds,
-		ttl:         ttl,
-		renewEvery:  renewEvery,
-		done:        make(chan struct{}),
-		stop:        make(chan struct{}),
+		d:            d,
+		leaseRef:     leaseRef,
+		connectorID:  connectorID,
+		token:        token,
+		ttlSeconds:   ttlSeconds,
+		ttl:          ttl,
+		overdueAfter: overdueAfter,
+		renewEvery:   renewEvery,
+		lastRenewal:  acquiredAt,
+		done:         make(chan struct{}),
+		stop:         make(chan struct{}),
 	}
 	lease.wg.Add(1)
 	go lease.heartbeatLoop()
@@ -825,39 +846,44 @@ func (l *redshiftManagedCDCRunLease) heartbeatLoop() {
 	ticker := time.NewTicker(l.renewEvery)
 	defer ticker.Stop()
 
-	lastSuccess := time.Now()
 	for {
 		select {
 		case <-l.stop:
 			return
 		case <-ticker.C:
+			if l.checkOverdue() {
+				return
+			}
 			renewCtx, cancel := context.WithTimeout(context.Background(), l.renewEvery)
-			owned, err := l.renew(renewCtx)
+			owned, renewedAt, err := l.renew(renewCtx)
 			cancel()
 			if err == nil && owned {
-				lastSuccess = time.Now()
+				if !l.recordRenewal(renewedAt) {
+					return
+				}
 				continue
 			}
 			if err == nil && !owned {
 				l.fail(errors.Join(source.ErrConnectorLeaseLost, errors.New("redshift CDC run lease was taken over or expired")))
 				return
 			}
-			if time.Since(lastSuccess) >= l.ttl {
-				l.fail(errors.Join(source.ErrConnectorLeaseLost, fmt.Errorf("redshift CDC run lease renewal failed: %w", err)))
+			if l.failIfOverdue(err) {
 				return
 			}
 		}
 	}
 }
 
-func (l *redshiftManagedCDCRunLease) renew(ctx context.Context) (bool, error) {
+func (l *redshiftManagedCDCRunLease) renew(ctx context.Context) (bool, time.Time, error) {
 	var rowsAffected int64
+	var renewedAt time.Time
 	err := l.d.withTx(ctx, func(tx redshiftTx) error {
 		if _, err := tx.Exec(ctx, "LOCK "+l.leaseRef); err != nil {
 			return err
 		}
+		renewedAt = l.d.now()
 		updateSQL := fmt.Sprintf(
-			`UPDATE %s SET "expires_at" = DATEADD(second, %d, CURRENT_TIMESTAMP) WHERE "connector_id" = $1 AND "lease_token" = $2`,
+			`UPDATE %s SET "expires_at" = DATEADD(second, %d, CURRENT_TIMESTAMP) WHERE "connector_id" = $1 AND "lease_token" = $2 AND "expires_at" > CURRENT_TIMESTAMP`,
 			l.leaseRef, l.ttlSeconds,
 		)
 		tag, err := tx.Exec(ctx, updateSQL, l.connectorID, l.token)
@@ -868,14 +894,12 @@ func (l *redshiftManagedCDCRunLease) renew(ctx context.Context) (bool, error) {
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return false, time.Time{}, err
 	}
-	return rowsAffected > 0, nil
+	return rowsAffected > 0, renewedAt, nil
 }
 
-func (l *redshiftManagedCDCRunLease) fail(cause error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func (l *redshiftManagedCDCRunLease) failLocked(cause error) {
 	if l.closed {
 		return
 	}
@@ -884,11 +908,68 @@ func (l *redshiftManagedCDCRunLease) fail(cause error) {
 	close(l.done)
 }
 
+func (l *redshiftManagedCDCRunLease) fail(cause error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.failLocked(cause)
+}
+
+func (l *redshiftManagedCDCRunLease) checkOverdue() bool {
+	now := l.d.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return true
+	}
+	if l.releasing {
+		return false
+	}
+	if leaseElapsed(now, l.lastRenewal) >= l.overdueAfter {
+		l.failLocked(errors.Join(source.ErrConnectorLeaseLost, errors.New("redshift CDC run lease renewal is overdue")))
+		return true
+	}
+	return false
+}
+
+func (l *redshiftManagedCDCRunLease) recordRenewal(renewedAt time.Time) bool {
+	now := l.d.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed || l.releasing {
+		return false
+	}
+	l.lastRenewal = renewedAt
+	if leaseElapsed(now, l.lastRenewal) >= l.overdueAfter {
+		l.failLocked(errors.Join(source.ErrConnectorLeaseLost, errors.New("redshift CDC run lease renewal is overdue")))
+		return false
+	}
+	return true
+}
+
+func (l *redshiftManagedCDCRunLease) failIfOverdue(cause error) bool {
+	now := l.d.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed || l.releasing {
+		return true
+	}
+	if leaseElapsed(now, l.lastRenewal) >= l.overdueAfter {
+		l.failLocked(errors.Join(source.ErrConnectorLeaseLost, fmt.Errorf("redshift CDC run lease renewal failed: %w", cause)))
+		return true
+	}
+	return false
+}
+
+// Done checks whether lease renewal is overdue before returning the channel so
+// ConnectorLeaseLoss rejects a process resuming from a pause before its
+// background heartbeat goroutine gets scheduled.
 func (l *redshiftManagedCDCRunLease) Done() <-chan struct{} {
+	l.checkOverdue()
 	return l.done
 }
 
 func (l *redshiftManagedCDCRunLease) Err() error {
+	l.checkOverdue()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.err
@@ -896,6 +977,9 @@ func (l *redshiftManagedCDCRunLease) Err() error {
 
 func (l *redshiftManagedCDCRunLease) Release() error {
 	l.releaseOnce.Do(func() {
+		l.mu.Lock()
+		l.releasing = true
+		l.mu.Unlock()
 		close(l.stop)
 		l.wg.Wait()
 
@@ -908,7 +992,7 @@ func (l *redshiftManagedCDCRunLease) Release() error {
 				return err
 			}
 			tag, err := tx.Exec(ctx, fmt.Sprintf(
-				`DELETE FROM %s WHERE "connector_id" = $1 AND "lease_token" = $2`,
+				`DELETE FROM %s WHERE "connector_id" = $1 AND "lease_token" = $2 AND "expires_at" > CURRENT_TIMESTAMP`,
 				l.leaseRef,
 			), l.connectorID, l.token)
 			if err != nil {

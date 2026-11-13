@@ -25,7 +25,10 @@ func (d *RedshiftDestination) MergeTable(ctx context.Context, opts destination.M
 		return err
 	}
 	return d.withTx(ctx, func(tx redshiftTx) error {
-		return d.mergeTableInTx(ctx, tx, opts, true)
+		if err := d.mergeTableInTx(ctx, tx, opts, true); err != nil {
+			return err
+		}
+		return source.ConnectorLeaseLoss(ctx)
 	})
 }
 
@@ -95,7 +98,7 @@ func (d *RedshiftDestination) MergeCDCTablesAtomically(ctx context.Context, merg
 				return err
 			}
 		}
-		return nil
+		return source.ConnectorLeaseLoss(ctx)
 	})
 }
 
@@ -337,7 +340,7 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 	}
 
 	predicate := strings.TrimSpace(opts.IncrementalPredicate)
-	predicateJoinFor := func(baseCond, srcAlias string) (extraFrom, whereCond string) {
+	predicateJoinFor := func(baseCond string) (extraFrom, whereCond string) {
 		if predicate == "" {
 			return "", baseCond
 		}
@@ -365,7 +368,7 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 		ctes = append(ctes, valueCTEs...)
 		cteBlock := "WITH " + strings.Join(ctes, ", ")
 
-		fromSuffix, updateJoin := predicateJoinFor(joinTargetLA, "la")
+		fromSuffix, updateJoin := predicateJoinFor(joinTargetLA)
 		updateSQL := fmt.Sprintf(
 			`%s UPDATE %s SET %s FROM latest_all AS la %s%s WHERE %s AND la.%s = false AND %s`,
 			cteBlock,
@@ -378,7 +381,7 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 			lsnTargetLTE("la"),
 		)
 
-		delSuffix, delJoin := predicateJoinFor(joinTargetLatest, "latest")
+		delSuffix, delJoin := predicateJoinFor(joinTargetLatest)
 		deleteSQL := fmt.Sprintf(
 			`WITH %s DELETE FROM %s USING latest_all AS latest%s WHERE %s AND latest.%s = true AND (%s.%s IS NULL OR latest.%s >= %s.%s)`,
 			latestAllCTE,
@@ -390,7 +393,7 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 			qLSN, targetRef, qLSN,
 		)
 
-		antiJoin := destination.MergeJoinCondition(buildJoinCondition(primaryKeys, "target", "la"), predicate)
+		antiJoin := buildJoinCondition(primaryKeys, "target", "la")
 		insertSQL := fmt.Sprintf(
 			`%s INSERT INTO %s (%s) SELECT %s FROM latest_all AS la %s WHERE la.%s = false AND NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 			cteBlock,
@@ -414,7 +417,7 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 	softCTEs = append(softCTEs, valueCTEs...)
 	softCTEBlock := "WITH " + strings.Join(softCTEs, ", ")
 
-	fromSuffix, activeJoin := predicateJoinFor(joinTargetLA, "la")
+	fromSuffix, activeJoin := predicateJoinFor(joinTargetLA)
 	activeCondition := fmt.Sprintf(
 		"(%s.%s IS NULL OR la.%s > %s.%s OR (la.%s = %s.%s AND COALESCE(%s.%s, false) = false AND EXISTS (SELECT 1 FROM latest_all AS latest WHERE %s AND latest.%s = la.%s AND latest.%s = true)))",
 		targetRef, qLSN,
@@ -433,7 +436,7 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 		activeCondition,
 	)
 
-	delSuffix, deleteJoin := predicateJoinFor(joinTargetLatest, "latest")
+	delSuffix, deleteJoin := predicateJoinFor(joinTargetLatest)
 	updateDeletedSQL := fmt.Sprintf(
 		`WITH %s UPDATE %s SET %s = true, %s = latest.%s, %s = latest.%s FROM latest_all AS latest%s WHERE %s AND latest.%s = true AND %s`,
 		latestAllCTE,
@@ -445,7 +448,7 @@ func buildCDCMergeStatements(stagingRef, targetRef string, opts destination.Merg
 		lsnTargetLTE("latest"),
 	)
 
-	antiJoin := destination.MergeJoinCondition(buildJoinCondition(primaryKeys, "target", "latest"), predicate)
+	antiJoin := buildJoinCondition(primaryKeys, "target", "latest")
 	insertUnmatchedSQL := fmt.Sprintf(
 		`%s INSERT INTO %s (%s) SELECT %s FROM latest_all AS latest LEFT JOIN latest_active AS la ON %s %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
 		softCTEBlock,

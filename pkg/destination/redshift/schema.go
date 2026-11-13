@@ -207,6 +207,10 @@ func primaryKeySetsEqual(expected, actual []string) bool {
 }
 
 func buildRedshiftCreateTableSQL(schemaName, tableName string, opts destination.PrepareOptions) string {
+	return buildRedshiftCreateTableSQLWithMode(schemaName, tableName, opts, true)
+}
+
+func buildRedshiftCreateTableSQLWithMode(schemaName, tableName string, opts destination.PrepareOptions, ifNotExists bool) string {
 	dialect := &Dialect{}
 	tableRef := quoteTable(schemaName, tableName)
 
@@ -252,7 +256,11 @@ func buildRedshiftCreateTableSQL(schemaName, tableName string, opts destination.
 		colDefs = append(colDefs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(quotedPKs, ", ")))
 	}
 
-	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", tableRef, strings.Join(colDefs, ",\n  "))
+	clause := "CREATE TABLE"
+	if ifNotExists {
+		clause = "CREATE TABLE IF NOT EXISTS"
+	}
+	return fmt.Sprintf("%s %s (\n  %s\n)", clause, tableRef, strings.Join(colDefs, ",\n  "))
 }
 
 func (d *RedshiftDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
@@ -543,6 +551,9 @@ func (d *RedshiftDestination) SwapTable(ctx context.Context, opts destination.Sw
 			renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", stagingRef, destination.QuoteIdentifier(targetTable))
 			if _, err := tx.Exec(ctx, renameSQL); err != nil {
 				return fmt.Errorf("failed to rename staging table %s to %s: %w", opts.StagingTable, opts.TargetTable, err)
+			}
+			if conditional {
+				return source.ConnectorLeaseLoss(ctx)
 			}
 			return nil
 		}

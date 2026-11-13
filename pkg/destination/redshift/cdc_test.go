@@ -351,16 +351,21 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 		return pgconn.NewCommandTag("CREATE SCHEMA"), nil
 
 	case strings.HasPrefix(trimmed, "CREATE TABLE"):
+		ifNotExists := strings.HasPrefix(trimmed, "CREATE TABLE IF NOT EXISTS ")
 		tableRef := extractTableRefAfter(trimmed, "IF NOT EXISTS ")
 		if tableRef == "" {
 			tableRef = extractTableRefAfter(trimmed, "CREATE TABLE ")
 		}
-		if _, exists := f.tables[tableRef]; !exists {
-			f.nextOID++
-			f.tables[tableRef] = &fakeRedshiftTable{
-				oid:        f.nextOID,
-				colMaxLens: make(map[string]int),
+		if _, exists := f.tables[tableRef]; exists {
+			if !ifNotExists {
+				return pgconn.CommandTag{}, fmt.Errorf("relation %q already exists", tableRef)
 			}
+			return pgconn.NewCommandTag("CREATE TABLE"), nil
+		}
+		f.nextOID++
+		f.tables[tableRef] = &fakeRedshiftTable{
+			oid:        f.nextOID,
+			colMaxLens: make(map[string]int),
 		}
 		return pgconn.NewCommandTag("CREATE TABLE"), nil
 
@@ -378,8 +383,26 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 		newName := unquoteRedshiftIdent(strings.TrimSpace(trimmed[idx+len("RENAME TO "):]))
 		srcParts := strings.SplitN(srcRef, ".", 2)
 		if tbl, ok := f.tables[srcRef]; ok && len(srcParts) == 2 {
+			dstKey := srcParts[0] + "." + newName
+			if _, dstExists := f.tables[dstKey]; dstExists {
+				return pgconn.CommandTag{}, fmt.Errorf("relation %q already exists", dstKey)
+			}
 			delete(f.tables, srcRef)
-			f.tables[srcParts[0]+"."+newName] = tbl
+			f.tables[dstKey] = tbl
+		}
+		return pgconn.NewCommandTag("ALTER TABLE"), nil
+
+	case strings.Contains(trimmed, " ALTER COLUMN ") && strings.Contains(trimmed, " TYPE "):
+		if inTx {
+			return pgconn.CommandTag{}, fmt.Errorf("ALTER TABLE ALTER COLUMN cannot run inside a transaction block")
+		}
+		tableRef := extractTableRefAfter(trimmed, "ALTER TABLE ")
+		tbl, ok := f.tables[tableRef]
+		if !ok {
+			return pgconn.CommandTag{}, fmt.Errorf("relation %q does not exist", tableRef)
+		}
+		if strings.Contains(trimmed, `ALTER COLUMN "_cdc_lsn" TYPE`) {
+			tbl.colMaxLens["_cdc_lsn"] = 65535
 		}
 		return pgconn.NewCommandTag("ALTER TABLE"), nil
 
@@ -387,13 +410,6 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 		tableRef := extractTableRefAfter(trimmed, "ALTER TABLE ")
 		if tbl, ok := f.tables[tableRef]; ok {
 			tbl.columns = append(tbl.columns, schema.Column{Name: "_cdc_lsn", DataType: schema.TypeString, MaxLength: 65535, Nullable: true})
-		}
-		return pgconn.NewCommandTag("ALTER TABLE"), nil
-
-	case strings.Contains(trimmed, `ALTER COLUMN "_cdc_lsn" TYPE`):
-		tableRef := extractTableRefAfter(trimmed, "ALTER TABLE ")
-		if tbl, ok := f.tables[tableRef]; ok {
-			tbl.colMaxLens["_cdc_lsn"] = 65535
 		}
 		return pgconn.NewCommandTag("ALTER TABLE"), nil
 
@@ -411,6 +427,9 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 		}
 		tok := args[1].(string)
 		if l, ok := f.leases[connID]; ok && l.token == tok {
+			if strings.Contains(trimmed, `"expires_at" > CURRENT_TIMESTAMP`) && !l.expiresAt.After(f.now) {
+				return pgconn.NewCommandTag("DELETE 0"), nil
+			}
 			delete(f.leases, connID)
 			return pgconn.NewCommandTag("DELETE 1"), nil
 		}
@@ -424,6 +443,9 @@ func (f *fakeRedshiftDB) execInternal(_ context.Context, sql string, args []any,
 	case strings.HasPrefix(trimmed, `UPDATE "_bruin_staging"."cdc_run_leases"`):
 		connID, tok := args[0].(string), args[1].(string)
 		if l, ok := f.leases[connID]; ok && l.token == tok {
+			if strings.Contains(trimmed, `"expires_at" > CURRENT_TIMESTAMP`) && !l.expiresAt.After(f.now) {
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			}
 			l.expiresAt = f.now.Add(45 * time.Second)
 			f.leases[connID] = l
 			return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -574,6 +596,14 @@ func TestRedshiftCDCInterfacesAndStrategyReadiness(t *testing.T) {
 
 	require.NoError(t, dest.ValidateManagedCDCState())
 	require.NoError(t, strategy.ValidateCDCChunkedSnapshotDestination(dest))
+	require.True(t, dest.SupportsCDCMerge())
+	require.True(t, dest.SupportsCDCUnchangedCols())
+	require.True(t, dest.SupportsCDCHardDelete())
+	require.True(t, destination.SupportsCDCHardDelete(dest))
+	require.True(t, dest.SupportsCDCConditionalMerge())
+	require.True(t, dest.SupportsCDCConditionalSwap())
+	require.True(t, dest.RequiresSerializedCDCRuns())
+	require.True(t, dest.SupportsColumnTypeChanges())
 
 	policy := dest.ReplaceStagingPolicy()
 	require.Equal(t, destination.ReplaceStagingTargetSchema, policy.DefaultPlacement)
@@ -581,9 +611,21 @@ func TestRedshiftCDCInterfacesAndStrategyReadiness(t *testing.T) {
 	require.Equal(t, "_bruin_staging", policy.DefaultManagedSchema)
 	require.Equal(t, policy, dest.ManagedStagingPolicy())
 
-	mgr, err := strategy.NewCDCStateManager(dest, "conn-1", "_bruin_staging.cdc_state", "")
-	require.NoError(t, err)
-	require.NotNil(t, mgr)
+	cdcSources := []string{
+		"postgres+cdc",
+		"mysql+cdc",
+		"mariadb+cdc",
+		"mssql+cdc",
+		"mssql+ct",
+		"mongodb+cdc",
+		"vitess+cdc",
+		"ps_mysql+cdc",
+	}
+	for _, srcScheme := range cdcSources {
+		mgr, err := strategy.NewCDCStateManager(dest, srcScheme+"-conn", "_bruin_staging.cdc_state", "")
+		require.NoError(t, err, srcScheme)
+		require.NotNil(t, mgr, srcScheme)
+	}
 }
 
 func TestRedshiftPrepareTableAndSchemaIntrospection(t *testing.T) {
@@ -949,17 +991,34 @@ func TestRedshiftCDCMergeSoftAndHardDeletesAndAtomicMultiTable(t *testing.T) {
 
 	t.Run("hard_delete_with_incremental_predicate", func(t *testing.T) {
 		stmts := buildCDCMergeStatements(`"public"."stg"`, `"public"."dst"`, destination.MergeOptions{
-			PrimaryKeys:          []string{"id"},
-			Columns:              colsNoUnchanged,
+			PrimaryKeys:          []string{"tenant_id", "id"},
+			Columns:              []string{"tenant_id", "id", "event_date", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
 			CDCHardDelete:        true,
-			IncrementalPredicate: `target."id" > 0`,
+			IncrementalPredicate: `target."event_date" >= CURRENT_DATE - 7`,
 		})
 		require.Len(t, stmts, 3)
-		for _, stmt := range stmts {
-			require.Contains(t, stmt, `(target."id" > 0)`)
-		}
+		require.Contains(t, stmts[0], `(target."event_date" >= CURRENT_DATE - 7)`)
+		require.Contains(t, stmts[1], `(target."event_date" >= CURRENT_DATE - 7)`)
 		require.Contains(t, stmts[0], `FROM latest_all AS la , "public"."dst" AS target`)
 		require.Contains(t, stmts[1], `USING latest_all AS latest, "public"."dst" AS target`)
+		// Insert anti-join must check PKs only so updates moving a row outside the predicate window do not insert duplicates.
+		require.NotContains(t, stmts[2], `event_date >= CURRENT_DATE - 7`)
+		require.Contains(t, stmts[2], `NOT EXISTS (SELECT 1 FROM "public"."dst" AS target WHERE target."tenant_id" = la."tenant_id" AND target."id" = la."id")`)
+	})
+
+	t.Run("soft_delete_with_incremental_predicate_uses_pk_only_insert_antijoin", func(t *testing.T) {
+		stmts := buildCDCMergeStatements(`"public"."stg"`, `"public"."dst"`, destination.MergeOptions{
+			PrimaryKeys:          []string{"tenant_id", "id"},
+			Columns:              []string{"tenant_id", "id", "event_date", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+			CDCHardDelete:        false,
+			IncrementalPredicate: `target."event_date" >= CURRENT_DATE - 7`,
+		})
+		require.Len(t, stmts, 3)
+		require.Contains(t, stmts[0], `(target."event_date" >= CURRENT_DATE - 7)`)
+		require.Contains(t, stmts[1], `(target."event_date" >= CURRENT_DATE - 7)`)
+		// Existing rows and tombstones outside the predicate window must still block inserts.
+		require.NotContains(t, stmts[2], `event_date >= CURRENT_DATE - 7`)
+		require.Contains(t, stmts[2], `NOT EXISTS (SELECT 1 FROM "public"."dst" AS target WHERE target."tenant_id" = latest."tenant_id" AND target."id" = latest."id")`)
 	})
 
 	t.Run("merge_incarnation_fencing_and_atomic_multi_table", func(t *testing.T) {
@@ -1047,7 +1106,8 @@ func TestRedshiftConditionalSchemaEvolution(t *testing.T) {
 	require.Equal(t, inc, resultInc)
 	require.Equal(t, []string{"BEGIN", "COMMIT"}, db.txEvents)
 
-	// ALTER COLUMN TYPE runs outside explicit BEGIN/COMMIT because Redshift forbids it inside transactions.
+	// ALTER COLUMN TYPE stages the verified table under a private guard name in Tx 1,
+	// alters the staged table outside any transaction, and restores the target name in Tx 2.
 	db.txEvents = nil
 	db.execLog = nil
 	_, resultInc, err = dest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", &schemaevolution.SchemaComparison{
@@ -1063,12 +1123,250 @@ func TestRedshiftConditionalSchemaEvolution(t *testing.T) {
 	}, inc)
 	require.NoError(t, err)
 	require.Equal(t, inc, resultInc)
-	require.Empty(t, db.txEvents)
-	require.Contains(t, strings.Join(db.execLog, "\n"), `ALTER COLUMN "name" TYPE VARCHAR(200)`)
+	require.Equal(t, []string{"BEGIN", "COMMIT", "BEGIN", "COMMIT"}, db.txEvents)
+	joinedLog := strings.Join(db.execLog, "\n")
+	require.Contains(t, joinedLog, `ALTER TABLE "public"."events" RENAME TO "__ingestr_evolve_`)
+	require.Contains(t, joinedLog, `ALTER COLUMN "name" TYPE VARCHAR(200)`)
+	require.NotContains(t, joinedLog, `ALTER TABLE "public"."events" ALTER COLUMN "name" TYPE VARCHAR(200)`)
+	require.Contains(t, joinedLog, `RENAME TO "events"`)
 
 	// Stale incarnation fails closed.
 	_, _, err = dest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", &schemaevolution.SchemaComparison{}, "42:999999")
 	require.ErrorContains(t, err, "physical incarnation changed")
+}
+
+func TestRedshiftConditionalSchemaEvolutionProtectsAgainstReplacementTables(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("concurrent_replacement_during_alter_type_is_untouched_and_rejected", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		origOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+		}, []string{"id"})
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		var replacementOID int64
+		var alteredTargets []string
+		db.execHook = func(sql string, _ []any, inTx bool) (pgconn.CommandTag, bool, error) {
+			trimmed := strings.TrimSpace(sql)
+			if strings.Contains(trimmed, " ALTER COLUMN ") && strings.Contains(trimmed, " TYPE ") {
+				if inTx {
+					return pgconn.CommandTag{}, true, fmt.Errorf("ALTER COLUMN TYPE must not run inside a transaction")
+				}
+				targetRef := extractTableRefAfter(trimmed, "ALTER TABLE ")
+				alteredTargets = append(alteredTargets, targetRef)
+				// Simulate a competing client recreating public.events during the standalone DDL window.
+				db.nextOID++
+				replacementOID = db.nextOID
+				db.tables["public.events"] = &fakeRedshiftTable{
+					oid: replacementOID,
+					columns: []schema.Column{
+						{Name: "id", DataType: schema.TypeInt64},
+						{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+					},
+					pks:        []string{"id"},
+					colMaxLens: map[string]int{"name": 50},
+				}
+			}
+			return pgconn.NewCommandTag(""), false, nil
+		}
+
+		_, gotInc, err := dest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{
+				{
+					Type:       schemaevolution.ChangeWidenType,
+					ColumnName: "name",
+					OldColumn:  &schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+					NewColumn:  schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 200},
+				},
+			},
+		}, origInc)
+		require.ErrorContains(t, err, "was replaced during schema evolution")
+		require.Empty(t, gotInc)
+		require.Len(t, alteredTargets, 1)
+		require.NotEqual(t, "public.events", alteredTargets[0])
+		require.Equal(t, replacementOID, db.tables["public.events"].oid)
+		require.Equal(t, 50, db.tables["public.events"].colMaxLens["name"])
+	})
+
+	t.Run("alter_type_failure_restores_staged_table_name", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		origOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+		}, []string{"id"})
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		db.execHook = func(sql string, _ []any, _ bool) (pgconn.CommandTag, bool, error) {
+			if strings.Contains(sql, " ALTER COLUMN ") && strings.Contains(sql, " TYPE ") {
+				return pgconn.CommandTag{}, true, fmt.Errorf("simulated Redshift DDL failure")
+			}
+			return pgconn.NewCommandTag(""), false, nil
+		}
+
+		_, _, err := dest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{
+				{
+					Type:       schemaevolution.ChangeWidenType,
+					ColumnName: "name",
+					OldColumn:  &schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 50},
+					NewColumn:  schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 200},
+				},
+			},
+		}, origInc)
+		require.ErrorContains(t, err, "simulated Redshift DDL failure")
+
+		restoredInc, exists, incErr := dest.CDCTargetIncarnation(ctx, "public.events")
+		require.NoError(t, incErr)
+		require.True(t, exists)
+		require.Equal(t, origInc, restoredInc)
+	})
+
+	t.Run("non_type_evolution_rejects_identity_changed_during_ddl", func(t *testing.T) {
+		dest, db := newConnectedFakeRedshift()
+		origOID := db.addTable("public", "events", []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+		}, []string{"id"})
+		origInc := fmt.Sprintf("42:%d", origOID)
+
+		db.execHook = func(sql string, _ []any, _ bool) (pgconn.CommandTag, bool, error) {
+			if strings.Contains(sql, "ADD COLUMN") {
+				db.tables["public.events"].oid = origOID + 99
+			}
+			return pgconn.NewCommandTag(""), false, nil
+		}
+
+		_, gotInc, err := dest.ApplySchemaEvolutionIfIncarnation(ctx, "public.events", &schemaevolution.SchemaComparison{
+			HasChanges: true,
+			Changes: []schemaevolution.SchemaChange{
+				{
+					Type:       schemaevolution.ChangeAddColumn,
+					ColumnName: "status",
+					NewColumn:  schema.Column{Name: "status", DataType: schema.TypeString, Nullable: true},
+				},
+			},
+		}, origInc)
+		require.ErrorContains(t, err, "physical incarnation changed during schema evolution")
+		require.Empty(t, gotInc)
+	})
+}
+
+func TestRedshiftClaimAndPrepareEmptyCDCTargetRejectsCompetingCreate(t *testing.T) {
+	dest, db := newConnectedFakeRedshift()
+	ctx := t.Context()
+
+	claim := destination.CDCTargetClaim{
+		DestinationTable: "orders",
+		ConnectorID:      "mysql-src",
+		SourceTable:      "shop.orders",
+	}
+	targetSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "_cdc_lsn", DataType: schema.TypeString},
+			{Name: "_cdc_deleted", DataType: schema.TypeBoolean},
+			{Name: "_cdc_synced_at", DataType: schema.TypeTimestampTZ},
+		},
+	}
+
+	var competingOID int64
+	db.execHook = func(sql string, _ []any, _ bool) (pgconn.CommandTag, bool, error) {
+		trimmed := strings.TrimSpace(sql)
+		// Simulate a competing client creating public.orders right after the initial absence check,
+		// while ClaimAndPrepareEmptyCDCTarget records its claim row.
+		if strings.HasPrefix(trimmed, "INSERT INTO") && strings.Contains(trimmed, `"claimed_at"`) {
+			db.nextOID++
+			competingOID = db.nextOID
+			db.tables["public.orders"] = &fakeRedshiftTable{
+				oid:        competingOID,
+				colMaxLens: make(map[string]int),
+			}
+		}
+		return pgconn.NewCommandTag(""), false, nil
+	}
+
+	inc, err := dest.ClaimAndPrepareEmptyCDCTarget(ctx, "_bruin_staging.cdc_targets", claim, destination.PrepareOptions{
+		Table:       "public.orders",
+		Schema:      targetSchema,
+		PrimaryKeys: []string{"id"},
+		CDCMode:     true,
+	})
+	require.ErrorContains(t, err, `already exists`)
+	require.Empty(t, inc)
+	require.Contains(t, db.txEvents, "ROLLBACK")
+	for _, stmt := range db.execLog {
+		if strings.Contains(stmt, `CREATE TABLE`) && strings.Contains(stmt, `"public"."orders"`) {
+			require.NotContains(t, stmt, "IF NOT EXISTS")
+		}
+	}
+}
+
+func TestRedshiftManagedCDCRunLeaseDetectsPausedOverdueRunBeforeHeartbeat(t *testing.T) {
+	dest, db := newConnectedFakeRedshift()
+	ctx := t.Context()
+
+	var clockMu sync.Mutex
+	fakeNow := db.now
+	dest.nowFn = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return fakeNow
+	}
+	// Keep background ticker quiet during the test so only Done()/Err() detect the pause.
+	dest.leaseTTL = 45 * time.Second
+	dest.leaseRenewInterval = 10 * time.Second
+
+	lease, err := dest.AcquireManagedCDCRunLease(ctx, "mysql-paused-conn")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease.Release() })
+
+	guard := source.NewConnectorLeaseGuard(lease)
+	guardedCtx := source.WithConnectorLeaseGuard(ctx, guard)
+	require.NoError(t, source.ConnectorLeaseLoss(guardedCtx))
+
+	// Advance both local and server clocks past lease TTL to simulate a paused process
+	// where another run takes over the connector lease without changing target table identity.
+	clockMu.Lock()
+	fakeNow = fakeNow.Add(50 * time.Second)
+	clockMu.Unlock()
+	db.mu.Lock()
+	db.now = db.now.Add(50 * time.Second)
+	db.mu.Unlock()
+
+	dest2 := NewRedshiftDestination()
+	dest2.db = db
+	dest2.nowFn = dest.nowFn
+	lease2, err := dest2.AcquireManagedCDCRunLease(ctx, "mysql-paused-conn")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease2.Release() })
+
+	oid := db.addTable("public", "orders", nil, []string{"id"})
+	db.addTable("public", "orders_stg", nil, nil)
+	inc := fmt.Sprintf("42:%d", oid)
+
+	// Before the old run's heartbeat goroutine even fires, ConnectorLeaseLoss via Done()
+	// must reject the overdue lease and block writes/merges alongside the new owner.
+	require.ErrorIs(t, source.ConnectorLeaseLoss(guardedCtx), source.ErrConnectorLeaseLost)
+	require.ErrorIs(t, lease.Err(), source.ErrConnectorLeaseLost)
+
+	db.execLog = nil
+	err = dest.MergeTable(guardedCtx, destination.MergeOptions{
+		TargetTable:            "public.orders",
+		StagingTable:           "public.orders_stg",
+		PrimaryKeys:            []string{"id"},
+		Columns:                []string{"id", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"},
+		CDCExpectedIncarnation: inc,
+	})
+	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
+	require.Empty(t, db.execLog)
+
+	// Releasing the old lease fails because lease2 owns the connector, while lease2 remains valid.
+	require.ErrorContains(t, lease.Release(), "not owned during release")
+	require.NoError(t, lease2.Err())
+	require.NoError(t, lease2.Release())
 }
 
 func TestRedshiftWriteCDCStateEndToEndBatch(t *testing.T) {

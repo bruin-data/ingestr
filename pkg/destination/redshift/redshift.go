@@ -23,6 +23,14 @@ type RedshiftDestination struct {
 	dbOID              int64
 	leaseTTL           time.Duration
 	leaseRenewInterval time.Duration
+	nowFn              func() time.Time
+}
+
+func (d *RedshiftDestination) now() time.Time {
+	if d != nil && d.nowFn != nil {
+		return d.nowFn()
+	}
+	return time.Now()
 }
 
 func NewRedshiftDestination() *RedshiftDestination {
@@ -159,10 +167,13 @@ func (d *RedshiftDestination) Write(ctx context.Context, records <-chan source.R
 				if _, _, _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
 					return err
 				}
-				return writeChunks(func(sql string, args ...any) error {
+				if err := writeChunks(func(sql string, args ...any) error {
 					_, execErr := tx.Exec(ctx, sql, args...)
 					return execErr
-				})
+				}); err != nil {
+					return err
+				}
+				return source.ConnectorLeaseLoss(ctx)
 			})
 		} else {
 			err = writeChunks(func(sql string, args ...any) error {

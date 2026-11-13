@@ -2,8 +2,12 @@ package redshift
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -18,6 +22,14 @@ func (d *RedshiftDestination) MaxDecimalPrecision() int {
 // destination's DDL using the local dialect and applies each statement.
 func (d *RedshiftDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
 	return destination.ApplyEvolution(ctx, d, &Dialect{}, table, comparison)
+}
+
+func newRedshiftEvolutionGuardName() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("failed to generate Redshift schema evolution guard name: %w", err)
+	}
+	return "__ingestr_evolve_" + hex.EncodeToString(token[:]), nil
 }
 
 func (d *RedshiftDestination) ApplySchemaEvolutionIfIncarnation(
@@ -37,7 +49,7 @@ func (d *RedshiftDestination) ApplySchemaEvolutionIfIncarnation(
 		return nil, "", err
 	}
 
-	statements, warnings, err := destination.RenderEvolution(&Dialect{}, table, comparison)
+	_, warnings, err := destination.RenderEvolution(&Dialect{}, table, comparison)
 	if err != nil {
 		return nil, "", err
 	}
@@ -46,52 +58,177 @@ func (d *RedshiftDestination) ApplySchemaEvolutionIfIncarnation(
 	if err != nil {
 		return nil, "", err
 	}
+	targetRef := quoteTable(schemaName, tableName)
+	statements, _, err := destination.RenderEvolution(&Dialect{}, targetRef, comparison)
+	if err != nil {
+		return nil, "", err
+	}
 
 	hasAlterType := false
+	alterColPrefix := "ALTER TABLE " + targetRef + " ALTER COLUMN "
 	for _, stmt := range statements {
-		if strings.Contains(strings.ToUpper(stmt), " ALTER COLUMN ") && strings.Contains(strings.ToUpper(stmt), " TYPE ") {
+		if strings.HasPrefix(stmt, alterColPrefix) {
 			hasAlterType = true
 			break
 		}
 	}
 
 	if !hasAlterType {
+		var resultInc string
 		err = d.withTx(ctx, func(tx redshiftTx) error {
-			if _, _, _, lockErr := d.lockAndValidateCDCIncarnation(ctx, tx, table, expectedIncarnation); lockErr != nil {
+			lockedSchema, lockedTable, lockedTargetRef, lockErr := d.lockAndValidateCDCIncarnation(ctx, tx, table, expectedIncarnation)
+			if lockErr != nil {
 				return fmt.Errorf("redshift CDC target %q physical incarnation changed before schema evolution: %w", table, lockErr)
 			}
-			for _, stmt := range statements {
+			txStmts := statements
+			if lockedTargetRef != targetRef {
+				var renderErr error
+				txStmts, _, renderErr = destination.RenderEvolution(&Dialect{}, lockedTargetRef, comparison)
+				if renderErr != nil {
+					return renderErr
+				}
+			}
+			for _, stmt := range txStmts {
+				if leaseErr := source.ConnectorLeaseLoss(ctx); leaseErr != nil {
+					return leaseErr
+				}
 				if _, execErr := tx.Exec(ctx, stmt); execErr != nil {
 					return fmt.Errorf("schema evolution failed (%s): %w", stmt, execErr)
 				}
 			}
+			inc, exists, incErr := d.targetIncarnationInTx(ctx, tx, lockedSchema, lockedTable)
+			if incErr != nil {
+				return incErr
+			}
+			if !exists || inc != expectedIncarnation {
+				return fmt.Errorf("redshift CDC target %q physical incarnation changed during schema evolution", table)
+			}
+			if leaseErr := source.ConnectorLeaseLoss(ctx); leaseErr != nil {
+				return leaseErr
+			}
+			resultInc = inc
 			return nil
 		})
 		if err != nil {
 			return nil, "", err
 		}
-	} else {
-		// Redshift disallows ALTER COLUMN TYPE inside explicit transactions.
-		for _, stmt := range statements {
-			inc, exists, incErr := d.targetIncarnationInTx(ctx, db, schemaName, tableName)
+		return warnings, resultInc, nil
+	}
+
+	// Redshift disallows ALTER COLUMN TYPE inside explicit transactions.
+	// Stage the verified table under a private name inside a locked transaction
+	// so concurrent drop+recreate of the original target name can never be altered,
+	// then restore the original name only if its slot remained unoccupied and the
+	// physical incarnation is unchanged.
+	guardName, err := newRedshiftEvolutionGuardName()
+	if err != nil {
+		return nil, "", err
+	}
+
+	var lockedSchema, lockedTable, guardRef string
+	err = d.withTx(ctx, func(tx redshiftTx) error {
+		var lockedTargetRef string
+		var lockErr error
+		lockedSchema, lockedTable, lockedTargetRef, lockErr = d.lockAndValidateCDCIncarnation(ctx, tx, table, expectedIncarnation)
+		if lockErr != nil {
+			return fmt.Errorf("redshift CDC target %q physical incarnation changed before schema evolution: %w", table, lockErr)
+		}
+		exists, existsErr := tableExists(ctx, tx, lockedSchema, guardName)
+		if existsErr != nil {
+			return existsErr
+		}
+		if exists {
+			return fmt.Errorf("temporary Redshift schema evolution table %s.%s already exists", lockedSchema, guardName)
+		}
+		if leaseErr := source.ConnectorLeaseLoss(ctx); leaseErr != nil {
+			return leaseErr
+		}
+		renameSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", lockedTargetRef, destination.QuoteIdentifier(guardName))
+		if _, execErr := tx.Exec(ctx, renameSQL); execErr != nil {
+			return fmt.Errorf("failed to stage Redshift CDC target %q for schema evolution: %w", table, execErr)
+		}
+		guardRef = quoteTable(lockedSchema, guardName)
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	guardStmts, _, applyErr := destination.RenderEvolution(&Dialect{}, guardRef, comparison)
+	if applyErr == nil {
+		for _, stmt := range guardStmts {
+			if leaseErr := source.ConnectorLeaseLoss(ctx); leaseErr != nil {
+				applyErr = leaseErr
+				break
+			}
+			inc, exists, incErr := d.targetIncarnationInTx(ctx, db, lockedSchema, guardName)
 			if incErr != nil {
-				return nil, "", incErr
+				applyErr = incErr
+				break
 			}
 			if !exists || inc != expectedIncarnation {
-				return nil, "", fmt.Errorf("redshift CDC target %q physical incarnation changed before schema evolution", table)
+				applyErr = fmt.Errorf("redshift CDC target %q physical incarnation changed during schema evolution", table)
+				break
 			}
 			if _, execErr := db.Exec(ctx, stmt); execErr != nil {
-				return nil, "", fmt.Errorf("schema evolution failed (%s): %w", stmt, execErr)
+				applyErr = fmt.Errorf("schema evolution failed (%s): %w", stmt, execErr)
+				break
 			}
 		}
 	}
 
-	resultInc, exists, err := d.targetIncarnationInTx(ctx, db, schemaName, tableName)
-	if err != nil {
-		return nil, "", err
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	var resultInc string
+	restoreErr := d.withTx(restoreCtx, func(tx redshiftTx) error {
+		inc, exists, incErr := d.targetIncarnationInTx(restoreCtx, tx, lockedSchema, guardName)
+		if incErr != nil {
+			return incErr
+		}
+		if !exists || inc != expectedIncarnation {
+			return fmt.Errorf("redshift CDC target %q physical incarnation changed during schema evolution", table)
+		}
+		if _, lockErr := tx.Exec(restoreCtx, "LOCK "+guardRef); lockErr != nil {
+			return fmt.Errorf("failed to lock staged Redshift CDC target %s: %w", guardRef, lockErr)
+		}
+		inc, exists, incErr = d.targetIncarnationInTx(restoreCtx, tx, lockedSchema, guardName)
+		if incErr != nil {
+			return incErr
+		}
+		if !exists || inc != expectedIncarnation {
+			return fmt.Errorf("redshift CDC target %q physical incarnation changed during schema evolution", table)
+		}
+
+		_, targetExists, targetErr := d.targetIncarnationInTx(restoreCtx, tx, lockedSchema, lockedTable)
+		if targetErr != nil {
+			return targetErr
+		}
+		if targetExists {
+			return fmt.Errorf("redshift CDC target %q was replaced during schema evolution (original preserved as %s)", table, guardRef)
+		}
+
+		renameBackSQL := fmt.Sprintf("ALTER TABLE %s RENAME TO %s", guardRef, destination.QuoteIdentifier(lockedTable))
+		if _, execErr := tx.Exec(restoreCtx, renameBackSQL); execErr != nil {
+			return fmt.Errorf("failed to restore Redshift CDC target %q after schema evolution: %w", table, execErr)
+		}
+
+		finalInc, finalExists, finalErr := d.targetIncarnationInTx(restoreCtx, tx, lockedSchema, lockedTable)
+		if finalErr != nil {
+			return finalErr
+		}
+		if !finalExists || finalInc != expectedIncarnation {
+			return fmt.Errorf("redshift CDC target %q physical incarnation changed during schema evolution", table)
+		}
+		resultInc = finalInc
+		return nil
+	})
+
+	if applyErr != nil || restoreErr != nil {
+		return nil, "", errors.Join(applyErr, restoreErr)
 	}
-	if !exists || resultInc == "" {
-		return nil, "", fmt.Errorf("redshift CDC target %q missing after schema evolution", table)
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return nil, "", err
 	}
 	return warnings, resultInc, nil
 }
