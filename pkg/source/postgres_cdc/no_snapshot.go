@@ -40,6 +40,10 @@ func (s *PostgresCDCSource) validateNoSnapshotSlot(ctx context.Context, start pg
 	if s.standby {
 		currentLSNExpr = "pg_last_wal_replay_lsn()"
 	}
+	// A walsender releases its slot only while exiting, after its client has
+	// already closed the connection, so a run started right after the previous
+	// one can still see the slot active. A slot that stays active fails below.
+	waitReplicationSlotReleased(ctx, s.queryPool, s.cdcConfig.SlotName)
 	err := s.queryPool.QueryRow(ctx, `
 		SELECT slot_type = 'logical' AND plugin = 'pgoutput' AND database = current_database()
 		       AND NOT active AND NOT temporary AND COALESCE(to_jsonb(s)->>'wal_status', '') != 'lost',

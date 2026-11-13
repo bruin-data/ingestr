@@ -2562,6 +2562,15 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 						t.Fatal("stream did not stop")
 					}
 				}
+				// A finished run's walsender releases the slot only while exiting, after
+				// the run has returned.
+				waitSlotReleased := func() {
+					t.Helper()
+					require.Eventually(t, func() bool {
+						var active bool
+						return pool.QueryRow(ctx, `SELECT active FROM pg_replication_slots WHERE slot_name='external_slot'`).Scan(&active) == nil && !active
+					}, 15*time.Second, 100*time.Millisecond)
+				}
 				stateDest := postgresdest.NewPostgresDestination()
 				require.NoError(t, stateDest.Connect(ctx, connString))
 				stateManager, err := strategy.NewCDCStateManager(stateDest, "bootstrap-failure-injection", "", "")
@@ -2690,12 +2699,9 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 				if streaming {
 					liveSchemaChange := cfg
 					liveSchemaChange.Stream = true
-					// The previous run's walsender can still hold the slot, which would satisfy
-					// the active check below before this stream has validated its baseline.
-					require.Eventually(t, func() bool {
-						var active bool
-						return pool.QueryRow(ctx, `SELECT active FROM pg_replication_slots WHERE slot_name='external_slot'`).Scan(&active) == nil && !active
-					}, 15*time.Second, 100*time.Millisecond)
+					// Otherwise the old walsender would satisfy the active check below
+					// before this stream has validated its baseline.
+					waitSlotReleased()
 					streamCtx, stop := context.WithCancel(ctx)
 					defer stop()
 					done := make(chan error, 1)
@@ -2717,6 +2723,7 @@ func TestPostgresCDC_ExternalBaseline(t *testing.T) {
 					return
 				}
 
+				waitSlotReleased()
 				_, err = pool.Exec(ctx, `SELECT pg_drop_replication_slot('external_slot')`)
 				require.NoError(t, err)
 				missingSlot := cfg
