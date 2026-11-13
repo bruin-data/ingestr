@@ -2376,3 +2376,51 @@ func TestCaseInsensitiveUnityCatalogTargetIdentityAndClaims(t *testing.T) {
 	overdueLease.lastHeartbeat.Store(time.Now().Add(-cdcLeaseTTL).UnixNano())
 	require.ErrorIs(t, overdueLease.Err(), source.ErrConnectorLeaseLost)
 }
+
+func TestClaimCDCTargetMarkerIsSharedAcrossURICatalogs(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	markers := map[string]string{}
+	ownerRe := regexp.MustCompile(`^CREATE VIEW IF NOT EXISTS (\S+) AS SELECT '([^']*)' AS owner_id$`)
+	handler := func(stmt string, _ dbsql.ExecuteStatementRequest) (dbsql.StatementResponse, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if m := ownerRe.FindStringSubmatch(stmt); m != nil {
+			if _, ok := markers[m[1]]; !ok {
+				markers[m[1]] = m[2]
+			}
+			return dbsql.StatementResponse{}, nil
+		}
+		if ref, ok := strings.CutPrefix(stmt, "SELECT owner_id FROM "); ok {
+			owner, exists := markers[ref]
+			if !exists {
+				return dbsql.StatementResponse{}, errors.New("TABLE_OR_VIEW_NOT_FOUND")
+			}
+			return makeQueryResponse([]string{"owner_id"}, [][]string{{owner}}), nil
+		}
+		return dbsql.StatementResponse{}, nil
+	}
+
+	destA, stmtsA := newTestDatabricksDestination(t, handler)
+	destA.catalog = "cat_a"
+	destB, _ := newTestDatabricksDestination(t, handler)
+	destB.catalog = "cat_b"
+
+	require.NoError(t, destA.ClaimCDCTarget(ctx, "ingestr_staging.cdc_targets", destination.CDCTargetClaim{
+		DestinationTable: "shared.analytics.orders",
+		ConnectorID:      "connector-a",
+		SourceTable:      "db.orders",
+	}))
+	err := destB.ClaimCDCTarget(ctx, "ingestr_staging.cdc_targets", destination.CDCTargetClaim{
+		DestinationTable: "SHARED.Analytics.Orders",
+		ConnectorID:      "connector-b",
+		SourceTable:      "db.orders",
+	})
+	require.ErrorContains(t, err, "already claimed by CDC connector")
+
+	require.Len(t, markers, 1)
+	for ref := range markers {
+		assert.True(t, strings.HasPrefix(ref, "`shared`.`ingestr_staging`.`cdc_claim_"), ref)
+	}
+	assert.Contains(t, *stmtsA, "CREATE SCHEMA IF NOT EXISTS `shared`.`ingestr_staging`")
+}

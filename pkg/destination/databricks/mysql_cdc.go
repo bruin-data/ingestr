@@ -204,7 +204,7 @@ func (d *DatabricksDestination) ClaimAndPrepareEmptyCDCTarget(ctx context.Contex
 		return "", fmt.Errorf("destination table %q already exists", opts.Table)
 	}
 
-	marker := d.claimMarker(claimTable, target)
+	_, marker := d.claimMarker(opts.Table)
 	res, markerErr := d.queryStatement(ctx, "SELECT owner_id FROM "+marker)
 	claimExisted := markerErr == nil && len(res.rows) > 0 && len(res.rows[0]) > 0 && res.rows[0][0] == owner
 
