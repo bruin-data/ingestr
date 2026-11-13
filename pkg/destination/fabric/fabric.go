@@ -337,9 +337,9 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 		var rows int64
 		var err error
 		if d.writeMode == writeModeCopy {
-			rows, err = d.writeRecordBatchCopy(ctx, result.Batch, opts.Table, opts.Schema)
+			rows, err = d.writeRecordBatchCopy(ctx, result.Batch, opts.Table, opts.Schema, opts.CDCExpectedIncarnation)
 		} else {
-			rows, err = d.writeRecordBatchInsert(ctx, result.Batch, opts.Table)
+			rows, err = d.writeRecordBatchInsert(ctx, result.Batch, opts.Table, opts.CDCExpectedIncarnation)
 		}
 		result.Batch.Release()
 		if err != nil {
@@ -363,11 +363,14 @@ func (d *FabricDestination) WriteParallel(ctx context.Context, records <-chan so
 	return nil
 }
 
-func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record arrow.RecordBatch, table, expectedIncarnation string) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
 	if numRows == 0 || numCols == 0 {
+		if expectedIncarnation != "" {
+			return 0, d.checkCDCIncarnation(ctx, table, expectedIncarnation)
+		}
 		return 0, nil
 	}
 
@@ -389,8 +392,24 @@ func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record a
 	if err != nil {
 		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
 
 	for batchStart := int64(0); batchStart < numRows; batchStart += int64(maxRowsPerBatch) {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return batchStart, err
+		}
+
 		batchEnd := batchStart + int64(maxRowsPerBatch)
 		if batchEnd > numRows {
 			batchEnd = numRows
@@ -415,14 +434,23 @@ func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record a
 
 		if _, err := tx.ExecContext(ctx, insertSQL, allValues...); err != nil {
 			config.LogFailedQuery(insertSQL, err)
-			_ = tx.Rollback()
 			return batchStart, fmt.Errorf("failed to insert rows %d-%d: %w", batchStart, batchEnd-1, err)
 		}
+	}
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
+	committed = true
 
 	return numRows, nil
 }
@@ -430,11 +458,14 @@ func (d *FabricDestination) writeRecordBatchInsert(ctx context.Context, record a
 // writeRecordBatchCopy streams the batch through Fabric's TDS bulk-copy path
 // (mssqldb.CopyIn) instead of parameterised INSERT ... VALUES. It keeps the same
 // one-transaction-per-Arrow-batch boundary as the insert path.
-func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema) (int64, error) {
+func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arrow.RecordBatch, table string, tableSchema *schema.TableSchema, expectedIncarnation string) (int64, error) {
 	numRows := record.NumRows()
 	numCols := int(record.NumCols())
 
 	if numRows == 0 || numCols == 0 {
+		if expectedIncarnation != "" {
+			return 0, d.checkCDCIncarnation(ctx, table, expectedIncarnation)
+		}
 		return 0, nil
 	}
 
@@ -454,6 +485,12 @@ func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arr
 			_ = tx.Rollback()
 		}
 	}()
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
 
 	stmt, err := tx.PrepareContext(ctx, mssqldb.CopyIn(quoteTable(table), mssqldb.BulkOptions{
 		RowsPerBatch: int(numRows),
@@ -479,6 +516,10 @@ func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arr
 		}
 	}
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return 0, err
+	}
+
 	result, err := stmt.ExecContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to flush bulk copy: %w", err)
@@ -487,6 +528,19 @@ func (d *FabricDestination) writeRecordBatchCopy(ctx context.Context, record arr
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		rowsAffected = numRows
+	}
+
+	if err := stmt.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close bulk copy statement: %w", err)
+	}
+
+	if expectedIncarnation != "" {
+		if err := d.checkCDCIncarnationTx(ctx, tx, table, expectedIncarnation); err != nil {
+			return 0, err
+		}
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {

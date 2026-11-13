@@ -860,7 +860,11 @@ func TestWriteParallelHandlesNilBatchAndIncarnationFencing(t *testing.T) {
 	batch := b.NewRecordBatch()
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
 	mock.ExpectExec(`INSERT INTO \[dbo\]\.\[events\]`).WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+		WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
 	mock.ExpectCommit()
 	mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
 		WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
@@ -877,6 +881,456 @@ func TestWriteParallelHandlesNilBatchAndIncarnationFencing(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func newSingleInt64Batch(val int64) arrow.RecordBatch {
+	mem := memory.NewGoAllocator()
+	recSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	b := array.NewRecordBuilder(mem, recSchema)
+	defer b.Release()
+	b.Field(0).(*array.Int64Builder).Append(val)
+	return b.NewRecordBatch()
+}
+
+func newEmptyInt64Batch() arrow.RecordBatch {
+	mem := memory.NewGoAllocator()
+	recSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	b := array.NewRecordBuilder(mem, recSchema)
+	defer b.Release()
+	return b.NewRecordBatch()
+}
+
+func TestWriteParallelIncarnationFencingAcrossBatchesAndModes(t *testing.T) {
+	expectedInc := destination.CDCTargetKey("", "77", "2026-01-01T00:00:00")
+
+	t.Run("insert mode aborts second batch before INSERT when target replaced mid-stream", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		mock.ExpectExec(`INSERT INTO \[dbo\]\.\[events\]`).WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		mock.ExpectCommit()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(88), "2026-01-01T00:05:00"))
+		mock.ExpectRollback()
+
+		records := make(chan source.RecordBatchResult, 2)
+		records <- source.RecordBatchResult{Batch: newSingleInt64Batch(1)}
+		records <- source.RecordBatchResult{Batch: newSingleInt64Batch(2)}
+		close(records)
+
+		dest := &FabricDestination{db: db, writeMode: writeModeInsert}
+		err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+			Table:                  "dbo.events",
+			CDCExpectedIncarnation: expectedInc,
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("insert mode rolls back uncommitted batch when incarnation changes before commit", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		mock.ExpectExec(`INSERT INTO \[dbo\]\.\[events\]`).WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(88), "2026-01-01T00:05:00"))
+		mock.ExpectRollback()
+
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: newSingleInt64Batch(1)}
+		close(records)
+
+		dest := &FabricDestination{db: db, writeMode: writeModeInsert}
+		err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+			Table:                  "dbo.events",
+			CDCExpectedIncarnation: expectedInc,
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("copy mode checks incarnation inside each batch transaction and commits on match", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		copySQL := mssqldb.CopyIn("[dbo].[events]", mssqldb.BulkOptions{RowsPerBatch: 1, Tablock: true}, "id")
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		prep := mock.ExpectPrepare(regexp.QuoteMeta(copySQL))
+		prep.ExpectExec().WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 0))
+		prep.ExpectExec().WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		mock.ExpectCommit()
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: newSingleInt64Batch(1)}
+		close(records)
+
+		dest := &FabricDestination{db: db, writeMode: writeModeCopy}
+		err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+			Table:                  "dbo.events",
+			CDCExpectedIncarnation: expectedInc,
+		})
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("copy mode aborts second batch before CopyIn when target replaced mid-stream", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		copySQL := mssqldb.CopyIn("[dbo].[events]", mssqldb.BulkOptions{RowsPerBatch: 1, Tablock: true}, "id")
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		prep := mock.ExpectPrepare(regexp.QuoteMeta(copySQL))
+		prep.ExpectExec().WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 0))
+		prep.ExpectExec().WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		mock.ExpectCommit()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(99), "2026-01-01T00:06:00"))
+		mock.ExpectRollback()
+
+		records := make(chan source.RecordBatchResult, 2)
+		records <- source.RecordBatchResult{Batch: newSingleInt64Batch(1)}
+		records <- source.RecordBatchResult{Batch: newSingleInt64Batch(2)}
+		close(records)
+
+		dest := &FabricDestination{db: db, writeMode: writeModeCopy}
+		err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+			Table:                  "dbo.events",
+			CDCExpectedIncarnation: expectedInc,
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("copy mode rolls back uncommitted bulk copy when incarnation changes before commit", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		copySQL := mssqldb.CopyIn("[dbo].[events]", mssqldb.BulkOptions{RowsPerBatch: 1, Tablock: true}, "id")
+
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+		prep := mock.ExpectPrepare(regexp.QuoteMeta(copySQL))
+		prep.ExpectExec().WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 0))
+		prep.ExpectExec().WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(99), "2026-01-01T00:06:00"))
+		mock.ExpectRollback()
+
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: newSingleInt64Batch(1)}
+		close(records)
+
+		dest := &FabricDestination{db: db, writeMode: writeModeCopy}
+		err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+			Table:                  "dbo.events",
+			CDCExpectedIncarnation: expectedInc,
+		})
+		require.ErrorContains(t, err, "physical incarnation changed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("zero-row batch still checks expected incarnation", func(t *testing.T) {
+		for _, mode := range []string{writeModeInsert, writeModeCopy} {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+
+			mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+				WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(77), "2026-01-01T00:00:00"))
+			mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "events").
+				WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(99), "2026-01-01T00:06:00"))
+
+			records := make(chan source.RecordBatchResult, 1)
+			records <- source.RecordBatchResult{Batch: newEmptyInt64Batch()}
+			close(records)
+
+			dest := &FabricDestination{db: db, writeMode: mode}
+			err = dest.WriteParallel(t.Context(), records, destination.WriteOptions{
+				Table:                  "dbo.events",
+				CDCExpectedIncarnation: expectedInc,
+			})
+			require.ErrorContains(t, err, "physical incarnation changed")
+			require.NoError(t, mock.ExpectationsWereMet())
+			_ = db.Close()
+		}
+	})
+}
+
+func TestSwapTablePreservesDottedSchemaAndTableQuoting(t *testing.T) {
+	t.Run("conditional cross-schema swap with dotted target schema and table", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectExec(`IF NOT EXISTS \(SELECT \* FROM sys\.schemas WHERE name = 'Sales\.Detail'\) EXEC\('CREATE SCHEMA \[Sales\.Detail\]'\)`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^CREATE TABLE \[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\] AS CLONE OF \[_bruin_staging\]\.\[order\.events_staging_1\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales.Detail", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(31), "2026-01-01T00:02:00"))
+
+		dest := &FabricDestination{db: db, database: "wh"}
+		gotStaging, gotResult, err := dest.CDCConditionalSwapIncarnations(
+			t.Context(),
+			"[Sales.Detail].[order.events]",
+			"[_bruin_staging].[order.events_staging_1]",
+		)
+		require.NoError(t, err)
+		assert.Equal(t, destination.CDCTargetKey("wh", "31", "2026-01-01T00:02:00"), gotStaging)
+		assert.Equal(t, gotStaging, gotResult)
+
+		targetInc := destination.CDCTargetKey("wh", "11", "2026-01-01T00:00:00")
+		mock.ExpectExec(`IF NOT EXISTS \(SELECT \* FROM sys\.schemas WHERE name = 'Sales\.Detail'\) EXEC\('CREATE SCHEMA \[Sales\.Detail\]'\)`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales.Detail", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(11), "2026-01-01T00:00:00"))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales.Detail", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(31), "2026-01-01T00:02:00"))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales.Detail", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(11), "2026-01-01T00:00:00"))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\.Detail\]\.\[order\.events\]', 'order\.events_old_[0-9]+', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\]', 'order\.events', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^DROP TABLE \[Sales\.Detail\]\.\[order\.events_old_[0-9]+\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales.Detail", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(31), "2026-01-01T00:02:00"))
+		mock.ExpectCommit()
+		mock.ExpectExec(`^IF OBJECT_ID\('\[_bruin_staging\]\.\[order\.events_staging_1\]', 'U'\) IS NOT NULL DROP TABLE \[_bruin_staging\]\.\[order\.events_staging_1\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		err = dest.SwapTable(t.Context(), destination.SwapOptions{
+			StagingTable:                  "[_bruin_staging].[order.events_staging_1]",
+			TargetTable:                   "[Sales.Detail].[order.events]",
+			CDCExpectedIncarnation:        targetInc,
+			CDCExpectedStagingIncarnation: gotStaging,
+			CDCExpectedResultIncarnation:  gotResult,
+		})
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("unconditional swap rollback drops dotted clone table with intact brackets", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectExec(`CREATE SCHEMA \[Sales\.Detail\]`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^CREATE TABLE \[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\] AS CLONE OF \[_bruin_staging\]\.\[orders_stg\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales.Detail", "order.events").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\]', 'order\.events', 'OBJECT'$`).
+			WillReturnError(errors.New("rename failed"))
+		mock.ExpectRollback()
+		mock.ExpectExec(`^IF OBJECT_ID\('\[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\]', 'U'\) IS NOT NULL DROP TABLE \[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		dest := &FabricDestination{db: db, database: "wh"}
+		err = dest.SwapTable(t.Context(), destination.SwapOptions{
+			StagingTable: "_bruin_staging.orders_stg",
+			TargetTable:  "[Sales.Detail].[order.events]",
+		})
+		require.ErrorContains(t, err, "rename failed")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("cross-database dotted catalog schema and table quoting", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectExec(`CREATE SCHEMA \[Sales\.Detail\]`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^CREATE TABLE \[wh\.two\]\.\[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\] AS CLONE OF \[_bruin_staging\]\.\[orders_stg\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		dest := &FabricDestination{db: db, database: "wh1"}
+		targetID, err := dest.resolveTargetIdentity("[wh.two].[Sales.Detail].[order.events]")
+		require.NoError(t, err)
+
+		cloned, err := dest.cloneStagingIntoTargetSchema(t.Context(), targetID, "[_bruin_staging].[orders_stg]")
+		require.NoError(t, err)
+		assert.Regexp(t, `^\[wh\.two\]\.\[Sales\.Detail\]\.\[order\.events_swap_[0-9]+\]$`, cloned)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestSwapTableRespectsWarehouseCollationForSchemaCase(t *testing.T) {
+	t.Run("conditional swap on case-sensitive BIN2 warehouse clones across Sales and sales schemas", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`SELECT \[name\], \[collation_name\] FROM \[sys\]\.\[databases\] WHERE \[name\] = @p1`).
+			WithArgs("wh").
+			WillReturnRows(sqlmock.NewRows([]string{"name", "collation_name"}).AddRow("wh", "Latin1_General_100_BIN2_UTF8"))
+		mock.ExpectExec(`IF NOT EXISTS \(SELECT \* FROM sys\.schemas WHERE name = 'Sales'\) EXEC\('CREATE SCHEMA \[Sales\]'\)`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^CREATE TABLE \[Sales\]\.\[orders_swap_[0-9]+\] AS CLONE OF \[sales\]\.\[orders_tmp\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(42), "2026-01-01T00:02:00"))
+
+		dest := &FabricDestination{db: db, database: "wh"}
+		gotStaging, gotResult, err := dest.CDCConditionalSwapIncarnations(t.Context(), "Sales.orders", "sales.orders_tmp")
+		require.NoError(t, err)
+		assert.Equal(t, destination.CDCTargetKey("wh", "42", "2026-01-01T00:02:00"), gotStaging)
+		assert.Equal(t, gotStaging, gotResult)
+
+		targetInc := destination.CDCTargetKey("wh", "12", "2026-01-01T00:00:00")
+		mock.ExpectExec(`IF NOT EXISTS \(SELECT \* FROM sys\.schemas WHERE name = 'Sales'\) EXEC\('CREATE SCHEMA \[Sales\]'\)`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales", "orders").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(12), "2026-01-01T00:00:00"))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales", sqlmock.AnyArg()).
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(42), "2026-01-01T00:02:00"))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales", "orders").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(12), "2026-01-01T00:00:00"))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\]\.\[orders\]', 'orders_old_[0-9]+', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\]\.\[orders_swap_[0-9]+\]', 'orders', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^DROP TABLE \[Sales\]\.\[orders_old_[0-9]+\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales", "orders").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(42), "2026-01-01T00:02:00"))
+		mock.ExpectCommit()
+		mock.ExpectExec(`^IF OBJECT_ID\('sales\.orders_tmp', 'U'\) IS NOT NULL DROP TABLE \[sales\]\.\[orders_tmp\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		err = dest.SwapTable(t.Context(), destination.SwapOptions{
+			StagingTable:                  "sales.orders_tmp",
+			TargetTable:                   "Sales.orders",
+			CDCExpectedIncarnation:        targetInc,
+			CDCExpectedStagingIncarnation: gotStaging,
+			CDCExpectedResultIncarnation:  gotResult,
+		})
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("unconditional swap on case-sensitive CS warehouse with default DB_NAME clones into Sales", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`SELECT \[name\], \[collation_name\] FROM \[sys\]\.\[databases\] WHERE \[name\] = DB_NAME\(\)`).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "collation_name"}).AddRow("wh", "Latin1_General_100_CS_AS_KS_WS_SC_UTF8"))
+		mock.ExpectExec(`IF NOT EXISTS \(SELECT \* FROM sys\.schemas WHERE name = 'Sales'\) EXEC\('CREATE SCHEMA \[Sales\]'\)`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^CREATE TABLE \[Sales\]\.\[orders_swap_[0-9]+\] AS CLONE OF \[sales\]\.\[orders_tmp\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales", "orders").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(12), "2026-01-01T00:00:00"))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\]\.\[orders\]', 'orders_old_[0-9]+', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\]\.\[orders_swap_[0-9]+\]', 'orders', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^DROP TABLE \[Sales\]\.\[orders_old_[0-9]+\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
+		mock.ExpectExec(`^IF OBJECT_ID\('sales\.orders_tmp', 'U'\) IS NOT NULL DROP TABLE \[sales\]\.\[orders_tmp\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		dest := &FabricDestination{db: db}
+		err = dest.SwapTable(t.Context(), destination.SwapOptions{
+			StagingTable: "sales.orders_tmp",
+			TargetTable:  "Sales.orders",
+		})
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("case-insensitive CI warehouse treats Sales and sales as same schema without cloning", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+
+		mock.ExpectQuery(`SELECT \[name\], \[collation_name\] FROM \[sys\]\.\[databases\] WHERE \[name\] = @p1`).
+			WithArgs("wh").
+			WillReturnRows(sqlmock.NewRows([]string{"name", "collation_name"}).AddRow("wh", "Latin1_General_100_CI_AS_KS_WS_SC_UTF8"))
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("sales", "orders_tmp").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(50), "2026-01-01T00:03:00"))
+
+		dest := &FabricDestination{db: db, database: "wh"}
+		gotStaging, gotResult, err := dest.CDCConditionalSwapIncarnations(t.Context(), "Sales.orders", "sales.orders_tmp")
+		require.NoError(t, err)
+		assert.Equal(t, destination.CDCTargetKey("wh", "50", "2026-01-01T00:03:00"), gotStaging)
+		assert.Equal(t, gotStaging, gotResult)
+
+		mock.ExpectQuery(`SELECT \[name\], \[collation_name\] FROM \[sys\]\.\[databases\] WHERE \[name\] = @p1`).
+			WithArgs("wh").
+			WillReturnRows(sqlmock.NewRows([]string{"name", "collation_name"}).AddRow("wh", "Latin1_General_100_CI_AS_KS_WS_SC_UTF8"))
+		mock.ExpectExec(`IF NOT EXISTS \(SELECT \* FROM sys\.schemas WHERE name = 'Sales'\) EXEC\('CREATE SCHEMA \[Sales\]'\)`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectBegin()
+		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("Sales", "orders").
+			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(12), "2026-01-01T00:00:00"))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[Sales\]\.\[orders\]', 'orders_old_[0-9]+', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^EXEC sys\.sp_rename '\[sales\]\.\[orders_tmp\]', 'orders', 'OBJECT'$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`^DROP TABLE \[Sales\]\.\[orders_old_[0-9]+\]$`).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
+
+		err = dest.SwapTable(t.Context(), destination.SwapOptions{
+			StagingTable: "sales.orders_tmp",
+			TargetTable:  "Sales.orders",
+		})
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
 type stubLostLease struct {
