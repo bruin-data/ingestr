@@ -367,13 +367,22 @@ func (l *trinoCDCRunLease) ownerOf(ctx context.Context, tableFQN string) (string
 	return owner.String, nil
 }
 
+// heartbeat checks ownership in the same statement as the write, so a worker
+// that paused past a takeover cannot add its token to the new owner's table.
 func (l *trinoCDCRunLease) heartbeat(ctx context.Context) error {
+	owner := quoteIdentifier("owner")
+	token := escapeString(l.token)
 	query := fmt.Sprintf(
-		"INSERT INTO %s (%s, %s) VALUES (%s, CURRENT_TIMESTAMP)",
+		"INSERT INTO %s (%s, %s) SELECT %s, CURRENT_TIMESTAMP WHERE (SELECT MIN(%s) = %s AND MAX(%s) = %s FROM %s)",
 		l.fqn(),
-		quoteIdentifier("owner"),
+		owner,
 		quoteIdentifier("heartbeat"),
-		escapeString(l.token),
+		token,
+		owner,
+		token,
+		owner,
+		token,
+		l.fqn(),
 	)
 	_, err := l.d.db.ExecContext(ctx, query)
 	return err

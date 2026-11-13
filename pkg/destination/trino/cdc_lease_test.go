@@ -254,7 +254,7 @@ func TestAcquireManagedCDCRunLease_Lifecycle(t *testing.T) {
 		heartbeated := make(chan struct{})
 		mock.ExpectQuery(regexp.QuoteMeta(`SELECT MAX("owner") FROM "iceberg"."_bruin_staging"."cdc_lease_abc"`)).
 			WillReturnRows(sqlmock.NewRows([]string{"owner"}).AddRow("tok-1"))
-		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "iceberg"."_bruin_staging"."cdc_lease_abc" ("owner", "heartbeat") VALUES ('tok-1', CURRENT_TIMESTAMP)`)).
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "iceberg"."_bruin_staging"."cdc_lease_abc" ("owner", "heartbeat") SELECT 'tok-1', CURRENT_TIMESTAMP WHERE (SELECT MIN("owner") = 'tok-1' AND MAX("owner") = 'tok-1' FROM "iceberg"."_bruin_staging"."cdc_lease_abc")`)).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(regexp.QuoteMeta(`SELECT MAX("owner") FROM "iceberg"."_bruin_staging"."cdc_lease_abc"`)).
 			WillReturnRows(sqlmock.NewRows([]string{"owner"}).AddRow("tok-1"))
