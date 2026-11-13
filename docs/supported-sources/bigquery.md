@@ -49,8 +49,8 @@ bigquery://my-project?credentials_path=/path/to/service-account.json&read_api=re
 ```
 
 With `read_api=rest`:
-- Whole-table reads use `tabledata.list`, which is free and runs no query.
-- Filtered reads (`--incremental-key` with `--interval-start`/`--interval-end`, `--extract-partition-by`, `--sql-limit`), views, materialized views, external tables, and custom queries (`query:...`) run as a query job, and ingestr pages through the results with `jobs.getQueryResults`. Query jobs are billed like any other BigQuery query.
+- Whole-table reads of regular tables use `tabledata.list`, which is free and runs no query. This also applies when only `--sql-limit` is set: ingestr stops after the requested number of rows. `tabledata.list` cannot select columns, so columns excluded with `--sql-exclude-columns` are still downloaded and then dropped.
+- Filtered reads (`--incremental-key` with `--interval-start`/`--interval-end`, `--extract-partition-by`), views, materialized views, external tables, and custom queries (`query:...`) run as a query job, and ingestr pages through the results with `jobs.getQueryResults`. Query jobs are billed like any other BigQuery query. Filtered reads add `--sql-limit` to the query as a `LIMIT`.
 - Rows are converted to the same Arrow types the Storage Read API produces, so destination tables come out the same.
 - Errors from the REST API are returned as is. ingestr never falls back to the Storage Read API.
 

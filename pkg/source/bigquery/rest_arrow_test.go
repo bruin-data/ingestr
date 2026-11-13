@@ -1,6 +1,7 @@
 package bigquery
 
 import (
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -134,6 +135,27 @@ func TestRESTArrowConvertsDecimalExtremes(t *testing.T) {
 	minScaled, _ := new(big.Int).SetString("-57896044618658097711785492504343953926634992332820282019728792003956564819968", 10)
 	assert.Equal(t, 0, maxScaled.Cmp(bn.Value(0).BigInt()), bn.Value(0).BigInt().String())
 	assert.Equal(t, 0, minScaled.Cmp(bn.Value(1).BigInt()), bn.Value(1).BigInt().String())
+}
+
+func TestRESTArrowIntervalNanosecondBoundary(t *testing.T) {
+	maxTime := &bigquery.IntervalValue{Hours: 2562047, Minutes: 47, Seconds: 16, SubSecondNanos: 854775807}
+	got, err := intervalToMonthDayNano(maxTime)
+	require.NoError(t, err)
+	assert.Equal(t, int64(math.MaxInt64), got.Nanoseconds)
+
+	minTime := &bigquery.IntervalValue{Hours: -2562047, Minutes: -47, Seconds: -16, SubSecondNanos: -854775808}
+	got, err = intervalToMonthDayNano(minTime)
+	require.NoError(t, err)
+	assert.Equal(t, int64(math.MinInt64), got.Nanoseconds)
+
+	for _, v := range []*bigquery.IntervalValue{
+		{Hours: 2562047, Minutes: 47, Seconds: 16, SubSecondNanos: 854775808},
+		{Hours: -2562047, Minutes: -47, Seconds: -16, SubSecondNanos: -854775809},
+	} {
+		_, err := intervalToMonthDayNano(v)
+		require.Error(t, err, v.String())
+		assert.Contains(t, err.Error(), "overflows")
+	}
 }
 
 func TestRESTArrowConvertsNegativeInterval(t *testing.T) {

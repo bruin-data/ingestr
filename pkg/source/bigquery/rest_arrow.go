@@ -3,7 +3,6 @@ package bigquery
 import (
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"time"
 
@@ -372,13 +371,15 @@ func bigIntToDecimal256(v *big.Int) (decimal256.Num, error) {
 
 func intervalToMonthDayNano(v *bigquery.IntervalValue) (arrow.MonthDayNanoInterval, error) {
 	seconds := (int64(v.Hours)*60+int64(v.Minutes))*60 + int64(v.Seconds)
-	if seconds > math.MaxInt64/int64(time.Second) || seconds < math.MinInt64/int64(time.Second) {
+	nanos := new(big.Int).Mul(big.NewInt(seconds), big.NewInt(int64(time.Second)))
+	nanos.Add(nanos, big.NewInt(int64(v.SubSecondNanos)))
+	if !nanos.IsInt64() {
 		return arrow.MonthDayNanoInterval{}, fmt.Errorf("INTERVAL %s overflows the Arrow month_day_nano time part", v.String())
 	}
 	return arrow.MonthDayNanoInterval{
 		Months:      v.Years*12 + v.Months,
 		Days:        v.Days,
-		Nanoseconds: seconds*int64(time.Second) + int64(v.SubSecondNanos),
+		Nanoseconds: nanos.Int64(),
 	}, nil
 }
 
