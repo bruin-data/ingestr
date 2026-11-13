@@ -83,7 +83,7 @@ While a stream using row-based cursors sits idle, ingestr periodically restamps 
 
 Use `--stream --full-refresh --refresh-id <unique-request-id>` to rebuild the table and continue polling in the same process. This requires a destination supporting managed CDC state. Persist the ID and reuse it on retries. In this mode, ingestr stores checkpoints in destination metadata, including for empty tables and idle polls. Once managed checkpoints exist for the connector, subsequent batch and streaming runs keep using them even without the refresh flags; they do not fall back to an older cursor in the destination rows. Keep that metadata alongside the destination data.
 
-Into BigQuery, Snowflake, Databricks, Redshift, ClickHouse, Trino, or Microsoft Fabric, run this connector serially: none of those destinations enforce primary-key uniqueness, so two overlapping runs can leave permanent duplicate rows. See [Overlapping runs on destinations without enforced primary keys](/getting-started/cdc.md#overlapping-runs-on-bigquery-and-snowflake).
+Into BigQuery, Snowflake, Databricks, Redshift, ClickHouse, Trino, or Microsoft Fabric, run this connector serially: none of those destinations enforce primary-key uniqueness on insert. Overlapping runs can leave permanent duplicate rows on BigQuery, Snowflake, Databricks, Redshift, Trino, and Microsoft Fabric; on ClickHouse (`ReplacingMergeTree` with `FINAL` reads and post-merge `OPTIMIZE TABLE ... FINAL`), duplicates are deduplicated rather than permanent, but concurrent non-transactional merges can still race and overwrite newer changes or briefly expose unmerged duplicates. See [Overlapping runs on destinations without enforced primary keys](/getting-started/cdc.md#overlapping-runs-on-bigquery-and-snowflake).
 
 ## Change Data Capture
 
@@ -111,7 +111,7 @@ CDC URI parameters:
 
 For a full walkthrough — enabling CDC and replicating a table into DuckDB — see [Replicate SQL Server to DuckDB with CDC](/tutorials/cdc-sqlserver-duckdb.md).
 
-Into BigQuery, Snowflake, Databricks, Redshift, ClickHouse, Trino, or Microsoft Fabric, run this connector serially: none of those destinations enforce primary-key uniqueness, so two overlapping runs can leave permanent duplicate rows. See [Overlapping runs on destinations without enforced primary keys](/getting-started/cdc.md#overlapping-runs-on-bigquery-and-snowflake).
+Into BigQuery, Snowflake, Databricks, Redshift, ClickHouse, Trino, or Microsoft Fabric, run this connector serially: none of those destinations enforce primary-key uniqueness on insert. Overlapping runs can leave permanent duplicate rows on BigQuery, Snowflake, Databricks, Redshift, Trino, and Microsoft Fabric; on ClickHouse (`ReplacingMergeTree` with `FINAL` reads and post-merge `OPTIMIZE TABLE ... FINAL`), duplicates are deduplicated rather than permanent, but concurrent non-transactional merges can still race and overwrite newer changes or briefly expose unmerged duplicates. See [Overlapping runs on destinations without enforced primary keys](/getting-started/cdc.md#overlapping-runs-on-bigquery-and-snowflake).
 
 ## Tips & Tricks
 
