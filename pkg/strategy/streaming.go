@@ -524,6 +524,7 @@ type streamTableState struct {
 	pending                     []arrow.RecordBatch
 	pendingRows                 int64
 	pendingSnapshot             bool
+	snapshotUseStaging          bool
 	snapshotBoundaryInvalidated bool
 	softReplace                 *pendingSoftReplace
 	snapshotRows                int64
@@ -589,47 +590,31 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 	ticker := time.NewTicker(l.opts.FlushInterval)
 	defer ticker.Stop()
 
+	var pending *source.RecordBatchResult
+	defer func() { releaseCDCSnapshotBatchResult(pending) }()
 	for {
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return l.abortLeaseLoss(records, err)
 		}
-		select {
-		case res, ok := <-records:
-			if !ok {
-				// Source ended on its own (e.g. its context was cancelled and
-				// it closed the channel before we observed ctx.Done).
-				return l.finalFlush(ctx)
-			}
-			if res.Err != nil {
-				if res.Batch != nil {
-					res.Batch.Release()
+		var res source.RecordBatchResult
+		if pending != nil {
+			res, pending = *pending, nil
+		} else {
+			select {
+			case next, ok := <-records:
+				if !ok {
+					// Source ended on its own (e.g. its context was cancelled and
+					// it closed the channel before we observed ctx.Done).
+					return l.finalFlush(ctx)
 				}
-				if ctx.Err() != nil {
-					return l.shutdown(ctx, records)
-				}
-				return fmt.Errorf("source error: %w", res.Err)
-			}
-			if err := connectorLeaseLoss(ctx); err != nil {
-				if res.Batch != nil {
-					res.Batch.Release()
-				}
-				return l.abortLeaseLoss(records, err)
-			}
-			var processErr error
-			if res.CDCSnapshotChunk != nil {
-				processErr = l.loadSnapshotChunk(ctx, records, res)
-			} else {
-				processErr = l.processResult(ctx, res)
-			}
-			if processErr != nil {
-				if loss := connectorLeaseLoss(ctx); loss != nil {
-					return l.abortLeaseLoss(records, loss)
-				}
-				return processErr
-			}
-			if l.buffered >= l.opts.FlushRecords {
+				res = next
+
+			case <-ticker.C:
 				if err := connectorLeaseLoss(ctx); err != nil {
 					return l.abortLeaseLoss(records, err)
+				}
+				if l.buffered == 0 && !l.tokenDirty {
+					continue
 				}
 				if err := l.flush(ctx); err != nil {
 					if loss := connectorLeaseLoss(ctx); loss != nil {
@@ -637,15 +622,44 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 					}
 					return err
 				}
-				ticker.Reset(l.opts.FlushInterval)
-			}
+				continue
 
-		case <-ticker.C:
+			case <-ctx.Done():
+				return l.shutdown(ctx, records)
+			}
+		}
+		if res.Err != nil {
+			if res.Batch != nil {
+				res.Batch.Release()
+			}
+			if ctx.Err() != nil {
+				return l.shutdown(ctx, records)
+			}
+			return fmt.Errorf("source error: %w", res.Err)
+		}
+		if err := connectorLeaseLoss(ctx); err != nil {
+			if res.Batch != nil {
+				res.Batch.Release()
+			}
+			return l.abortLeaseLoss(records, err)
+		}
+		var processErr error
+		if res.CDCSnapshotChunk != nil {
+			processErr = l.loadSnapshotChunk(ctx, records, res)
+		} else if l.canLoadContinuousSnapshot(res) {
+			pending, processErr = l.loadContinuousSnapshot(ctx, records, res)
+		} else {
+			processErr = l.processResult(ctx, res)
+		}
+		if processErr != nil {
+			if loss := connectorLeaseLoss(ctx); loss != nil {
+				return l.abortLeaseLoss(records, loss)
+			}
+			return processErr
+		}
+		if l.buffered >= l.opts.FlushRecords {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return l.abortLeaseLoss(records, err)
-			}
-			if l.buffered == 0 && !l.tokenDirty {
-				continue
 			}
 			if err := l.flush(ctx); err != nil {
 				if loss := connectorLeaseLoss(ctx); loss != nil {
@@ -653,9 +667,7 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 				}
 				return err
 			}
-
-		case <-ctx.Done():
-			return l.shutdown(ctx, records)
+			ticker.Reset(l.opts.FlushInterval)
 		}
 	}
 }
@@ -762,6 +774,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 	if !ok {
 		return fmt.Errorf("source requested truncate for unknown table %q", res.TableName)
 	}
+	st.snapshotUseStaging = false
 	if res.CDCSnapshotResumed {
 		return l.resumeSnapshotReplacement(ctx, res, st)
 	}
@@ -1028,6 +1041,7 @@ func (l *flushLoop) ensureTable(ctx context.Context, ti source.SourceTableInfo) 
 // first, then the destination table is evolved and the staging table
 // recreated so the new-shape batches following the announcement land cleanly.
 func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTableInfo, st *streamTableState) error {
+	st.snapshotUseStaging = false
 	if l.opts.StateManager != nil {
 		if err := l.opts.StateManager.RegisterTableState(ctx, ti.Name, st.destTable, ti.Incarnation, ti.SchemaFingerprint); err != nil {
 			return fmt.Errorf("failed to register CDC state for table %s: %w", ti.Name, err)

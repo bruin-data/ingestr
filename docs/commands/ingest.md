@@ -90,6 +90,8 @@ The `--stream` flag turns `ingest` into a long-running process that continuously
 
 A flush happens whenever **either** `--flush-interval` (default 30s) **or** `--flush-records` (default 50000) is reached, whichever comes first. `--flush-records` is the memory bound: records are buffered until a flush.
 
+Eligible single-table CDC snapshots into StarRocks stream continuously through the parallel snapshot writer. During this phase, the writer bounds memory and commits by bytes and time; `--flush-interval` and `--flush-records` govern buffered changes after the snapshot. Snapshot progress becomes resumable only after the covered rows are committed and visible. Multi-table snapshots and snapshots requiring staging use the regular flush triggers.
+
 Each flush writes the buffered records, merges them into the destination, and only then confirms the source position as durable. This gives **at-least-once delivery**: a crash before a flush completes re-delivers the un-flushed changes on restart, and the `merge` (by primary key / `msg_id`) makes replays idempotent. The stream resumes automatically — CDC from the destination's last recorded LSN, brokers from their committed offset / unacknowledged messages.
 
 Stop a stream with `Ctrl+C` (SIGINT) or SIGTERM; ingestr performs a final flush of buffered data and exits cleanly.
