@@ -10,10 +10,24 @@ import (
 // Dialect implements the destination.Dialect interface for ClickHouse.
 type Dialect struct {
 	cluster string
+	columns map[string]schema.Column
 }
 
 func (d *Dialect) Name() string {
 	return "ClickHouse"
+}
+
+func (d *Dialect) RelaxColumnNullabilitySQL(table, colName string) string {
+	col, ok := d.columns[strings.ToLower(colName)]
+	if !ok || col.IsPrimaryKey {
+		return ""
+	}
+	col.Nullable = true
+	return fmt.Sprintf("ALTER TABLE %s%s MODIFY COLUMN %s %s",
+		table,
+		onClusterClause(d.cluster),
+		d.QuoteIdentifier(colName),
+		MapDataTypeToClickHouse(col))
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {

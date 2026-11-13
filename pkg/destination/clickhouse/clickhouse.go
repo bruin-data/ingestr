@@ -78,10 +78,14 @@ func (d *ClickHouseDestination) Close(ctx context.Context) error {
 }
 
 func (d *ClickHouseDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	return d.prepareTable(ctx, opts, false)
+}
+
+func (d *ClickHouseDestination) prepareTable(ctx context.Context, opts destination.PrepareOptions, exclusive bool) error {
 	if err := tablename.TwoLevel("clickhouse").CheckName(opts.Table); err != nil {
 		return err
 	}
-	if opts.Schema == nil {
+	if opts.Schema == nil && !opts.RequirePrimaryKeyMatch {
 		return fmt.Errorf("schema is required")
 	}
 
@@ -90,7 +94,7 @@ func (d *ClickHouseDestination) PrepareTable(ctx context.Context, opts destinati
 		return fmt.Errorf("failed to ensure database exists: %w", err)
 	}
 
-	if opts.DropFirst {
+	if opts.DropFirst && !exclusive {
 		startDrop := time.Now()
 		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s%s", quoteIdentifier(database), quoteIdentifier(tableName), onClusterClause(d.cluster))
 		if err := d.conn.Exec(ctx, dropSQL); err != nil {
@@ -100,14 +104,22 @@ func (d *ClickHouseDestination) PrepareTable(ctx context.Context, opts destinati
 		config.Debug("[CLICKHOUSE] DROP TABLE took %v", time.Since(startDrop))
 	}
 
-	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(database, tableName, opts.Schema.Columns, opts.PrimaryKeys, d.engineType, d.engineSettings, d.cluster)
-	config.Debug("[CLICKHOUSE] CREATE SQL: %s", createSQL)
-	if err := d.conn.Exec(ctx, createSQL); err != nil {
-		config.LogFailedQuery(createSQL, err)
-		return fmt.Errorf("failed to create table: %w", err)
+	if opts.Schema != nil {
+		startCreate := time.Now()
+		createSQL := buildCreateTableSQLWithOptions(database, tableName, opts.Schema.Columns, opts.PrimaryKeys, opts.CDCKeys, opts.CDCMode, exclusive, d.engineType, d.engineSettings, d.cluster)
+		config.Debug("[CLICKHOUSE] CREATE SQL: %s", createSQL)
+		if err := d.conn.Exec(ctx, createSQL); err != nil {
+			config.LogFailedQuery(createSQL, err)
+			return fmt.Errorf("failed to create table: %w", err)
+		}
+		config.Debug("[CLICKHOUSE] CREATE TABLE took %v", time.Since(startCreate))
 	}
-	config.Debug("[CLICKHOUSE] CREATE TABLE took %v", time.Since(startCreate))
+
+	if opts.RequirePrimaryKeyMatch && len(opts.PrimaryKeys) > 0 {
+		if err := d.validatePrimaryKey(ctx, "CDC target", opts.Table, opts.PrimaryKeys); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -138,6 +150,13 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 	config.Debug("[CLICKHOUSE] Starting write to %s", opts.Table)
 	startTotal := time.Now()
 
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+
 	database, tableName := d.parseTableName(opts.Table)
 
 	var totalRows int64
@@ -160,6 +179,15 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 		if numRows == 0 {
 			record.Release()
 			continue
+		}
+
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			record.Release()
+			return err
+		}
+		if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+			record.Release()
+			return err
 		}
 
 		config.Debug("[CLICKHOUSE] Batch %d: received %d rows, %d cols", batchNum, numRows, numCols)
@@ -201,6 +229,10 @@ func (d *ClickHouseDestination) writeBatch(ctx context.Context, records <-chan s
 		config.Debug("[CLICKHOUSE] Batch %d: %d rows in %v (%.0f rows/sec)", batchNum, numRows, time.Since(startBatch), rate)
 	}
 
+	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
+		return err
+	}
+
 	totalRate := float64(totalRows) / time.Since(startTotal).Seconds()
 	config.Debug("[CLICKHOUSE] Total: %d rows written in %v (%.0f rows/sec)", totalRows, time.Since(startTotal), totalRate)
 	return nil
@@ -211,6 +243,18 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 
 	stagingTable := opts.StagingTable
 	targetTable := opts.TargetTable
+	fenced := opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != ""
+	if fenced {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		if err := d.checkCDCIncarnation(ctx, targetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		if err := d.checkCDCIncarnation(ctx, stagingTable, opts.CDCExpectedStagingIncarnation); err != nil {
+			return err
+		}
+	}
 
 	stagingDB, stagingName := d.parseTableName(stagingTable)
 	targetDB, targetName := d.parseTableName(targetTable)
@@ -227,14 +271,38 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 
 		oldNameCandidate := fmt.Sprintf("%s_old_%d", targetName, time.Now().UnixNano())
 		oldName := destination.ShortenIdentifier(oldNameCandidate, oldNameCandidate, destination.MaxIdentifierLength("clickhouse"))
+		oldTable := targetDB + "." + oldName
 
 		renameOldSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(targetName), quoteIdentifier(targetDB), quoteIdentifier(oldName), onClusterClause(d.cluster))
+		renamedOld := false
 		if err := d.conn.Exec(ctx, renameOldSQL); err != nil {
+			if fenced && opts.CDCExpectedIncarnation != "" {
+				return fmt.Errorf("ClickHouse CDC target %q could not be fenced before swap: %w", targetTable, err)
+			}
 			config.Debug("[CLICKHOUSE] No existing table to rename (this is OK for first run)")
+		} else {
+			renamedOld = true
+		}
+
+		if renamedOld && fenced && opts.CDCExpectedIncarnation != "" {
+			expectedMoved := destination.CDCTargetKey(targetDB, oldName, extractIncarnationUUID(opts.CDCExpectedIncarnation))
+			actualMoved, exists, checkErr := d.CDCTargetIncarnation(ctx, oldTable)
+			if checkErr != nil || !exists || actualMoved != expectedMoved {
+				restoreSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
+				_ = d.conn.Exec(ctx, restoreSQL)
+				if checkErr != nil {
+					return checkErr
+				}
+				return fmt.Errorf("ClickHouse CDC target %q physical incarnation changed during swap", targetTable)
+			}
 		}
 
 		renameNewSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
 		if err := d.conn.Exec(ctx, renameNewSQL); err != nil {
+			if renamedOld {
+				restoreSQL := fmt.Sprintf("RENAME TABLE %s.%s TO %s.%s%s", quoteIdentifier(targetDB), quoteIdentifier(oldName), quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster))
+				_ = d.conn.Exec(ctx, restoreSQL)
+			}
 			config.LogFailedQuery(renameNewSQL, err)
 			return fmt.Errorf("failed to rename staging to target: %w", err)
 		}
@@ -243,30 +311,34 @@ func (d *ClickHouseDestination) SwapTable(ctx context.Context, opts destination.
 		_ = d.conn.Exec(ctx, dropOldSQL)
 	}
 
+	if fenced && opts.CDCExpectedResultIncarnation != "" {
+		if err := d.checkCDCIncarnation(ctx, targetTable, opts.CDCExpectedResultIncarnation); err != nil {
+			return err
+		}
+	}
+
 	config.Debug("[CLICKHOUSE] Table swap completed in %v", time.Since(startSwap))
 	return nil
 }
 
 func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+	if destination.HasCDCDeletedColumn(opts.Columns) && len(opts.PrimaryKeys) > 0 {
+		return d.mergeCDC(ctx, opts)
+	}
+
 	startMerge := time.Now()
 
 	stagingDB, stagingName := d.parseTableName(opts.StagingTable)
 	targetDB, targetName := d.parseTableName(opts.TargetTable)
 
 	quotedColumns := quoteColumns(opts.Columns)
-
-	var insertSQL string
-	if destination.HasCDCDeletedColumn(opts.Columns) && len(opts.PrimaryKeys) > 0 {
-		insertSQL = buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName, opts.Columns, opts.PrimaryKeys)
-	} else {
-		insertSQL = fmt.Sprintf(
-			"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
-			quoteIdentifier(targetDB), quoteIdentifier(targetName),
-			strings.Join(quotedColumns, ", "),
-			strings.Join(quotedColumns, ", "),
-			quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
-		)
-	}
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s.%s (%s) SELECT %s FROM %s.%s",
+		quoteIdentifier(targetDB), quoteIdentifier(targetName),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(quotedColumns, ", "),
+		quoteIdentifier(stagingDB), quoteIdentifier(stagingName),
+	)
 	config.Debug("[CLICKHOUSE MERGE] Executing INSERT: %s", insertSQL)
 
 	if err := d.conn.Exec(ctx, insertSQL); err != nil {
@@ -284,73 +356,21 @@ func (d *ClickHouseDestination) MergeTable(ctx context.Context, opts destination
 	return nil
 }
 
-// buildCDCMergeInsert composes one row per PK for ReplacingMergeTree: data
-// columns come from the latest non-deleted change in staging, falling back to
-// the current target row for delete-only windows; CDC columns and the deleted
-// flag come from the latest change overall. Rows inserted and deleted within
-// one window materialize as soft-deleted; a delete-only window for an unknown
-// row is skipped. ClickHouse LEFT JOIN fills misses with type defaults (not
-// NULLs), so existence checks compare _cdc_lsn against the empty string.
-func buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName string, columns, primaryKeys []string) string {
-	pkMap := make(map[string]bool, len(primaryKeys))
-	quotedPKs := make([]string, len(primaryKeys))
-	for i, pk := range primaryKeys {
-		pkMap[strings.ToLower(pk)] = true
-		quotedPKs[i] = quoteIdentifier(pk)
-	}
-	pkList := strings.Join(quotedPKs, ", ")
-
-	joinOn := func(left, right string) string {
-		conds := make([]string, len(quotedPKs))
-		for i, pk := range quotedPKs {
-			conds[i] = fmt.Sprintf("%s.%s = %s.%s", left, pk, right, pk)
-		}
-		return strings.Join(conds, " AND ")
-	}
-
-	quotedColumns := make([]string, len(columns))
-	selectCols := make([]string, len(columns))
-	for i, col := range columns {
-		quoted := quoteIdentifier(col)
-		quotedColumns[i] = quoted
-		switch {
-		case pkMap[strings.ToLower(col)] || destination.IsCDCColumn(col):
-			selectCols[i] = "la." + quoted
-		default:
-			selectCols[i] = fmt.Sprintf("if(act.`_cdc_lsn` != '', act.%s, t.%s)", quoted, quoted)
-		}
-	}
-
-	staging := fmt.Sprintf("%s.%s", quoteIdentifier(stagingDB), quoteIdentifier(stagingName))
-	target := fmt.Sprintf("%s.%s", quoteIdentifier(targetDB), quoteIdentifier(targetName))
-
-	return fmt.Sprintf(
-		"INSERT INTO %s (%s) SELECT %s FROM (SELECT * FROM %s ORDER BY %s LIMIT 1 BY %s) AS la "+
-			"LEFT JOIN (SELECT * FROM %s WHERE `_cdc_deleted` = false ORDER BY `_cdc_lsn` DESC LIMIT 1 BY %s) AS act ON %s "+
-			"LEFT JOIN (SELECT * FROM %s FINAL) AS t ON %s "+
-			"WHERE la.`_cdc_deleted` = false OR act.`_cdc_lsn` != '' OR t.`_cdc_lsn` != ''",
-		target,
-		strings.Join(quotedColumns, ", "),
-		strings.Join(selectCols, ", "),
-		staging, destination.CDCLatestOverallOrderBy(quoteIdentifier), pkList,
-		staging, pkList, joinOn("la", "act"),
-		target, joinOn("la", "t"),
-	)
-}
-
-func (d *ClickHouseDestination) SupportsCDCMerge() bool { return true }
-
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
 func (d *ClickHouseDestination) GetMaxCDCLSN(ctx context.Context, table string) (string, error) {
 	db, name := d.parseTableName(table)
-	query := fmt.Sprintf("SELECT MAX(`_cdc_lsn`) FROM %s.%s", quoteIdentifier(db), quoteIdentifier(name))
+	hasColumn, err := d.tableHasColumn(ctx, db, name, destination.CDCLSNColumn)
+	if err != nil || !hasColumn {
+		return "", err
+	}
 
+	query := fmt.Sprintf("SELECT ifNull(MAX(%s), '') FROM %s.%s", quoteIdentifier(destination.CDCLSNColumn), quoteIdentifier(db), quoteIdentifier(name))
 	var maxLSN string
 	if err := d.conn.QueryRow(ctx, query).Scan(&maxLSN); err != nil {
-		if strings.Contains(err.Error(), "UNKNOWN_TABLE") || strings.Contains(err.Error(), "doesn't exist") {
+		if isMissingTableOrDB(err) {
 			return "", nil
 		}
-		return "", err
+		return "", fmt.Errorf("failed to read ClickHouse CDC cursor for %s: %w", table, err)
 	}
 	return maxLSN, nil
 }
@@ -649,7 +669,7 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 	database, tableName := d.parseTableName(table)
 
 	query := `
-		SELECT name, type
+		SELECT name, type, is_in_primary_key
 		FROM system.columns
 		WHERE database = ? AND table = ?
 		ORDER BY position`
@@ -662,9 +682,11 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	var fallbackPKs []string
 	for rows.Next() {
 		var colName, colType string
-		if err := rows.Scan(&colName, &colType); err != nil {
+		var inPK uint8
+		if err := rows.Scan(&colName, &colType, &inPK); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
@@ -675,13 +697,17 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 		if dataType == schema.TypeTimestamp && strings.Contains(strings.ToUpper(colType), "UTC") {
 			dataType = schema.TypeTimestampTZ
 		}
+		if inPK > 0 {
+			fallbackPKs = append(fallbackPKs, colName)
+		}
 		columns = append(columns, schema.Column{
-			Name:      colName,
-			DataType:  dataType,
-			Precision: precision,
-			Scale:     scale,
-			ArrayType: arrayType,
-			Nullable:  strings.Contains(strings.ToLower(colType), "nullable"),
+			Name:         colName,
+			DataType:     dataType,
+			Precision:    precision,
+			Scale:        scale,
+			ArrayType:    arrayType,
+			Nullable:     strings.Contains(strings.ToLower(colType), "nullable"),
+			IsPrimaryKey: inPK > 0,
 		})
 	}
 
@@ -693,10 +719,21 @@ func (d *ClickHouseDestination) GetTableSchema(ctx context.Context, table string
 		return nil, nil
 	}
 
+	primaryKeys := fallbackPKs
+	if len(fallbackPKs) > 0 {
+		var pkExpr string
+		if err := d.conn.QueryRow(ctx, "SELECT primary_key FROM system.tables WHERE database = ? AND name = ?", database, tableName).Scan(&pkExpr); err == nil {
+			if parsed := parseClickHouseKeyList(pkExpr); len(parsed) > 0 {
+				primaryKeys = parsed
+			}
+		}
+	}
+
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  database,
-		Columns: columns,
+		Name:        tableName,
+		Schema:      database,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 
@@ -765,31 +802,80 @@ func parseClickHouseURI(uri string) (*clickhouse.Options, string, string, string
 }
 
 func (d *ClickHouseDestination) parseTableName(table string) (string, string) {
-	parts := strings.SplitN(table, ".", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	parts := tablename.Split(table)
+	if len(parts) >= 2 {
+		return parts[len(parts)-2], parts[len(parts)-1]
+	}
+	if len(parts) == 1 && parts[0] != "" {
+		return d.database, parts[0]
 	}
 	return d.database, table
 }
 
+func (d *ClickHouseDestination) tableRef(table string) string {
+	database, tableName := d.parseTableName(table)
+	return fmt.Sprintf("%s.%s", quoteIdentifier(database), quoteIdentifier(tableName))
+}
+
+func (d *ClickHouseDestination) ListStagingTables(ctx context.Context, schemaName, prefix string) ([]string, error) {
+	database := schemaName
+	if database == "" {
+		database = d.database
+	}
+	rows, err := d.conn.Query(ctx, "SELECT name FROM system.tables WHERE database = ? AND startsWith(name, ?) ORDER BY name", database, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list ClickHouse staging tables in %s: %w", database, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
 func buildCreateTableSQL(database, table string, columns []schema.Column, primaryKeys []string, engineType string, engineSettings map[string]string, cluster string) string {
-	pkSet := make(map[string]bool)
+	return buildCreateTableSQLWithOptions(database, table, columns, primaryKeys, nil, false, false, engineType, engineSettings, cluster)
+}
+
+func buildCreateTableSQLWithOptions(database, table string, columns []schema.Column, primaryKeys, cdcKeys []string, cdcMode, exclusive bool, engineType string, engineSettings map[string]string, cluster string) string {
+	pkSet := make(map[string]bool, len(primaryKeys))
 	for _, pk := range primaryKeys {
 		pkSet[strings.ToLower(pk)] = true
+	}
+	cdcKeySet := make(map[string]bool, len(cdcKeys))
+	for _, key := range cdcKeys {
+		cdcKeySet[strings.ToLower(key)] = true
 	}
 
 	var colDefs []string
 	for _, col := range columns {
-		isPK := pkSet[strings.ToLower(col.Name)]
+		lower := strings.ToLower(col.Name)
+		isPK := pkSet[lower]
+		if cdcMode && !isPK && !cdcKeySet[lower] && !destination.IsCDCColumn(col.Name) && !destination.IsCDCStagingOnlyColumn(col.Name) {
+			col.Nullable = true
+		}
+		if cdcMode && (isPK || cdcKeySet[lower]) {
+			col.Nullable = false
+		}
 		colType := mapDataTypeForColumn(col, isPK)
 		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col.Name), colType))
 	}
 
 	engine, isMergeTree := validateEngineType(engineType, len(primaryKeys) > 0)
 
+	createKeyword := "CREATE TABLE IF NOT EXISTS"
+	if exclusive {
+		createKeyword = "CREATE TABLE"
+	}
+
 	parts := []string{
-		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s.%s%s (\n  %s\n) ENGINE = %s",
-			quoteIdentifier(database), quoteIdentifier(table), onClusterClause(cluster), strings.Join(colDefs, ",\n  "), engine),
+		fmt.Sprintf("%s %s.%s%s (\n  %s\n) ENGINE = %s",
+			createKeyword, quoteIdentifier(database), quoteIdentifier(table), onClusterClause(cluster), strings.Join(colDefs, ",\n  "), engine),
 	}
 
 	if isMergeTree {
