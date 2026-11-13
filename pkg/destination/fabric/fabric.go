@@ -210,12 +210,20 @@ func (d *FabricDestination) prepareTable(ctx context.Context, opts destination.P
 
 	if opts.Schema != nil {
 		createSQL := buildCreateTableSQLWithOptions(opts.Table, opts.Schema.Columns, opts.PrimaryKeys, opts.DeferredPrimaryKeys, strictCreate)
-		if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
+		if strictCreate {
+			// Strict creation adds the primary key in a second statement; run both in
+			// one transaction so a failed constraint does not leave an empty table
+			// that later CDC discovery refuses to adopt.
+			if err := d.execInTransaction(ctx, createSQL); err != nil {
+				config.LogFailedQuery(createSQL, err)
+				return fmt.Errorf("failed to create table: %w", err)
+			}
+		} else if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 			alreadyExists := isObjectAlreadyExistsError(err)
-			if alreadyExists && !opts.RequirePrimaryKeyMatch && !strictCreate {
+			if alreadyExists && !opts.RequirePrimaryKeyMatch {
 				return nil
 			}
-			if !alreadyExists || strictCreate {
+			if !alreadyExists {
 				config.LogFailedQuery(createSQL, err)
 				return fmt.Errorf("failed to create table: %w", err)
 			}
@@ -229,6 +237,18 @@ func (d *FabricDestination) prepareTable(ctx context.Context, opts destination.P
 	}
 
 	return nil
+}
+
+func (d *FabricDestination) execInTransaction(ctx context.Context, query string) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, query); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *FabricDestination) ensureSchemaExists(ctx context.Context, schemaName string) error {

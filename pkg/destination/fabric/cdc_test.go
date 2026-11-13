@@ -123,7 +123,9 @@ func TestCDCLongStringAndBinaryPrimaryKeys(t *testing.T) {
 		require.Contains(t, expectedCreateSQL, "[doc_id] VARCHAR(8000) NOT NULL")
 		require.Contains(t, expectedCreateSQL, "[bin_id] VARBINARY(8000) NOT NULL")
 		require.NotContains(t, expectedCreateSQL, "900")
+		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta(expectedCreateSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
 		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "long_pk_events").
 			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(301), "2026-01-01T00:00:00"))
 
@@ -623,7 +625,9 @@ func TestClaimAndPrepareEmptyCDCTarget(t *testing.T) {
 		mock.ExpectCommit()
 
 		createSQL := buildCreateTableSQLWithOptions("dbo.orders", tableSchema.Columns, []string{"id"}, nil, true)
+		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta(createSQL)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
 		mock.ExpectQuery(`FROM sys\.tables`).WithArgs("dbo", "orders").
 			WillReturnRows(sqlmock.NewRows([]string{"object_id", "create_date"}).AddRow(int64(99), "2026-01-01T00:00:00"))
 
@@ -652,7 +656,9 @@ func TestClaimAndPrepareEmptyCDCTarget(t *testing.T) {
 		mock.ExpectExec(`INSERT INTO \[_bruin_staging\]\.\[cdc_targets\]`).WithArgs(canonical, ownerID).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 
+		mock.ExpectBegin()
 		mock.ExpectExec("CREATE TABLE").WillReturnError(mssqldb.Error{Number: 2714, Message: "already exists"})
+		mock.ExpectRollback()
 		mock.ExpectExec(`DROP VIEW IF EXISTS \[_bruin_staging\]\.\[cdc_claim_`).WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(`DELETE FROM \[_bruin_staging\]\.\[cdc_targets\] WHERE \[destination_table\] = @p1 AND \[connector_id\] = @p2`).
 			WithArgs(canonical, ownerID).WillReturnResult(sqlmock.NewResult(0, 1))
@@ -1484,4 +1490,42 @@ func TestBuildFabricCDCMergeSQLWithAllCDCSourcesColumns(t *testing.T) {
 	assert.Contains(t, sqlText, "PARTITION BY [tenant_id], [id]")
 	assert.Contains(t, sqlText, "la.[tenant_id] = act.[tenant_id] AND la.[id] = act.[id]")
 	assert.False(t, strings.Contains(sqlText, "OPENJSON"))
+}
+
+func TestFabricCDCMergeKeepsCaseDistinctNonKeyColumns(t *testing.T) {
+	columns := []string{"id", "ID", "_cdc_lsn", "_cdc_deleted"}
+	for name, mergeSQL := range map[string]string{
+		"soft": buildFabricCDCMergeSQL("dbo.events", "dbo.events_stg", []string{"id"}, columns, ""),
+		"hard": buildFabricCDCHardDeleteMergeSQL("dbo.events", "dbo.events_stg", []string{"id"}, columns, ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, updateSet, ok := strings.Cut(mergeSQL, "UPDATE SET ")
+			require.True(t, ok, mergeSQL)
+			updateSet, _, _ = strings.Cut(updateSet, "\n")
+			assert.Contains(t, updateSet, "target.[ID] = ")
+			assert.NotContains(t, updateSet, "target.[id] = ")
+		})
+	}
+
+	assert.Equal(t, []string{"name"}, excludeFabricIdentifiers([]string{"Id", "name"}, []string{"id"}))
+}
+
+func TestSwapTableRejectsOtherWarehouses(t *testing.T) {
+	for name, tables := range map[string][2]string{
+		"target":  {"other_wh.dbo.orders", "_bruin_staging.orders_stg"},
+		"staging": {"dbo.orders", "other_wh._bruin_staging.orders_stg"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+
+			dest := &FabricDestination{db: db, database: "wh"}
+			err = dest.SwapTable(t.Context(), destination.SwapOptions{TargetTable: tables[0], StagingTable: tables[1]})
+			require.ErrorContains(t, err, `warehouse "other_wh"`)
+			_, _, err = dest.CDCConditionalSwapIncarnations(t.Context(), tables[0], tables[1])
+			require.ErrorContains(t, err, `warehouse "other_wh"`)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
