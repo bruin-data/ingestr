@@ -132,6 +132,7 @@ func prepareAppendOnlyCDCTable(ctx context.Context, dest destination.Destination
 		Schema:    tableSchema,
 		DropFirst: false,
 		CDCMode:   true,
+		Strategy:  string(config.StrategyAppend),
 	}); err != nil {
 		return fmt.Errorf("failed to prepare append-only change-log table %s: %w", table, err)
 	}

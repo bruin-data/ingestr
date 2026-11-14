@@ -21,6 +21,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/redshift"
 	"github.com/bruin-data/ingestr/pkg/destination/snowflake"
 	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
+	"github.com/bruin-data/ingestr/pkg/destination/starrocks"
 	"github.com/bruin-data/ingestr/pkg/destination/synapse"
 	"github.com/bruin-data/ingestr/pkg/destination/trino"
 	"github.com/bruin-data/ingestr/pkg/schema"
@@ -50,6 +51,7 @@ func dialectsByScheme() map[string]destination.Dialect {
 		"mssql":      &mssql.Dialect{},
 		"oracle":     &oracle.Dialect{},
 		"redshift":   &redshift.Dialect{},
+		"starrocks":  &starrocks.Dialect{},
 		"trino":      &trino.Dialect{},
 		"synapse":    &synapse.Dialect{},
 	}
@@ -105,6 +107,7 @@ func TestAllDialects_QuoteIdentifier(t *testing.T) {
 		{"oracle", "column_name", `"COLUMN_NAME"`},
 		{"hana", "column_name", `"COLUMN_NAME"`},
 		{"redshift", "column_name", `"column_name"`},
+		{"starrocks", "column_name", "`column_name`"},
 		{"synapse", "column_name", "[column_name]"},
 		{"trino", "column_name", `"column_name"`},
 	}
@@ -136,6 +139,7 @@ func TestAllDialects_TypeName_Boolean(t *testing.T) {
 		"oracle":     "NUMBER(1,0)",
 		"hana":       "BOOLEAN",
 		"redshift":   "BOOLEAN",
+		"starrocks":  "BOOLEAN",
 		"synapse":    "BIT",
 		"trino":      "BOOLEAN",
 	}
@@ -170,6 +174,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 				"oracle":     "NUMBER(5,0)",
 				"hana":       "SMALLINT",
 				"redshift":   "SMALLINT",
+				"starrocks":  "SMALLINT",
 				"synapse":    "SMALLINT",
 				"trino":      "SMALLINT",
 			},
@@ -192,6 +197,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 				"oracle":     "NUMBER(10,0)",
 				"hana":       "INTEGER",
 				"redshift":   "INTEGER",
+				"starrocks":  "INT",
 				"synapse":    "INT",
 				"trino":      "INTEGER",
 			},
@@ -214,6 +220,7 @@ func TestAllDialects_TypeName_Integers(t *testing.T) {
 				"oracle":     "NUMBER(19,0)",
 				"hana":       "BIGINT",
 				"redshift":   "BIGINT",
+				"starrocks":  "BIGINT",
 				"synapse":    "BIGINT",
 				"trino":      "BIGINT",
 			},
@@ -255,6 +262,7 @@ func TestAllDialects_TypeName_Floats(t *testing.T) {
 				"oracle":     "BINARY_FLOAT",
 				"hana":       "REAL",
 				"redshift":   "REAL",
+				"starrocks":  "FLOAT",
 				"synapse":    "REAL",
 				"trino":      "REAL",
 			},
@@ -277,6 +285,7 @@ func TestAllDialects_TypeName_Floats(t *testing.T) {
 				"oracle":     "BINARY_DOUBLE",
 				"hana":       "DOUBLE",
 				"redshift":   "DOUBLE PRECISION",
+				"starrocks":  "DOUBLE",
 				"synapse":    "FLOAT",
 				"trino":      "DOUBLE",
 			},
@@ -320,7 +329,7 @@ func TestAllDialects_TypeName_DecimalDefault(t *testing.T) {
 		"fabric": "DECIMAL(38,0)", "hana": "DECIMAL(38,0)", "maxcompute": "DECIMAL(38,9)",
 		"mssql": "DECIMAL(38,0)", "mysql": "DECIMAL(38,9)", "oracle": "NUMBER(38,0)",
 		"postgres": "NUMERIC", "redshift": "DECIMAL(38,9)", "snowflake": "NUMBER(38,9)",
-		"sqlite": "REAL", "synapse": "DECIMAL(38,9)", "trino": "DECIMAL(38,9)",
+		"sqlite": "REAL", "starrocks": "DECIMAL(38, 9)", "synapse": "DECIMAL(38,9)", "trino": "DECIMAL(38,9)",
 	}
 	for _, dt := range allDialects() {
 		t.Run(dt.Scheme, func(t *testing.T) {
@@ -422,6 +431,10 @@ func TestAllDialects_TypeName_AllTypes(t *testing.T) {
 			"TEXT", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "REAL", "REAL", "REAL",
 			"TEXT", "BLOB", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "JSON", "TEXT", "TEXT",
 		},
+		"starrocks": {
+			"VARCHAR(1048576)", "BOOLEAN", "TINYINT", "SMALLINT", "INT", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL(18, 4)",
+			"VARCHAR(1048576)", "VARBINARY", "DATE", "VARCHAR(64)", "DATETIME", "DATETIME", "VARCHAR(1048576)", "JSON", "VARCHAR(1048576)", "ARRAY<BIGINT>",
+		},
 		"synapse": {
 			"NVARCHAR(4000)", "BIT", "SMALLINT", "SMALLINT", "INT", "BIGINT", "REAL", "FLOAT", "DECIMAL(18,4)",
 			"NVARCHAR(4000)", "VARBINARY(8000)", "DATE", "TIME(7)", "DATETIME2(6)", "DATETIMEOFFSET(6)", "NVARCHAR(255)", "NVARCHAR(4000)", "UNIQUEIDENTIFIER", "NVARCHAR(4000)",
@@ -453,7 +466,7 @@ func TestAllDialects_TypeName_StringArray(t *testing.T) {
 		"fabric": "VARCHAR(MAX)", "hana": "NCLOB", "maxcompute": "STRING",
 		"mssql": "NVARCHAR(MAX)", "mysql": "JSON", "oracle": "CLOB",
 		"postgres": "TEXT[]", "redshift": "SUPER", "snowflake": "ARRAY",
-		"sqlite": "TEXT", "synapse": "NVARCHAR(4000)", "trino": "ARRAY(VARCHAR)",
+		"sqlite": "TEXT", "starrocks": "ARRAY<VARCHAR(1048576)>", "synapse": "NVARCHAR(4000)", "trino": "ARRAY(VARCHAR)",
 	}
 	for _, dt := range allDialects() {
 		t.Run(dt.Scheme, func(t *testing.T) {
@@ -484,6 +497,7 @@ func TestAllDialects_TypeName_SizedString(t *testing.T) {
 		"trino":      "VARCHAR(50)",
 		"cratedb":    "VARCHAR(50)",
 		"sqlite":     "VARCHAR(50)",
+		"starrocks":  "VARCHAR(50)",
 		"maxcompute": "VARCHAR(50)",
 	}
 
@@ -588,7 +602,7 @@ func TestAllDialects_AlterColumnTypeSQL(t *testing.T) {
 }
 
 func TestDialect_SupportsAlterType(t *testing.T) {
-	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "synapse", "fabric", "hana", "oracle"}
+	dialectsWithAlter := []string{"postgres", "duckdb", "snowflake", "bigquery", "clickhouse", "mysql", "mssql", "redshift", "starrocks", "synapse", "fabric", "hana", "oracle"}
 	dialectsWithoutAlter := []string{"sqlite", "trino", "cassandra", "athena", "cratedb", "maxcompute"}
 
 	for _, scheme := range dialectsWithAlter {

@@ -284,10 +284,28 @@ func (d *StarRocksDestination) validatePrimaryKey(ctx context.Context, role, tab
 			out[i] = strings.ToLower(col)
 		}
 		slices.Sort(out)
-		return out
+		return slices.Compact(out)
 	}
 	if !strings.EqualFold(model, "PRIMARY_KEYS") || !slices.Equal(normalize(actual), normalize(keys)) {
 		return fmt.Errorf("StarRocks %s %s requires PRIMARY KEY (%s); found %s (%s). If the key changed, rerun with --full-refresh to rebuild the table", role, table, strings.Join(keys, ", "), model, strings.Join(actual, ", "))
+	}
+	return nil
+}
+
+func (d *StarRocksDestination) validateAppendTable(ctx context.Context, table string, mustExist bool) error {
+	model, _, err := d.tableLayout(ctx, table)
+	if err != nil {
+		return err
+	}
+	if model == "" && !mustExist {
+		return nil
+	}
+	if !strings.EqualFold(model, "DUP_KEYS") {
+		found := model
+		if found == "" {
+			found = "non-OLAP object"
+		}
+		return fmt.Errorf("StarRocks append target %s requires a DUPLICATE KEY table; found %s. Drop or rename the existing table so append can recreate it as DUPLICATE KEY", table, found)
 	}
 	return nil
 }

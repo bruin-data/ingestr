@@ -6,6 +6,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/float16"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
@@ -145,5 +146,62 @@ func TestRecordBatchToJSONBinaryListUsesBase64(t *testing.T) {
 	}
 	if want := `[{"c":["AP8=","",null]}]`; string(body) != want {
 		t.Fatalf("body: got %s want %s", body, want)
+	}
+}
+
+func TestStreamLoadBatchEncoderExoticColumnsAndArrowTypes(t *testing.T) {
+	pool := memory.NewGoAllocator()
+
+	u64b := array.NewUint64Builder(pool)
+	u64b.Append(18446744073709551615)
+	u64Arr := u64b.NewUint64Array()
+	defer u64Arr.Release()
+
+	fsbb := array.NewFixedSizeBinaryBuilder(pool, &arrow.FixedSizeBinaryType{ByteWidth: 2})
+	fsbb.Append([]byte{0xde, 0xad})
+	fsbArr := fsbb.NewFixedSizeBinaryArray()
+	defer fsbArr.Release()
+
+	f16b := array.NewFloat16Builder(pool)
+	f16b.Append(float16.New(1.5))
+	f16Arr := f16b.NewFloat16Array()
+	defer f16Arr.Release()
+
+	t32b := array.NewTime32Builder(pool, &arrow.Time32Type{Unit: arrow.Second})
+	t32b.Append(arrow.Time32(3723))
+	t32Arr := t32b.NewTime32Array()
+	defer t32Arr.Release()
+
+	fslb := array.NewFixedSizeListBuilder(pool, 2, arrow.PrimitiveTypes.Uint16)
+	fslvb := fslb.ValueBuilder().(*array.Uint16Builder)
+	fslb.Append(true)
+	fslvb.AppendValues([]uint16{7, 8}, nil)
+	fslArr := fslb.NewListArray()
+	defer fslArr.Release()
+
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "$price", Type: arrow.PrimitiveTypes.Uint64},
+		{Name: "_c0", Type: &arrow.FixedSizeBinaryType{ByteWidth: 2}},
+		{Name: "a.b[0]", Type: arrow.FixedWidthTypes.Float16},
+		{Name: "t_sec", Type: &arrow.Time32Type{Unit: arrow.Second}},
+		{Name: "pair", Type: arrow.FixedSizeListOf(2, arrow.PrimitiveTypes.Uint16)},
+	}, nil)
+	rec := array.NewRecordBatch(sc, []arrow.Array{u64Arr, fsbArr, f16Arr, t32Arr, fslArr}, 1)
+	defer rec.Release()
+
+	enc, opts := newStreamLoadBatchEncoder(rec, 4096)
+	body, rows, err := enc.next(t.Context())
+	if err != nil || rows != 1 {
+		t.Fatalf("rows=%d err=%v", rows, err)
+	}
+	if want := `[{"_c_0":18446744073709551615,"_c_1":"dead","_c_2":1.5,"_c_3":[7,8],"_c_4":"01:02:03.000000"}]`; string(body) != want {
+		t.Fatalf("body: got %s want %s", body, want)
+	}
+	if want := `["$._c_0","$._c_1","$._c_2","$._c_3","$._c_4"]`; opts.jsonpaths != want {
+		t.Fatalf("jsonpaths: got %s want %s", opts.jsonpaths, want)
+	}
+	wantCols := "_c_0, _c_1, _c_2, _c_3, _c_4, `$price`=_c_0, `_c0`=to_binary(_c_1, 'hex'), `a.b[0]`=_c_2, `pair`=_c_3, `t_sec`=_c_4"
+	if opts.columns != wantCols {
+		t.Fatalf("columns: got %q want %q", opts.columns, wantCols)
 	}
 }

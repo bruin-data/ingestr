@@ -41,7 +41,7 @@ func (*Dialect) AddColumnSQL(table string, col schema.Column) string {
 	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s NULL", table, quoteColumn(col.Name), MapDataTypeToStarRocks(col))
 }
 
-func (d *Dialect) AlterColumnTypeSQL(table, name string, col schema.Column) string {
+func (d *Dialect) modifyColumnClause(name string, col schema.Column) string {
 	if planned, ok := d.columns[strings.ToLower(name)]; ok {
 		col = planned
 	}
@@ -52,8 +52,39 @@ func (d *Dialect) AlterColumnTypeSQL(table, name string, col schema.Column) stri
 	if col.IsPrimaryKey || !col.Nullable {
 		nullable = " NOT NULL"
 	}
-	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s%s%s", table, quoteColumn(name), mapStarRocksType(col), d.keySuffix(name), nullable)
+	return fmt.Sprintf("MODIFY COLUMN %s %s%s%s", quoteColumn(name), mapStarRocksType(col), d.keySuffix(name), nullable)
 }
+
+func (d *Dialect) AlterColumnTypeSQL(table, name string, col schema.Column) string {
+	clause := d.modifyColumnClause(name, col)
+	if clause == "" {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s %s", table, clause)
+}
+
+func (d *Dialect) BatchAlterColumnTypesSQL(table string, cols []schema.Column) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	clauses := make([]string, 0, len(cols))
+	seen := make(map[string]bool, len(cols))
+	for _, col := range cols {
+		key := strings.ToLower(col.Name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		clause := d.modifyColumnClause(col.Name, col)
+		if clause == "" {
+			return ""
+		}
+		clauses = append(clauses, clause)
+	}
+	return fmt.Sprintf("ALTER TABLE %s %s", table, strings.Join(clauses, ", "))
+}
+
+var _ destination.BatchColumnTypeAlterer = (*Dialect)(nil)
 
 // canModifyColumnType mirrors the MODIFY COLUMN conversions StarRocks 3.3
 // accepts; everything else fails with "Can not change X to Y".
@@ -259,7 +290,7 @@ func (d *StarRocksDestination) ApplySchemaEvolution(ctx context.Context, table s
 			}
 		}
 	}
-	statements, warnings, err := destination.RenderEvolution(dialect, d.tableRef(table), comparison)
+	statements, warnings, err := renderStarRocksEvolution(dialect, d.tableRef(table), comparison)
 	if err != nil {
 		return nil, fmt.Errorf("%w; rerun with --full-refresh to rebuild the table", err)
 	}
@@ -276,6 +307,46 @@ func (d *StarRocksDestination) ApplySchemaEvolution(ctx context.Context, table s
 		}
 	}
 	return warnings, nil
+}
+
+func renderStarRocksEvolution(dialect *Dialect, table string, comparison *schemaevolution.SchemaComparison) ([]string, []string, error) {
+	statements, warnings, err := destination.RenderEvolution(dialect, table, comparison)
+	if err != nil || comparison == nil {
+		return statements, warnings, err
+	}
+	batchedTypeCols := make(map[string]bool)
+	for _, change := range comparison.Changes {
+		if change.Type != schemaevolution.ChangeWidenType && change.Type != schemaevolution.ChangeOverrideType {
+			continue
+		}
+		if change.OldColumn != nil && dialect.TypeName(*change.OldColumn) == dialect.TypeName(change.NewColumn) {
+			continue
+		}
+		batchedTypeCols[strings.ToLower(change.ColumnName)] = true
+	}
+	if len(batchedTypeCols) > 0 {
+		filtered := *comparison
+		filtered.Changes = make([]schemaevolution.SchemaChange, 0, len(comparison.Changes))
+		for _, change := range comparison.Changes {
+			if batchedTypeCols[strings.ToLower(change.ColumnName)] &&
+				(change.Type == schemaevolution.ChangeRelaxNullability || change.Type == schemaevolution.ChangeRemoveColumn) {
+				continue
+			}
+			filtered.Changes = append(filtered.Changes, change)
+		}
+		filtered.HasChanges = len(filtered.Changes) > 0
+		statements, _ = destination.BuildMigration(dialect, table, &filtered)
+	}
+	out := make([]string, 0, len(statements))
+	seen := make(map[string]bool, len(statements))
+	for _, stmt := range statements {
+		if seen[stmt] {
+			continue
+		}
+		seen[stmt] = true
+		out = append(out, stmt)
+	}
+	return out, warnings, nil
 }
 
 // An override that turns a non-string column into a string carries the
