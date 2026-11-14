@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -323,8 +324,10 @@ func destinationCases() []destCase {
 					t.Skip("shared MaxCompute emulator container not available")
 				}
 
+				maxcomputeEmulatorMu.Lock()
 				table := fmt.Sprintf("conformance_%s", uniqueSuffix())
 				cleanup := func() {
+					defer maxcomputeEmulatorMu.Unlock()
 					dest, err := uri.DefaultRegistry.GetDestination(maxcomputeDest.uri)
 					if err != nil {
 						return
@@ -347,15 +350,19 @@ func destinationCases() []destCase {
 					t.Skip("shared mssql destination container not available")
 				}
 
-				table := fmt.Sprintf("dbo.conformance_%s", uniqueSuffix())
+				// Each test gets its own database: catalog reads and DDL from
+				// parallel tests in one database deadlock on its system tables.
+				dbName := fmt.Sprintf("conformance_%s", uniqueSuffix())
+				admin, err := sql.Open("sqlserver", mssqlConnString(mssqlDest.uri))
+				require.NoError(t, err)
+				_, err = admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE [%s]", dbName))
+				require.NoError(t, err)
 				cleanup := func() {
-					db, err := sql.Open("sqlserver", mssqlConnString(mssqlDest.uri))
-					if err == nil {
-						_, _ = db.ExecContext(ctx, fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s", table, quoteTableMSSQL(table)))
-						_ = db.Close()
-					}
+					_, _ = admin.ExecContext(ctx, fmt.Sprintf("ALTER DATABASE [%s] SET SINGLE_USER WITH ROLLBACK IMMEDIATE", dbName))
+					_, _ = admin.ExecContext(ctx, fmt.Sprintf("DROP DATABASE [%s]", dbName))
+					_ = admin.Close()
 				}
-				return mssqlDest.uri, table, cleanup
+				return mssqlURIForDatabase(t, mssqlDest.uri, "mssql", dbName, nil), fmt.Sprintf("dbo.conformance_%s", uniqueSuffix()), cleanup
 			},
 			sqlBackend:             mssqlBackend(),
 			mergeCapable:           true,
@@ -1218,6 +1225,12 @@ func splitSchemaTable(table string, defaultSchema string) (string, string) {
 }
 
 var uniqueCounter atomic.Uint64
+
+// maxcomputeEmulatorMu runs one test at a time against the shared MaxCompute
+// emulator. v0.0.7 keeps storage read sessions in an unsynchronized HashMap and
+// answers a failed read with an empty 200 response, which the source reports
+// as an Arrow EOF.
+var maxcomputeEmulatorMu sync.Mutex
 
 func uniqueSuffix() string {
 	// Collision-safe even when parallel tests race on the same nanosecond. Digits
