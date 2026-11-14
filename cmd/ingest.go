@@ -57,7 +57,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "incremental-predicate",
-				Usage:   "Additional destination-specific SQL predicate appended to the merge join condition",
+				Usage:   "Additional destination-specific SQL predicate that limits which destination rows merge matches or delete+insert deletes",
 				Sources: cli.EnvVars("INCREMENTAL_PREDICATE", "INGESTR_INCREMENTAL_PREDICATE"),
 			},
 			&cli.StringFlag{

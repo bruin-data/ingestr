@@ -3571,11 +3571,17 @@ func validateIncrementalPredicate(cfg *config.IngestConfig, dest destination.Des
 	if strings.TrimSpace(cfg.IncrementalPredicate) == "" {
 		return nil
 	}
-	if resolvedStrategy != config.StrategyMerge {
-		return fmt.Errorf("incremental-predicate can only be used with the merge incremental strategy, but the resolved strategy is %q", resolvedStrategy)
-	}
-	if sup, ok := dest.(destination.IncrementalPredicateSupport); !ok || !sup.SupportsIncrementalPredicate() {
-		return fmt.Errorf("destination scheme %q does not support --incremental-predicate", dest.GetScheme())
+	switch resolvedStrategy {
+	case config.StrategyMerge:
+		if sup, ok := dest.(destination.IncrementalPredicateSupport); !ok || !sup.SupportsIncrementalPredicate() {
+			return fmt.Errorf("destination scheme %q does not support --incremental-predicate with the merge strategy", dest.GetScheme())
+		}
+	case config.StrategyDeleteInsert:
+		if !destination.SupportsDeleteInsertPredicate(dest) {
+			return fmt.Errorf("destination scheme %q does not support --incremental-predicate with the delete+insert strategy", dest.GetScheme())
+		}
+	default:
+		return fmt.Errorf("incremental-predicate can only be used with the merge or delete+insert incremental strategies, but the resolved strategy is %q", resolvedStrategy)
 	}
 	return nil
 }

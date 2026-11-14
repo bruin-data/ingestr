@@ -2602,3 +2602,36 @@ func TestGetTableSchema_SpecialCharacterColumnNames(t *testing.T) {
 	assert.True(t, colMap["MixedCase"], "should preserve mixed case column name")
 	assert.True(t, colMap["with_underscore"], "should preserve underscore column name")
 }
+
+func TestDeleteInsertTable_IncrementalPredicateLimitsDelete(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE target_table (id BIGINT, region VARCHAR, ts BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE staging_table (id BIGINT, region VARCHAR, ts BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO target_table VALUES (1, 'eu', 10), (2, 'us', 20), (3, 'eu', 500)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (4, 'eu', 15)`))
+
+	require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+		StagingTable:         "staging_table",
+		TargetTable:          "target_table",
+		IncrementalKey:       "ts",
+		IntervalStart:        int64(0),
+		IntervalEnd:          int64(100),
+		Columns:              []string{"id", "region", "ts"},
+		IncrementalPredicate: "target.region = 'eu'",
+	}))
+
+	db := openDuckDB(t, ctx, path)
+	rows, err := db.QueryContext(ctx, "SELECT id FROM target_table ORDER BY id")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []int64{2, 3, 4}, ids, "only in-interval rows matching the predicate are deleted")
+}

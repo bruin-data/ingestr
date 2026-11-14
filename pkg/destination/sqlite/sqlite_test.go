@@ -1038,3 +1038,55 @@ func TestLoadCDCStateFenceReturnsLatestRunSentinels(t *testing.T) {
 		t.Fatalf("missing fence = %#v", missing)
 	}
 }
+
+func TestDeleteInsertTableIncrementalPredicateLimitsDelete(t *testing.T) {
+	d := NewSQLiteDestination()
+	path := filepath.Join(t.TempDir(), "di-predicate.db")
+	if err := d.Connect(t.Context(), "sqlite://"+path); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close(t.Context()) }()
+
+	for _, statement := range []string{
+		`CREATE TABLE events (id INTEGER, region TEXT, ts INTEGER)`,
+		`CREATE TABLE events_staging (id INTEGER, region TEXT, ts INTEGER)`,
+		`INSERT INTO events VALUES (1, 'eu', 10), (2, 'us', 20), (3, 'eu', 500)`,
+		`INSERT INTO events_staging VALUES (4, 'eu', 15)`,
+	} {
+		if err := d.Exec(t.Context(), statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := d.DeleteInsertTable(t.Context(), destination.DeleteInsertOptions{
+		StagingTable:         "events_staging",
+		TargetTable:          "events",
+		IncrementalKey:       "ts",
+		IntervalStart:        int64(0),
+		IntervalEnd:          int64(100),
+		Columns:              []string{"id", "region", "ts"},
+		IncrementalPredicate: "target.region = 'eu'",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := d.db.QueryContext(t.Context(), `SELECT id FROM events ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ids, []int64{2, 3, 4}) {
+		t.Fatalf("ids = %v, want [2 3 4]", ids)
+	}
+}

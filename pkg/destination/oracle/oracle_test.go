@@ -961,3 +961,14 @@ func TestExtractValue_ListUsesRowValue(t *testing.T) {
 	assert.Equal(t, "[1,2]", extractValue(arr, 0))
 	assert.Equal(t, "[3]", extractValue(arr, 1))
 }
+
+func TestBuildDeleteInsertDeleteSQL(t *testing.T) {
+	if got, want := buildDeleteInsertDeleteSQL("events", `"UPDATED_AT"`, ":1", ":2", ""), `DELETE FROM "EVENTS" WHERE "UPDATED_AT" >= :1 AND "UPDATED_AT" <= :2`; got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
+	got := buildDeleteInsertDeleteSQL("events", `"UPDATED_AT"`, ":1", ":2", `target."EVENT_DATE" >= DATE '2026-01-01'`)
+	want := `DELETE FROM "EVENTS" target WHERE target."UPDATED_AT" >= :1 AND target."UPDATED_AT" <= :2 AND (target."EVENT_DATE" >= DATE '2026-01-01')`
+	if got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
+}
