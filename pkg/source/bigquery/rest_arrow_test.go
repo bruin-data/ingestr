@@ -59,19 +59,66 @@ func TestRESTArrowSchemaMatchesStorageForAllTypes(t *testing.T) {
 	assert.Truef(t, want.Equal(got), "want %s\ngot  %s", want, got)
 }
 
-func TestRESTArrowRepeatedJSONAndGeographyKeepMetadataOnListField(t *testing.T) {
+func TestRESTArrowRepeatedAndNestedFieldsMatchStorage(t *testing.T) {
 	got, err := restArrowSchema(bigquery.Schema{
 		{Name: "js", Type: bigquery.JSONFieldType, Repeated: true},
-		{Name: "rec", Type: bigquery.RecordFieldType, Schema: bigquery.Schema{{Name: "geo", Type: bigquery.GeographyFieldType}}},
+		{Name: "dts", Type: bigquery.DateTimeFieldType, Repeated: true},
+		{Name: "rec", Type: bigquery.RecordFieldType, Schema: bigquery.Schema{
+			{Name: "geo", Type: bigquery.GeographyFieldType},
+			{Name: "iv", Type: bigquery.IntervalFieldType},
+			{Name: "arr", Type: bigquery.DateTimeFieldType, Repeated: true},
+		}},
 	})
 	require.NoError(t, err)
 
 	js := got.Field(0)
 	assert.True(t, arrow.TypeEqual(arrow.ListOf(arrow.BinaryTypes.String), js.Type))
-	assert.True(t, js.Metadata.Equal(jsonMetadata()))
+	assert.False(t, js.Nullable, "REPEATED columns are non-nullable lists")
+	assert.True(t, js.Metadata.Equal(jsonMetadata()), "metadata belongs on the list field")
+	assert.Equal(t, 0, js.Type.(*arrow.ListType).ElemField().Metadata.Len())
 
-	child := got.Field(1).Type.(*arrow.StructType).Field(0)
-	assert.True(t, child.Metadata.Equal(geographyMetadata()))
+	dts := got.Field(1)
+	assert.False(t, dts.Nullable)
+	assert.True(t, dts.Metadata.Equal(datetimeMetadata()))
+
+	children := got.Field(2).Type.(*arrow.StructType)
+	assert.True(t, children.Field(0).Metadata.Equal(geographyMetadata()))
+	assert.True(t, children.Field(1).Metadata.Equal(intervalMetadata()))
+	assert.False(t, children.Field(2).Nullable)
+	assert.True(t, children.Field(2).Metadata.Equal(datetimeMetadata()))
+}
+
+func TestRESTArrowParameterizedDecimals(t *testing.T) {
+	fields := bigquery.Schema{
+		{Name: "n", Type: bigquery.NumericFieldType, Precision: 10, Scale: 2},
+		{Name: "n_int", Type: bigquery.NumericFieldType, Precision: 5},
+		{Name: "bn", Type: bigquery.BigNumericFieldType, Precision: 40, Scale: 5},
+		{Name: "bn_small", Type: bigquery.BigNumericFieldType, Precision: 20, Scale: 4},
+	}
+	got, err := restArrowSchema(fields)
+	require.NoError(t, err)
+	assert.True(t, arrow.TypeEqual(&arrow.Decimal128Type{Precision: 10, Scale: 2}, got.Field(0).Type))
+	assert.True(t, arrow.TypeEqual(&arrow.Decimal128Type{Precision: 5, Scale: 0}, got.Field(1).Type))
+	assert.True(t, arrow.TypeEqual(&arrow.Decimal256Type{Precision: 40, Scale: 5}, got.Field(2).Type))
+	assert.True(t, arrow.TypeEqual(&arrow.Decimal256Type{Precision: 20, Scale: 4}, got.Field(3).Type), "BIGNUMERIC stays decimal256 even when p <= 38")
+
+	rat := func(v string) *big.Rat {
+		r, ok := new(big.Rat).SetString(v)
+		require.True(t, ok, v)
+		return r
+	}
+	batch := buildRESTBatch(t, fields, []bigquery.Value{rat("-12.34"), rat("12345"), rat("12345678901234567890123456789012345.12345"), rat("1234567890123456.1234")})
+	assert.Equal(t, "-12.34", batch.Column(0).(*array.Decimal128).Value(0).ToString(2))
+	assert.Equal(t, "12345", batch.Column(1).(*array.Decimal128).Value(0).ToString(0))
+	assert.Equal(t, "12345678901234567890123456789012345.12345", batch.Column(2).(*array.Decimal256).Value(0).ToString(5))
+	assert.Equal(t, "1234567890123456.1234", batch.Column(3).(*array.Decimal256).Value(0).ToString(4))
+
+	b, err := newRESTBatchBuilder(fields[:1])
+	require.NoError(t, err)
+	defer b.release()
+	err = b.appendRow([]bigquery.Value{rat("1.234")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "more fractional digits than the column scale")
 }
 
 func TestRESTArrowConvertsTemporalEdgeValues(t *testing.T) {

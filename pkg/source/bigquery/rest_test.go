@@ -262,11 +262,24 @@ func jsonMetadata() arrow.Metadata {
 }
 
 func geographyMetadata() arrow.Metadata {
-	return arrow.NewMetadata([]string{"ARROW:extension:name"}, []string{"google:sqlType:geography"})
+	return arrow.NewMetadata([]string{"ARROW:extension:metadata", "ARROW:extension:name"}, []string{`{"encoding": "WKT"}`, "google:sqlType:geography"})
+}
+
+func datetimeMetadata() arrow.Metadata {
+	return arrow.NewMetadata([]string{"ARROW:extension:name"}, []string{"google:sqlType:datetime"})
+}
+
+func intervalMetadata() arrow.Metadata {
+	return arrow.NewMetadata([]string{"ARROW:extension:name"}, []string{"google:sqlType:interval"})
+}
+
+func rangeMetadata() arrow.Metadata {
+	return arrow.NewMetadata([]string{"google:sqlType"}, []string{"range"})
 }
 
 // storageAllTypesSchema is the Arrow schema the Storage Read API returns for
-// allTypesSchemaJSON.
+// allTypesSchemaJSON, as observed against live BigQuery (see
+// TestBigQuerySource_RESTReadAPIMatchesStorage).
 func storageAllTypesSchema() *arrow.Schema {
 	return arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
@@ -275,28 +288,28 @@ func storageAllTypesSchema() *arrow.Schema {
 		{Name: "s", Type: arrow.BinaryTypes.String, Nullable: true},
 		{Name: "by", Type: arrow.BinaryTypes.Binary, Nullable: true},
 		{Name: "ts", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
-		{Name: "dt", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "dt", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true, Metadata: datetimeMetadata()},
 		{Name: "d", Type: arrow.FixedWidthTypes.Date32, Nullable: true},
 		{Name: "t", Type: arrow.FixedWidthTypes.Time64us, Nullable: true},
-		{Name: "n", Type: &arrow.Decimal128Type{Precision: 38, Scale: 9}, Nullable: true},
+		{Name: "n", Type: &arrow.Decimal128Type{Precision: 10, Scale: 2}, Nullable: true},
 		{Name: "bn", Type: &arrow.Decimal256Type{Precision: 76, Scale: 38}, Nullable: true},
 		{Name: "j", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: jsonMetadata()},
 		{Name: "g", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: geographyMetadata()},
-		{Name: "iv", Type: arrow.FixedWidthTypes.MonthDayNanoInterval, Nullable: true},
+		{Name: "iv", Type: arrow.FixedWidthTypes.MonthDayNanoInterval, Nullable: true, Metadata: intervalMetadata()},
 		{Name: "r", Type: arrow.StructOf(
 			arrow.Field{Name: "start", Type: arrow.FixedWidthTypes.Date32, Nullable: true},
 			arrow.Field{Name: "end", Type: arrow.FixedWidthTypes.Date32, Nullable: true},
-		), Nullable: true},
+		), Nullable: true, Metadata: rangeMetadata()},
 		{Name: "rec", Type: arrow.StructOf(
 			arrow.Field{Name: "x", Type: arrow.BinaryTypes.String, Nullable: true},
 			arrow.Field{Name: "inner", Type: arrow.StructOf(
 				arrow.Field{Name: "z", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
 			), Nullable: true},
 		), Nullable: true},
-		{Name: "arr", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: true},
+		{Name: "arr", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64)},
 		{Name: "recs", Type: arrow.ListOf(arrow.StructOf(
 			arrow.Field{Name: "k", Type: arrow.BinaryTypes.String, Nullable: true},
-		)), Nullable: true},
+		))},
 	}, nil)
 }
 
@@ -329,7 +342,7 @@ func TestRESTWholeTableReadUsesTableDataList(t *testing.T) {
 	assert.Equal(t, arrow.Timestamp(time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC).UnixMicro()), col("dt").(*array.Timestamp).Value(0))
 	assert.Equal(t, arrow.Date32(-1), col("d").(*array.Date32).Value(0))
 	assert.Equal(t, arrow.Time64(45296789012), col("t").(*array.Time64).Value(0))
-	assert.Equal(t, decimal128.FromI64(-123450000000), col("n").(*array.Decimal128).Value(0))
+	assert.Equal(t, decimal128.FromI64(-12345), col("n").(*array.Decimal128).Value(0))
 	bn, ok := new(big.Int).SetString("123456789012345678901234567890123456789", 10)
 	require.True(t, ok)
 	assert.Equal(t, decimal256.FromBigInt(bn), col("bn").(*array.Decimal256).Value(0))

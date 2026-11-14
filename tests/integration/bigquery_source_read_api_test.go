@@ -15,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,15 +37,22 @@ func TestBigQuerySource_RESTReadAPIMatchesStorage(t *testing.T) {
 		c_numeric NUMERIC, c_numeric_p NUMERIC(10, 2), c_bignumeric BIGNUMERIC,
 		c_json JSON, c_geography GEOGRAPHY, c_interval INTERVAL, c_range RANGE<DATE>,
 		c_struct STRUCT<x STRING, nested STRUCT<z FLOAT64>>,
-		c_array ARRAY<INT64>, c_array_struct ARRAY<STRUCT<k STRING>>
+		c_array ARRAY<INT64>, c_array_struct ARRAY<STRUCT<k STRING>>,
+		c_numeric_int NUMERIC(5), c_bignumeric_p BIGNUMERIC(40, 5), c_bignumeric_small BIGNUMERIC(20, 4),
+		c_array_datetime ARRAY<DATETIME>, c_array_json ARRAY<JSON>, c_array_geography ARRAY<GEOGRAPHY>,
+		c_struct_typed STRUCT<dt DATETIME, j JSON, g GEOGRAPHY, iv INTERVAL, n NUMERIC(6, 3), arr ARRAY<DATETIME>>
 	)`, qualified))
 	bqRunQuery(t, ctx, client, fmt.Sprintf(`INSERT INTO %s VALUES
 		(1, TRUE, 1.5, 'héllo', b'\x01\x02\x03',
 		 TIMESTAMP '2023-11-14 22:13:20.123456 UTC', DATETIME '2024-01-02 03:04:05.123456', DATE '1969-12-31', TIME '12:34:56.789012',
 		 NUMERIC '-123.456789012', NUMERIC '12.34', BIGNUMERIC '1.23456789012345678901234567890123456789',
 		 JSON '{"a":1}', ST_GEOGPOINT(1, 2), INTERVAL '1-2 3 4:5:6.789' YEAR TO SECOND, RANGE<DATE> '[2024-01-01, UNBOUNDED)',
-		 STRUCT('x1', STRUCT(2.5)), [1, 2], [STRUCT('k1'), STRUCT(CAST(NULL AS STRING))]),
-		(2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, [], [])`, qualified))
+		 STRUCT('x1', STRUCT(2.5)), [1, 2], [STRUCT('k1'), STRUCT(CAST(NULL AS STRING))],
+		 NUMERIC '12345', BIGNUMERIC '12345678901234567890123456789012345.12345', BIGNUMERIC '1234567890123456.1234',
+		 [DATETIME '2024-01-02 03:04:05.123456'], [JSON '{"b":2}'], [ST_GEOGPOINT(3, 4)],
+		 STRUCT(DATETIME '2024-01-02 03:04:05', JSON '[1]', ST_GEOGPOINT(5, 6), INTERVAL 3 DAY, NUMERIC '123.456', [DATETIME '2024-05-06 07:08:09'])),
+		(2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, [], [],
+		 NULL, NULL, NULL, [], [], [], NULL)`, qualified))
 
 	baseURI := os.Getenv("GONG_TEST_BIGQUERY_URI")
 	tableName := dataset + "." + table
@@ -135,13 +143,30 @@ func requireSameArrowSchema(t *testing.T, want, got *arrow.Schema) {
 	require.NotNil(t, want)
 	require.NotNil(t, got)
 	require.Equal(t, want.NumFields(), got.NumFields(), "want %s\ngot  %s", want, got)
+	ok := true
 	for i := range want.Fields() {
 		w, g := want.Field(i), got.Field(i)
-		require.Equal(t, w.Name, g.Name)
-		require.Truef(t, arrow.TypeEqual(w.Type, g.Type), "column %s: storage %s, rest %s", w.Name, w.Type, g.Type)
-		require.Equal(t, w.Nullable, g.Nullable, "column %s nullability", w.Name)
-		wExt, _ := w.Metadata.GetValue("ARROW:extension:name")
-		gExt, _ := g.Metadata.GetValue("ARROW:extension:name")
-		require.Equal(t, wExt, gExt, "column %s extension name", w.Name)
+		ok = assert.Equal(t, w.Name, g.Name) && ok
+		ok = assert.Truef(t, arrow.TypeEqual(w.Type, g.Type, arrow.CheckMetadata()), "column %s: storage %s, rest %s", w.Name, w.Type, g.Type) && ok
+		ok = assert.Equal(t, w.Nullable, g.Nullable, "column %s nullability", w.Name) && ok
+		ok = assert.Equal(t, w.Metadata.ToMap(), g.Metadata.ToMap(), "column %s metadata", w.Name) && ok
 	}
+	if !ok {
+		t.Logf("storage schema:\n%s\nrest schema:\n%s", describeArrowFields(want.Fields(), ""), describeArrowFields(got.Fields(), ""))
+		t.FailNow()
+	}
+}
+
+func describeArrowFields(fields []arrow.Field, indent string) string {
+	var b strings.Builder
+	for _, f := range fields {
+		fmt.Fprintf(&b, "%s%s: %s nullable=%t metadata=%v\n", indent, f.Name, f.Type, f.Nullable, f.Metadata.ToMap())
+		switch dt := f.Type.(type) {
+		case *arrow.StructType:
+			b.WriteString(describeArrowFields(dt.Fields(), indent+"  "))
+		case *arrow.ListType:
+			b.WriteString(describeArrowFields([]arrow.Field{dt.ElemField()}, indent+"  "))
+		}
+	}
+	return b.String()
 }

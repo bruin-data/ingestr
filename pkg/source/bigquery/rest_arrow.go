@@ -15,12 +15,13 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
-// The Storage Read API tags JSON and GEOGRAPHY string columns with these
-// (unregistered) extension names; REST batches carry the same field metadata.
+// Field metadata the Storage Read API attaches to some BigQuery types; REST
+// batches carry the same so both read paths produce identical schemas.
 const (
-	arrowExtensionNameKey      = "ARROW:extension:name"
-	storageJSONExtensionName   = "google:sqlType:json"
-	storageGeographyExtension  = "google:sqlType:geography"
+	arrowExtensionNameKey     = "ARROW:extension:name"
+	arrowExtensionMetadataKey = "ARROW:extension:metadata"
+	storageSQLTypeKey         = "google:sqlType"
+
 	storageNumericPrecision    = 38
 	storageNumericScale        = 9
 	storageBigNumericPrecision = 76
@@ -28,11 +29,33 @@ const (
 )
 
 var (
-	unixEpochDate         = civil.Date{Year: 1970, Month: time.January, Day: 1}
-	numericScaleFactor    = new(big.Int).Exp(big.NewInt(10), big.NewInt(storageNumericScale), nil)
-	bigNumericScaleFactor = new(big.Int).Exp(big.NewInt(10), big.NewInt(storageBigNumericScale), nil)
-	minInt256             = new(big.Int).Neg(new(big.Int).Lsh(big.NewInt(1), 255))
+	unixEpochDate = civil.Date{Year: 1970, Month: time.January, Day: 1}
+	minInt256     = new(big.Int).Neg(new(big.Int).Lsh(big.NewInt(1), 255))
+	pow10         = func() []*big.Int {
+		out := make([]*big.Int, storageBigNumericPrecision+1)
+		for i := range out {
+			out[i] = new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(i)), nil)
+		}
+		return out
+	}()
 )
+
+func storageFieldMetadata(t bigquery.FieldType) arrow.Metadata {
+	switch t {
+	case bigquery.JSONFieldType:
+		return arrow.NewMetadata([]string{arrowExtensionNameKey}, []string{"google:sqlType:json"})
+	case bigquery.GeographyFieldType:
+		return arrow.NewMetadata([]string{arrowExtensionMetadataKey, arrowExtensionNameKey}, []string{`{"encoding": "WKT"}`, "google:sqlType:geography"})
+	case bigquery.DateTimeFieldType:
+		return arrow.NewMetadata([]string{arrowExtensionNameKey}, []string{"google:sqlType:datetime"})
+	case bigquery.IntervalFieldType:
+		return arrow.NewMetadata([]string{arrowExtensionNameKey}, []string{"google:sqlType:interval"})
+	case bigquery.RangeFieldType:
+		return arrow.NewMetadata([]string{storageSQLTypeKey}, []string{"range"})
+	default:
+		return arrow.Metadata{}
+	}
+}
 
 // restArrowSchema maps a BigQuery schema to the Arrow schema the Storage Read
 // API produces for it, so REST and Storage reads emit identical batches.
@@ -57,14 +80,14 @@ func restArrowField(field *bigquery.FieldSchema) (arrow.Field, error) {
 		dt = arrow.ListOf(dt)
 	}
 
-	af := arrow.Field{Name: field.Name, Type: dt, Nullable: !field.Required}
-	switch field.Type {
-	case bigquery.JSONFieldType:
-		af.Metadata = arrow.NewMetadata([]string{arrowExtensionNameKey}, []string{storageJSONExtensionName})
-	case bigquery.GeographyFieldType:
-		af.Metadata = arrow.NewMetadata([]string{arrowExtensionNameKey}, []string{storageGeographyExtension})
-	}
-	return af, nil
+	// The Storage Read API marks REPEATED columns non-nullable (BigQuery has no
+	// NULL arrays) and puts type metadata on the list field, not its item.
+	return arrow.Field{
+		Name:     field.Name,
+		Type:     dt,
+		Nullable: !field.Required && !field.Repeated,
+		Metadata: storageFieldMetadata(field.Type),
+	}, nil
 }
 
 func restArrowElementType(field *bigquery.FieldSchema) (arrow.DataType, error) {
@@ -88,8 +111,14 @@ func restArrowElementType(field *bigquery.FieldSchema) (arrow.DataType, error) {
 	case bigquery.TimeFieldType:
 		return arrow.FixedWidthTypes.Time64us, nil
 	case bigquery.NumericFieldType:
+		if field.Precision > 0 {
+			return &arrow.Decimal128Type{Precision: int32(field.Precision), Scale: int32(field.Scale)}, nil
+		}
 		return &arrow.Decimal128Type{Precision: storageNumericPrecision, Scale: storageNumericScale}, nil
 	case bigquery.BigNumericFieldType:
+		if field.Precision > 0 {
+			return &arrow.Decimal256Type{Precision: int32(field.Precision), Scale: int32(field.Scale)}, nil
+		}
 		return &arrow.Decimal256Type{Precision: storageBigNumericPrecision, Scale: storageBigNumericScale}, nil
 	case bigquery.IntervalFieldType:
 		return arrow.FixedWidthTypes.MonthDayNanoInterval, nil
@@ -253,7 +282,7 @@ func appendRESTScalar(builder array.Builder, field *bigquery.FieldSchema, value 
 		}
 		b.Append(arrow.Time64(civilTimeMicros(v)))
 	case *array.Decimal128Builder:
-		scaled, err := scaledRat(field, value, numericScaleFactor)
+		scaled, err := scaledRat(field, value, b.Type().(*arrow.Decimal128Type).Scale)
 		if err != nil {
 			return err
 		}
@@ -262,7 +291,7 @@ func appendRESTScalar(builder array.Builder, field *bigquery.FieldSchema, value 
 		}
 		b.Append(decimal128.FromBigInt(scaled))
 	case *array.Decimal256Builder:
-		scaled, err := scaledRat(field, value, bigNumericScaleFactor)
+		scaled, err := scaledRat(field, value, b.Type().(*arrow.Decimal256Type).Scale)
 		if err != nil {
 			return err
 		}
@@ -342,14 +371,17 @@ func civilTimeMicros(t civil.Time) int64 {
 	return d.Microseconds()
 }
 
-// scaledRat returns value*factor, which must be an integer: BigQuery NUMERIC
+// scaledRat returns value*10^scale, which must be an integer: BigQuery NUMERIC
 // and BIGNUMERIC values never have more fractional digits than their scale.
-func scaledRat(field *bigquery.FieldSchema, value bigquery.Value, factor *big.Int) (*big.Int, error) {
+func scaledRat(field *bigquery.FieldSchema, value bigquery.Value, scale int32) (*big.Int, error) {
 	r, ok := value.(*big.Rat)
 	if !ok || r == nil {
 		return nil, unexpectedRESTValue(field, value)
 	}
-	num := new(big.Int).Mul(r.Num(), factor)
+	if scale < 0 || int(scale) >= len(pow10) {
+		return nil, fmt.Errorf("%s scale %d is out of range", field.Type, scale)
+	}
+	num := new(big.Int).Mul(r.Num(), pow10[scale])
 	quo, rem := new(big.Int).QuoRem(num, r.Denom(), new(big.Int))
 	if rem.Sign() != 0 {
 		return nil, fmt.Errorf("%s value %s has more fractional digits than the column scale", field.Type, r.RatString())
