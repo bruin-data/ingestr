@@ -120,6 +120,13 @@ func (a *Auth) parseEndpoint(query url.Values) error {
 	return nil
 }
 
+const localStackDomain = "localhost.localstack.cloud"
+
+func isLocalStackHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == localStackDomain || strings.HasSuffix(host, "."+localStackDomain)
+}
+
 func (a *Auth) resolvePrivateKey() error {
 	if a.PrivateKeyRaw == "" {
 		return nil
@@ -167,6 +174,11 @@ func (a *Auth) ToConfig() *sf.Config {
 		Schema:    a.Schema,
 		Warehouse: a.Warehouse,
 		Role:      a.Role,
+		// gosnowflake v2.2.0 can only skip the OCSP cache server process-wide, so the
+		// LocalStack emulator skips revocation checks per connection instead. Its
+		// certificate names no OCSP responder, so the check never had anything to
+		// verify; it only spent seconds retrying ocsp.<host>:80. TLS verification stays on.
+		DisableOCSPChecks: isLocalStackHost(a.Host),
 	}
 
 	if a.Authenticator != sf.AuthTypeSnowflake {
