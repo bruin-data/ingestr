@@ -283,7 +283,7 @@ func checkParallelSnapshotImports(t *testing.T, ctx context.Context, primaryURI,
 	// Already imported transactions remain valid when a later importer fails.
 	exporter, snapshot = export(t, "_b")
 	tx := importSnapshot(snapshot.SnapshotName)
-	require.NoError(t, exporter.Close(ctx))
+	closePostgresSnapshotExporter(t, ctx, readers, exporter)
 	late, err := readers.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	require.NoError(t, err)
 	defer func() { _ = late.Rollback(context.Background()) }()

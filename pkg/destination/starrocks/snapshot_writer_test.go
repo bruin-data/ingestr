@@ -189,6 +189,7 @@ func TestSnapshotWriterRetriesWholeTransactionAfterVersionPressure(t *testing.T)
 		t.Run(operation, func(t *testing.T) {
 			d, server := newSnapshotTestDestination(t)
 			d.snapshotLimits.requestTarget = 1
+			d.snapshotLimits.retryTimeout = time.Minute
 			if operation == "load" {
 				server.failLoad = 2
 			} else {
@@ -436,6 +437,7 @@ func TestSnapshotWriterSealsWithinPages(t *testing.T) {
 			t.Run(fmt.Sprintf("workers=%d/failLoad=%d", workers, failLoad), func(t *testing.T) {
 				d, server := newSnapshotTestDestination(t)
 				d.snapshotLimits.transactionBytes = 2048
+				d.snapshotLimits.retryTimeout = time.Minute
 				server.failLoad = failLoad
 				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 				records := make(chan source.RecordBatchResult, workers+2)

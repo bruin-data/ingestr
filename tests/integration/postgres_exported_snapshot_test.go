@@ -34,6 +34,20 @@ func exportPostgresTestSnapshot(t *testing.T, ctx context.Context, uri, slot str
 	return conn, created
 }
 
+// closePostgresSnapshotExporter returns once the exporting backend has exited.
+// Closing the client socket does not end the backend synchronously: until it
+// exits, importing its snapshot can still succeed or fail with 55000 instead
+// of the 42704 a vanished snapshot reports.
+func closePostgresSnapshotExporter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, exporter *pgconn.PgConn) {
+	t.Helper()
+	pid := exporter.PID()
+	require.NoError(t, exporter.Close(ctx))
+	require.Eventually(t, func() bool {
+		var alive bool
+		return pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)", pid).Scan(&alive) == nil && !alive
+	}, 30*time.Second, 20*time.Millisecond, "exporting backend %d did not exit", pid)
+}
+
 func requirePostgresSnapshotRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string, expected map[int32]string) {
 	t.Helper()
 	rows, err := pool.Query(ctx, "SELECT id, name FROM "+pqTable("landing", table))
@@ -208,7 +222,7 @@ func TestPostgresExportedSnapshotReadGuards(t *testing.T) {
 		})
 	}
 
-	require.NoError(t, exporter.Close(ctx))
+	closePostgresSnapshotExporter(t, ctx, pool, exporter)
 	cfg.SourceURI = uri + "&snapshot=" + url.QueryEscape(snapshot.SnapshotName)
 	require.ErrorContains(t, pipeline.New(&cfg).Run(ctx), "invalid snapshot identifier")
 	requirePostgresSnapshotRows(t, ctx, pool, "orders", map[int32]string{99: "keep destination"})
