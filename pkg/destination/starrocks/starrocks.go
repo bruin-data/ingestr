@@ -166,9 +166,7 @@ func (d *StarRocksDestination) prepareTable(ctx context.Context, opts destinatio
 	if err != nil {
 		return err
 	}
-	createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", quoteColumn(db))
-	if _, err := d.db.ExecContext(ctx, createDB); err != nil {
-		config.LogFailedQuery(createDB, err)
+	if err := d.ensureDatabase(ctx, db); err != nil {
 		return fmt.Errorf("failed to ensure database %s: %w", db, err)
 	}
 
@@ -453,7 +451,7 @@ func (d *StarRocksDestination) SwapTable(ctx context.Context, opts destination.S
 	}
 	targetDB, targetName := d.tableParts(opts.TargetTable)
 	stageDB, stageName := d.tableParts(opts.StagingTable)
-	if _, err := d.db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+quoteColumn(targetDB)); err != nil {
+	if err := d.ensureDatabase(ctx, targetDB); err != nil {
 		return fmt.Errorf("ensure StarRocks swap database: %w", err)
 	}
 	oldID, exists, err := d.tableID(ctx, targetDB, targetName)
@@ -807,6 +805,26 @@ var _ destination.Destination = (*StarRocksDestination)(nil)
 func rejectBacktickName(db, name string) error {
 	if strings.Contains(db, "`") || strings.Contains(name, "`") {
 		return fmt.Errorf("StarRocks cannot use table %q: database and table names containing a backtick are not supported", db+"."+name)
+	}
+	return nil
+}
+
+// ensureDatabase creates db unless it already exists. StarRocks checks the
+// CREATE DATABASE privilege even for IF NOT EXISTS on an existing database,
+// so a user with grants only on a pre-created database would fail without
+// the lookup.
+func (d *StarRocksDestination) ensureDatabase(ctx context.Context, db string) error {
+	var count int
+	if err := d.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.schemata WHERE SCHEMA_NAME = ?", db).Scan(&count); err != nil {
+		return fmt.Errorf("check if database %s exists: %w", db, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	createDB := "CREATE DATABASE IF NOT EXISTS " + quoteColumn(db)
+	if _, err := d.db.ExecContext(ctx, createDB); err != nil {
+		config.LogFailedQuery(createDB, err)
+		return err
 	}
 	return nil
 }

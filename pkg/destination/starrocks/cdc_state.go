@@ -127,7 +127,7 @@ func (d *StarRocksDestination) PrepareCDCStateTable(ctx context.Context, table s
 		return err
 	}
 	db, _ := d.tableParts(table)
-	if _, err := d.db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+quoteColumn(db)); err != nil {
+	if err := d.ensureDatabase(ctx, db); err != nil {
 		return err
 	}
 	// Duplicate Key tables retain the append-only log without the 128-byte
