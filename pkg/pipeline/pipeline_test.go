@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -4502,6 +4503,15 @@ func TestCanonicalCDCStateURIIgnoresStarRocksConnectionSettings(t *testing.T) {
 	require.Equal(t, base, canonicalCDCStateURI("starrocks://other@sr:9030/analytics?http_port=443&http_scheme=https&replication_num=1&ssl=true"))
 	require.NotEqual(t, base, canonicalCDCStateURI("starrocks://root@sr:9030/other"))
 	require.Contains(t, canonicalCDCStateURI("clickhouse://u@ch:9000/db?http_port=8123"), "http_port=8123")
+}
+
+func TestCanonicalCDCStateURIDropsOracleDescriptorCredentials(t *testing.T) {
+	const descriptor = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))"
+	base := canonicalCDCStateURI("oracle://loader:old@" + descriptor)
+	require.NotContains(t, base, "old")
+	require.Equal(t, base, canonicalCDCStateURI("oracle://loader:rotated@"+descriptor))
+	require.Equal(t, base, canonicalCDCStateURI("oracle://loader:rotated@/?dsn="+url.QueryEscape(descriptor)))
+	require.NotEqual(t, base, canonicalCDCStateURI("oracle://loader:old@"+strings.Replace(descriptor, "ORCLPDB", "OTHER", 1)))
 }
 
 func TestStreamingRefreshPreservesCDCStrategyRestrictions(t *testing.T) {

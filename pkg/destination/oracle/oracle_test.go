@@ -190,6 +190,31 @@ func TestBuildConnStrings(t *testing.T) {
 			},
 		},
 		{
+			name: "inline connect descriptor",
+			uri:  "oracle://user:pass@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name: "inline connect descriptor with Exadata scheme and driver options",
+			uri:  "exadata://user:pass@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))?SSL=false",
+			want: []string{"oracle://user:pass@:0/?SSL=false&connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name: "multi-line connect descriptor",
+			uri:  "oracle://user:pass@(DESCRIPTION=\n  (ADDRESS=\n    (PROTOCOL=TCP)\n    (HOST=db.example.com)\n    (PORT=1521)\n  )\n  (CONNECT_DATA=\n    (SERVICE_NAME=ORCLPDB)\n  )\n)",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%0A++%28ADDRESS%3D%0A++++%28PROTOCOL%3DTCP%29%0A++++%28HOST%3Ddb.example.com%29%0A++++%28PORT%3D1521%29%0A++%29%0A++%28CONNECT_DATA%3D%0A++++%28SERVICE_NAME%3DORCLPDB%29%0A++%29%0A%29"},
+		},
+		{
+			name: "connect descriptor in dsn query parameter",
+			uri:  "oracle://user:pass@/?dsn=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name:    "connect descriptor with host",
+			uri:     "oracle://user:pass@host:1521/?dsn=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29",
+			wantErr: true,
+		},
+		{
 			name:    "invalid scheme",
 			uri:     "postgres://user:pass@host/db",
 			wantErr: true,
