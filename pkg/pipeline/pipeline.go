@@ -19,6 +19,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/display"
 	"github.com/bruin-data/ingestr/internal/metrics"
+	"github.com/bruin-data/ingestr/internal/oracleutil"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/databuffer"
@@ -3239,6 +3240,9 @@ func cdcTableNamingIdentity(cfg *config.IngestConfig) string {
 }
 
 func canonicalCDCStateURI(rawURI string) string {
+	if lifted, err := oracleutil.LiftInlineDescriptor(rawURI); err == nil {
+		rawURI = lifted
+	}
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
 		return rawURI

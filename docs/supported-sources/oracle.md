@@ -21,6 +21,24 @@ URI parameters:
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Oracle dialect [here](https://docs.sqlalchemy.org/en/20/core/engines.html#oracle).
 
+### TNS connect descriptor
+
+When a database is only reachable through a full TNS connect descriptor, put the descriptor where the host would go:
+
+```plaintext
+oracle://user:password@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))
+```
+
+ingestr sends the descriptor to the listener as given, so `ADDRESS_LIST`, `FAILOVER`, `LOAD_BALANCE`, `PROTOCOL=TCPS`, and other descriptor settings are honored. Line breaks and indentation inside the descriptor are allowed. Driver options can follow the descriptor as a query string, e.g. `...)))?SSL VERIFY=false`.
+
+The descriptor can also be passed URL-encoded in the `dsn` query parameter, which is useful when it contains characters such as `&` or `#`:
+
+```plaintext
+oracle://user:password@/?dsn=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29
+```
+
+When a descriptor is used, the listeners and the service name or SID come from the descriptor, so the URI must not also contain a host, port, path, `service_name`, `SID`, or `server`. TNS aliases from `tnsnames.ora` are not supported; use the full descriptor they resolve to.
+
 ### Oracle Exadata destination
 
 Use `exadata` when you want to identify the destination explicitly as Exadata:

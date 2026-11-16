@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/oracleutil"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -82,6 +83,11 @@ func buildConnStrings(uri string) ([]string, error) {
 		normalized = "oracle://" + uri[len("oracle+cx_oracle://"):]
 	}
 
+	normalized, err := oracleutil.LiftInlineDescriptor(normalized)
+	if err != nil {
+		return nil, err
+	}
+
 	u, err := url.Parse(normalized)
 	if err != nil {
 		return nil, err
@@ -90,6 +96,14 @@ func buildConnStrings(uri string) ([]string, error) {
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "oracle" {
 		return nil, fmt.Errorf("unsupported scheme: %s", scheme)
+	}
+
+	connStr, hasDescriptor, err := oracleutil.DescriptorConnString(u)
+	if err != nil {
+		return nil, err
+	}
+	if hasDescriptor {
+		return []string{connStr}, nil
 	}
 
 	host := u.Hostname()

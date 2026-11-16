@@ -63,6 +63,21 @@ func TestBuildConnStrings(t *testing.T) {
 			uri:     "postgres://user:pass@host/db",
 			wantErr: true,
 		},
+		{
+			name: "inline connect descriptor",
+			uri:  "oracle+cx_oracle://user:pass@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name: "connect descriptor in dsn query parameter",
+			uri:  "oracle://user:pass@/?dsn=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name:    "connect descriptor with service name in path",
+			uri:     "oracle://user:pass@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))/ORCL",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
