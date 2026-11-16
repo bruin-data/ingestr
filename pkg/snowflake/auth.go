@@ -174,10 +174,11 @@ func (a *Auth) ToConfig() *sf.Config {
 		Schema:    a.Schema,
 		Warehouse: a.Warehouse,
 		Role:      a.Role,
-		// gosnowflake v2.2.0 can only skip the OCSP cache server process-wide, so the
-		// LocalStack emulator skips revocation checks per connection instead. Its
-		// certificate names no OCSP responder, so the check never had anything to
-		// verify; it only spent seconds retrying ocsp.<host>:80. TLS verification stays on.
+		// OCSP is off by default since gosnowflake v2.3.0, but SF_DISABLE_OCSP_CHECKS=false
+		// opts every connection back in, so the LocalStack emulator still skips revocation
+		// checks per connection. Its certificate names no OCSP responder, so the check never
+		// had anything to verify; it only spent seconds retrying ocsp.<host>:80. TLS
+		// verification stays on.
 		DisableOCSPChecks: isLocalStackHost(a.Host),
 	}
 
