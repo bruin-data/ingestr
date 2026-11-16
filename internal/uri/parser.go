@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/bruin-data/ingestr/internal/oracleutil"
 )
 
 type ParsedURI struct {
@@ -50,11 +52,17 @@ func Parse(rawURI string) (*ParsedURI, error) {
 		}, nil
 	}
 
+	// An Oracle connect descriptor in the host position is not a valid URL
+	// authority; move it into the query before strict parsing.
+	normalizedURI, err := oracleutil.LiftInlineDescriptor(rawURI)
+	if err != nil {
+		return nil, err
+	}
+
 	// The scheme was already extracted above, so parse the rest under a
 	// placeholder: url.Parse rejects scheme characters ingestr allows, such as
 	// the underscore in ps_mysql.
-	normalizedURI := rawURI
-	if parts := strings.SplitN(rawURI, "://", 2); len(parts) == 2 {
+	if parts := strings.SplitN(normalizedURI, "://", 2); len(parts) == 2 {
 		normalizedURI = "scheme://" + parts[1]
 	}
 
