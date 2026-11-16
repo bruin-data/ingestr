@@ -240,6 +240,7 @@ func TestPostgresCDC_ChunkedSnapshotFinite(t *testing.T) {
 				require.Positive(t, checkpoints, "chunked snapshots must persist bootstrap recovery metadata")
 				_, err := f.src.Exec(f.ctx, `UPDATE public.items SET amount = 999 WHERE id = 1; DELETE FROM public.items WHERE id = 12; INSERT INTO public.items VALUES (30, 300, 'after-snapshot')`)
 				require.NoError(t, err)
+				f.waitSlotReleased(t)
 				require.NoError(t, pipeline.New(f.cfg).Run(f.ctx))
 				f.assertRows(t, "public.items", "id, amount, md5(payload)", "id")
 				f.assertSlotCheckpoint(t)
@@ -295,6 +296,17 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 	}
 }
 
+// waitSlotReleased waits for the previous run's walsender to exit: it releases
+// chunk_slot only after the run has returned, and the chunked reader does not
+// wait for the slot before starting replication on it.
+func (f *chunkedCDCFixture) waitSlotReleased(t *testing.T) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var active bool
+		return f.src.QueryRow(f.ctx, `SELECT active FROM pg_replication_slots WHERE slot_name = 'chunk_slot'`).Scan(&active) == nil && !active
+	}, 30*time.Second, 50*time.Millisecond, "chunk_slot is still held by the previous run's walsender")
+}
+
 func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 	t.Parallel()
 	for _, mode := range chunkedSnapshotModes() {
@@ -314,6 +326,7 @@ func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 			require.True(t, slotExists, "interrupted bootstrap must preserve its recovery slot")
 			_, err := f.src.Exec(f.ctx, `UPDATE public.items SET amount = 222 WHERE id = 2; DELETE FROM public.items WHERE id = 11; UPDATE public.items SET id = 0 WHERE id = 10; INSERT INTO public.items VALUES (30, 300, 'during-restart')`)
 			require.NoError(t, err)
+			f.waitSlotReleased(t)
 			require.NoError(t, pipeline.New(f.cfg).Run(f.ctx))
 			f.assertRows(t, "public.items", "id, amount, md5(payload)", "id")
 			var resumedPosition string
@@ -335,6 +348,7 @@ func TestPostgresCDC_ChunkedSnapshotRejectsReplacedDestination(t *testing.T) {
 	close(gate.release)
 	_, err := f.dst.Exec(f.ctx, `DROP TABLE public.items; CREATE TABLE public.items (id bigint PRIMARY KEY, amount bigint, payload text); INSERT INTO public.items VALUES (999, 999, 'external-replacement')`)
 	require.NoError(t, err)
+	f.waitSlotReleased(t)
 	err = pipeline.New(f.cfg).Run(f.ctx)
 	require.Error(t, err)
 	require.Regexp(t, `(?i)(incarnation|identity|replaced|ownership|destination changed)`, err.Error())
