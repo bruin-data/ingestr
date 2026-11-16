@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -315,6 +318,11 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 		expectTargetLockAcquire(mock, "iceberg", "analytics", secondTable, "p1-tok-b")
 		mock.ExpectExec(`CREATE SCHEMA IF NOT EXISTS "iceberg"."_bruin_staging"`).WillReturnResult(sqlmock.NewResult(0, 0))
 
+		stagingCreate := func(kind string, index int, table string) string {
+			return `CREATE TABLE "iceberg"."_bruin_staging"."__ingestr_cdc_` + kind + `_\d+_[0-9a-f]{16}_` +
+				strconv.Itoa(index) + `_` + targetLockDigest("iceberg", "analytics", table) + `"`
+		}
+
 		// Target 0 (t1): incarnation + columns + $refs + backup + shadow + reverify.
 		expectIncarnationLookup(mock, "iceberg", "analytics", "t1", true, trinoIncarnationCommentPrefix+m1)
 		mock.ExpectQuery(`FROM "iceberg".information_schema.columns`).
@@ -322,8 +330,8 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 				AddRow("id", "bigint", "YES").AddRow("_cdc_lsn", "varchar", "YES"))
 		mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t1\$refs"`).
 			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(101)))
-		mock.ExpectExec(`CREATE TABLE "iceberg"."_bruin_staging"."__ingestr_cdc_bak_`).WillReturnResult(sqlmock.NewResult(0, 2))
-		mock.ExpectExec(`CREATE TABLE "iceberg"."_bruin_staging"."__ingestr_cdc_shd_`).WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(stagingCreate("bak", 0, "t1")).WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(stagingCreate("shd", 0, "t1")).WillReturnResult(sqlmock.NewResult(0, 2))
 		expectIncarnationLookup(mock, "iceberg", "analytics", "t1", true, trinoIncarnationCommentPrefix+m1)
 		mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t1\$refs"`).
 			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(101)))
@@ -335,8 +343,8 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 				AddRow("id", "bigint", "YES").AddRow("_cdc_lsn", "varchar", "YES"))
 		mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t2\$refs"`).
 			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(202)))
-		mock.ExpectExec(`CREATE TABLE "iceberg"."_bruin_staging"."__ingestr_cdc_bak_`).WillReturnResult(sqlmock.NewResult(0, 2))
-		mock.ExpectExec(`CREATE TABLE "iceberg"."_bruin_staging"."__ingestr_cdc_shd_`).WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(stagingCreate("bak", 1, "t2")).WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(stagingCreate("shd", 1, "t2")).WillReturnResult(sqlmock.NewResult(0, 2))
 		expectIncarnationLookup(mock, "iceberg", "analytics", "t2", true, trinoIncarnationCommentPrefix+m2)
 		mock.ExpectQuery(`SELECT snapshot_id FROM "iceberg"."analytics"."t2\$refs"`).
 			WillReturnRows(sqlmock.NewRows([]string{"snapshot_id"}).AddRow(int64(202)))
@@ -967,12 +975,23 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("stale Phase-1 orphan bak and shd tables are swept while fresh and journal-referenced tables are kept", func(t *testing.T) {
-		t.Parallel()
-		db, mock, err := sqlmock.New()
+	newRecordingSweepMock := func(t *testing.T) (*TrinoDestination, sqlmock.Sqlmock, func() []string) {
+		t.Helper()
+		// The sweep ignores DROP errors, so a wrong DROP would not fail the test
+		// on its own. Match unordered and record every statement compared
+		// against a pending expectation; tables that must be kept are listed
+		// before the dropped ones so a wrong DROP still meets a pending one.
+		var mu sync.Mutex
+		var seen []string
+		db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+			mu.Lock()
+			seen = append(seen, actual)
+			mu.Unlock()
+			return sqlmock.QueryMatcherRegexp.Match(expected, actual)
+		})))
 		require.NoError(t, err)
-		defer func() { _ = db.Close() }()
-
+		t.Cleanup(func() { _ = db.Close() })
+		mock.MatchExpectationsInOrder(false)
 		d := &TrinoDestination{
 			db:                    db,
 			catalog:               "iceberg",
@@ -980,30 +999,68 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 			atomicRecoveryEnabled: true,
 			atomicOrphanMaxAge:    2 * time.Minute,
 		}
+		return d, mock, func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(seen)
+		}
+	}
+	requireNotDropped := func(t *testing.T, seen []string, tables ...string) {
+		t.Helper()
+		for _, stmt := range seen {
+			for _, kept := range tables {
+				require.NotContainsf(t, stmt, "DROP TABLE IF EXISTS "+qualifyTrinoTable("iceberg", trinoCDCLeaseSchema, kept), "%s must be kept", kept)
+			}
+		}
+	}
+	lockAgeSQL := func(digest string) string {
+		return regexp.QuoteMeta(`FROM "iceberg"."_bruin_staging"."` + trinoCDCTargetLockPrefix + digest + `"`)
+	}
+	dropSQL := func(table string) string {
+		return regexp.QuoteMeta(`DROP TABLE IF EXISTS "iceberg"."_bruin_staging".` + quoteIdentifier(table))
+	}
 
+	t.Run("stale Phase-1 orphan bak and shd tables are swept while fresh, journal-referenced and lock-held tables are kept", func(t *testing.T) {
+		t.Parallel()
+		d, mock, seen := newRecordingSweepMock(t)
+
+		orphanLock := targetLockDigest("iceberg", "analytics", "t1")
+		liveLock := targetLockDigest("iceberg", "analytics", "slow")
+		expiredLock := targetLockDigest("iceberg", "analytics", "crashed")
 		oldMS := time.Now().Add(-10 * time.Minute).UnixMilli()
 		freshMS := time.Now().UnixMilli()
-		orphanBak := formatTrinoAtomicStagingTableName("bak", oldMS, "orphanb", 0)
-		orphanShd := formatTrinoAtomicStagingTableName("shd", oldMS, "orphanb", 0)
-		referencedBak := formatTrinoAtomicStagingTableName("bak", oldMS, "activeb", 0)
-		freshBak := formatTrinoAtomicStagingTableName("bak", freshMS, "freshb", 0)
+		orphanBak := formatTrinoAtomicStagingTableName("bak", oldMS, "orphanb", 0, orphanLock)
+		orphanShd := formatTrinoAtomicStagingTableName("shd", oldMS, "orphanb", 0, orphanLock)
+		referencedBak := formatTrinoAtomicStagingTableName("bak", oldMS, "activeb", 0, orphanLock)
+		freshBak := formatTrinoAtomicStagingTableName("bak", freshMS, "freshb", 0, orphanLock)
+		slowBak := formatTrinoAtomicStagingTableName("bak", oldMS, "slowb", 0, liveLock)
+		slowShd := formatTrinoAtomicStagingTableName("shd", oldMS, "slowb", 0, liveLock)
+		crashedShd := formatTrinoAtomicStagingTableName("shd", oldMS, "crashedb", 1, expiredLock)
 
 		mock.ExpectQuery(`SELECT DISTINCT "batch_id" FROM "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).
 			WillReturnRows(sqlmock.NewRows([]string{"batch_id"}))
 		mock.ExpectQuery(`SELECT table_name FROM "iceberg".information_schema.tables`).
 			WillReturnRows(sqlmock.NewRows([]string{"table_name"}).
-				AddRow(orphanBak).
-				AddRow(orphanShd).
+				AddRow(slowBak).
+				AddRow(slowShd).
 				AddRow(referencedBak).
 				AddRow(freshBak).
+				AddRow(orphanBak).
+				AddRow(orphanShd).
+				AddRow(crashedShd).
 				AddRow("__ingestr_cdc_bak_legacy_no_ts"))
 		mock.ExpectQuery(`SELECT DISTINCT lower\("batch_id"\) FROM "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).
 			WillReturnRows(sqlmock.NewRows([]string{"batch_id"}).AddRow("activeb"))
 
-		mock.ExpectExec(regexp.QuoteMeta(`DROP TABLE IF EXISTS "iceberg"."_bruin_staging".` + quoteIdentifier(orphanBak))).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(regexp.QuoteMeta(`DROP TABLE IF EXISTS "iceberg"."_bruin_staging".` + quoteIdentifier(orphanShd))).
-			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(lockAgeSQL(liveLock)).
+			WillReturnRows(sqlmock.NewRows([]string{"age"}).AddRow(int64(4)))
+		mock.ExpectQuery(lockAgeSQL(orphanLock)).
+			WillReturnError(errors.New("Table 'iceberg._bruin_staging." + trinoCDCTargetLockPrefix + orphanLock + "' does not exist"))
+		mock.ExpectExec(dropSQL(orphanBak)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(dropSQL(orphanShd)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(lockAgeSQL(expiredLock)).
+			WillReturnRows(sqlmock.NewRows([]string{"age"}).AddRow(int64(31)))
+		mock.ExpectExec(dropSQL(crashedShd)).WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectQuery(`FROM "iceberg".information_schema.columns`).
 			WillReturnRows(sqlmock.NewRows([]string{"column_name", "data_type", "is_nullable"}))
 
@@ -1011,34 +1068,74 @@ func TestMergeCDCTablesAtomically_Unit(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, gotSchema)
 		require.NoError(t, mock.ExpectationsWereMet())
+		requireNotDropped(t, seen(), referencedBak, freshBak, slowBak, slowShd)
+	})
+
+	t.Run("orphan sweep keeps tables whose target lock cannot be checked", func(t *testing.T) {
+		t.Parallel()
+		d, mock, seen := newRecordingSweepMock(t)
+
+		oldMS := time.Now().Add(-10 * time.Minute).UnixMilli()
+		uncheckedLock := targetLockDigest("iceberg", "analytics", "t1")
+		orphanLock := targetLockDigest("iceberg", "analytics", "t2")
+		uncheckedBak := formatTrinoAtomicStagingTableName("bak", oldMS, "b1", 0, uncheckedLock)
+		orphanBak := formatTrinoAtomicStagingTableName("bak", oldMS, "b2", 0, orphanLock)
+
+		mock.ExpectQuery(`SELECT DISTINCT "batch_id" FROM "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).
+			WillReturnRows(sqlmock.NewRows([]string{"batch_id"}))
+		mock.ExpectQuery(`SELECT table_name FROM "iceberg".information_schema.tables`).
+			WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow(uncheckedBak).AddRow(orphanBak))
+		mock.ExpectQuery(`SELECT DISTINCT lower\("batch_id"\) FROM "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).
+			WillReturnRows(sqlmock.NewRows([]string{"batch_id"}))
+		mock.ExpectQuery(lockAgeSQL(uncheckedLock)).
+			WillReturnError(errors.New("Query exceeded maximum time limit"))
+		mock.ExpectQuery(lockAgeSQL(orphanLock)).
+			WillReturnError(errors.New("Table 'iceberg._bruin_staging." + trinoCDCTargetLockPrefix + orphanLock + "' does not exist"))
+		mock.ExpectExec(dropSQL(orphanBak)).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(`FROM "iceberg".information_schema.columns`).
+			WillReturnRows(sqlmock.NewRows([]string{"column_name", "data_type", "is_nullable"}))
+
+		_, err := d.GetTableSchema(t.Context(), "analytics.t1")
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+		requireNotDropped(t, seen(), uncheckedBak)
 	})
 }
 
 func TestParseTrinoAtomicStagingTableName(t *testing.T) {
 	t.Parallel()
 
-	bak := formatTrinoAtomicStagingTableName("bak", 1700000000123, "AbCdEf01", 2)
-	ms, batchID, ok := parseTrinoAtomicStagingTableName(bak)
+	lock := targetLockDigest("iceberg", "analytics", "t1")
+	bak := formatTrinoAtomicStagingTableName("bak", 1700000000123, "AbCdEf01", 2, lock)
+	ms, batchID, lockDigest, ok := parseTrinoAtomicStagingTableName(bak)
 	require.True(t, ok)
 	require.Equal(t, int64(1700000000123), ms)
 	require.Equal(t, "abcdef01", batchID)
+	require.Equal(t, lock, lockDigest)
 
-	shd := formatTrinoAtomicStagingTableName("shd", 1700000000999, "11223344", 0)
-	ms, batchID, ok = parseTrinoAtomicStagingTableName(shd)
+	shd := formatTrinoAtomicStagingTableName("shd", 1700000000999, "11223344", 0, lock)
+	ms, batchID, lockDigest, ok = parseTrinoAtomicStagingTableName(shd)
 	require.True(t, ok)
 	require.Equal(t, int64(1700000000999), ms)
 	require.Equal(t, "11223344", batchID)
+	require.Equal(t, lock, lockDigest)
+
+	longest := formatTrinoAtomicStagingTableName("bak", time.Now().UnixMilli(), strings.Repeat("f", 16), 999, lock)
+	require.LessOrEqual(t, len(longest), 128)
 
 	for _, invalid := range []string{
 		"",
 		"__ingestr_cdc_batch_journal",
 		"__ingestr_cdc_bak_legacy_0",
-		"__ingestr_cdc_bak_notanumber_abc_0",
-		"__ingestr_cdc_bak_0_abc_0",
-		"__ingestr_cdc_bak_1700000000123__0",
-		"__ingestr_cdc_bak_1700000000123_abc_notidx",
+		"__ingestr_cdc_bak_1700000000123_abc_0",
+		"__ingestr_cdc_bak_notanumber_abc_0_" + lock,
+		"__ingestr_cdc_bak_0_abc_0_" + lock,
+		"__ingestr_cdc_bak_1700000000123__0_" + lock,
+		"__ingestr_cdc_bak_1700000000123_abc_notidx_" + lock,
+		"__ingestr_cdc_bak_1700000000123_abc_0_" + lock[:62],
+		"__ingestr_cdc_bak_1700000000123_abc_0_" + strings.Repeat("z", 64),
 	} {
-		_, _, ok := parseTrinoAtomicStagingTableName(invalid)
+		_, _, _, ok := parseTrinoAtomicStagingTableName(invalid)
 		require.Falsef(t, ok, "expected %q to be rejected", invalid)
 	}
 }

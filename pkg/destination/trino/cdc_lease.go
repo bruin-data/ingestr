@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	trinoCDCLeaseSchema     = "_bruin_staging"
-	trinoCDCLeaseTTL        = 30 * time.Second
-	trinoCDCLeaseHeartbeat  = 10 * time.Second
-	trinoCDCLeaseCheck      = 2 * time.Second
-	trinoCDCLeasePoll       = 2 * time.Second
-	trinoCDCTargetLockPoll  = 200 * time.Millisecond
-	trinoCDCTargetLockLabel = "target lock"
+	trinoCDCLeaseSchema      = "_bruin_staging"
+	trinoCDCLeaseTTL         = 30 * time.Second
+	trinoCDCLeaseHeartbeat   = 10 * time.Second
+	trinoCDCLeaseCheck       = 2 * time.Second
+	trinoCDCLeasePoll        = 2 * time.Second
+	trinoCDCTargetLockPoll   = 200 * time.Millisecond
+	trinoCDCTargetLockLabel  = "target lock"
+	trinoCDCTargetLockPrefix = "cdc_tlock_"
 )
 
 type trinoCDCRunLease struct {
@@ -165,7 +166,7 @@ func (d *TrinoDestination) acquireCDCTargetLocksWithTimings(
 		leaseIface, err := d.acquireTrinoTableLease(
 			ctx,
 			spec.catalog,
-			"cdc_tlock_"+destination.CDCTargetKeyDigest(spec.canonicalKey),
+			trinoCDCTargetLockPrefix+destination.CDCTargetKeyDigest(spec.canonicalKey),
 			trinoCDCTargetLockLabel,
 			true,
 			fmt.Sprintf("another operation is mutating Trino target %s", spec.table),
@@ -192,6 +193,26 @@ func (d *TrinoDestination) acquireCDCTargetLocksWithTimings(
 		return nil
 	}
 	return releaseAll, verifyHeld, nil
+}
+
+// isTrinoCDCTargetLockLive reports whether some run is still renewing the
+// target lock with this digest. Unexpected errors count as live so callers
+// never act on a lock they could not inspect.
+func (d *TrinoDestination) isTrinoCDCTargetLockLive(ctx context.Context, catalog, lockDigest string) bool {
+	query := fmt.Sprintf(
+		`SELECT CAST(date_diff('second', MAX(%s), CURRENT_TIMESTAMP) AS BIGINT) FROM %s`,
+		quoteIdentifier("heartbeat"),
+		qualifyTrinoTable(catalog, trinoCDCLeaseSchema, trinoCDCTargetLockPrefix+lockDigest),
+	)
+	var ageSeconds sql.NullInt64
+	if err := d.db.QueryRowContext(ctx, query).Scan(&ageSeconds); err != nil {
+		if isTrinoMissingObject(err) {
+			return false
+		}
+		config.Debug("[TRINO] Could not check CDC target lock %s: %v", lockDigest, err)
+		return true
+	}
+	return ageSeconds.Valid && ageSeconds.Int64 <= int64(trinoCDCLeaseTTL.Seconds())
 }
 
 func (d *TrinoDestination) acquireTrinoTableLease(

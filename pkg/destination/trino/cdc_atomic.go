@@ -3,6 +3,7 @@ package trino
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -339,12 +340,13 @@ func (d *TrinoDestination) MergeCDCTablesAtomically(ctx context.Context, merges 
 		if markerErr != nil {
 			return markerErr
 		}
-		plan.backupName = formatTrinoAtomicStagingTableName("bak", createdAtMS, batchID, plan.index)
+		lockDigest := destination.CDCTargetKeyDigest(plan.canonicalKey)
+		plan.backupName = formatTrinoAtomicStagingTableName("bak", createdAtMS, batchID, plan.index, lockDigest)
 		plan.backupFQN = qualifyTrinoTable(batchCatalog, trinoCDCLeaseSchema, plan.backupName)
 		plan.backupMarker = backupMarker
 		plan.backupPred = trinoIncarnationExistsPredicate(batchCatalog, trinoCDCLeaseSchema, plan.backupName, backupMarker)
 
-		plan.shadowName = formatTrinoAtomicStagingTableName("shd", createdAtMS, batchID, plan.index)
+		plan.shadowName = formatTrinoAtomicStagingTableName("shd", createdAtMS, batchID, plan.index, lockDigest)
 		plan.shadowFQN = qualifyTrinoTable(batchCatalog, trinoCDCLeaseSchema, plan.shadowName)
 		plan.shadowMarker = shadowMarker
 		plan.shadowPred = trinoIncarnationExistsPredicate(batchCatalog, trinoCDCLeaseSchema, plan.shadowName, shadowMarker)
@@ -679,11 +681,13 @@ func isIndeterminateTrinoPublishError(ctx context.Context, err error) bool {
 		strings.Contains(msg, "client.timeout")
 }
 
-func formatTrinoAtomicStagingTableName(kind string, createdAtMS int64, batchID string, index int) string {
-	return fmt.Sprintf("%s%s_%d_%s_%d", trinoCDCInternalTablePrefix, kind, createdAtMS, batchID, index)
+// Staging names carry the target-lock digest so the orphan sweep can tell a
+// slow live batch (lock still renewed) from an abandoned one.
+func formatTrinoAtomicStagingTableName(kind string, createdAtMS int64, batchID string, index int, lockDigest string) string {
+	return fmt.Sprintf("%s%s_%d_%s_%d_%s", trinoCDCInternalTablePrefix, kind, createdAtMS, batchID, index, lockDigest)
 }
 
-func parseTrinoAtomicStagingTableName(name string) (createdAtMS int64, batchID string, ok bool) {
+func parseTrinoAtomicStagingTableName(name string) (createdAtMS int64, batchID, lockDigest string, ok bool) {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	var rest string
 	switch {
@@ -692,20 +696,23 @@ func parseTrinoAtomicStagingTableName(name string) (createdAtMS int64, batchID s
 	case strings.HasPrefix(lower, trinoCDCInternalTablePrefix+"shd_"):
 		rest = lower[len(trinoCDCInternalTablePrefix+"shd_"):]
 	default:
-		return 0, "", false
+		return 0, "", "", false
 	}
 	parts := strings.Split(rest, "_")
-	if len(parts) != 3 || parts[1] == "" {
-		return 0, "", false
+	if len(parts) != 4 || parts[1] == "" {
+		return 0, "", "", false
 	}
 	ms, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil || ms <= 0 {
-		return 0, "", false
+		return 0, "", "", false
 	}
 	if _, err := strconv.Atoi(parts[2]); err != nil {
-		return 0, "", false
+		return 0, "", "", false
 	}
-	return ms, parts[1], true
+	if digest, err := hex.DecodeString(parts[3]); err != nil || len(digest) != sha256.Size {
+		return 0, "", "", false
+	}
+	return ms, parts[1], parts[3], true
 }
 
 func (d *TrinoDestination) verifyAtomicPlanUnchanged(ctx context.Context, plan *trinoAtomicTargetPlan) error {
@@ -1114,8 +1121,9 @@ func (d *TrinoDestination) sweepStaleOrphanAtomicStagingTables(ctx context.Conte
 		return fmt.Errorf("list Trino CDC atomic staging tables in %s: %w", batchCatalog, err)
 	}
 	type staleCandidate struct {
-		tableName string
-		batchID   string
+		tableName  string
+		batchID    string
+		lockDigest string
 	}
 	maxAge := d.effectiveAtomicOrphanMaxAge()
 	nowMS := time.Now().UnixMilli()
@@ -1126,12 +1134,12 @@ func (d *TrinoDestination) sweepStaleOrphanAtomicStagingTables(ctx context.Conte
 			_ = rows.Close()
 			return fmt.Errorf("scan Trino CDC atomic staging table name: %w", scanErr)
 		}
-		createdAtMS, batchID, ok := parseTrinoAtomicStagingTableName(name)
+		createdAtMS, batchID, lockDigest, ok := parseTrinoAtomicStagingTableName(name)
 		if !ok {
 			continue
 		}
 		if nowMS-createdAtMS > maxAge.Milliseconds() {
-			candidates = append(candidates, staleCandidate{tableName: name, batchID: batchID})
+			candidates = append(candidates, staleCandidate{tableName: name, batchID: batchID, lockDigest: lockDigest})
 		}
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
@@ -1168,10 +1176,21 @@ func (d *TrinoDestination) sweepStaleOrphanAtomicStagingTables(ctx context.Conte
 		_ = jRows.Close()
 	}
 
+	// A batch holds its target locks from before Phase 1 until after it drops
+	// its own tables, so a live lock means the batch may still be running.
+	lockLive := make(map[string]bool)
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	for _, cand := range candidates {
 		if _, referenced := journalBatches[cand.batchID]; referenced {
+			continue
+		}
+		live, checked := lockLive[cand.lockDigest]
+		if !checked {
+			live = d.isTrinoCDCTargetLockLive(ctx, batchCatalog, cand.lockDigest)
+			lockLive[cand.lockDigest] = live
+		}
+		if live {
 			continue
 		}
 		_, _ = d.db.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS "+qualifyTrinoTable(batchCatalog, trinoCDCLeaseSchema, cand.tableName))

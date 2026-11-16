@@ -1104,12 +1104,14 @@ func TestTrinoCDCIntegration(t *testing.T) {
 		bakMarker, err := generateTrinoIncarnationMarker()
 		require.NoError(t, err)
 		crashMS := time.Now().UnixMilli()
-		bakName0 := formatTrinoAtomicStagingTableName("bak", crashMS, "crashtest", 0)
+		lockT1 := targetLockDigest("iceberg", "cdc_it", "atomic_t1")
+		lockT2 := targetLockDigest("iceberg", "cdc_it", "atomic_t2")
+		bakName0 := formatTrinoAtomicStagingTableName("bak", crashMS, "crashtest", 0, lockT1)
 		bakFQN0 := qualifyTrinoTable("iceberg", trinoCDCLeaseSchema, bakName0)
-		bakName1 := formatTrinoAtomicStagingTableName("bak", crashMS, "crashtest", 1)
+		bakName1 := formatTrinoAtomicStagingTableName("bak", crashMS, "crashtest", 1, lockT2)
 		bakFQN1 := qualifyTrinoTable("iceberg", trinoCDCLeaseSchema, bakName1)
-		shdName0 := formatTrinoAtomicStagingTableName("shd", crashMS, "crashtest", 0)
-		shdName1 := formatTrinoAtomicStagingTableName("shd", crashMS, "crashtest", 1)
+		shdName0 := formatTrinoAtomicStagingTableName("shd", crashMS, "crashtest", 0, lockT1)
+		shdName1 := formatTrinoAtomicStagingTableName("shd", crashMS, "crashtest", 1, lockT2)
 
 		require.NoError(t, dest.Exec(ctx, buildCreateTableFromStagingSQL(
 			bakFQN0,
@@ -1227,36 +1229,43 @@ func TestTrinoCDCIntegration(t *testing.T) {
 		require.NoError(t, dest.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM "iceberg"."_bruin_staging"."__ingestr_cdc_batch_journal"`).Scan(&journalRemaining))
 		require.Zero(t, journalRemaining)
 
-		// 4c) Stale unreferenced Phase-1 orphan bak_/shd_ tables are swept on entrypoint while fresh tables are preserved!
+		// 4c) Stale unreferenced Phase-1 orphan bak_/shd_ tables are swept on entrypoint while fresh tables and tables whose target lock is still held are preserved!
 		oldOrphanMS := time.Now().Add(-10 * time.Minute).UnixMilli()
 		freshOrphanMS := time.Now().UnixMilli()
-		staleOrphanBak := formatTrinoAtomicStagingTableName("bak", oldOrphanMS, "orphanp1", 0)
-		staleOrphanShd := formatTrinoAtomicStagingTableName("shd", oldOrphanMS, "orphanp1", 0)
-		freshOrphanBak := formatTrinoAtomicStagingTableName("bak", freshOrphanMS, "freshp1", 0)
+		staleOrphanBak := formatTrinoAtomicStagingTableName("bak", oldOrphanMS, "orphanp1", 0, lockT1)
+		staleOrphanShd := formatTrinoAtomicStagingTableName("shd", oldOrphanMS, "orphanp1", 0, lockT1)
+		freshOrphanBak := formatTrinoAtomicStagingTableName("bak", freshOrphanMS, "freshp1", 0, lockT1)
+		slowLiveBak := formatTrinoAtomicStagingTableName("bak", oldOrphanMS, "slowp1", 0, lockT2)
 
-		for _, orphanTbl := range []string{staleOrphanBak, staleOrphanShd, freshOrphanBak} {
+		releaseSlowLock, _, err := dest.acquireCDCTargetLocks(ctx, t2)
+		require.NoError(t, err)
+		for _, orphanTbl := range []string{staleOrphanBak, staleOrphanShd, freshOrphanBak, slowLiveBak} {
 			orphanFQN := qualifyTrinoTable("iceberg", trinoCDCLeaseSchema, orphanTbl)
 			require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s AS SELECT CAST(1 AS BIGINT) AS id`, orphanFQN)))
 		}
 		_, err = dest2.GetTableSchema(ctx, t1)
 		require.NoError(t, err)
 
-		var staleRemaining, freshRemaining int
-		require.NoError(t, dest.db.QueryRowContext(
-			ctx,
-			fmt.Sprintf(
-				`SELECT
-					COUNT(*) FILTER (WHERE lower(table_name) IN (lower(%s), lower(%s))),
-					COUNT(*) FILTER (WHERE lower(table_name) = lower(%s))
-				FROM "iceberg".information_schema.tables
-				WHERE lower(table_schema) = lower('_bruin_staging')`,
-				escapeString(staleOrphanBak),
-				escapeString(staleOrphanShd),
-				escapeString(freshOrphanBak),
-			),
-		).Scan(&staleRemaining, &freshRemaining))
-		require.Zero(t, staleRemaining, "stale Phase-1 orphan bak_/shd_ tables must be swept")
-		require.Equal(t, 1, freshRemaining, "fresh bak_ table must not be swept prematurely")
+		countStaging := func(name string) int {
+			var n int
+			require.NoError(t, dest.db.QueryRowContext(
+				ctx,
+				fmt.Sprintf(
+					`SELECT COUNT(*) FROM "iceberg".information_schema.tables
+					WHERE lower(table_schema) = lower('_bruin_staging') AND lower(table_name) = lower(%s)`,
+					escapeString(name),
+				),
+			).Scan(&n))
+			return n
+		}
+		require.Zero(t, countStaging(staleOrphanBak)+countStaging(staleOrphanShd), "stale Phase-1 orphan bak_/shd_ tables must be swept")
+		require.Equal(t, 1, countStaging(freshOrphanBak), "fresh bak_ table must not be swept prematurely")
+		require.Equal(t, 1, countStaging(slowLiveBak), "a slow batch's bak_ table must survive while its target lock is held")
+
+		require.NoError(t, releaseSlowLock())
+		_, err = dest2.GetTableSchema(ctx, t1)
+		require.NoError(t, err)
+		require.Zero(t, countStaging(slowLiveBak), "once its target lock is released the abandoned bak_ table must be swept")
 		require.NoError(t, dest.Exec(ctx, "DROP TABLE IF EXISTS "+qualifyTrinoTable("iceberg", trinoCDCLeaseSchema, freshOrphanBak)))
 
 		// 5) Outside replacement of t1 during mid-publish rollback is NEVER overwritten!

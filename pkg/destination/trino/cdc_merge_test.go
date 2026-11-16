@@ -324,9 +324,13 @@ func deterministicTokenGen(tokens ...string) func() (string, error) {
 	}
 }
 
-func targetLockTableName(catalog, schemaName, tableName string) string {
+func targetLockDigest(catalog, schemaName, tableName string) string {
 	key := destination.CDCTargetKey(strings.ToLower(catalog), strings.ToLower(schemaName), strings.ToLower(tableName))
-	return "cdc_tlock_" + destination.CDCTargetKeyDigest(key)
+	return destination.CDCTargetKeyDigest(key)
+}
+
+func targetLockTableName(catalog, schemaName, tableName string) string {
+	return trinoCDCTargetLockPrefix + targetLockDigest(catalog, schemaName, tableName)
 }
 
 func expectTargetLockAcquire(mock sqlmock.Sqlmock, catalog, schemaName, tableName, token string) {
