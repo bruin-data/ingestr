@@ -16,4 +16,4 @@ columns:
     type: varchar
     checks:
       - name: accepted_values
-        value: ["Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island", "EWR", "Unknown", "N/A"]
+        value: ["Bronx", "Brooklyn", "Queens", "Staten Island", "EWR", "Unknown", "N/A"]
