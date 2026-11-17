@@ -1,0 +1,8 @@
+name: bronze.weather
+type: ingestr
+description: Daily Central Park weather for January 2024 from the Open-Meteo archive API (one JSON document).
+parameters:
+  source_connection: nyc-weather-2024-01
+  source_table: weather
+  file_type: json
+  destination: snowflake

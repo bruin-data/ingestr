@@ -1,0 +1,7 @@
+name: bronze.taxi_trips
+type: ingestr
+description: NYC green taxi trips for January 2024 (public TLC Parquet file, ~56k rows).
+parameters:
+  source_connection: nyc-taxi-trips-2024-01
+  source_table: taxi_trips
+  destination: snowflake

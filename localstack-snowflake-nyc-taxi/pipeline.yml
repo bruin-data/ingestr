@@ -1,0 +1,6 @@
+name: localstack-snowflake-nyc-taxi
+schedule: daily
+start_date: "2024-01-01"
+catchup: false
+default_connections:
+  snowflake: snowflake-localstack-demo

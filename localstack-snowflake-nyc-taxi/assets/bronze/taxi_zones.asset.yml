@@ -1,0 +1,19 @@
+name: bronze.taxi_zones
+type: ingestr
+description: TLC taxi zone lookup (265 zones with their borough), a public CSV.
+parameters:
+  source_connection: nyc-taxi-zones
+  source_table: taxi_zones
+  destination: snowflake
+columns:
+  - name: location_id
+    type: varchar
+    primary_key: true
+    checks:
+      - name: not_null
+      - name: unique
+  - name: borough
+    type: varchar
+    checks:
+      - name: accepted_values
+        value: ["Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island", "EWR", "Unknown", "N/A"]

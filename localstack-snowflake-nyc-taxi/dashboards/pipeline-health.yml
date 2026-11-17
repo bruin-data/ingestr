@@ -1,0 +1,122 @@
+name: NYC Taxi Pipeline Health
+description: How the localstack-snowflake-nyc-taxi pipeline is doing. Rows in each medallion layer, its 20 quality checks and when its tables were last rebuilt in the LocalStack Snowflake emulator.
+connection: snowflake-localstack-demo
+
+rows:
+  - widgets:
+      - name: Bronze rows
+        type: metric
+        col: 2
+        description: "Raw loads from the three URLs: taxi_trips 56,551 + taxi_zones 265 + weather 1."
+        sql: |
+          SELECT (SELECT COUNT(*) FROM bronze.taxi_trips) + (SELECT COUNT(*) FROM bronze.taxi_zones) + (SELECT COUNT(*) FROM bronze.weather) AS "value"
+        value: { field: value, type: number, format: ",.0f" }
+
+      - name: Silver rows
+        type: metric
+        col: 2
+        description: Cleaned trips (silver.trips) after dropping trips outside January, longer than 6 hours or with negative totals.
+        sql: |
+          SELECT (SELECT COUNT(*) FROM silver.trips) AS "value"
+        value: { field: value, type: number, format: ",.0f" }
+
+      - name: Gold rows
+        type: metric
+        col: 2
+        description: "Dashboard tables: daily_trips 31 + trips_by_weather 3 + payment_summary 5."
+        sql: |
+          SELECT (SELECT COUNT(*) FROM gold.daily_trips) + (SELECT COUNT(*) FROM gold.trips_by_weather) + (SELECT COUNT(*) FROM gold.payment_summary) AS "value"
+        value: { field: value, type: number, format: ",.0f" }
+
+      - name: Quality checks passing
+        type: metric
+        col: 3
+        description: The pipeline's 20 Bruin checks, re-run here as SQL against the current tables.
+        sql: |
+          WITH c AS (
+            SELECT 'bronze.taxi_zones' AS "asset", 'location_id not_null' AS "check", COUNT_IF(location_id IS NULL) = 0 AS "ok" FROM bronze.taxi_zones
+            UNION ALL SELECT 'bronze.taxi_zones', 'location_id unique', COUNT(location_id) = COUNT(DISTINCT location_id) FROM bronze.taxi_zones
+            UNION ALL SELECT 'bronze.taxi_zones', 'borough accepted_values', COUNT_IF(borough NOT IN ('Bronx', 'Brooklyn', 'Manhattan', 'Queens', 'Staten Island', 'EWR', 'Unknown', 'N/A')) = 0 FROM bronze.taxi_zones
+            UNION ALL SELECT 'silver.trips', 'pickup_at not_null', COUNT_IF(pickup_at IS NULL) = 0 FROM silver.trips
+            UNION ALL SELECT 'silver.trips', 'trip_minutes non_negative', COUNT_IF(trip_minutes < 0) = 0 FROM silver.trips
+            UNION ALL SELECT 'silver.trips', 'total_amount non_negative', COUNT_IF(total_amount < 0) = 0 FROM silver.trips
+            UNION ALL SELECT 'silver.trips', 'payment_type accepted_values', COUNT_IF(payment_type NOT IN ('flex_fare', 'credit_card', 'cash', 'no_charge', 'dispute', 'unknown', 'voided_trip')) = 0 FROM silver.trips
+            UNION ALL SELECT 'silver.trips', 'no trip is longer than 6 hours', COUNT_IF(trip_minutes > 360) = 0 FROM silver.trips
+            UNION ALL SELECT 'gold.daily_trips', 'day not_null', COUNT_IF(day IS NULL) = 0 FROM gold.daily_trips
+            UNION ALL SELECT 'gold.daily_trips', 'day unique', COUNT(day) = COUNT(DISTINCT day) FROM gold.daily_trips
+            UNION ALL SELECT 'gold.daily_trips', 'trips positive', COUNT_IF(trips <= 0) = 0 FROM gold.daily_trips
+            UNION ALL SELECT 'gold.daily_trips', 'weather not_null', COUNT_IF(weather IS NULL) = 0 FROM gold.daily_trips
+            UNION ALL SELECT 'gold.daily_trips', 'weather accepted_values', COUNT_IF(weather NOT IN ('dry', 'rain', 'snow')) = 0 FROM gold.daily_trips
+            UNION ALL SELECT 'gold.daily_trips', 'has all 31 days of January', COUNT(*) = 31 FROM gold.daily_trips
+            UNION ALL SELECT 'gold.trips_by_weather', 'weather unique', COUNT(weather) = COUNT(DISTINCT weather) FROM gold.trips_by_weather
+            UNION ALL SELECT 'gold.payment_summary', 'payment_type not_null', COUNT_IF(payment_type IS NULL) = 0 FROM gold.payment_summary
+            UNION ALL SELECT 'gold.payment_summary', 'payment_type unique', COUNT(payment_type) = COUNT(DISTINCT payment_type) FROM gold.payment_summary
+            UNION ALL SELECT 'gold.payment_summary', 'trips positive', COUNT_IF(trips <= 0) = 0 FROM gold.payment_summary
+            UNION ALL SELECT 'gold.payment_summary', 'tip_pct_of_fare non_negative', COUNT_IF(tip_pct_of_fare < 0) = 0 FROM gold.payment_summary
+            UNION ALL SELECT 'gold.payment_summary', 'trips add up to silver.trips', (SELECT SUM(trips) FROM gold.payment_summary) = (SELECT COUNT(*) FROM silver.trips)
+          )
+          SELECT COUNT_IF("ok") || ' / ' || COUNT(*) AS "value" FROM c
+        value: { field: value, type: category }
+
+      - name: Last run (UTC)
+        type: metric
+        col: 3
+        description: When the last pipeline table was rebuilt, from Snowflake's information_schema.
+        sql: |
+          SELECT TO_VARCHAR(CONVERT_TIMEZONE('UTC', MAX(last_altered)), 'Mon DD, HH24:MI') AS "value"
+          FROM information_schema.tables
+          WHERE table_schema IN ('BRONZE', 'SILVER', 'GOLD')
+        value: { field: value, type: category }
+
+  - widgets:
+      - name: Pipeline Details
+        type: tabs
+        col: 12
+        tabs:
+          - name: Quality Checks
+            type: table
+            sql: |
+              SELECT 'bronze.taxi_zones' AS "asset", 'location_id not_null' AS "check", COUNT_IF(location_id IS NULL) = 0 AS "ok" FROM bronze.taxi_zones
+              UNION ALL SELECT 'bronze.taxi_zones', 'location_id unique', COUNT(location_id) = COUNT(DISTINCT location_id) FROM bronze.taxi_zones
+              UNION ALL SELECT 'bronze.taxi_zones', 'borough accepted_values', COUNT_IF(borough NOT IN ('Bronx', 'Brooklyn', 'Manhattan', 'Queens', 'Staten Island', 'EWR', 'Unknown', 'N/A')) = 0 FROM bronze.taxi_zones
+              UNION ALL SELECT 'silver.trips', 'pickup_at not_null', COUNT_IF(pickup_at IS NULL) = 0 FROM silver.trips
+              UNION ALL SELECT 'silver.trips', 'trip_minutes non_negative', COUNT_IF(trip_minutes < 0) = 0 FROM silver.trips
+              UNION ALL SELECT 'silver.trips', 'total_amount non_negative', COUNT_IF(total_amount < 0) = 0 FROM silver.trips
+              UNION ALL SELECT 'silver.trips', 'payment_type accepted_values', COUNT_IF(payment_type NOT IN ('flex_fare', 'credit_card', 'cash', 'no_charge', 'dispute', 'unknown', 'voided_trip')) = 0 FROM silver.trips
+              UNION ALL SELECT 'silver.trips', 'no trip is longer than 6 hours', COUNT_IF(trip_minutes > 360) = 0 FROM silver.trips
+              UNION ALL SELECT 'gold.daily_trips', 'day not_null', COUNT_IF(day IS NULL) = 0 FROM gold.daily_trips
+              UNION ALL SELECT 'gold.daily_trips', 'day unique', COUNT(day) = COUNT(DISTINCT day) FROM gold.daily_trips
+              UNION ALL SELECT 'gold.daily_trips', 'trips positive', COUNT_IF(trips <= 0) = 0 FROM gold.daily_trips
+              UNION ALL SELECT 'gold.daily_trips', 'weather not_null', COUNT_IF(weather IS NULL) = 0 FROM gold.daily_trips
+              UNION ALL SELECT 'gold.daily_trips', 'weather accepted_values', COUNT_IF(weather NOT IN ('dry', 'rain', 'snow')) = 0 FROM gold.daily_trips
+              UNION ALL SELECT 'gold.daily_trips', 'has all 31 days of January', COUNT(*) = 31 FROM gold.daily_trips
+              UNION ALL SELECT 'gold.trips_by_weather', 'weather unique', COUNT(weather) = COUNT(DISTINCT weather) FROM gold.trips_by_weather
+              UNION ALL SELECT 'gold.payment_summary', 'payment_type not_null', COUNT_IF(payment_type IS NULL) = 0 FROM gold.payment_summary
+              UNION ALL SELECT 'gold.payment_summary', 'payment_type unique', COUNT(payment_type) = COUNT(DISTINCT payment_type) FROM gold.payment_summary
+              UNION ALL SELECT 'gold.payment_summary', 'trips positive', COUNT_IF(trips <= 0) = 0 FROM gold.payment_summary
+              UNION ALL SELECT 'gold.payment_summary', 'tip_pct_of_fare non_negative', COUNT_IF(tip_pct_of_fare < 0) = 0 FROM gold.payment_summary
+              UNION ALL SELECT 'gold.payment_summary', 'trips add up to silver.trips', (SELECT SUM(trips) FROM gold.payment_summary) = (SELECT COUNT(*) FROM silver.trips)
+            columns:
+              - { name: asset, label: Asset }
+              - { name: check, label: Check }
+              - name: ok
+                label: Passed
+                format:
+                  - { if: text_is_exactly, value: "true", backgroundColor: green }
+                  - { if: text_is_exactly, value: "false", backgroundColor: red }
+
+          - name: Tables
+            type: table
+            sql: |
+              SELECT LOWER(table_schema) AS "layer", LOWER(table_schema || '.' || table_name) AS "table",
+                     LOWER(table_type) AS "type", row_count AS "rows",
+                     TO_VARCHAR(CONVERT_TIMEZONE('UTC', last_altered), 'Mon DD, HH24:MI:SS') AS "rebuilt_utc"
+              FROM information_schema.tables
+              WHERE table_schema IN ('BRONZE', 'SILVER', 'GOLD')
+              ORDER BY CASE table_schema WHEN 'BRONZE' THEN 1 WHEN 'SILVER' THEN 2 ELSE 3 END, table_name
+            columns:
+              - { name: layer, label: Layer }
+              - { name: table, label: Table }
+              - { name: type, label: Type }
+              - { name: rows, label: Rows, number: ",.0f" }
+              - { name: rebuilt_utc, label: Rebuilt (UTC) }

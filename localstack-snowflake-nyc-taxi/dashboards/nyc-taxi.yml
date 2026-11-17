@@ -1,0 +1,436 @@
+name: NYC Green Taxis, January 2024
+description: Trips, revenue, weather and tipping from the localstack-snowflake-nyc-taxi pipeline's tables. Click a weather bar or a borough bar to filter the rest of the page.
+connection: snowflake-localstack-demo
+
+filters:
+  - name: weather
+    type: select
+    default: All
+    options:
+      values: [All, dry, rain, snow]
+  - name: borough
+    type: select
+    multiple: true
+    default: []
+    options:
+      query: SELECT DISTINCT pickup_borough FROM silver.trips ORDER BY 1
+
+rows:
+  # ---------------------------------------------------------------- At a glance
+  - widgets:
+      - name: At a glance
+        type: text
+        col: 12
+        content: |
+          ### At a glance
+          How many trips, how much money, and how the month went day by day.
+
+  - widgets:
+      - name: Trips
+        type: metric
+        col: 3
+        sql: |
+          SELECT COUNT(*) AS "value"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+        value: { field: value, type: number, format: ",.0f" }
+
+      - name: Revenue
+        type: metric
+        col: 3
+        description: Sum of total_amount (fare, tolls, surcharges and tips).
+        sql: |
+          SELECT SUM(t.total_amount) AS "value"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+        value: { field: value, type: number, format: "$,.0f" }
+
+      - name: Average card tip (% of fare)
+        type: metric
+        col: 3
+        description: Tips on card trips divided by their fares. Only card tips are recorded; cash tips never reach the data.
+        sql: |
+          SELECT SUM(t.tip_amount) / NULLIF(SUM(t.fare_amount), 0) AS "value"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE t.payment_type = 'credit_card'
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+        value: { field: value, format: ".1%" }
+
+      - name: Card trips tipped
+        type: metric
+        col: 3
+        description: Share of card trips that include a tip.
+        sql: |
+          SELECT COUNT_IF(t.tip_amount > 0) / NULLIF(COUNT(*), 0) AS "value"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE t.payment_type = 'credit_card'
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+        value: { field: value, format: ".1%" }
+
+  - widgets:
+      - name: Daily Trips and Revenue
+        type: chart
+        chart: combo
+        col: 12
+        sql: |
+          -- Starts from every day so a day with no pickups in the chosen boroughs shows as 0.
+          SELECT d.day AS "day", COUNT(t.pickup_at)::FLOAT AS "trips", COALESCE(SUM(t.total_amount), 0)::FLOAT AS "revenue"
+          FROM gold.daily_trips d
+          LEFT JOIN silver.trips t ON t.pickup_at::DATE = d.day
+            {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          GROUP BY 1
+          ORDER BY 1
+        x: { field: day, type: date }
+        y: { field: [trips], format: ",.0f", beginAtZero: true }
+        y2: { field: [revenue], format: "$,.0f" }
+        lines: [revenue]
+
+  - widgets:
+      - name: Revenue So Far This Month
+        type: chart
+        chart: area
+        col: 6
+        description: Running total of revenue, day by day.
+        sql: |
+          SELECT d.day AS "day", (SUM(COALESCE(SUM(t.total_amount), 0)) OVER (ORDER BY d.day))::FLOAT AS "revenue"
+          FROM gold.daily_trips d
+          LEFT JOIN silver.trips t ON t.pickup_at::DATE = d.day
+            {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          GROUP BY 1
+          ORDER BY 1
+        x: { field: day, type: date }
+        y: { field: [revenue], format: "$,.0f", beginAtZero: true }
+
+      - name: Is Any Day Unusual?
+        type: chart
+        chart: xmr
+        col: 6
+        description: A control chart of daily trips. Days outside the dashed limits (average ± 2.66 × the average day-to-day change) are unusual for this month.
+        sql: |
+          WITH daily AS (
+            SELECT d.day, COUNT(t.pickup_at)::FLOAT AS trips
+            FROM gold.daily_trips d
+            LEFT JOIN silver.trips t ON t.pickup_at::DATE = d.day
+              {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+            WHERE TRUE
+            {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+            GROUP BY 1
+          ), mr AS (
+            SELECT day, trips, ABS(trips - LAG(trips) OVER (ORDER BY day)) AS moving_range FROM daily
+          )
+          SELECT day AS "day", trips AS "trips",
+                 (AVG(trips) OVER () - 2.66 * AVG(moving_range) OVER ())::FLOAT AS "lower_limit",
+                 (AVG(trips) OVER () + 2.66 * AVG(moving_range) OVER ())::FLOAT AS "upper_limit"
+          FROM mr
+          ORDER BY day
+        x: { field: day, type: date }
+        y: { field: [trips], format: ",.0f" }
+        yMin: lower_limit
+        yMax: upper_limit
+
+  # ---------------------------------------------------------------- Weather
+  - widgets:
+      - name: Weather
+        type: text
+        col: 12
+        content: |
+          ### Weather
+          Do New Yorkers take more taxis when it rains or snows? Click a bar to filter the page.
+
+  - widgets:
+      - name: Average Daily Trips by Weather
+        type: chart
+        chart: bar
+        col: 4
+        description: snow = any snowfall; rain = no snow and 5 mm or more of precipitation; dry = everything else.
+        sql: |
+          -- Divides by every day of that weather, including days with no pickups in the chosen boroughs.
+          SELECT d.weather AS "weather", (COUNT(t.pickup_at) / COUNT(DISTINCT d.day))::FLOAT AS "avg_daily_trips"
+          FROM gold.daily_trips d
+          LEFT JOIN silver.trips t ON t.pickup_at::DATE = d.day
+            {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          GROUP BY 1
+          ORDER BY CASE d.weather WHEN 'dry' THEN 1 WHEN 'rain' THEN 2 ELSE 3 END
+        x: { field: weather }
+        y: { field: [avg_daily_trips], format: ",.0f", beginAtZero: true }
+
+      - name: Fare Difference vs Dry Days
+        type: chart
+        chart: forest
+        col: 4
+        description: How much more or less the average trip cost on rain and snow days than on dry days, with a 95% confidence interval. Grey means the interval crosses $0, so the difference may be chance.
+        sql: |
+          WITH s AS (
+            SELECT d.weather, AVG(t.total_amount) AS m, VARIANCE(t.total_amount) AS v, COUNT(*) AS n
+            FROM silver.trips t
+            JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+            WHERE TRUE
+            {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+            GROUP BY 1
+          )
+          SELECT w.weather || ' vs dry' AS "comparison",
+                 (w.m - b.m)::FLOAT AS "difference",
+                 (w.m - b.m - 1.96 * SQRT(w.v / w.n + b.v / b.n))::FLOAT AS "low",
+                 (w.m - b.m + 1.96 * SQRT(w.v / w.n + b.v / b.n))::FLOAT AS "high"
+          FROM s w CROSS JOIN s b
+          WHERE b.weather = 'dry' AND w.weather <> 'dry'
+          ORDER BY 1
+        x: { field: comparison }
+        y: { field: [difference], format: "$,.2f" }
+        yMin: low
+        yMax: high
+
+      - name: Colder Days, Fewer Trips?
+        type: chart
+        chart: scatter
+        col: 4
+        description: One dot per day, the day's max temperature against its trips.
+        sql: |
+          SELECT d.temp_max_c::FLOAT AS "temp_max_c", COUNT(t.pickup_at)::FLOAT AS "trips"
+          FROM gold.daily_trips d
+          LEFT JOIN silver.trips t ON t.pickup_at::DATE = d.day
+            {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          GROUP BY d.day, d.temp_max_c
+        x: { field: temp_max_c, type: number, title: Max temp (°C) }
+        y: { field: [trips], format: ",.0f", title: Trips }
+
+  # ---------------------------------------------------------------- Payments and tips
+  - widgets:
+      - name: Payments and tips
+        type: text
+        col: 12
+        content: |
+          ### Payments and tips
+          How riders pay and who tips. The meter only records card tips, so cash trips always show $0 in tips.
+
+  - widgets:
+      - name: How Riders Pay
+        type: chart
+        chart: pie
+        col: 4
+        description: Share of trips per payment type. no_charge and dispute (under 1% together) are grouped as other.
+        sql: |
+          SELECT IFF(t.payment_type IN ('no_charge', 'dispute'), 'other', t.payment_type) AS "payment_type",
+                 COUNT(*)::FLOAT AS "trips"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          GROUP BY 1
+          ORDER BY 2 DESC
+        label: payment_type
+        value: { field: trips, format: ",.0f" }
+
+      - name: From Trip to Tip
+        type: chart
+        chart: funnel
+        col: 4
+        description: All trips, then trips that were charged, paid by card, and tipped.
+        sql: |
+          WITH f AS (
+            SELECT t.*
+            FROM silver.trips t
+            JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+            WHERE TRUE
+            {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+            {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          )
+          SELECT 'All trips' AS "stage", COUNT(*)::FLOAT AS "trips", 1 AS "step" FROM f
+          UNION ALL
+          SELECT 'Charged', COUNT_IF(payment_type NOT IN ('no_charge', 'dispute'))::FLOAT, 2 FROM f
+          UNION ALL
+          SELECT 'Paid by card', COUNT_IF(payment_type = 'credit_card')::FLOAT, 3 FROM f
+          UNION ALL
+          SELECT 'Tipped', COUNT_IF(payment_type = 'credit_card' AND tip_amount > 0)::FLOAT, 4 FROM f
+          ORDER BY 3
+        label: stage
+        value: { field: trips, format: ",.0f" }
+
+      - name: Revenue Paid by Card
+        type: chart
+        chart: gauge
+        col: 4
+        description: Card revenue out of all revenue.
+        sql: |
+          SELECT SUM(IFF(t.payment_type = 'credit_card', t.total_amount, 0))::FLOAT AS "card_revenue",
+                 SUM(t.total_amount)::FLOAT AS "revenue"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+        value: { field: card_revenue, format: "$,.0f" }
+        target: revenue
+
+  - widgets:
+      - name: How Much Card Riders Tip
+        type: chart
+        chart: histogram
+        col: 6
+        description: Tip as % of fare on card trips with a fare, capped at 50%. A fixed 1-in-10 sample of trips.
+        sql: |
+          SELECT LEAST(t.tip_amount / t.fare_amount * 100, 50)::FLOAT AS "tip_pct"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE t.payment_type = 'credit_card' AND t.fare_amount > 0
+            AND MOD(ABS(HASH(t.pickup_at, t.dropoff_at, t.total_amount)), 10) = 0
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+        x: { field: tip_pct, format: ",.0f" }
+        bins: 25
+
+      - name: Trip Total by Payment Type
+        type: chart
+        chart: boxplot
+        col: 6
+        description: Spread of trip totals per payment type, capped at $150. A fixed 1-in-10 sample of trips.
+        sql: |
+          SELECT t.payment_type AS "payment_type", LEAST(t.total_amount, 150)::FLOAT AS "total"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE t.payment_type IN ('credit_card', 'cash', 'unknown')
+            AND MOD(ABS(HASH(t.pickup_at, t.dropoff_at, t.total_amount)), 10) = 0
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          ORDER BY 1
+        x: { field: payment_type }
+        y: { field: [total], format: "$,.0f" }
+
+  # ---------------------------------------------------------------- Where
+  - widgets:
+      - name: Where
+        type: text
+        col: 12
+        content: |
+          ### Where green taxis pick up
+          Green taxis serve upper Manhattan and the outer boroughs. Click a borough bar to filter the page.
+
+  - widgets:
+      - name: Trips by Borough
+        type: chart
+        chart: bar
+        col: 5
+        horizontal: true
+        description: Pickups per borough. Click a bar to filter the page; this chart keeps showing every borough so you can click another.
+        sql: |
+          SELECT t.pickup_borough AS "borough", COUNT(*)::FLOAT AS "trips"
+          FROM silver.trips t
+          JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+          WHERE TRUE
+          {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          GROUP BY 1
+          ORDER BY 2 DESC
+        x: { field: borough }
+        y: { field: [trips], format: ",.0f" }
+
+      - name: Average Trips per Weekday
+        type: chart
+        chart: heatmap
+        col: 7
+        description: Average pickups per day, by borough and day of the week.
+        sql: |
+          -- Every borough x day pair, so days with no pickups count as 0 in the average.
+          WITH days AS (
+            SELECT d.day
+            FROM gold.daily_trips d
+            WHERE TRUE
+            {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+          ), boroughs AS (
+            SELECT DISTINCT t.pickup_borough AS borough
+            FROM silver.trips t
+            WHERE t.pickup_borough IN ('Bronx', 'Brooklyn', 'Manhattan', 'Queens')
+            {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+          ), pickups AS (
+            SELECT t.pickup_at::DATE AS day, t.pickup_borough AS borough, COUNT(*) AS trips
+            FROM silver.trips t
+            GROUP BY 1, 2
+          )
+          SELECT DAYNAME(days.day) AS "weekday", boroughs.borough AS "borough",
+                 (COALESCE(SUM(pickups.trips), 0) / COUNT(*))::FLOAT AS "trips_per_day"
+          FROM days
+          CROSS JOIN boroughs
+          LEFT JOIN pickups ON pickups.day = days.day AND pickups.borough = boroughs.borough
+          GROUP BY 1, 2, DAYOFWEEKISO(days.day)
+          ORDER BY DAYOFWEEKISO(days.day), 2
+        x: { field: weekday, type: category }
+        y: { field: [borough] }
+        value: { field: trips_per_day, format: ",.0f" }
+        showValues: true
+
+  - widgets:
+      - name: Zone Details
+        type: tabs
+        col: 12
+        tabs:
+          - name: Busiest Zones
+            type: table
+            sql: |
+              WITH z AS (
+                SELECT t.pickup_zone, t.pickup_borough, d.day, COUNT(*) AS trips, SUM(t.total_amount) AS amount
+                FROM silver.trips t
+                JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+                WHERE TRUE
+                {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+                {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+                GROUP BY 1, 2, 3
+              )
+              SELECT pickup_zone AS "zone", pickup_borough AS "borough", SUM(trips) AS "trips",
+                     ARRAY_AGG(OBJECT_CONSTRUCT('x', TO_VARCHAR(day), 'y', trips::FLOAT)) WITHIN GROUP (ORDER BY day) AS "trend",
+                     SUM(amount) / SUM(trips) AS "avg_total"
+              FROM z
+              GROUP BY 1, 2
+              ORDER BY 3 DESC
+              LIMIT 10
+            columns:
+              - { name: zone, label: Zone }
+              - { name: borough, label: Borough }
+              - name: trips
+                label: Trips
+                number: ",.0f"
+                format:
+                  - { backgroundColor: [white, green] }
+              - name: trend
+                label: Trips per day
+                type: sparkline
+                x: { field: x, type: date, format: "%b %d" }
+                y: { field: y, type: number, format: ",.0f" }
+              - { name: avg_total, label: Avg total, number: "$,.2f" }
+
+          - name: Borough by Weather
+            type: pivot_table
+            sql: |
+              SELECT t.pickup_borough AS "borough", d.weather AS "weather", COUNT(*)::FLOAT AS "trips"
+              FROM silver.trips t
+              JOIN gold.daily_trips d ON d.day = t.pickup_at::DATE
+              WHERE t.pickup_borough IN ('Bronx', 'Brooklyn', 'Manhattan', 'Queens')
+              {% if filters.weather != 'All' %}AND d.weather = '{{ filters.weather }}'{% endif %}
+              {% if filters.borough and filters.borough | length > 0 %}AND t.pickup_borough IN ('{{ filters.borough | join("','") }}'){% endif %}
+              GROUP BY 1, 2
+            pivot:
+              rows:
+                - { field: borough, showTotals: true }
+              columns:
+                - { field: weather, showTotals: true }
+              values:
+                - field: trips
+                  summarize: sum
+                  label: Trips
+                  format:
+                    - { backgroundColor: [white, blue] }
