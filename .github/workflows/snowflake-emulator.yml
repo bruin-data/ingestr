@@ -31,5 +31,10 @@ jobs:
           CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH;
           CREATE DATABASE IF NOT EXISTS LOCALSTACK_DEMO;"
 
+      - name: Create Bruin config
+        run: echo "$BRUIN_CONFIG" > .bruin.yml
+        env:
+          BRUIN_CONFIG: ${{ secrets.BRUIN_CONFIG }}
+
       - name: Run the pipeline and its checks
-        run: bruin run --config-file ci/bruin.emulator.yml --full-refresh localstack-snowflake-nyc-taxi
+        run: bruin run --full-refresh localstack-snowflake-nyc-taxi
