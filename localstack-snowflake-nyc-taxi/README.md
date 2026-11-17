@@ -67,14 +67,21 @@ above (4567). If you map a different port, change it here and in the `snow sql` 
 
 ## Run
 
-Run these from the generated `localstack-snowflake-nyc-taxi/` folder. `setup.sql` needs the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) (`snow`):
+A new emulator is empty, and the connection can't log in until its warehouse and database exist.
+Create them once with the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation)
+(`snow`) or any SQL client. Any username and password work, and the statements are safe to rerun.
+Bruin creates the `BRONZE`, `SILVER` and `GOLD` schemas itself on the first run.
 
 ```bash
-# Once: create the warehouse, database and the BRONZE, SILVER and GOLD schemas
-snow sql --temporary-connection --account test --user test \
-  --password test --host snowflake.localhost.localstack.cloud --port 4567 -f setup.sql
+snow sql --temporary-connection --account test --user test --password test \
+  --host snowflake.localhost.localstack.cloud --port 4567 -q "
+CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH;
+CREATE DATABASE IF NOT EXISTS LOCALSTACK_DEMO;"
+```
 
-# Run
+Then run these from the generated `localstack-snowflake-nyc-taxi/` folder:
+
+```bash
 bruin run .
 
 # See what feeds a table
