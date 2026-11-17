@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: bruin-data/setup-bruin@main
+        with:
+          token: ${{ github.token }}
 
       - name: Install the Snowflake CLI
         run: pipx install snowflake-cli
