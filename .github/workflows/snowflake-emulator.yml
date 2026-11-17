@@ -7,15 +7,15 @@ jobs:
   bruin:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      snowflake:
-        image: localstack/snowflake-next:latest
-        env:
-          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
-        ports:
-          - 4566:4566
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start LocalStack for Snowflake
+        run: |
+          npm install -g @localstack/lstk
+          lstk start --type snowflake --image localstack/snowflake-next --non-interactive
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
 
       - uses: bruin-data/setup-bruin@main
         with:
@@ -24,19 +24,12 @@ jobs:
       - name: Install the Snowflake CLI
         run: pipx install snowflake-cli
 
-      - name: Wait for the emulator
-        run: |
-          until curl -sfk https://snowflake.localhost.localstack.cloud:4566/_localstack/health; do
-            sleep 2
-          done
-
       - name: Create the warehouse and database
         run: |
           snow sql --temporary-connection --account test --user test --password test \
             --host snowflake.localhost.localstack.cloud --port 4566 -q "
           CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH;
-          CREATE DATABASE IF NOT EXISTS LOCALSTACK_DEMO;
-          CREATE SCHEMA IF NOT EXISTS LOCALSTACK_DEMO._BRUIN_STAGING;"
+          CREATE DATABASE IF NOT EXISTS LOCALSTACK_DEMO;"
 
       - name: Run the pipeline and its checks
         run: bruin run --config-file ci/bruin.emulator.yml --full-refresh localstack-snowflake-nyc-taxi
