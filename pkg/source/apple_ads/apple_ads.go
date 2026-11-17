@@ -443,6 +443,7 @@ func (s *AppleAdsSource) queryAll(ctx context.Context, accountID, path string, f
 		resp, err := s.client.R(ctx).
 			SetHeader(contextHeader, accountContext(accountID)).
 			SetHeader("Content-Type", "application/json").
+			SetAllowNonIdempotentRetry().
 			SetBody(reqBody).
 			Post(path)
 		if err != nil {
@@ -731,7 +732,8 @@ func reportDateRange(opts source.ReadOptions, granularity string) (time.Time, ti
 		lookback = 90
 	}
 	end := now
-	start := now.AddDate(0, 0, -lookback)
+	// Report windows include both ends, so a lookback of N days starts N-1 days ago.
+	start := now.AddDate(0, 0, -(lookback - 1))
 
 	if opts.IntervalStart != nil {
 		start = *opts.IntervalStart
@@ -787,9 +789,7 @@ func reportRequestBody(rc reportTableConfig, chunk dateRange, filters []map[stri
 		"end":      endDay,
 		"timeZone": "UTC",
 	}
-	// A one-day window must be sent without granularity; its figures then come
-	// back in totalMetrics only.
-	if rc.granularity != "" && startDay != endDay {
+	if rc.granularity != "" && !dailyTotalsOnly(rc, chunk) {
 		timeRange["granularity"] = rc.granularity
 	}
 	body := map[string]interface{}{
@@ -811,6 +811,14 @@ func reportRequestBody(rc reportTableConfig, chunk dateRange, filters []map[stri
 	return body
 }
 
+// dailyTotalsOnly reports whether a DAILY request covers one day. Apple wants
+// such a request sent without granularity and answers in totalMetrics only,
+// which is that day's row. Other granularities keep their granularity, so a
+// one-day HOURLY window still returns hourly rows.
+func dailyTotalsOnly(rc reportTableConfig, chunk dateRange) bool {
+	return rc.granularity == "DAILY" && chunk.start.UTC().Format("2006-01-02") == chunk.end.UTC().Format("2006-01-02")
+}
+
 type reportRow struct {
 	Metadata        map[string]interface{}   `json:"metadata"`
 	TotalMetrics    map[string]interface{}   `json:"totalMetrics"`
@@ -821,12 +829,12 @@ type reportRow struct {
 // Report metadata carries the entity's own id as `id`; it is copied to
 // idColumn so the primary keys stay campaignId / adGroupId / adId.
 func flattenReportRows(rows []reportRow, accountID, idColumn string, rc reportTableConfig, chunk dateRange) []map[string]interface{} {
-	singleDay := chunk.start.UTC().Format("2006-01-02") == chunk.end.UTC().Format("2006-01-02")
+	totalsOnly := dailyTotalsOnly(rc, chunk)
 	var out []map[string]interface{}
 	for _, row := range rows {
 		var metricsList []map[string]interface{}
 		switch {
-		case rc.granularity != "" && singleDay:
+		case totalsOnly:
 			if row.TotalMetrics != nil {
 				m := make(map[string]interface{}, len(row.TotalMetrics)+1)
 				for k, v := range row.TotalMetrics {
@@ -880,6 +888,7 @@ func (s *AppleAdsSource) fetchReport(ctx context.Context, task reportTask, rc re
 			resp, err := s.client.R(ctx).
 				SetHeader(contextHeader, accountContext(task.orgID)).
 				SetHeader("Content-Type", "application/json").
+				SetAllowNonIdempotentRetry().
 				SetBody(reportRequestBody(rc, chunk, task.filters, offset)).
 				Post(task.endpoint)
 			if err != nil {

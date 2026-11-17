@@ -154,7 +154,7 @@ func TestReportDateRange(t *testing.T) {
 				require.NoError(t, err)
 				now := time.Now().UTC()
 				assert.Equal(t, dateStr(now), dateStr(end))
-				expected := now.AddDate(0, 0, -tc.lookback)
+				expected := now.AddDate(0, 0, -(tc.lookback - 1))
 				assert.Equal(t, dateStr(expected), dateStr(start))
 			})
 		}
@@ -559,4 +559,85 @@ func TestGroupByDropsEmptyMetricsOption(t *testing.T) {
 	assert.False(t, hasOptions)
 	plain := reportRequestBody(reportTableConfig{}, dateRange{day, day.AddDate(0, 0, 5)}, nil, 0)
 	assert.Equal(t, map[string]interface{}{"includeRows": []string{"EMPTY_METRICS"}}, plain["options"])
+}
+
+func TestOneDayHourlyReportKeepsHourlyRows(t *testing.T) {
+	day := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour)
+	end := day.Add(24*time.Hour - time.Microsecond)
+	srv, calls := fakePlatformAPI(t, func(path string, body map[string]interface{}) interface{} {
+		tr := body["timeRange"].(map[string]interface{})
+		if tr["granularity"] != "HOURLY" {
+			return map[string]interface{}{"result": map[string]interface{}{"rows": []interface{}{map[string]interface{}{
+				"metadata":     map[string]interface{}{"id": 1},
+				"totalMetrics": map[string]interface{}{"impressions": 30},
+			}}}}
+		}
+		return map[string]interface{}{"result": map[string]interface{}{"rows": []interface{}{map[string]interface{}{
+			"metadata": map[string]interface{}{"id": 1},
+			"granularMetrics": []interface{}{
+				map[string]interface{}{"date": day.Format("2006-01-02") + " 00", "impressions": 10},
+				map[string]interface{}{"date": day.Format("2006-01-02") + " 01", "impressions": 20},
+			},
+		}}}}
+	})
+
+	results, err := testSource(srv.URL).readReport(context.Background(), "campaign_reports", source.ReadOptions{IntervalStart: &day, IntervalEnd: &end}, reportTableConfig{baseTable: "campaign_reports", granularity: "HOURLY"})
+	require.NoError(t, err)
+	rows := collect(t, results)
+
+	require.Len(t, *calls, 1)
+	require.Len(t, rows, 2)
+	assert.Equal(t, day.Format("2006-01-02")+" 01", rows[1]["date"])
+}
+
+func TestDefaultReportRangeSendsGranularityOnEveryRequest(t *testing.T) {
+	for _, gran := range []string{"HOURLY", "DAILY", "WEEKLY", "MONTHLY"} {
+		t.Run(gran, func(t *testing.T) {
+			srv, calls := fakePlatformAPI(t, func(path string, body map[string]interface{}) interface{} {
+				return map[string]interface{}{"result": map[string]interface{}{}}
+			})
+
+			results, err := testSource(srv.URL).readReport(context.Background(), "campaign_reports", source.ReadOptions{}, reportTableConfig{baseTable: "campaign_reports", granularity: gran})
+			require.NoError(t, err)
+			collect(t, results)
+
+			require.Len(t, *calls, 1)
+			assert.Equal(t, gran, (*calls)[0].body["timeRange"].(map[string]interface{})["granularity"])
+		})
+	}
+}
+
+func TestRateLimitedRequestsAreRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		read func(s *AppleAdsSource) (<-chan source.RecordBatchResult, error)
+	}{
+		{"entity query", `{"result":[]}`, func(s *AppleAdsSource) (<-chan source.RecordBatchResult, error) {
+			return s.read(context.Background(), "campaigns", source.ReadOptions{})
+		}},
+		{"report", `{"result":{}}`, func(s *AppleAdsSource) (<-chan source.RecordBatchResult, error) {
+			return s.readReport(context.Background(), "campaign_reports", source.ReadOptions{}, reportTableConfig{baseTable: "campaign_reports"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if requests == 1 {
+					w.Header().Set("Retry-After", "0")
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			results, err := tc.read(testSource(srv.URL))
+			require.NoError(t, err)
+			collect(t, results)
+			assert.Greater(t, requests, 1)
+		})
+	}
 }
