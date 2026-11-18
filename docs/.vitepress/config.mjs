@@ -220,6 +220,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Attio", link: "/supported-sources/attio.md" },
+              { text: "Azure Blob Storage", link: "/supported-sources/azure-blob.md" },
               { text: "Azure Data Lake Storage Gen2", link: "/supported-sources/adls.md" },
               { text: "BallDontLie FIFA", link: "/supported-sources/balldontlie.md" },
               { text: "BambooHR", link: "/supported-sources/bamboohr.md" },

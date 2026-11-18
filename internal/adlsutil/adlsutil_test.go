@@ -303,3 +303,23 @@ func headerValue(h http.Header, name string) string {
 	}
 	return ""
 }
+
+func TestNewBlobClient(t *testing.T) {
+	client, err := NewBlobClient("acct", "", "?sv=2024-01-01&sig=abc", "", ClientCredentials{})
+	require.NoError(t, err)
+	assert.Equal(t, "https://acct.blob.core.windows.net/?sv=2024-01-01&sig=abc", client.URL())
+
+	client, err = NewBlobClient("acct", "a2V5", "sv=2024-01-01&sig=abc", "BlobEndpoint=https://other.blob.core.chinacloudapi.cn/;SharedAccessSignature=sig=xyz", ClientCredentials{})
+	require.NoError(t, err)
+	assert.Equal(t, "https://other.blob.core.chinacloudapi.cn/?sig=xyz", client.URL(), "connection string takes precedence")
+
+	client, err = NewBlobClient("acct", "a2V5", "sv=2024-01-01&sig=abc", "", ClientCredentials{})
+	require.NoError(t, err)
+	assert.Equal(t, "https://acct.blob.core.windows.net/", client.URL(), "account key takes precedence over SAS")
+
+	_, err = NewBlobClient("", "", "", "", ClientCredentials{})
+	require.ErrorContains(t, err, "account_name or connection_string is required")
+
+	_, err = NewBlobClient("acct", "", "", "", ClientCredentials{TenantID: "tenant"})
+	require.ErrorContains(t, err, "missing: client_id, client_secret")
+}

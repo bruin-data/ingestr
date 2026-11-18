@@ -97,6 +97,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Amazon Kinesis](/supported-sources/kinesis.md)
 - [Amazon SQS](/supported-sources/sqs.md)
 - [Anthropic](/supported-sources/anthropic.md)
+- [Azure Blob Storage](/supported-sources/azure-blob.md)
 - [Azure Data Lake Storage Gen2](/supported-sources/adls.md)
 - [Bruin](/supported-sources/bruin.md)
 - [Cloudflare Radar](/supported-sources/cloudflare-radar.md)

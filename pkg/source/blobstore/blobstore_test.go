@@ -3,16 +3,22 @@ package blobstore
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/arrowconv"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -496,6 +503,20 @@ func TestParseBlobstoreURI_AzureDatalake(t *testing.T) {
 			assert.Equal(t, tt.want.clientCredentials, got.clientCredentials)
 		})
 	}
+}
+
+func TestParseBlobstoreURI_Azure(t *testing.T) {
+	parsed, err := parseBlobstoreURI("az://?account_name=myaccount&tenant_id=tenant&client_id=client&client_secret=secret")
+	require.NoError(t, err)
+	assert.Equal(t, ProviderAzure, parsed.provider)
+	assert.Equal(t, "myaccount", parsed.accountName)
+	assert.Equal(t, adlsutil.ClientCredentials{TenantID: "tenant", ClientID: "client", ClientSecret: "secret"}, parsed.clientCredentials)
+
+	connStr := "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=a2V5;EndpointSuffix=core.windows.net"
+	parsed, err = parseBlobstoreURI("azure://?connection_string=" + url.QueryEscape(connStr))
+	require.NoError(t, err)
+	assert.Equal(t, ProviderAzure, parsed.provider)
+	assert.Equal(t, connStr, parsed.connectionString)
 }
 
 func TestParseTablePattern(t *testing.T) {
@@ -1185,6 +1206,9 @@ func TestBlobstoreFilepath(t *testing.T) {
 	s.provider = ProviderGCS
 	assert.Equal(t, "gs://bucket/data/file.csv", s.filepath("bucket", "data/file.csv"))
 	assert.Equal(t, "gs://bucket/data/file.csv", s.filepath("bucket/", "/data/file.csv"))
+
+	s.provider = ProviderAzure
+	assert.Equal(t, "az://container/data/file.csv", s.filepath("container", "data/file.csv"))
 }
 
 func TestAddBlobstoreMetadataColumns(t *testing.T) {
@@ -1411,4 +1435,199 @@ func TestBlobstoreByteCap(t *testing.T) {
 	batchesOn, rowsOn := runReadJSONLFile(t, jsonlPath, source.ReadOptions{MaxBatchBytes: 4096})
 	require.Greater(t, batchesOn, 1, "small cap must split into more than one batch")
 	require.Equal(t, int64(recordCount), rowsOn, "byte cap must not drop rows")
+}
+
+type fakeAzureBlob struct {
+	name     string
+	data     []byte
+	modified time.Time
+	tier     string
+	// contentEncoding is the blob's stored Content-Encoding property, which Get
+	// Blob returns as a response header. Cloudflare Logpush sets gzip.
+	contentEncoding string
+	isFolder        bool
+	resourceType    string
+}
+
+// fakeAzureBlobServer serves List Blobs and Get Blob for one container and
+// rejects every other container, like a role assignment scoped to one container.
+func fakeAzureBlobServer(t *testing.T, containerName, sig string, blobs []fakeAzureBlob) (endpoint string, listPrefixes, downloads func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var prefixes, downloaded []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/acct/"), "/", 2)
+		if q.Get("sig") != sig || parts[0] != containerName {
+			w.Header().Set("x-ms-error-code", "AuthorizationPermissionMismatch")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+
+		if q.Get("comp") == "list" {
+			mu.Lock()
+			prefixes = append(prefixes, q.Get("prefix"))
+			mu.Unlock()
+			var sb strings.Builder
+			sb.WriteString(`<?xml version="1.0" encoding="utf-8"?><EnumerationResults ContainerName="` + containerName + `"><Blobs>`)
+			for _, b := range blobs {
+				if !strings.HasPrefix(b.name, q.Get("prefix")) {
+					continue
+				}
+				modified := b.modified.UTC().Format(http.TimeFormat)
+				sb.WriteString("<Blob><Name>" + b.name + "</Name><Properties>")
+				sb.WriteString("<Creation-Time>" + modified + "</Creation-Time><Last-Modified>" + modified + "</Last-Modified>")
+				fmt.Fprintf(&sb, "<Content-Length>%d</Content-Length><BlobType>BlockBlob</BlobType>", len(b.data))
+				if b.tier != "" {
+					sb.WriteString("<AccessTier>" + b.tier + "</AccessTier>")
+				}
+				if b.resourceType != "" {
+					sb.WriteString("<ResourceType>" + b.resourceType + "</ResourceType>")
+				}
+				sb.WriteString("</Properties><Metadata>")
+				if b.isFolder {
+					sb.WriteString("<hdi_isfolder>true</hdi_isfolder>")
+				}
+				sb.WriteString("</Metadata></Blob>")
+			}
+			sb.WriteString("</Blobs><NextMarker/></EnumerationResults>")
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(sb.String()))
+			return
+		}
+
+		key := parts[1]
+		mu.Lock()
+		downloaded = append(downloaded, key)
+		mu.Unlock()
+		for _, b := range blobs {
+			if b.name == key {
+				if b.tier == "Archive" {
+					w.Header().Set("x-ms-error-code", "BlobArchived")
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
+				w.Header().Set("ETag", `"etag"`)
+				w.Header().Set("Content-Length", fmt.Sprint(len(b.data)))
+				if b.contentEncoding != "" {
+					w.Header().Set("Content-Encoding", b.contentEncoding)
+				}
+				_, _ = w.Write(b.data)
+				return
+			}
+		}
+		w.Header().Set("x-ms-error-code", "BlobNotFound")
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	snapshot := func(values *[]string) func() []string {
+		return func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]string(nil), *values...)
+		}
+	}
+	return srv.URL + "/acct", snapshot(&prefixes), snapshot(&downloaded)
+}
+
+func gzipBytes(t *testing.T, s string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write([]byte(s))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
+func readAzureTable(t *testing.T, uri, table string, opts source.ReadOptions) ([]arrow.RecordBatch, error) {
+	t.Helper()
+	s := NewBlobstoreSource()
+	require.NoError(t, s.Connect(context.Background(), uri))
+	tbl, err := s.GetTable(context.Background(), source.TableRequest{Name: table, IncrementalKey: opts.IncrementalKey})
+	require.NoError(t, err)
+	ch, err := tbl.Read(context.Background(), opts)
+	require.NoError(t, err)
+
+	var batches []arrow.RecordBatch
+	var readErr error
+	for r := range ch {
+		if r.Err != nil {
+			readErr = r.Err
+			continue
+		}
+		batches = append(batches, r.Batch)
+	}
+	t.Cleanup(func() {
+		for _, b := range batches {
+			b.Release()
+		}
+	})
+	return batches, readErr
+}
+
+func TestAzureBlobSourceReadsGzippedJSONLFromOneContainer(t *testing.T) {
+	newer := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	older := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
+	endpoint, listPrefixes, downloads := fakeAzureBlobServer(t, "logs", "secret", []fakeAzureBlob{
+		{name: "http/20260101", modified: newer, isFolder: true},
+		{name: "http/20260102", modified: newer, resourceType: "directory"},
+		{name: "http/20260101/new.log.gz", modified: newer, contentEncoding: "gzip", data: gzipBytes(t, "{\"RayID\":\"a\",\"EdgeResponseStatus\":200}\n{\"RayID\":\"b\",\"EdgeResponseStatus\":404}\n")},
+		{name: "http/20260101/old.log.gz", modified: older, data: gzipBytes(t, "{\"RayID\":\"c\",\"EdgeResponseStatus\":500}\n")},
+		{name: "http/20260101/archived.log.gz", modified: newer, tier: "Archive", data: gzipBytes(t, "{}\n")},
+		{name: "http/20251201/archived-old.log.gz", modified: older, tier: "Archive", data: gzipBytes(t, "{}\n")},
+		{name: "other/skip.log.gz", modified: newer, data: gzipBytes(t, "{}\n")},
+	})
+	connStr := "BlobEndpoint=" + endpoint + ";SharedAccessSignature=sv=2024-01-01&sig=secret"
+	uri := "az://?connection_string=" + url.QueryEscape(connStr)
+
+	stdout, stderr, mode := output.Current()
+	debugMode := config.DebugMode
+	t.Cleanup(func() {
+		output.Init(stdout, stderr, mode)
+		config.DebugMode = debugMode
+	})
+	var logs bytes.Buffer
+	output.Init(&logs, &bytes.Buffer{}, output.ModeText)
+	config.DebugMode = false
+
+	batches, err := readAzureTable(t, uri, "logs/http/**#jsonl", source.ReadOptions{})
+	require.NoError(t, err)
+	assert.Contains(t, logs.String(), "skipped 2 archived Azure blob(s) in container logs")
+	assert.NotContains(t, logs.String(), "archived.log.gz", "normal output reports only the count")
+	var rows int64
+	for _, b := range batches {
+		rows += b.NumRows()
+	}
+	assert.Equal(t, int64(3), rows)
+	assert.ElementsMatch(t, []string{"http/20260101/new.log.gz", "http/20260101/old.log.gz"}, downloads(), "directory markers and archived blobs must not be downloaded")
+	assert.Equal(t, []string{"http/"}, listPrefixes())
+
+	logs.Reset()
+	config.DebugMode = true
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	batches, err = readAzureTable(t, uri, "logs/http/**#jsonl", source.ReadOptions{
+		IncrementalKey: defaultBlobstoreModifiedAtColumn,
+		IntervalStart:  &start,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, logs.String(), "skipped 1 archived Azure blob(s) in container logs", "archived blobs outside the interval are not counted")
+	assert.Contains(t, logs.String(), "Skipping archived Azure blob logs/http/20260101/archived.log.gz")
+	assert.NotContains(t, logs.String(), "archived-old.log.gz", "debug output lists only archived blobs inside the interval")
+	config.DebugMode = false
+	require.Len(t, batches, 1)
+	rec := batches[0]
+	assert.Equal(t, int64(2), rec.NumRows())
+	pathIdx := rec.Schema().FieldIndices(defaultBlobstoreFilePathColumn)
+	require.Len(t, pathIdx, 1)
+	assert.Equal(t, "az://logs/http/20260101/new.log.gz", rec.Column(pathIdx[0]).ValueStr(0))
+	modIdx := rec.Schema().FieldIndices(defaultBlobstoreModifiedAtColumn)
+	require.Len(t, modIdx, 1)
+	assert.Equal(t, arrow.Timestamp(newer.UnixMicro()), rec.Column(modIdx[0]).(*array.Timestamp).Value(0))
+
+	_, err = readAzureTable(t, uri, "other-container/**#jsonl", source.ReadOptions{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AuthorizationPermissionMismatch")
 }
