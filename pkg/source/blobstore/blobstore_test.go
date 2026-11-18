@@ -1538,6 +1538,30 @@ func fakeAzureBlobServer(t *testing.T, containerName, sig string, blobs []fakeAz
 	return srv.URL + "/acct", snapshot(&prefixes), snapshot(&downloaded)
 }
 
+// lockedBuffer collects output written by the source's concurrent workers.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
 func gzipBytes(t *testing.T, s string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -1596,7 +1620,7 @@ func TestAzureBlobSourceReadsGzippedJSONLFromOneContainer(t *testing.T) {
 		output.Init(stdout, stderr, mode)
 		config.DebugMode = debugMode
 	})
-	var logs bytes.Buffer
+	var logs lockedBuffer
 	output.Init(&logs, &bytes.Buffer{}, output.ModeText)
 	config.DebugMode = false
 

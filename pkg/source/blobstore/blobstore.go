@@ -541,8 +541,8 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	// Close results channel when all goroutines done
 	go func() {
 		wg.Wait()
-		close(results)
 		config.Debug("[BLOBSTORE-SRC] Completed in %v", time.Since(startTotal))
+		close(results)
 	}()
 
 	return results, nil
