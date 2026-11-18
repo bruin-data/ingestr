@@ -680,6 +680,8 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.credentialsFile = u.Query().Get("credentials_file")
 	case "az", "azure":
 		parsed.provider = ProviderAzure
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")

@@ -30,7 +30,7 @@ const (
 	fileIDToken       = "\x00file_id\x00"
 )
 
-const replacePermissions = "replace needs list and delete permission on the bucket (S3: s3:ListBucket, s3:DeleteObject; GCS: storage.objects.list, storage.objects.delete; Azure: Storage Blob Data Contributor); use the append strategy to keep existing files"
+const replacePermissions = "replace needs list and delete permission on the bucket (S3: s3:ListBucket, s3:DeleteObject; GCS: storage.objects.list, storage.objects.delete; Azure: Storage Blob Data Contributor, or a SAS token with list and delete); use the append strategy to keep existing files"
 
 type replaceState struct {
 	bucket   string
