@@ -1441,7 +1441,9 @@ type fakeAzureBlob struct {
 	name     string
 	data     []byte
 	modified time.Time
-	tier     string
+	// created defaults to modified when zero.
+	created time.Time
+	tier    string
 	// contentEncoding is the blob's stored Content-Encoding property, which Get
 	// Blob returns as a response header. Cloudflare Logpush sets gzip.
 	contentEncoding string
@@ -1477,7 +1479,11 @@ func fakeAzureBlobServer(t *testing.T, containerName, sig string, blobs []fakeAz
 				}
 				modified := b.modified.UTC().Format(http.TimeFormat)
 				sb.WriteString("<Blob><Name>" + b.name + "</Name><Properties>")
-				sb.WriteString("<Creation-Time>" + modified + "</Creation-Time><Last-Modified>" + modified + "</Last-Modified>")
+				created := modified
+				if !b.created.IsZero() {
+					created = b.created.UTC().Format(http.TimeFormat)
+				}
+				sb.WriteString("<Creation-Time>" + created + "</Creation-Time><Last-Modified>" + modified + "</Last-Modified>")
 				fmt.Fprintf(&sb, "<Content-Length>%d</Content-Length><BlobType>BlockBlob</BlobType>", len(b.data))
 				if b.tier != "" {
 					sb.WriteString("<AccessTier>" + b.tier + "</AccessTier>")
@@ -1571,11 +1577,12 @@ func readAzureTable(t *testing.T, uri, table string, opts source.ReadOptions) ([
 func TestAzureBlobSourceReadsGzippedJSONLFromOneContainer(t *testing.T) {
 	newer := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	older := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
+	oldest := time.Date(2025, 10, 1, 0, 0, 0, 0, time.UTC)
 	endpoint, listPrefixes, downloads := fakeAzureBlobServer(t, "logs", "secret", []fakeAzureBlob{
 		{name: "http/20260101", modified: newer, isFolder: true},
 		{name: "http/20260102", modified: newer, resourceType: "directory"},
-		{name: "http/20260101/new.log.gz", modified: newer, contentEncoding: "gzip", data: gzipBytes(t, "{\"RayID\":\"a\",\"EdgeResponseStatus\":200}\n{\"RayID\":\"b\",\"EdgeResponseStatus\":404}\n")},
-		{name: "http/20260101/old.log.gz", modified: older, data: gzipBytes(t, "{\"RayID\":\"c\",\"EdgeResponseStatus\":500}\n")},
+		{name: "http/20260101/new.log.gz", modified: newer, created: older, contentEncoding: "gzip", data: gzipBytes(t, "{\"RayID\":\"a\",\"EdgeResponseStatus\":200}\n{\"RayID\":\"b\",\"EdgeResponseStatus\":404}\n")},
+		{name: "http/20260101/old.log.gz", modified: older, created: oldest, data: gzipBytes(t, "{\"RayID\":\"c\",\"EdgeResponseStatus\":500}\n")},
 		{name: "http/20260101/archived.log.gz", modified: newer, tier: "Archive", data: gzipBytes(t, "{}\n")},
 		{name: "http/20251201/archived-old.log.gz", modified: older, tier: "Archive", data: gzipBytes(t, "{}\n")},
 		{name: "other/skip.log.gz", modified: newer, data: gzipBytes(t, "{}\n")},
@@ -1626,6 +1633,24 @@ func TestAzureBlobSourceReadsGzippedJSONLFromOneContainer(t *testing.T) {
 	modIdx := rec.Schema().FieldIndices(defaultBlobstoreModifiedAtColumn)
 	require.Len(t, modIdx, 1)
 	assert.Equal(t, arrow.Timestamp(newer.UnixMicro()), rec.Column(modIdx[0]).(*array.Timestamp).Value(0))
+
+	createdStart := time.Date(2025, 11, 15, 0, 0, 0, 0, time.UTC)
+	createdEnd := time.Date(2025, 12, 15, 0, 0, 0, 0, time.UTC)
+	batches, err = readAzureTable(t, uri, "logs/http/**#jsonl", source.ReadOptions{
+		IncrementalKey: defaultBlobstoreCreatedAtColumn,
+		IntervalStart:  &createdStart,
+		IntervalEnd:    &createdEnd,
+	})
+	require.NoError(t, err)
+	require.Len(t, batches, 1, "only new.log.gz was created inside the interval")
+	rec = batches[0]
+	assert.Equal(t, int64(2), rec.NumRows())
+	pathIdx = rec.Schema().FieldIndices(defaultBlobstoreFilePathColumn)
+	require.Len(t, pathIdx, 1)
+	assert.Equal(t, "az://logs/http/20260101/new.log.gz", rec.Column(pathIdx[0]).ValueStr(0))
+	createdIdx := rec.Schema().FieldIndices(defaultBlobstoreCreatedAtColumn)
+	require.Len(t, createdIdx, 1)
+	assert.Equal(t, arrow.Timestamp(older.UnixMicro()), rec.Column(createdIdx[0]).(*array.Timestamp).Value(0))
 
 	_, err = readAzureTable(t, uri, "other-container/**#jsonl", source.ReadOptions{})
 	require.Error(t, err)
