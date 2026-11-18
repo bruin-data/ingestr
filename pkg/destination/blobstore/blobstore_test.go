@@ -154,6 +154,16 @@ func TestParseBlobstoreURI_Azure(t *testing.T) {
 			},
 		},
 		{
+			name: "Azure with container and prefix",
+			uri:  "az://lake/exports/daily/?account_name=myaccount",
+			want: &parsedBlobstoreURI{
+				provider:    ProviderAzure,
+				bucket:      "lake",
+				prefix:      "exports/daily",
+				accountName: "myaccount",
+			},
+		},
+		{
 			name: "Azure with service principal credentials",
 			uri:  "az://?account_name=myaccount&tenant_id=tenant&client_id=client&client_secret=secret",
 			want: &parsedBlobstoreURI{
@@ -177,6 +187,8 @@ func TestParseBlobstoreURI_Azure(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want.provider, got.provider)
+			assert.Equal(t, tt.want.bucket, got.bucket)
+			assert.Equal(t, tt.want.prefix, got.prefix)
 			assert.Equal(t, tt.want.accountName, got.accountName)
 			assert.Equal(t, tt.want.accountKey, got.accountKey)
 			assert.Equal(t, tt.want.sasToken, got.sasToken)

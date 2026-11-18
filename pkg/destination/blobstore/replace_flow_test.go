@@ -585,7 +585,7 @@ func TestReplaceFlow(t *testing.T) {
 }
 
 func TestReplaceFlowUnderURIPrefix(t *testing.T) {
-	for _, provider := range []Provider{ProviderS3, ProviderGCS} {
+	for _, provider := range []Provider{ProviderS3, ProviderGCS, ProviderAzure} {
 		t.Run(string(provider), func(t *testing.T) {
 			store := newFakeObjectStore(
 				"exports/public.orders/a1b2c3d4.0.parquet",
