@@ -161,6 +161,8 @@ lake/
 
 A `--dest-table` with a `/`, such as `lake/records` or `other-container/records`, is still read as `<container>/<folder>`, and the container and folder in the URI are not used. To write into a nested folder of the URI's container, add the folder to the URI.
 
+A `--dest-table` that is exactly the URI's container name, such as `lake` with `az://lake/exports`, is also read as `<container>`: files go into the root of the container, not into `exports/lake`, and `replace` keeps the existing files there. When the URI has a folder, `ingestr` prints a warning that it was not used.
+
 ### Example: Writing data to Azure Blob Storage
 
 ```sh
