@@ -581,7 +581,7 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 	// for the worker's entire lifetime. This lets the pool (bounded by
 	// SetMaxOpenConns) be shared safely across all tables in a multi-table
 	// write, regardless of numTables * parallelism.
-	uploadCtx := sf.WithFilePutStream(w.ctx, w.buf)
+	uploadCtx := sf.WithFilePutStream(w.ctx, w.buf) //nolint:staticcheck // the file is already fully buffered in memory, so UploadStream's streaming would not save anything
 
 	// The stage path is a directory prefix; the local file name names the
 	// staged object, which COPY's FILES list references as <loadID>/<fileName>.
