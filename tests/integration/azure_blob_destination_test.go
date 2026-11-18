@@ -94,6 +94,7 @@ func readAzureParquetNames(t *testing.T, ctx context.Context, client *azblob.Cli
 }
 
 func TestCSVToAzureBlob_ReplaceAndAppend(t *testing.T) {
+	t.Parallel()
 	requireDocker(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
