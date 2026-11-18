@@ -40,8 +40,12 @@ jobs:
 
   integration-tests:
     needs: [preflight]
+    # Each suite runs with the same setup as its tests.yml job (test, end2end).
     env:
-      TEST_CONCURRENCY: "1"
+      # DuckDB's ADBC driver can crash when several package test binaries load it
+      # at the same time under race builds; only test-full uses -race.
+      TEST_CONCURRENCY: ${{ matrix.suite == 'test-full' && '1' || '4' }}
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     strategy:
       matrix:
         # Each platform/suite combination is listed explicitly. macOS runners
@@ -60,12 +64,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - name: Pre-pull testcontainer images (background)
+        if: matrix.suite == 'test-integration'
+        run: hack/pull-test-images.sh
+
       - name: Setup Go
         uses: actions/setup-go@v7.0.0
         with:
           go-version-file: 'go.mod'
-          cache: true
+          cache-dependency-path: "go.sum"
       - name: Install uv
+        if: matrix.suite == 'test-full'
         uses: astral-sh/setup-uv@v10.3.3
       - name: Run test suite
         run: make ${{ matrix.suite }}
