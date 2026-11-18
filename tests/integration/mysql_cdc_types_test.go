@@ -16,6 +16,7 @@ import (
 )
 
 func TestMySQLCDC_EnumSetBitSpatial_SnapshotAndIncremental_MySQL(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -27,6 +28,7 @@ func TestMySQLCDC_EnumSetBitSpatial_SnapshotAndIncremental_MySQL(t *testing.T) {
 }
 
 func TestMySQLCDC_EnumSetBit_CompositePrimaryKey_MySQL(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
