@@ -2178,6 +2178,7 @@ type prFake struct {
 	noCursor                   bool
 	unknownSignatures          map[string]bool
 	forcePushesDuringPushPages int
+	pushOnReads                map[int]bool
 	pushPagesServed            int
 	timelinePageSize           int
 	gqlCalls                   []string
@@ -2448,7 +2449,7 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 func (f *prFake) afterFirstCommitPage(pr *fakePR) {
 	pr.reads++
 	changed := false
-	if pr.reads <= f.pushDuringReads {
+	if pr.reads <= f.pushDuringReads || f.pushOnReads[pr.reads] {
 		pr.head = f.g.add(pr.head)
 		changed = true
 	}
@@ -2676,7 +2677,7 @@ func prCommitColumnNames(t *testing.T, s *GithubSource) string {
 
 func TestGithubPRCommitsTable(t *testing.T) {
 	s := connectPRFake(t, newPRFake(t))
-	want := "repo pr_number sha pr_state pr_url pr_title pr_author pr_created_at pr_updated_at pr_closed_at pr_merged_at base_ref head_ref head_repo merge_commit_sha commit_url message author_name author_email author_login authored_at committer_name committer_email committer_login committed_at parent_count verified verification_reason signed_by_github replaced_by_force_push replaced_at source_api"
+	want := "repo pr_number sha pr_state pr_url pr_title pr_author pr_created_at pr_updated_at pr_closed_at pr_merged_at base_ref head_ref head_repo merge_commit_sha commit_url message author_name author_email author_login authored_at committer_name committer_email committer_login committed_at parent_count verified verification_reason signed_by_github replaced_by_force_push replaced_at"
 	if got := prCommitColumnNames(t, s); got != want {
 		t.Fatalf("columns=%s", got)
 	}
@@ -2717,7 +2718,7 @@ func TestGithubPRCommitsStatesAndColumns(t *testing.T) {
 		if r["repo"] != "o/r" || r["verified"] != false || r["verification_reason"] != "unsigned" || r["signed_by_github"] != false || r["parent_count"] != int64(1) {
 			t.Fatalf("row %v", r)
 		}
-		if r["source_api"] != "graphql" || r["replaced_by_force_push"] != false || r["replaced_at"] != nil {
+		if r["replaced_by_force_push"] != false || r["replaced_at"] != nil {
 			t.Fatalf("row %v", r)
 		}
 		sha := r["sha"].(string)
@@ -2765,11 +2766,11 @@ func TestGithubPRCommitsGraphQLCountCheckFails(t *testing.T) {
 	s := connectPRFake(t, f)
 
 	_, _, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
-	if err == nil || !strings.Contains(err.Error(), "pull request o/r#3: GitHub listed 5 commits, expected 6, after 3 retries") {
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#3: GitHub listed 5 commits, expected 6, also when read again") {
 		t.Fatalf("err=%v", err)
 	}
-	if got := strings.Count(logs.String(), "pull request o/r#3: GitHub listed 5 commits, expected 6, reading its commits again"); got != 3 {
-		t.Fatalf("%d retry warnings, want 3:\n%s", got, logs.String())
+	if got := strings.Count(logs.String(), "pull request o/r#3: GitHub listed 5 commits, expected 6, reading its commits again"); got != 1 {
+		t.Fatalf("%d retry warnings, want 1:\n%s", got, logs.String())
 	}
 }
 
@@ -2777,7 +2778,7 @@ func TestGithubPRCommitsChangeDuringReadIsRetried(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		pushes, rewrite int
-	}{{"push between pages twice", 2, 0}, {"rewrite with as many commits", 0, 1}} {
+	}{{"push between pages", 1, 0}, {"rewrite with as many commits", 0, 1}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPRFake(t)
 			f.pushDuringReads, f.rewriteDuringReads = tc.pushes, tc.rewrite
@@ -2830,10 +2831,10 @@ func TestGithubPRCommitsChangingOnEveryReadFails(t *testing.T) {
 	s := connectPRFake(t, f)
 
 	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
-	if err == nil || !strings.Contains(err.Error(), "pull request o/r#7: its head changed while its commits were read, after 3 retries") {
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#7: its head changed while its commits were read, also when read again") {
 		t.Fatalf("err=%v", err)
 	}
-	if len(rows) != 0 || strings.Count(logs.String(), "reading its commits again (retry") != 3 {
+	if len(rows) != 0 || strings.Count(logs.String(), "reading its commits again (retry 1 of 1)") != 1 {
 		t.Fatalf("rows=%d logs:\n%s", len(rows), logs.String())
 	}
 }
@@ -2856,11 +2857,6 @@ func TestGithubPRCommitsOver250ReadThroughCompare(t *testing.T) {
 				t.Fatal(err)
 			}
 			mustEqualSet(t, "300 commits", shasOf(rows, 9), f.g.between(main, head))
-			for _, r := range rows {
-				if r["source_api"] != "compare" {
-					t.Fatalf("row %v", r)
-				}
-			}
 			for _, c := range f.calls(&f.compares) {
 				if !strings.HasPrefix(c, main+"...") {
 					t.Fatalf("compare %s does not start from baseRefOid %s", c, main)
@@ -2892,9 +2888,12 @@ func TestGithubPRCommitsGrowingPast250DuringReadUsesCompare(t *testing.T) {
 		t.Fatalf("rows=%d want 251", len(rows))
 	}
 	for _, r := range rows {
-		if r["source_api"] != "compare" || r["pr_updated_at"] != "2026-11-11T00:00:00Z" {
+		if r["pr_updated_at"] != "2026-11-11T00:00:00Z" {
 			t.Fatalf("row %v", r)
 		}
+	}
+	if len(f.calls(&f.compares)) == 0 {
+		t.Fatal("not read through compare")
 	}
 }
 
@@ -3080,11 +3079,6 @@ func TestGithubPRCommitsForcePushes(t *testing.T) {
 			if gotAt := replacedAtOf(rows, 4); fmt.Sprint(gotAt) != fmt.Sprint(wantAt) || len(wantAt) != tc.want {
 				t.Fatalf("replaced:\n got %v\nwant %v", gotAt, wantAt)
 			}
-			for _, r := range rows {
-				if r["replaced_by_force_push"] == true && r["source_api"] != "compare" {
-					t.Fatalf("replaced row %v", r)
-				}
-			}
 			if !strings.Contains(logs.String(), "does not show the head replaced by the force push at 2026-11-04T10:00:00Z in pull request o/r#4") {
 				t.Fatalf("no warning for the force push without a replaced head:\n%s", logs.String())
 			}
@@ -3247,7 +3241,7 @@ func TestGithubPRCommitsForcePushDuringPagingIsRetried(t *testing.T) {
 			t.Fatalf("row keeps the details from before the force push: %v", r)
 		}
 	}
-	if !strings.Contains(logs.String(), "pull request o/r#6: its head changed while its force pushes were read, reading it again (retry 1 of 3)") {
+	if !strings.Contains(logs.String(), "pull request o/r#6: its head changed while its force pushes were read, reading it again (retry 1 of 1)") {
 		t.Fatalf("logs:\n%s", logs.String())
 	}
 }
@@ -3291,11 +3285,44 @@ func TestGithubPRCommitsForcePushesChangingOnEveryReadFails(t *testing.T) {
 	s := connectPRFake(t, f)
 
 	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
-	if err == nil || !strings.Contains(err.Error(), "pull request o/r#6: its head changed while its force pushes were read, after 3 retries") {
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#6: its head changed while its force pushes were read, also when read again") {
 		t.Fatalf("err=%v", err)
 	}
-	if len(rows) != 0 || strings.Count(logs.String(), "while its force pushes were read, reading it again") != 3 {
+	if len(rows) != 0 || strings.Count(logs.String(), "while its force pushes were read, reading it again") != 1 {
 		t.Fatalf("rows=%d logs:\n%s", len(rows), logs.String())
+	}
+}
+
+// The worst case that still succeeds: the commit pages change, then the force pushes, then the commit
+// pages of that re-read. The pull request is read 4 times in all (the listing and 3 re-reads), the
+// most it can be, and its rows describe the last read.
+func TestGithubPRCommitsChangesInBothPhasesAreReadAtMostFourTimes(t *testing.T) {
+	f := newPRFake(t)
+	f.pushOnReads = map[int]bool{1: true, 3: true}
+	f.timelinePageSize = 1
+	f.forcePushesDuringPushPages = 1
+	base := f.g.chain("", 1)
+	v0, v1, _ := forcePushShape(f, base)
+	pr := f.addPR("o/r", &fakePR{number: 6, base: base, head: f.g.chain(base, 130), pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: v0},
+		{at: "2026-11-06T10:00:00Z", before: v1},
+	}})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqualSet(t, "final version read last", shasOf(rows, 6), f.g.between(base, pr.head))
+	rereads := 0
+	for _, c := range f.calls(&f.gqlCalls) {
+		if strings.HasPrefix(c, "pr o/r#6") {
+			rereads++
+		}
+	}
+	if rereads != 3 {
+		t.Fatalf("pull request read again %d times, want 3: %v\n%s", rereads, f.calls(&f.gqlCalls), logs.String())
 	}
 }
 
@@ -3581,8 +3608,6 @@ func TestGithubPRCommitsMissingActorFieldsMatchInCompareRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	fromGraphQL, fromCompare := graphQLCommitRow(g), restCommitRow(r)
-	delete(fromGraphQL, "source_api")
-	delete(fromCompare, "source_api")
 	if fmt.Sprint(fromGraphQL) != fmt.Sprint(fromCompare) {
 		t.Fatalf("\ngraphql %v\ncompare %v", fromGraphQL, fromCompare)
 	}
@@ -3656,11 +3681,6 @@ func TestGithubPRCommitsGraphQLAndCompareRowsMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 		fromGraphQL, fromCompare := graphQLCommitRow(g), restCommitRow(r)
-		if fromGraphQL["source_api"] != "graphql" || fromCompare["source_api"] != "compare" {
-			t.Fatalf("source_api %v %v", fromGraphQL["source_api"], fromCompare["source_api"])
-		}
-		delete(fromGraphQL, "source_api")
-		delete(fromCompare, "source_api")
 		if fmt.Sprint(fromGraphQL) != fmt.Sprint(fromCompare) {
 			t.Fatalf("%s:\ngraphql %v\ncompare %v", sha, fromGraphQL, fromCompare)
 		}

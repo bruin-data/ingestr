@@ -165,7 +165,7 @@ What you get:
 - **Commits replaced by force pushes**: when a branch is force-pushed, the commits that were pushed before and then removed stay in the table, with `replaced_by_force_push = true` and the time of the force push in `replaced_at`.
 - **Signature status** of each commit: `verified` and `verification_reason` as GitHub shows them, and `signed_by_github` for commits GitHub signed itself (made in the GitHub web UI or through the API).
 
-Which pull requests a run reads: those last updated between `--interval-start` and `--interval-end`. Any change to a pull request counts as an update: a push, a comment, a label, a merge. To keep the table current, run it on a schedule with a lookback window (for example the last 30 days); a pull request updated after a run's end is picked up by the next run. Without an interval, every pull request of the repository is read. If a pull request changes while it is being read, ingestr reads it again, with a warning, so its rows always describe one consistent state.
+Which pull requests a run reads: those last updated between `--interval-start` and `--interval-end`. Any change to a pull request counts as an update: a push, a comment, a label, a merge. To keep the table current, run it on a schedule with a lookback window (for example the last 30 days); a pull request updated after a run's end is picked up by the next run. Without an interval, every pull request of the repository is read. If a pull request changes while it is being read, ingestr reads it again, with a warning, so its rows always describe one consistent state; a pull request is read at most 4 times, and if it is still changing after that, the run fails.
 
 Columns:
 
@@ -186,7 +186,6 @@ Columns:
 | `verified`, `verification_reason` | Whether GitHub verified the commit's signature, and why (`valid`, `unsigned`, `unknown_key`, ...) |
 | `signed_by_github` | The commit was signed by GitHub's own key |
 | `replaced_by_force_push`, `replaced_at` | The commit was removed from the pull request by a force push, and when |
-| `source_api` | The GitHub API the row was read from: `graphql` or `compare` |
 
 Example: read the pull request commits of every repository of `bruin-data` updated in the last 30 days:
 
@@ -204,6 +203,7 @@ Limits:
 
 - A rebase merge puts new copies of the commits on the base branch; this table has the pull request's original commits, not the copies.
 - Branches that never had a pull request, and force pushes made before a pull request was opened, are not covered.
+- If a pull request's target branch is changed and the pull request is then force-pushed, commits of the old target branch can be marked as replaced, although they were never part of the pull request.
 - Commits removed by a force push can be read only as long as GitHub keeps them.
 - `author_login` and `committer_login` can be empty for some commits when GitHub doesn't link the email to an account.
 - Pull requests with thousands of commits or many force pushes need more GitHub API requests (about one per 100 commits), so a first run over a long history can take a while.

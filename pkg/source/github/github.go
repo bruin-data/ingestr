@@ -187,7 +187,6 @@ var prCommitFields = []schema.Column{
 	{Name: "signed_by_github", DataType: schema.TypeBoolean, Nullable: true},
 	{Name: "replaced_by_force_push", DataType: schema.TypeBoolean, Nullable: true},
 	{Name: "replaced_at", DataType: schema.TypeTimestampTZ, Nullable: true},
-	{Name: "source_api", DataType: schema.TypeString, Nullable: true},
 }
 
 var stargazerFields = []schema.Column{
@@ -2111,16 +2110,18 @@ func (s *GithubSource) paginateGraphQL(
 // GitHub lists at most the newest 250 commits of a pull request, in GraphQL as in REST.
 const prCommitListCap = 250
 
-// prCommitListRetries is how many times a pull request's commit list is read again when it changed
-// while being read.
-const prCommitListRetries = 3
+// When a pull request changes while it is read, it is read again: at most prCommitPageRetries
+// times while its commit pages are read, and at most prForcePushPageRetries times while its force
+// pushes are read, which reads its commit pages again too. With 1 and 1, a pull request is read at
+// most 4 times.
+const (
+	prCommitPageRetries    = 1
+	prForcePushPageRetries = 1
+)
 
 const (
 	gitHubCommitterEmail = "noreply@github.com"
 	webFlowLogin         = "web-flow"
-
-	sourceAPIGraphQL = "graphql"
-	sourceAPICompare = "compare"
 )
 
 const prCommitFragment = `
@@ -2464,7 +2465,7 @@ func prInInterval(pr pullRequestNode, opts source.ReadOptions) (read, stop bool,
 
 // pullRequestCommitRows reads the pull request's final version and its force pushes. When its head
 // changes while more than one page of force pushes is read, the whole pull request is read again,
-// with a warning, up to prCommitListRetries times, so the force pushes belong to the version read.
+// with a warning, up to prForcePushPageRetries times, so the force pushes belong to the version read.
 func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) ([]map[string]interface{}, error) {
 	var final *commitSet
 	var baseInFinal *bool
@@ -2482,10 +2483,10 @@ func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName strin
 		if !headMoved {
 			break
 		}
-		if retry == prCommitListRetries {
-			return nil, fmt.Errorf("pull request %s#%d: its head changed while its force pushes were read, after %d retries", fullName, pr.Number, prCommitListRetries)
+		if retry == prForcePushPageRetries {
+			return nil, fmt.Errorf("pull request %s#%d: its head changed while its force pushes were read, also when read again", fullName, pr.Number)
 		}
-		output.Warnf("\nWarning: pull request %s#%d: its head changed while its force pushes were read, reading it again (retry %d of %d)\n", fullName, pr.Number, retry+1, prCommitListRetries)
+		output.Warnf("\nWarning: pull request %s#%d: its head changed while its force pushes were read, reading it again (retry %d of %d)\n", fullName, pr.Number, retry+1, prForcePushPageRetries)
 		if pr, read, err = s.rereadPullRequest(ctx, fullName, pr.Number, opts); err != nil || !read {
 			return nil, err
 		}
@@ -2494,7 +2495,11 @@ func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName strin
 	if err != nil {
 		return nil, err
 	}
-	if err := s.applyGitHubSignatures(ctx, fullName, pr.Number, final, replaced); err != nil {
+	fromCompare := []*commitSet{replaced}
+	if baseInFinal != nil {
+		fromCompare = append(fromCompare, final)
+	}
+	if err := s.applyGitHubSignatures(ctx, fullName, pr.Number, fromCompare...); err != nil {
 		return nil, err
 	}
 
@@ -2509,17 +2514,13 @@ func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName strin
 	return rows, nil
 }
 
-// applyGitHubSignatures sets signed_by_github on rows read through compare from GraphQL's
-// wasSignedByGitHub, which REST doesn't return. A commit GitHub can't find keeps the value
+// applyGitHubSignatures sets signed_by_github on the rows of sets, all read through compare, from
+// GraphQL's wasSignedByGitHub, which REST doesn't return. A commit GitHub can't find keeps the value
 // restCommitRow infers, with a warning.
 func (s *GithubSource) applyGitHubSignatures(ctx context.Context, fullName string, number int, sets ...*commitSet) error {
 	var shas []string
 	for _, set := range sets {
-		for _, sha := range set.order {
-			if set.rows[sha]["source_api"] == sourceAPICompare {
-				shas = append(shas, sha)
-			}
-		}
+		shas = append(shas, set.order...)
 	}
 	if len(shas) == 0 {
 		return nil
@@ -2531,9 +2532,6 @@ func (s *GithubSource) applyGitHubSignatures(ctx context.Context, fullName strin
 	missing := 0
 	for _, set := range sets {
 		for _, sha := range set.order {
-			if set.rows[sha]["source_api"] != sourceAPICompare {
-				continue
-			}
 			if v, ok := signed[sha]; ok {
 				set.rows[sha]["signed_by_github"] = v
 			} else {
@@ -2743,7 +2741,7 @@ func (s *GithubSource) forcePushEvents(ctx context.Context, fullName string, pr 
 // listedPRCommits returns the pull request's commits as GitHub lists them, reading the pages after
 // the first 100. Over prCommitListCap commits GitHub lists only the newest ones. When the pull
 // request changes between two pages (its head moves) or the commits read don't match the count, the
-// whole pull request is read again, with a warning, up to prCommitListRetries times; then the run
+// whole pull request is read again, with a warning, up to prCommitPageRetries times; then the run
 // fails. It returns the pull request as last read, and read = false when that read shows it updated
 // outside the interval, so the run whose interval holds its last update reads it.
 func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) (pullRequestNode, []gqlCommit, bool, error) {
@@ -2760,10 +2758,10 @@ func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr 
 		if headMoved {
 			problem = "its head changed while its commits were read"
 		}
-		if retry == prCommitListRetries {
-			return pr, nil, false, fmt.Errorf("pull request %s#%d: %s, after %d retries", fullName, pr.Number, problem, prCommitListRetries)
+		if retry == prCommitPageRetries {
+			return pr, nil, false, fmt.Errorf("pull request %s#%d: %s, also when read again", fullName, pr.Number, problem)
 		}
-		output.Warnf("\nWarning: pull request %s#%d: %s, reading its commits again (retry %d of %d)\n", fullName, pr.Number, problem, retry+1, prCommitListRetries)
+		output.Warnf("\nWarning: pull request %s#%d: %s, reading its commits again (retry %d of %d)\n", fullName, pr.Number, problem, retry+1, prCommitPageRetries)
 		var read bool
 		if pr, read, err = s.rereadPullRequest(ctx, fullName, pr.Number, opts); err != nil || !read {
 			return pr, nil, false, err
@@ -3037,7 +3035,6 @@ func graphQLCommitRow(c gqlCommit) map[string]interface{} {
 		"verified":            false,
 		"verification_reason": "unsigned",
 		"signed_by_github":    false,
-		"source_api":          sourceAPIGraphQL,
 	}
 	if sig := c.Signature; sig != nil {
 		row["verified"] = sig.IsValid
@@ -3089,7 +3086,6 @@ func restCommitRow(c restCommit) map[string]interface{} {
 		"verified":            false,
 		"verification_reason": nil,
 		"signed_by_github":    false,
-		"source_api":          sourceAPICompare,
 	}
 	if a := c.Commit.Author; a != nil {
 		row["author_name"], row["author_email"], row["authored_at"] = nullIfEmpty(a.Name), nullIfEmpty(a.Email), nullIfEmpty(a.Date)
