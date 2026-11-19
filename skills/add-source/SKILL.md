@@ -34,7 +34,7 @@ The most important step. Read the official docs and map out, per endpoint:
 
 Then decide the table set and per-table behavior:
 
-- Table names, primary key(s), incremental key, merge vs replace (see the checklist rules).
+- Table names, primary key(s), incremental key, write strategy (see below).
 - Don't flatten nested objects. Pass each provider object through as-is so it lands as a JSON
   column; only lift the primary-key field(s) to top-level columns.
 - Every URI param you expose must be wired end to end: parse → store on the struct → use in a
@@ -45,6 +45,50 @@ Then decide the table set and per-table behavior:
 Read 2-3 existing sources as reference — e.g. `attio` for schema inference, plus one that
 paginates and one that does server-side date filtering. Reuse their patterns and helpers
 instead of inventing new ones.
+
+### Choose each table's write strategy
+
+API sources return `HandlesIncrementality() == true`, so the table's `Strategy()` is what runs.
+The user's `--incremental-strategy` is silently ignored unless `GetTable` reads `req.Strategy`,
+so pick the right one here — users can't fix it later.
+
+- **`replace`** when a full fetch stays cheap (users, labels, settings) or the API can't return
+  only changed rows. Fetch everything and set `TableIgnoresInterval`: replace drops rows outside
+  the interval.
+- **The incremental key must be when the row last changed** (`updated_at`), not when it was
+  created (`created_at`, `committed_at`). A creation time loses rows that show up after their
+  window already ran. Rows that never change after creation (trades, bounces, events) can use the
+  creation time. If there's no change time, use `replace`.
+- **`merge` on a stable PK for entities fetched by `updated_at`** (users, tickets, orders). It
+  never deletes rows, so request deleted/archived items and keep `is_deleted` / `deleted_at`.
+- **`delete+insert` when a slice, usually a day, is replaced as a whole.** Use it for reports
+  (one row per day + dimensions, e.g. `adjust`, `applovin`): vendors recompute whole days, rows
+  drop out, and a renamed campaign changes the PK, so `merge` would keep stale rows. Also use it
+  when there's no stable PK, or for large date-partitioned tables where deleting a partition is
+  cheaper than a MERGE. Never key it on `updated_at` for entities: the old version of a row sits
+  outside the window, never gets deleted, and duplicates.
+- **`delete+insert` deletes `[start, end]` with both ends inclusive**, then inserts what you
+  fetched, so the fetch must return exactly that window. Rows outside it are inserted but never
+  deleted. An end-exclusive filter (like `deel`'s `filterItemsByInterval`) deletes the end day
+  without re-inserting it. And an API failure that comes back as an empty result while an
+  interval is set wipes the whole window, so return an error instead.
+- **`append` for immutable, high-volume events and logs** read with a cursor that never returns a
+  row twice: no lookback, no overlapping windows (`slack` `access_logs`, `zendesk`
+  `ticket_metric_events`, `posthog` events, `influxdb`). It's cheaper than `merge` since there's
+  no MERGE over a growing table, but any re-run or overlap duplicates rows. If rows have a stable
+  id and the volume is moderate, use `merge`.
+- **`scd2` only when the API returns just the current state and history matters** (Shopify
+  `balance`). It's destination-specific, and it only closes deleted keys on a full fetch.
+- **Child tables** (line items, PR commits): `merge` on `(parent_id, child_id)`. Fetching
+  children only for changed parents works only if a child change bumps the parent's
+  `updated_at`.
+- **Lookbacks only shrink the gap**, so add one only when the vendor documents the maximum delay
+  (an attribution window, a re-run limit).
+
+`--full-refresh` always runs `replace` with whatever the source returns for no interval. On APIs
+that only keep recent data, that wipes older history: `adapty` fetches the last 30 days by
+default, so a full refresh leaves only those. Don't suggest periodic full refreshes for those
+sources.
 
 ## 2. Ask the user for test-account credentials
 
@@ -205,11 +249,7 @@ normalization). Fix discrepancies before continuing.
 - [ ] **Constrained params validated** with a clear error.
 - [ ] **No `opts.Limit` in API sources**: the pipeline handles row limiting. Only database/SQL
   sources use it.
-- [ ] **Merge vs replace, per table**: use `merge` only when the table can load incrementally —
-  its endpoint accepts a time filter (directly or via a parent), its rows carry an update
-  timestamp, or its rows are append-only/immutable with a stable PK. Otherwise `replace` with a
-  full fetch. Avoid `append`: it's a plain insert that duplicates on re-run — prefer `merge`
-  keyed on a stable PK for append-only data.
+- [ ] **Strategy per table** follows section 1, and the incremental key is a change time.
 - [ ] **Incremental filtering decided per table**: server-side (query params, exact
   operator/field), client-side (fetch all, filter in code), none (replace), or special
   (sub-type loops, custom filters).
@@ -304,6 +344,13 @@ For incremental logic (local verification, not committed): for one server-side a
 client-side filtered table, run against the real API and confirm by hand that (1) a range
 covering the data returns the expected rows, (2) a range before the data returns 0 rows, (3) no
 interval returns all records.
+
+Then check each incremental table before shipping:
+
+1. Run the same window twice: the row count doesn't change.
+2. One run over `[a, c]` matches runs over `[a, b]` then `[b, c]`.
+3. Edit, archive, or delete a record: the next run picks it up, or the report says why not.
+4. Think of the latest a row can arrive (a late edit, a restated day) and which run picks it up.
 
 Run `make format`, `make lint`, and `make test` when done.
 
