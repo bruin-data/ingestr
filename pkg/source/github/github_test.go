@@ -2167,6 +2167,7 @@ type prFake struct {
 	gqlNodeLimit       int
 	pushDuringReads    int
 	rewriteDuringReads int
+	updatedOnChange    string
 	gqlCalls           []string
 }
 
@@ -2346,11 +2347,15 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 	if pr == nil {
 		return
 	}
+	if strings.Contains(req.Query, "...prNode") {
+		f.record(&f.gqlCalls, fmt.Sprintf("pr %s#%d", key, number))
+		node := f.prNode(pr)
+		f.afterFirstCommitPage(pr)
+		writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": node}}})
+		return
+	}
 	f.record(&f.gqlCalls, fmt.Sprintf("commits %s#%d %s", key, number, after))
 	pull := map[string]interface{}{"headRefOid": pr.head, "commits": f.commitConnection(pr, after)}
-	if after == "" {
-		f.afterFirstCommitPage(pr)
-	}
 	writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": pull}}})
 }
 
@@ -2358,11 +2363,17 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 // with as many commits (rewriteDuringReads) right after the first page of each of its first reads.
 func (f *prFake) afterFirstCommitPage(pr *fakePR) {
 	pr.reads++
+	changed := false
 	if pr.reads <= f.pushDuringReads {
 		pr.head = f.g.add(pr.head)
+		changed = true
 	}
 	if pr.reads <= f.rewriteDuringReads {
 		pr.head = f.g.chain(pr.base, len(f.g.between(pr.base, pr.head)))
+		changed = true
+	}
+	if changed && f.updatedOnChange != "" {
+		pr.updated = f.updatedOnChange
 	}
 }
 
@@ -2601,6 +2612,29 @@ func TestGithubPRCommitsChangeDuringReadIsRetried(t *testing.T) {
 				t.Fatalf("%d retry warnings, want %d:\n%s", got, tc.pushes+tc.rewrite, logs.String())
 			}
 		})
+	}
+}
+
+func TestGithubPRCommitsUpdatedPastTheEndDuringReadIsSkipped(t *testing.T) {
+	f := newPRFake(t)
+	f.pushDuringReads = 1
+	f.updatedOnChange = "2026-11-12T00:00:00Z"
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 7, base: main, head: f.g.chain(main, 130), updated: "2026-11-10T00:00:00Z"})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("%d rows written for a pull request updated after the interval end while it was read", len(rows))
+	}
+	if !strings.Contains(logs.String(), "pull request o/r#7 was updated after the interval while its commits were read, skipping it") {
+		t.Fatalf("logs:\n%s", logs.String())
 	}
 }
 
