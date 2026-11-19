@@ -444,6 +444,7 @@ type TableRequest struct {
 	Streaming      bool                       // Table will be read in streaming mode (--stream)
 	StrategySet    bool                       // Whether strategy was explicitly supplied by the caller
 	FullRefresh    bool                       // Whether the run ignores incremental state and fully refreshes the destination
+	Columns        string                     // Raw --columns overrides, applied by the pipeline after GetTable
 }
 
 // Source represents a data source that can provide tables.

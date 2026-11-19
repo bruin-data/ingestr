@@ -16,6 +16,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/bruin-data/ingestr/pkg/schemainfer"
 	"github.com/bruin-data/ingestr/pkg/source"
 	xpmmap "golang.org/x/exp/mmap"
@@ -84,8 +85,15 @@ func (s *MMapSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 	if strategy == config.StrategyDeleteInsert && s.knownSchema != nil {
 		for _, column := range s.knownSchema.Columns {
 			if strings.EqualFold(column.Name, req.IncrementalKey) {
+				keyType := column.DataType
+				// A --columns override (e.g. key:date) sets the key type the bounds are compared against.
+				if overrides, err := schemaevolution.ParseColumnOverrides(req.Columns); err == nil {
+					if override, ok := overrides[strings.ToLower(column.Name)]; ok && override.DataType != schema.TypeUnknown {
+						keyType = override.DataType
+					}
+				}
 				// CLI interval bounds are timestamps. Other key types use staged Arrow values.
-				switch column.DataType {
+				switch keyType {
 				case schema.TypeDate, schema.TypeTimestamp, schema.TypeTimestampTZ, schema.TypeUnknown:
 				default:
 					ignoresInterval = true

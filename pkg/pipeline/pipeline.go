@@ -439,6 +439,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		Streaming:      usesStreamingExecutor(p.config),
 		StrategySet:    p.config.IncrementalStrategyExplicit,
 		FullRefresh:    p.config.FullRefresh,
+		Columns:        p.config.Columns,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get table: %w", err)

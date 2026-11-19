@@ -21,15 +21,19 @@ func TestMMapDeleteInsertIntervalTypes(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name        string
-		keyType     schema.DataType
-		ignoreDates bool
+		name            string
+		keyType         schema.DataType
+		columns         string
+		ignoresInterval bool
 	}{
-		{name: "text", keyType: schema.TypeString, ignoreDates: true},
-		{name: "integer", keyType: schema.TypeInt64, ignoreDates: true},
+		{name: "text", keyType: schema.TypeString, ignoresInterval: true},
+		{name: "integer", keyType: schema.TypeInt64, ignoresInterval: true},
 		{name: "date", keyType: schema.TypeDate},
 		{name: "timestamp", keyType: schema.TypeTimestamp},
 		{name: "timestamp with time zone", keyType: schema.TypeTimestampTZ},
+		{name: "text overridden to date", keyType: schema.TypeString, columns: "other:bigint,KEY:date"},
+		{name: "text overridden to varchar", keyType: schema.TypeString, columns: "key:varchar", ignoresInterval: true},
+		{name: "timestamp overridden to text", keyType: schema.TypeTimestamp, columns: "key:varchar", ignoresInterval: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := NewMMapSource()
@@ -40,9 +44,10 @@ func TestMMapDeleteInsertIntervalTypes(t *testing.T) {
 				Name:           "rows",
 				IncrementalKey: "key",
 				Strategy:       config.StrategyDeleteInsert,
+				Columns:        tc.columns,
 			})
 			require.NoError(t, err)
-			require.Equal(t, tc.ignoreDates, table.(source.IntervalIgnoringTable).IgnoresInterval())
+			require.Equal(t, tc.ignoresInterval, table.(source.IntervalIgnoringTable).IgnoresInterval())
 		})
 	}
 }
