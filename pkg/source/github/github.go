@@ -59,6 +59,7 @@ const (
 var supportedTables = []string{
 	"commits",
 	"issues",
+	"pull_request_commits",
 	"pull_requests",
 	"repo_events",
 	"repositories",
@@ -66,9 +67,15 @@ var supportedTables = []string{
 }
 
 var graphQLTables = map[string]bool{
-	"issues":        true,
-	"pull_requests": true,
-	"stargazers":    true,
+	"issues":               true,
+	"pull_request_commits": true,
+	"pull_requests":        true,
+	"stargazers":           true,
+}
+
+var repoListTables = map[string]bool{
+	"commits":              true,
+	"pull_request_commits": true,
 }
 
 // The fields GitHub's OpenAPI marks as required on every repository list response; the rest are inferred.
@@ -145,6 +152,38 @@ var commitFields = []schema.Column{
 	{Name: "author", DataType: schema.TypeJSON, Nullable: true},
 	{Name: "committer", DataType: schema.TypeJSON, Nullable: true},
 	{Name: "parents", DataType: schema.TypeJSON, Nullable: true},
+}
+
+var prCommitFields = []schema.Column{
+	{Name: "repo", DataType: schema.TypeString, Nullable: false},
+	{Name: "pr_number", DataType: schema.TypeInt64, Nullable: false},
+	{Name: "sha", DataType: schema.TypeString, Nullable: false},
+	{Name: "pr_state", DataType: schema.TypeString, Nullable: true},
+	{Name: "pr_url", DataType: schema.TypeString, Nullable: true},
+	{Name: "pr_title", DataType: schema.TypeString, Nullable: true},
+	{Name: "pr_author", DataType: schema.TypeString, Nullable: true},
+	{Name: "pr_created_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "pr_updated_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "pr_closed_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "pr_merged_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "base_ref", DataType: schema.TypeString, Nullable: true},
+	{Name: "head_ref", DataType: schema.TypeString, Nullable: true},
+	{Name: "head_repo", DataType: schema.TypeString, Nullable: true},
+	{Name: "merge_commit_sha", DataType: schema.TypeString, Nullable: true},
+	{Name: "commit_url", DataType: schema.TypeString, Nullable: true},
+	{Name: "message", DataType: schema.TypeString, Nullable: true},
+	{Name: "author_name", DataType: schema.TypeString, Nullable: true},
+	{Name: "author_email", DataType: schema.TypeString, Nullable: true},
+	{Name: "author_login", DataType: schema.TypeString, Nullable: true},
+	{Name: "authored_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "committer_name", DataType: schema.TypeString, Nullable: true},
+	{Name: "committer_email", DataType: schema.TypeString, Nullable: true},
+	{Name: "committer_login", DataType: schema.TypeString, Nullable: true},
+	{Name: "committed_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "parent_count", DataType: schema.TypeInt64, Nullable: true},
+	{Name: "verified", DataType: schema.TypeBoolean, Nullable: true},
+	{Name: "verification_reason", DataType: schema.TypeString, Nullable: true},
+	{Name: "signed_by_github", DataType: schema.TypeBoolean, Nullable: true},
 }
 
 var stargazerFields = []schema.Column{
@@ -469,18 +508,18 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", req.Name, strings.Join(supportedTables, ", "))
 	}
 
-	switch tableName {
-	case "commits":
+	switch {
+	case repoListTables[tableName]:
 		if sel == nil && s.owner == "" {
-			return nil, fmt.Errorf("table commits needs owner in the URI, or a list of repositories: commits:<owner>/<repo>, or commits:<owner>/* for every repository of an owner")
+			return nil, fmt.Errorf("table %[1]s needs owner in the URI, or a list of repositories: %[1]s:<owner>/<repo>, or %[1]s:<owner>/* for every repository of an owner", tableName)
 		}
-	case "repositories":
+	case tableName == "repositories":
 		if s.owner == "" {
 			return nil, fmt.Errorf("table repositories needs owner in the URI")
 		}
 	default:
 		if s.repo == "" {
-			return nil, fmt.Errorf("table %s needs owner and repo in the URI (only commits can list repositories)", tableName)
+			return nil, fmt.Errorf("table %s needs owner and repo in the URI (only commits and pull_request_commits can list repositories)", tableName)
 		}
 	}
 
@@ -503,6 +542,9 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 	case "commits":
 		incrementalKey = "committed_at"
 		strategy = config.StrategyMerge
+	case "pull_request_commits":
+		incrementalKey = "pr_updated_at"
+		strategy = config.StrategyMerge
 	}
 
 	return &source.DynamicSourceTable{
@@ -520,24 +562,25 @@ func (s *GithubSource) GetTable(ctx context.Context, req source.TableRequest) (s
 	}, nil
 }
 
-// commitSelection is the parsed list of a "commits:..." table: repositories named one by one, as
-// owner/name in the order written, and owners whose every repository is read through <owner>/*.
-type commitSelection struct {
+// repoSelection is the parsed list of a "commits:..." or "pull_request_commits:..." table:
+// repositories named one by one, as owner/name in the order written, and owners whose every
+// repository is read through <owner>/*.
+type repoSelection struct {
 	repos  []string
 	owners []string
 }
 
-// parseTableName splits "commits:<repo>,<owner>/<repo>,<owner>/*" into the table and its
-// selection: trimmed, a bare name under defaultOwner, without empty entries or case-insensitive
-// duplicates. The selection is nil without a list. Other tables keep their full name, so a ":"
-// suffix fails the table check.
-func parseTableName(name, defaultOwner string) (string, *commitSelection, error) {
+// parseTableName splits "commits:<repo>,<owner>/<repo>,<owner>/*" (or the same list after
+// pull_request_commits) into the table and its selection: trimmed, a bare name under defaultOwner,
+// without empty entries or case-insensitive duplicates. The selection is nil without a list. Other
+// tables keep their full name, so a ":" suffix fails the table check.
+func parseTableName(name, defaultOwner string) (string, *repoSelection, error) {
 	base, args, ok := strings.Cut(name, ":")
-	if !ok || base != "commits" {
+	if !ok || !repoListTables[base] {
 		return name, nil, nil
 	}
 
-	sel := &commitSelection{}
+	sel := &repoSelection{}
 	seenRepos := make(map[string]bool)
 	seenOwners := make(map[string]bool)
 	for _, entry := range strings.Split(args, ",") {
@@ -575,7 +618,7 @@ func parseTableName(name, defaultOwner string) (string, *commitSelection, error)
 		sel.repos = append(sel.repos, fullName)
 	}
 	if len(sel.repos) == 0 && len(sel.owners) == 0 {
-		return "", nil, fmt.Errorf("table %s lists no repositories, use commits:<repo>,<owner>/<repo>,<owner>/*", name)
+		return "", nil, fmt.Errorf("table %s lists no repositories, use %s:<repo>,<owner>/<repo>,<owner>/*", name, base)
 	}
 	return base, sel, nil
 }
@@ -591,9 +634,9 @@ func invalidRepositoryError(entry, table, defaultOwner string) error {
 	return fmt.Errorf("invalid repository %q in table %s: use <repo> for a repository of %s, <owner>/<repo>, or <owner>/* for every repository of an owner", entry, table, defaultOwner)
 }
 
-// readsManyRepos reports whether commits come from a repository list or from every repository of
-// the owner, rather than from the URI repo alone.
-func (s *GithubSource) readsManyRepos(sel *commitSelection) bool {
+// readsManyRepos reports whether rows come from a repository list or from every repository of the
+// owner, rather than from the URI repo alone.
+func (s *GithubSource) readsManyRepos(sel *repoSelection) bool {
 	return sel != nil || s.repo == ""
 }
 
@@ -608,6 +651,9 @@ func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.Tab
 	case "issues":
 		fields = issueFields
 		primaryKeys = nil
+	case "pull_request_commits":
+		fields = prCommitFields
+		primaryKeys = []string{"repo", "pr_number", "sha"}
 	case "pull_requests":
 		fields = pullRequestFields
 		primaryKeys = nil
@@ -631,7 +677,7 @@ func (s *GithubSource) getSchema(ctx context.Context, table string) (*schema.Tab
 	}, nil
 }
 
-func (s *GithubSource) read(ctx context.Context, table string, sel *commitSelection, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+func (s *GithubSource) read(ctx context.Context, table string, sel *repoSelection, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
 	if !isValidTable(table) {
 		return nil, fmt.Errorf("unsupported table: %s (supported: %s)", table, strings.Join(supportedTables, ", "))
 	}
@@ -650,6 +696,8 @@ func (s *GithubSource) read(ctx context.Context, table string, sel *commitSelect
 			err = s.readCommits(ctx, opts, results, sel)
 		case "issues":
 			err = s.readIssues(ctx, opts, results)
+		case "pull_request_commits":
+			err = s.readPRCommits(ctx, opts, results, sel)
 		case "pull_requests":
 			err = s.readPullRequests(ctx, opts, results)
 		case "repo_events":
@@ -696,6 +744,27 @@ type graphQLError struct {
 	Message string `json:"message"`
 }
 
+// graphQLErrors is a GraphQL answer with errors, kept typed so callers can tell a missing
+// repository (NOT_FOUND) from other failures.
+type graphQLErrors []graphQLError
+
+func (e graphQLErrors) Error() string {
+	msgs := make([]string, 0, len(e))
+	for _, ge := range e {
+		msgs = append(msgs, ge.Message)
+	}
+	return "graphql errors: " + strings.Join(msgs, "; ")
+}
+
+func (e graphQLErrors) allOfType(t string) bool {
+	for _, ge := range e {
+		if ge.Type != t {
+			return false
+		}
+	}
+	return len(e) > 0
+}
+
 type rateLimitInfo struct {
 	Limit     int    `json:"limit"`
 	Cost      int    `json:"cost"`
@@ -731,11 +800,7 @@ func (s *GithubSource) executeGraphQL(ctx context.Context, query string, variabl
 	}
 
 	if len(resp.Errors) > 0 {
-		var errMsgs []string
-		for _, e := range resp.Errors {
-			errMsgs = append(errMsgs, e.Message)
-		}
-		return nil, nil, fmt.Errorf("graphql errors: %s", strings.Join(errMsgs, "; "))
+		return nil, nil, graphQLErrors(resp.Errors)
 	}
 
 	// Extract rateLimit from data (GitHub returns it in the data field)
@@ -1164,11 +1229,12 @@ func (s *GithubSource) readRepoEvents(ctx context.Context, opts source.ReadOptio
 
 var errEmptyRepository = errors.New("repository is empty")
 
-// unavailableRepoError is a REST answer saying the repository can't be read with this token:
-// missing, blocked, or forbidden for a reason other than a rate limit.
+// unavailableRepoError is GitHub's answer saying the repository can't be read with this token:
+// missing, blocked, or forbidden for a reason other than a rate limit. answer is the REST status
+// or the GraphQL error type.
 type unavailableRepoError struct {
 	error
-	status int
+	answer string
 }
 
 func repoUnavailable(resp *ingestrhttp.Response) bool {
@@ -1181,10 +1247,17 @@ func repoUnavailable(resp *ingestrhttp.Response) bool {
 	return false
 }
 
-// readCommits reads the URI repo, or the selected repositories, or every repository of the owner
-// except forks when neither is given. A repository found through an owner's listing that can't be
-// read is skipped with a warning; a repository named in the list or the URI fails the run.
-func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, sel *commitSelection) error {
+func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, sel *repoSelection) error {
+	return s.readSelectedRepos(ctx, opts, sel, "commits", func(ctx context.Context, opts source.ReadOptions, fullName string) (int, error) {
+		return s.readRepoCommits(ctx, opts, results, fullName)
+	})
+}
+
+// readSelectedRepos reads the URI repo, or the selected repositories, or every repository of the
+// owner except forks when neither is given, with readRepo. A repository found through an owner's
+// listing that can't be read is skipped with a warning; a repository named in the list or the URI
+// fails the run.
+func (s *GithubSource) readSelectedRepos(ctx context.Context, opts source.ReadOptions, sel *repoSelection, what string, readRepo func(context.Context, source.ReadOptions, string) (int, error)) error {
 	repos, err := s.resolveCommitRepos(ctx, sel)
 	if err != nil {
 		return err
@@ -1199,11 +1272,11 @@ func (s *GithubSource) readCommits(ctx context.Context, opts source.ReadOptions,
 				break
 			}
 		}
-		n, err := s.readRepoCommits(ctx, repoOpts, results, r.fullName)
+		n, err := readRepo(ctx, repoOpts, r.fullName)
 		sent += n
 		var unavailable unavailableRepoError
 		if !r.explicit && errors.As(err, &unavailable) {
-			output.Warnf("\nWarning: skipping the commits of %s, GitHub answered %d\n", r.fullName, unavailable.status)
+			output.Warnf("\nWarning: skipping the %s of %s, GitHub answered %s\n", what, r.fullName, unavailable.answer)
 			continue
 		}
 		if err != nil {
@@ -1251,7 +1324,7 @@ type commitRepo struct {
 // resolveCommitRepos returns the repositories to read under GitHub's full names: the selected
 // repositories in their order, then the repositories of each selected owner except forks and
 // those already selected; or the URI repo; or every repository of the URI owner except forks.
-func (s *GithubSource) resolveCommitRepos(ctx context.Context, sel *commitSelection) ([]commitRepo, error) {
+func (s *GithubSource) resolveCommitRepos(ctx context.Context, sel *repoSelection) ([]commitRepo, error) {
 	switch {
 	case sel != nil:
 		named, err := s.lookupRepos(ctx, sel.repos)
@@ -1586,7 +1659,7 @@ func (s *GithubSource) paginateREST(
 		if !httpResp.IsSuccess() {
 			err := fmt.Errorf("failed to fetch %s with status %d: %s", table, httpResp.StatusCode(), httpResp.String())
 			if repoUnavailable(httpResp) {
-				return totalSent, unavailableRepoError{err, httpResp.StatusCode()}
+				return totalSent, unavailableRepoError{err, strconv.Itoa(httpResp.StatusCode())}
 			}
 			return totalSent, err
 		}
@@ -2028,5 +2101,512 @@ func (s *GithubSource) paginateGraphQL(
 
 	config.Debug("[GITHUB] Finished reading %s, total records: %d", rootField, totalSent)
 	// No need to print at the end - last iteration already printed the final state
+	return nil
+}
+
+// GitHub lists at most the newest 250 commits of a pull request, in GraphQL as in REST.
+const prCommitListCap = 250
+
+// prCommitListRetries is how many times a pull request's commit list is read again when it changed
+// while being read.
+const prCommitListRetries = 3
+
+const (
+	gitHubCommitterEmail = "noreply@github.com"
+	webFlowLogin         = "web-flow"
+)
+
+const prCommitFragment = `
+fragment prCommit on Commit {
+  oid
+  url
+  message
+  author { name email date user { login } }
+  committer { name email date user { login } }
+  parents { totalCount }
+  signature { isValid state wasSignedByGitHub }
+}`
+
+// prNodeFragment is everything read about a pull request, by the listing and when a pull request is
+// read again.
+const prNodeFragment = `
+fragment prNode on PullRequest {
+  number
+  url
+  title
+  state
+  author { login }
+  createdAt
+  updatedAt
+  closedAt
+  mergedAt
+  baseRefName
+  baseRefOid
+  headRefName
+  headRefOid
+  headRepository { nameWithOwner }
+  mergeCommit { oid }
+  commits(first: 100) {
+    totalCount
+    pageInfo { hasNextPage endCursor }
+    nodes { commit { ...prCommit } }
+  }
+}`
+
+const pullRequestCommitsQuery = `
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 50, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...prNode }
+    }
+  }
+  rateLimit { limit cost remaining resetAt }
+}` + prNodeFragment + prCommitFragment
+
+const pullRequestQuery = `
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { ...prNode }
+  }
+  rateLimit { limit cost remaining resetAt }
+}` + prNodeFragment + prCommitFragment
+
+const prCommitsPageQuery = `
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      commits(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { commit { ...prCommit } }
+      }
+    }
+  }
+  rateLimit { limit cost remaining resetAt }
+}` + prCommitFragment
+
+type gqlPageInfo struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
+}
+
+type gqlLogin struct {
+	Login string `json:"login"`
+}
+
+type gqlGitActor struct {
+	Name  string    `json:"name"`
+	Email string    `json:"email"`
+	Date  string    `json:"date"`
+	User  *gqlLogin `json:"user"`
+}
+
+type gqlCommit struct {
+	Oid       string      `json:"oid"`
+	URL       string      `json:"url"`
+	Message   string      `json:"message"`
+	Author    gqlGitActor `json:"author"`
+	Committer gqlGitActor `json:"committer"`
+	Parents   struct {
+		TotalCount int `json:"totalCount"`
+	} `json:"parents"`
+	Signature *struct {
+		IsValid           bool   `json:"isValid"`
+		State             string `json:"state"`
+		WasSignedByGitHub bool   `json:"wasSignedByGitHub"`
+	} `json:"signature"`
+}
+
+type prCommitConnection struct {
+	TotalCount int         `json:"totalCount"`
+	PageInfo   gqlPageInfo `json:"pageInfo"`
+	Nodes      []struct {
+		Commit gqlCommit `json:"commit"`
+	} `json:"nodes"`
+}
+
+type pullRequestNode struct {
+	Number         int       `json:"number"`
+	URL            string    `json:"url"`
+	Title          string    `json:"title"`
+	State          string    `json:"state"`
+	Author         *gqlLogin `json:"author"`
+	CreatedAt      string    `json:"createdAt"`
+	UpdatedAt      string    `json:"updatedAt"`
+	ClosedAt       *string   `json:"closedAt"`
+	MergedAt       *string   `json:"mergedAt"`
+	BaseRefName    string    `json:"baseRefName"`
+	BaseRefOid     string    `json:"baseRefOid"`
+	HeadRefName    string    `json:"headRefName"`
+	HeadRefOid     string    `json:"headRefOid"`
+	HeadRepository *struct {
+		NameWithOwner string `json:"nameWithOwner"`
+	} `json:"headRepository"`
+	MergeCommit *struct {
+		Oid string `json:"oid"`
+	} `json:"mergeCommit"`
+	Commits prCommitConnection `json:"commits"`
+}
+
+func (s *GithubSource) readPRCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, sel *repoSelection) error {
+	return s.readSelectedRepos(ctx, opts, sel, "pull request commits", func(ctx context.Context, opts source.ReadOptions, fullName string) (int, error) {
+		return s.readRepoPRCommits(ctx, opts, results, fullName)
+	})
+}
+
+// readRepoPRCommits lists one repository's pull requests by last update, newest first, and emits
+// the commits of each pull request in the interval. Each pull request is emitted once per run.
+func (s *GithubSource) readRepoPRCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName string) (int, error) {
+	config.Debug("[GITHUB] Reading pull request commits for %s", fullName)
+	owner, name, _ := strings.Cut(fullName, "/")
+	out := &rowBatcher{results: results, fields: prCommitFields, opts: opts, table: "pull_request_commits"}
+	seen := make(map[int]bool)
+	after := ""
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return out.sent, err
+		}
+		vars := map[string]interface{}{"owner": owner, "name": name}
+		if after != "" {
+			vars["after"] = after
+		}
+		data, _, err := s.executeGraphQL(ctx, pullRequestCommitsQuery, vars)
+		if err != nil {
+			err = fmt.Errorf("failed to list the pull requests of %s: %w", fullName, err)
+			var gqlErr graphQLErrors
+			if errors.As(err, &gqlErr) && prRepoUnavailable(gqlErr) {
+				return out.sent, unavailableRepoError{err, "NOT_FOUND"}
+			}
+			return out.sent, err
+		}
+		var page struct {
+			Repository *struct {
+				PullRequests struct {
+					PageInfo gqlPageInfo       `json:"pageInfo"`
+					Nodes    []pullRequestNode `json:"nodes"`
+				} `json:"pullRequests"`
+			} `json:"repository"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			return out.sent, fmt.Errorf("failed to decode the pull requests of %s: %w", fullName, err)
+		}
+		if page.Repository == nil {
+			return out.sent, fmt.Errorf("unexpected response format: missing repository %s", fullName)
+		}
+
+		for _, pr := range page.Repository.PullRequests.Nodes {
+			read, stop, err := prInInterval(pr, opts)
+			if err != nil {
+				return out.sent, fmt.Errorf("pull request %s#%d: %w", fullName, pr.Number, err)
+			}
+			if stop {
+				return out.sent, out.flush()
+			}
+			if !read || seen[pr.Number] {
+				continue
+			}
+			seen[pr.Number] = true
+			rows, err := s.pullRequestCommitRows(ctx, fullName, pr, opts)
+			if err != nil {
+				return out.sent, err
+			}
+			for _, row := range rows {
+				full, err := out.add(row)
+				if err != nil || full {
+					if err == nil {
+						err = out.flush()
+					}
+					return out.sent, err
+				}
+			}
+		}
+		if err := out.flush(); err != nil {
+			return out.sent, err
+		}
+		if !page.Repository.PullRequests.PageInfo.HasNextPage || page.Repository.PullRequests.PageInfo.EndCursor == "" {
+			return out.sent, nil
+		}
+		after = page.Repository.PullRequests.PageInfo.EndCursor
+	}
+}
+
+// prRepoUnavailable reports a repository GraphQL can't resolve. Other errors, such as a token
+// without access to pull requests, fail the run: they would hit every repository alike.
+func prRepoUnavailable(err graphQLErrors) bool {
+	return err.allOfType("NOT_FOUND")
+}
+
+// prInInterval reads a pull request last updated in the interval, like pr_updated_at, the incremental
+// key. Pull requests come newest update first: those updated at or after the end are skipped, and the
+// first one updated before the start stops the listing.
+func prInInterval(pr pullRequestNode, opts source.ReadOptions) (read, stop bool, err error) {
+	if opts.IntervalStart == nil && opts.IntervalEnd == nil {
+		return true, false, nil
+	}
+	updated, err := time.Parse(time.RFC3339, pr.UpdatedAt)
+	if err != nil {
+		return false, false, fmt.Errorf("invalid updatedAt %q: %w", pr.UpdatedAt, err)
+	}
+	if opts.IntervalStart != nil && updated.Before(*opts.IntervalStart) {
+		return false, true, nil
+	}
+	if opts.IntervalEnd != nil && !updated.Before(*opts.IntervalEnd) {
+		return false, false, nil
+	}
+	return true, false, nil
+}
+
+func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) ([]map[string]interface{}, error) {
+	pr, commits, read, err := s.listedPRCommits(ctx, fullName, pr, opts)
+	if err != nil || !read {
+		return nil, err
+	}
+	prColumns := pullRequestColumns(fullName, pr)
+	rows := make([]map[string]interface{}, 0, len(commits))
+	for _, c := range commits {
+		rows = append(rows, prCommitRow(prColumns, graphQLCommitRow(c)))
+	}
+	return rows, nil
+}
+
+func prCommitRow(prColumns, commit map[string]interface{}) map[string]interface{} {
+	row := make(map[string]interface{}, len(prColumns)+len(commit))
+	for k, v := range prColumns {
+		row[k] = v
+	}
+	for k, v := range commit {
+		row[k] = v
+	}
+	return row
+}
+
+// listedPRCommits returns the pull request's commits as GitHub lists them, reading the pages after
+// the first 100. Over prCommitListCap commits GitHub lists only the newest ones. When the pull
+// request changes between two pages (its head moves) or the commits read don't match the count, the
+// whole pull request is read again, with a warning, up to prCommitListRetries times; then the run
+// fails. It returns the pull request as last read, and read = false when that read shows it updated
+// outside the interval, so the run whose interval holds its last update reads it.
+func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) (pullRequestNode, []gqlCommit, bool, error) {
+	for retry := 0; ; retry++ {
+		commits, headMoved, err := s.prCommitPages(ctx, fullName, pr.Number, pr.Commits, pr.HeadRefOid)
+		if err != nil {
+			return pr, nil, false, err
+		}
+		want := min(pr.Commits.TotalCount, prCommitListCap)
+		if !headMoved && len(commits) == want {
+			if pr.Commits.TotalCount > prCommitListCap {
+				output.Warnf("\nWarning: pull request %s#%d has more than %d commits, GitHub lists only the newest %d, reading those\n", fullName, pr.Number, prCommitListCap, len(commits))
+			}
+			return pr, commits, true, nil
+		}
+		problem := fmt.Sprintf("GitHub listed %d commits, expected %d", len(commits), want)
+		if headMoved {
+			problem = "its head changed while its commits were read"
+		}
+		if retry == prCommitListRetries {
+			return pr, nil, false, fmt.Errorf("pull request %s#%d: %s, after %d retries", fullName, pr.Number, problem, prCommitListRetries)
+		}
+		output.Warnf("\nWarning: pull request %s#%d: %s, reading its commits again (retry %d of %d)\n", fullName, pr.Number, problem, retry+1, prCommitListRetries)
+		var fresh pullRequestNode
+		if err := s.pullRequestPage(ctx, fullName, pr.Number, pullRequestQuery, "", &fresh); err != nil {
+			return pr, nil, false, err
+		}
+		pr = fresh
+		if read, _, err := prInInterval(pr, opts); err != nil || !read {
+			if err == nil {
+				output.Warnf("\nWarning: pull request %s#%d was updated after the interval while its commits were read, skipping it; the run whose interval holds its last update reads it\n", fullName, pr.Number)
+			}
+			return pr, nil, false, err
+		}
+	}
+}
+
+// prCommitPages reads the commit pages after first and reports whether the pull request's head moved
+// away from head meanwhile.
+func (s *GithubSource) prCommitPages(ctx context.Context, fullName string, number int, first prCommitConnection, head string) ([]gqlCommit, bool, error) {
+	nodes := first.Nodes
+	pageInfo := first.PageInfo
+	headMoved := false
+	for pageInfo.HasNextPage {
+		var page struct {
+			HeadRefOid string             `json:"headRefOid"`
+			Commits    prCommitConnection `json:"commits"`
+		}
+		if err := s.pullRequestPage(ctx, fullName, number, prCommitsPageQuery, pageInfo.EndCursor, &page); err != nil {
+			return nil, false, err
+		}
+		headMoved = headMoved || page.HeadRefOid != head
+		nodes = append(nodes, page.Commits.Nodes...)
+		pageInfo = page.Commits.PageInfo
+	}
+	commits := make([]gqlCommit, 0, len(nodes))
+	for _, n := range nodes {
+		commits = append(commits, n.Commit)
+	}
+	return commits, headMoved, nil
+}
+
+// pullRequestPage runs a per-pull-request follow-up query and decodes its pullRequest object.
+func (s *GithubSource) pullRequestPage(ctx context.Context, fullName string, number int, query, after string, into interface{}) error {
+	owner, name, _ := strings.Cut(fullName, "/")
+	vars := map[string]interface{}{"owner": owner, "name": name, "number": number}
+	if after != "" {
+		vars["after"] = after
+	}
+	data, _, err := s.executeGraphQL(ctx, query, vars)
+	if err != nil {
+		return fmt.Errorf("failed to read pull request %s#%d: %w", fullName, number, err)
+	}
+	var page struct {
+		Repository *struct {
+			PullRequest json.RawMessage `json:"pullRequest"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(data, &page); err != nil {
+		return fmt.Errorf("failed to decode pull request %s#%d: %w", fullName, number, err)
+	}
+	if page.Repository == nil || len(page.Repository.PullRequest) == 0 || string(page.Repository.PullRequest) == "null" {
+		return fmt.Errorf("unexpected response format: missing pull request %s#%d", fullName, number)
+	}
+	if err := json.Unmarshal(page.Repository.PullRequest, into); err != nil {
+		return fmt.Errorf("failed to decode pull request %s#%d: %w", fullName, number, err)
+	}
+	return nil
+}
+
+func pullRequestColumns(fullName string, pr pullRequestNode) map[string]interface{} {
+	cols := map[string]interface{}{
+		"repo":             fullName,
+		"pr_number":        pr.Number,
+		"pr_state":         strings.ToLower(pr.State),
+		"pr_url":           pr.URL,
+		"pr_title":         pr.Title,
+		"pr_author":        nil,
+		"pr_created_at":    nullIfEmpty(pr.CreatedAt),
+		"pr_updated_at":    nullIfEmpty(pr.UpdatedAt),
+		"pr_closed_at":     nil,
+		"pr_merged_at":     nil,
+		"base_ref":         pr.BaseRefName,
+		"head_ref":         pr.HeadRefName,
+		"head_repo":        nil,
+		"merge_commit_sha": nil,
+	}
+	if pr.Author != nil {
+		cols["pr_author"] = pr.Author.Login
+	}
+	if pr.ClosedAt != nil {
+		cols["pr_closed_at"] = *pr.ClosedAt
+	}
+	if pr.MergedAt != nil {
+		cols["pr_merged_at"] = *pr.MergedAt
+	}
+	if pr.HeadRepository != nil {
+		cols["head_repo"] = pr.HeadRepository.NameWithOwner
+	}
+	if pr.MergeCommit != nil {
+		cols["merge_commit_sha"] = pr.MergeCommit.Oid
+	}
+	return cols
+}
+
+func graphQLCommitRow(c gqlCommit) map[string]interface{} {
+	row := map[string]interface{}{
+		"sha":                 c.Oid,
+		"commit_url":          c.URL,
+		"message":             c.Message,
+		"author_name":         nullIfEmpty(c.Author.Name),
+		"author_email":        nullIfEmpty(c.Author.Email),
+		"author_login":        gitActorLogin(c.Author),
+		"authored_at":         nullIfEmpty(c.Author.Date),
+		"committer_name":      nullIfEmpty(c.Committer.Name),
+		"committer_email":     nullIfEmpty(c.Committer.Email),
+		"committer_login":     gitActorLogin(c.Committer),
+		"committed_at":        nullIfEmpty(c.Committer.Date),
+		"parent_count":        c.Parents.TotalCount,
+		"verified":            false,
+		"verification_reason": "unsigned",
+		"signed_by_github":    false,
+	}
+	if sig := c.Signature; sig != nil {
+		row["verified"] = sig.IsValid
+		row["verification_reason"] = signatureReason(sig.State)
+		row["signed_by_github"] = sig.WasSignedByGitHub
+	}
+	return row
+}
+
+// gitActorLogin is the account GitHub links to a commit's author or committer. GraphQL shows
+// commits GitHub made itself with no account, where REST shows web-flow.
+func gitActorLogin(a gqlGitActor) interface{} {
+	if a.User != nil && a.User.Login != "" {
+		return a.User.Login
+	}
+	if strings.EqualFold(a.Email, gitHubCommitterEmail) {
+		return webFlowLogin
+	}
+	return nil
+}
+
+var signatureReasons = map[string]string{
+	"MALFORMED_SIG":    "malformed_signature",
+	"UNKNOWN_SIG_TYPE": "unknown_signature_type",
+}
+
+// signatureReason maps GraphQL's GitSignatureState to the REST verification reason.
+func signatureReason(state string) string {
+	if reason, ok := signatureReasons[state]; ok {
+		return reason
+	}
+	return strings.ToLower(state)
+}
+
+func nullIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// rowBatcher converts rows to Arrow batches, splitting at opts.MaxBatchBytes and stopping at
+// opts.Limit.
+type rowBatcher struct {
+	results chan<- source.RecordBatchResult
+	fields  []schema.Column
+	opts    source.ReadOptions
+	table   string
+	items   []map[string]interface{}
+	bytes   int64
+	sent    int
+}
+
+// add queues a row and reports whether opts.Limit is reached.
+func (b *rowBatcher) add(row map[string]interface{}) (bool, error) {
+	if b.opts.MaxBatchBytes > 0 {
+		rowBytes := arrowconv.RowBytes(row)
+		if len(b.items) > 0 && b.bytes+rowBytes > b.opts.MaxBatchBytes {
+			if err := b.flush(); err != nil {
+				return false, err
+			}
+		}
+		b.bytes += rowBytes
+	}
+	b.items = append(b.items, row)
+	return b.opts.Limit > 0 && b.sent+len(b.items) >= b.opts.Limit, nil
+}
+
+func (b *rowBatcher) flush() error {
+	if len(b.items) == 0 {
+		return nil
+	}
+	record, err := arrowconv.ItemsToArrowRecordWithSchema(b.items, b.fields, b.opts.ExcludeColumns)
+	if err != nil {
+		return fmt.Errorf("failed to convert %s to Arrow: %w", b.table, err)
+	}
+	b.results <- source.RecordBatchResult{Batch: record}
+	b.sent += len(b.items)
+	b.items = nil
+	b.bytes = 0
 	return nil
 }

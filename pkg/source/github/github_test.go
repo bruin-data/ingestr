@@ -16,10 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	ingestrhttp "github.com/bruin-data/ingestr/pkg/http"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
@@ -1889,7 +1891,7 @@ func TestGithubNoOwnerTables(t *testing.T) {
 		"commits":       "table commits needs owner in the URI, or a list of repositories: commits:<owner>/<repo>, or commits:<owner>/* for every repository of an owner",
 		"commits:r":     `repository "r" in table commits:r has no owner and the URI has no owner`,
 		"repositories":  "table repositories needs owner in the URI",
-		"issues":        "table issues needs owner and repo in the URI (only commits can list repositories)",
+		"issues":        "table issues needs owner and repo in the URI (only commits and pull_request_commits can list repositories)",
 		"pull_requests": "table pull_requests needs owner and repo in the URI",
 		"stargazers":    "table stargazers needs owner and repo in the URI",
 		"repo_events":   "table repo_events needs owner and repo in the URI",
@@ -2063,5 +2065,876 @@ func TestGithubCommitsWildcardOverridesURIRepo(t *testing.T) {
 		return strings.HasPrefix(p, "/repos/o/") || strings.HasPrefix(p, "/orgs/o/") || p == "/users/o"
 	}); len(reqs) != 0 {
 		t.Fatalf("the URI owner or repo was read: %v", reqs)
+	}
+}
+
+// fakeGraph is an in-memory commit graph. SHAs are numbered in creation order, which stands in
+// for commit dates.
+type fakeGraph struct {
+	parents map[string][]string
+	order   map[string]int
+}
+
+func newFakeGraph() *fakeGraph {
+	return &fakeGraph{parents: map[string][]string{}, order: map[string]int{}}
+}
+
+func (g *fakeGraph) add(parents ...string) string {
+	idx := len(g.order) + 1
+	sha := fmt.Sprintf("c%05d", idx)
+	g.order[sha] = idx
+	g.parents[sha] = parents
+	return sha
+}
+
+func (g *fakeGraph) chain(from string, n int) string {
+	tip := from
+	for i := 0; i < n; i++ {
+		if tip == "" {
+			tip = g.add()
+		} else {
+			tip = g.add(tip)
+		}
+	}
+	return tip
+}
+
+func (g *fakeGraph) reach(sha string) map[string]bool {
+	seen := map[string]bool{}
+	stack := []string{sha}
+	for len(stack) > 0 {
+		s := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[s] {
+			continue
+		}
+		if _, ok := g.order[s]; !ok {
+			continue
+		}
+		seen[s] = true
+		stack = append(stack, g.parents[s]...)
+	}
+	return seen
+}
+
+// between is git rev-list base..head, oldest first.
+func (g *fakeGraph) between(base, head string) []string {
+	exclude := g.reach(base)
+	var out []string
+	for s := range g.reach(head) {
+		if !exclude[s] {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return g.order[out[i]] < g.order[out[j]] })
+	return out
+}
+
+func (g *fakeGraph) date(sha string) string {
+	return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(g.order[sha]) * time.Minute).Format(time.RFC3339)
+}
+
+type fakePR struct {
+	number                  int
+	state                   string
+	created, updated        string
+	closed, merged          string
+	base, head, mergeCommit string
+	baseRef, headRef        string
+	headRepo, author        string
+	reads                   int
+}
+
+// fakeCommitter overrides who committed a commit and its signature.
+type fakeCommitter struct {
+	name, email, gqlLogin string
+	state                 string
+	valid, byGitHub       bool
+}
+
+// prFake serves pull requests over a fakeGraph through GraphQL: the listing and the per-pull-request
+// commit pages, with GitHub's 250-commit cap. Repository lookups and owner listings go to
+// commitsFake.
+type prFake struct {
+	*commitsFake
+	g                  *fakeGraph
+	mu                 sync.Mutex
+	prs                map[string][]*fakePR
+	gqlErrors          map[string]string
+	committers         map[string]fakeCommitter
+	listPageSize       int
+	listStep           int
+	gqlNodeLimit       int
+	pushDuringReads    int
+	rewriteDuringReads int
+	updatedOnChange    string
+	gqlCalls           []string
+}
+
+func newPRFake(t *testing.T) *prFake {
+	return &prFake{
+		commitsFake:  newCommitsFake(t),
+		g:            newFakeGraph(),
+		prs:          map[string][]*fakePR{},
+		gqlErrors:    map[string]string{},
+		committers:   map[string]fakeCommitter{},
+		listPageSize: 50,
+	}
+}
+
+func (f *prFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/graphql" {
+		f.serveGraphQL(w, r)
+		return
+	}
+	f.commitsFake.ServeHTTP(w, r)
+}
+
+func (f *prFake) record(list *[]string, entry string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	*list = append(*list, entry)
+}
+
+func (f *prFake) calls(list *[]string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), *list...)
+}
+
+func (f *prFake) committer(sha string) fakeCommitter {
+	if c, ok := f.committers[sha]; ok {
+		return c
+	}
+	return fakeCommitter{name: "Dev", email: "dev@example.com", gqlLogin: "dev"}
+}
+
+func (f *prFake) gqlCommit(sha string) map[string]interface{} {
+	c := f.committer(sha)
+	var committerUser interface{}
+	if c.gqlLogin != "" {
+		committerUser = map[string]interface{}{"login": c.gqlLogin}
+	}
+	var signature interface{}
+	if c.state != "" {
+		signature = map[string]interface{}{"isValid": c.valid, "state": c.state, "wasSignedByGitHub": c.byGitHub}
+	}
+	return map[string]interface{}{
+		"oid":       sha,
+		"url":       "https://github.com/o/r/commit/" + sha,
+		"message":   "commit " + sha,
+		"author":    map[string]interface{}{"name": "Dev", "email": "dev@example.com", "date": f.g.date(sha), "user": map[string]interface{}{"login": "dev"}},
+		"committer": map[string]interface{}{"name": c.name, "email": c.email, "date": f.g.date(sha), "user": committerUser},
+		"parents":   map[string]interface{}{"totalCount": len(f.g.parents[sha])},
+		"signature": signature,
+	}
+}
+
+func (f *prFake) prCommitList(pr *fakePR) ([]string, int) {
+	all := f.g.between(pr.base, pr.head)
+	total := min(len(all), 10000)
+	if len(all) > prCommitListCap {
+		all = all[len(all)-prCommitListCap:]
+	}
+	return all, total
+}
+
+func pageOf[T any](items []T, after string, size int) ([]T, map[string]interface{}) {
+	offset, _ := strconv.Atoi(after)
+	offset = min(offset, len(items))
+	end := min(offset+size, len(items))
+	return items[offset:end], map[string]interface{}{"hasNextPage": end < len(items), "endCursor": strconv.Itoa(end)}
+}
+
+func (f *prFake) commitConnection(pr *fakePR, after string) map[string]interface{} {
+	list, total := f.prCommitList(pr)
+	if f.gqlNodeLimit > 0 {
+		list = list[:min(f.gqlNodeLimit, len(list))]
+	}
+	page, info := pageOf(list, after, 100)
+	nodes := make([]interface{}, 0, len(page))
+	for _, sha := range page {
+		nodes = append(nodes, map[string]interface{}{"commit": f.gqlCommit(sha)})
+	}
+	return map[string]interface{}{"totalCount": total, "pageInfo": info, "nodes": nodes}
+}
+
+func nullable(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func (f *prFake) prNode(pr *fakePR) map[string]interface{} {
+	node := map[string]interface{}{
+		"number": pr.number, "url": fmt.Sprintf("https://github.com/o/r/pull/%d", pr.number), "title": fmt.Sprintf("PR %d", pr.number),
+		"state": pr.state, "author": map[string]interface{}{"login": pr.author},
+		"createdAt": pr.created, "updatedAt": pr.updated, "closedAt": nullable(pr.closed), "mergedAt": nullable(pr.merged),
+		"baseRefName": pr.baseRef, "baseRefOid": pr.base, "headRefName": pr.headRef, "headRefOid": pr.head,
+		"headRepository": nil, "mergeCommit": nil,
+		"commits": f.commitConnection(pr, ""),
+	}
+	if pr.headRepo != "" {
+		node["headRepository"] = map[string]interface{}{"nameWithOwner": pr.headRepo}
+	}
+	if pr.mergeCommit != "" {
+		node["mergeCommit"] = map[string]interface{}{"oid": pr.mergeCommit}
+	}
+	return node
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (f *prFake) findPR(key string, number int) *fakePR {
+	for _, p := range f.prs[key] {
+		if p.number == number {
+			return p
+		}
+	}
+	f.t.Errorf("unknown pull request %s#%d", key, number)
+	return nil
+}
+
+func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query     string                 `json:"query"`
+		Variables map[string]interface{} `json:"variables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		f.t.Errorf("bad graphql request: %v", err)
+		return
+	}
+	owner, _ := req.Variables["owner"].(string)
+	name, _ := req.Variables["name"].(string)
+	after, _ := req.Variables["after"].(string)
+	key := strings.ToLower(owner + "/" + name)
+
+	if strings.Contains(req.Query, "pullRequests(") {
+		f.record(&f.gqlCalls, "list "+key+" "+after)
+		if typ, ok := f.gqlErrors[key]; ok {
+			writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": nil}, "errors": []interface{}{map[string]interface{}{"type": typ, "message": typ + " for " + key}}})
+			return
+		}
+		prs := append([]*fakePR(nil), f.prs[key]...)
+		sort.SliceStable(prs, func(i, j int) bool { return prs[i].updated > prs[j].updated })
+		offset, _ := strconv.Atoi(after)
+		offset = min(offset, len(prs))
+		end := min(offset+f.listPageSize, len(prs))
+		next := end
+		if f.listStep > 0 {
+			next = min(offset+f.listStep, len(prs))
+		}
+		nodes := make([]interface{}, 0)
+		for _, pr := range prs[offset:end] {
+			nodes = append(nodes, f.prNode(pr))
+		}
+		for _, pr := range prs[offset:end] {
+			f.afterFirstCommitPage(pr)
+		}
+		writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequests": map[string]interface{}{
+			"pageInfo": map[string]interface{}{"hasNextPage": end < len(prs), "endCursor": strconv.Itoa(next)},
+			"nodes":    nodes,
+		}}}})
+		return
+	}
+
+	number := int(req.Variables["number"].(float64))
+	pr := f.findPR(key, number)
+	if pr == nil {
+		return
+	}
+	if strings.Contains(req.Query, "...prNode") {
+		f.record(&f.gqlCalls, fmt.Sprintf("pr %s#%d", key, number))
+		node := f.prNode(pr)
+		f.afterFirstCommitPage(pr)
+		writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": node}}})
+		return
+	}
+	f.record(&f.gqlCalls, fmt.Sprintf("commits %s#%d %s", key, number, after))
+	pull := map[string]interface{}{"headRefOid": pr.head, "commits": f.commitConnection(pr, after)}
+	writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": pull}}})
+}
+
+// afterFirstCommitPage simulates a push (pushDuringReads) or a rewrite of the whole pull request
+// with as many commits (rewriteDuringReads) right after the first page of each of its first reads.
+func (f *prFake) afterFirstCommitPage(pr *fakePR) {
+	pr.reads++
+	changed := false
+	if pr.reads <= f.pushDuringReads {
+		pr.head = f.g.add(pr.head)
+		changed = true
+	}
+	if pr.reads <= f.rewriteDuringReads {
+		pr.head = f.g.chain(pr.base, len(f.g.between(pr.base, pr.head)))
+		changed = true
+	}
+	if changed && f.updatedOnChange != "" {
+		pr.updated = f.updatedOnChange
+	}
+}
+
+func (f *prFake) addPR(repo string, pr *fakePR) *fakePR {
+	if pr.state == "" {
+		pr.state = "OPEN"
+	}
+	if pr.created == "" {
+		pr.created = "2026-11-01T00:00:00Z"
+	}
+	if pr.updated == "" {
+		pr.updated = "2026-11-10T00:00:00Z"
+	}
+	if pr.baseRef == "" {
+		pr.baseRef = "main"
+	}
+	if pr.headRef == "" {
+		pr.headRef = fmt.Sprintf("feature-%d", pr.number)
+	}
+	if pr.author == "" {
+		pr.author = "dev"
+	}
+	f.prs[strings.ToLower(repo)] = append(f.prs[strings.ToLower(repo)], pr)
+	return pr
+}
+
+type prRow map[string]interface{}
+
+func (r prRow) key() string { return fmt.Sprintf("%v#%v %v", r["repo"], r["pr_number"], r["sha"]) }
+
+func readPRCommitTable(t *testing.T, s *GithubSource, name string, opts source.ReadOptions) (source.SourceTable, []prRow, error) {
+	t.Helper()
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: name})
+	if err != nil {
+		return nil, nil, err
+	}
+	results, err := table.Read(context.Background(), opts)
+	if err != nil {
+		return table, nil, err
+	}
+	var rows []prRow
+	var readErr error
+	for res := range results {
+		if res.Err != nil {
+			readErr = res.Err
+			continue
+		}
+		rec := res.Batch
+		for i := 0; i < int(rec.NumRows()); i++ {
+			row := prRow{}
+			for c, field := range rec.Schema().Fields() {
+				col := rec.Column(c)
+				if col.IsNull(i) {
+					row[field.Name] = nil
+					continue
+				}
+				switch a := col.(type) {
+				case *array.String:
+					row[field.Name] = a.Value(i)
+				case *array.Int64:
+					row[field.Name] = a.Value(i)
+				case *array.Boolean:
+					row[field.Name] = a.Value(i)
+				case *array.Timestamp:
+					row[field.Name] = time.UnixMicro(int64(a.Value(i))).UTC().Format(time.RFC3339)
+				default:
+					t.Fatalf("column %s has unexpected type %s", field.Name, field.Type)
+				}
+			}
+			rows = append(rows, row)
+		}
+		rec.Release()
+	}
+	return table, rows, readErr
+}
+
+func connectPRFake(t *testing.T, f *prFake) *GithubSource {
+	t.Helper()
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o&repo=r")
+	return s
+}
+
+func shasOf(rows []prRow, pr int64) []string {
+	var out []string
+	for _, r := range rows {
+		if r["pr_number"] == pr {
+			out = append(out, r["sha"].(string))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mustEqualSet(t *testing.T, what string, got, want []string) {
+	t.Helper()
+	got, want = append([]string(nil), got...), append([]string(nil), want...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("%s: got %d %v\nwant %d %v", what, len(got), got, len(want), want)
+	}
+}
+
+func prCommitColumnNames(t *testing.T, s *GithubSource) string {
+	t.Helper()
+	table, err := s.GetTable(context.Background(), source.TableRequest{Name: "pull_request_commits"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(table.PrimaryKeys()) != "[repo pr_number sha]" || table.IncrementalKey() != "pr_updated_at" || table.Strategy() != config.StrategyMerge {
+		t.Fatalf("pk=%v key=%q strategy=%q", table.PrimaryKeys(), table.IncrementalKey(), table.Strategy())
+	}
+	sch, err := table.GetSchema(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, c := range sch.Columns {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, " ")
+}
+
+func TestGithubPRCommitsTable(t *testing.T) {
+	s := connectPRFake(t, newPRFake(t))
+	want := "repo pr_number sha pr_state pr_url pr_title pr_author pr_created_at pr_updated_at pr_closed_at pr_merged_at base_ref head_ref head_repo merge_commit_sha commit_url message author_name author_email author_login authored_at committer_name committer_email committer_login committed_at parent_count verified verification_reason signed_by_github"
+	if got := prCommitColumnNames(t, s); got != want {
+		t.Fatalf("columns=%s", got)
+	}
+	for _, c := range prCommitFields {
+		if strings.HasSuffix(c.Name, "_at") {
+			if typ, ok := schema.DataTypeToArrowType(c).(*arrow.TimestampType); !ok || typ.Unit != arrow.Microsecond {
+				t.Fatalf("%s maps to %v", c.Name, schema.DataTypeToArrowType(c))
+			}
+		}
+	}
+}
+
+func TestGithubPRCommitsStatesAndColumns(t *testing.T) {
+	f := newPRFake(t)
+	main := f.g.chain("", 3)
+	openHead := f.g.chain(main, 2)
+	closedHead := f.g.chain(main, 1)
+	mergedHead := f.g.chain(main, 3)
+	mergeCommit := f.g.add(main, mergedHead)
+	f.addPR("o/r", &fakePR{number: 1, base: main, head: openHead, headRepo: "fork/r", updated: "2026-11-12T00:00:00Z"})
+	f.addPR("o/r", &fakePR{number: 2, state: "CLOSED", base: main, head: closedHead, closed: "2026-11-11T00:00:00Z", updated: "2026-11-11T00:00:00Z"})
+	f.addPR("o/r", &fakePR{number: 3, state: "MERGED", base: main, head: mergedHead, mergeCommit: mergeCommit, merged: "2026-11-10T00:00:00Z", closed: "2026-11-10T00:00:00Z", headRepo: "o/r"})
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqualSet(t, "open", shasOf(rows, 1), f.g.between(main, openHead))
+	mustEqualSet(t, "closed", shasOf(rows, 2), f.g.between(main, closedHead))
+	mustEqualSet(t, "merged", shasOf(rows, 3), f.g.between(main, mergedHead))
+	if len(rows) != 6 {
+		t.Fatalf("rows=%d want 6", len(rows))
+	}
+	byPR := map[int64]prRow{}
+	for _, r := range rows {
+		byPR[r["pr_number"].(int64)] = r
+		if r["repo"] != "o/r" || r["verified"] != false || r["verification_reason"] != "unsigned" || r["signed_by_github"] != false || r["parent_count"] != int64(1) {
+			t.Fatalf("row %v", r)
+		}
+		sha := r["sha"].(string)
+		if r["committed_at"] != f.g.date(sha) || r["authored_at"] != f.g.date(sha) || r["commit_url"] != "https://github.com/o/r/commit/"+sha || r["author_login"] != "dev" {
+			t.Fatalf("commit columns %v", r)
+		}
+	}
+	if r := byPR[1]; r["pr_state"] != "open" || r["head_repo"] != "fork/r" || r["merge_commit_sha"] != nil || r["pr_closed_at"] != nil || r["pr_url"] != "https://github.com/o/r/pull/1" {
+		t.Fatalf("open PR row %v", r)
+	}
+	if r := byPR[2]; r["pr_state"] != "closed" || r["head_repo"] != nil || r["pr_closed_at"] != "2026-11-11T00:00:00Z" || r["pr_merged_at"] != nil {
+		t.Fatalf("closed PR (fork gone) row %v", r)
+	}
+	if r := byPR[3]; r["pr_state"] != "merged" || r["merge_commit_sha"] != mergeCommit || r["pr_merged_at"] != "2026-11-10T00:00:00Z" || r["base_ref"] != "main" || r["head_ref"] != "feature-3" || r["pr_updated_at"] != "2026-11-10T00:00:00Z" {
+		t.Fatalf("merged PR row %v", r)
+	}
+}
+
+func TestGithubPRCommitsFollowUpPages(t *testing.T) {
+	f := newPRFake(t)
+	main := f.g.chain("", 1)
+	head := f.g.chain(main, 230)
+	f.addPR("o/r", &fakePR{number: 7, base: main, head: head})
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqualSet(t, "230 commits", shasOf(rows, 7), f.g.between(main, head))
+	if got := fmt.Sprint(f.calls(&f.gqlCalls)); got != "[list o/r  commits o/r#7 100 commits o/r#7 200]" {
+		t.Fatalf("graphql calls %s", got)
+	}
+}
+
+func TestGithubPRCommitsGraphQLCountCheckFails(t *testing.T) {
+	f := newPRFake(t)
+	f.gqlNodeLimit = 5
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 3, base: main, head: f.g.chain(main, 6)})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, _, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#3: GitHub listed 5 commits, expected 6, after 3 retries") {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Count(logs.String(), "pull request o/r#3: GitHub listed 5 commits, expected 6, reading its commits again"); got != 3 {
+		t.Fatalf("%d retry warnings, want 3:\n%s", got, logs.String())
+	}
+}
+
+func TestGithubPRCommitsChangeDuringReadIsRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		pushes, rewrite int
+	}{{"push between pages twice", 2, 0}, {"rewrite with as many commits", 0, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPRFake(t)
+			f.pushDuringReads, f.rewriteDuringReads = tc.pushes, tc.rewrite
+			main := f.g.chain("", 1)
+			pr := f.addPR("o/r", &fakePR{number: 7, base: main, head: f.g.chain(main, 130)})
+			logs := captureOutput(t)
+			s := connectPRFake(t, f)
+
+			_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustEqualSet(t, "the version read last", shasOf(rows, 7), f.g.between(main, pr.head))
+			if got := strings.Count(logs.String(), "reading its commits again"); got != tc.pushes+tc.rewrite {
+				t.Fatalf("%d retry warnings, want %d:\n%s", got, tc.pushes+tc.rewrite, logs.String())
+			}
+		})
+	}
+}
+
+func TestGithubPRCommitsUpdatedPastTheEndDuringReadIsSkipped(t *testing.T) {
+	f := newPRFake(t)
+	f.pushDuringReads = 1
+	f.updatedOnChange = "2026-11-12T00:00:00Z"
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 7, base: main, head: f.g.chain(main, 130), updated: "2026-11-10T00:00:00Z"})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("%d rows written for a pull request updated after the interval end while it was read", len(rows))
+	}
+	if !strings.Contains(logs.String(), "pull request o/r#7 was updated after the interval while its commits were read, skipping it") {
+		t.Fatalf("logs:\n%s", logs.String())
+	}
+}
+
+func TestGithubPRCommitsChangingOnEveryReadFails(t *testing.T) {
+	f := newPRFake(t)
+	f.pushDuringReads = 4
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 7, base: main, head: f.g.chain(main, 130)})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#7: its head changed while its commits were read, after 3 retries") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(rows) != 0 || strings.Count(logs.String(), "reading its commits again (retry") != 3 {
+		t.Fatalf("rows=%d logs:\n%s", len(rows), logs.String())
+	}
+}
+
+func TestGithubPRCommitsOver250ReadsTheNewest250(t *testing.T) {
+	f := newPRFake(t)
+	main := f.g.chain("", 1)
+	head := f.g.chain(main, 300)
+	f.addPR("o/r", &fakePR{number: 9, base: main, head: head})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := f.g.between(main, head)
+	mustEqualSet(t, "newest 250", shasOf(rows, 9), all[len(all)-prCommitListCap:])
+	if !strings.Contains(logs.String(), "Warning: pull request o/r#9 has more than 250 commits, GitHub lists only the newest 250, reading those") {
+		t.Fatalf("logs:\n%s", logs.String())
+	}
+}
+
+func TestGithubPRCommitsOver250ShortListingFails(t *testing.T) {
+	f := newPRFake(t)
+	f.gqlNodeLimit = 5
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 9, base: main, head: f.g.chain(main, 300)})
+	captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#9: GitHub listed 5 commits, expected 250") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows written for an incomplete listing: %d", len(rows))
+	}
+}
+
+func TestGithubPRCommitsInterval(t *testing.T) {
+	f := newPRFake(t)
+	f.listPageSize = 2
+	main := f.g.chain("", 1)
+	for i, pr := range []*fakePR{
+		{number: 1, updated: "2026-11-10T00:00:00Z", created: "2026-11-02T00:00:00Z"},
+		{number: 6, updated: "2026-11-04T00:00:00Z", created: "2026-11-01T00:00:00Z"},
+		{number: 2, updated: "2026-11-03T00:00:00Z", created: "2026-10-25T00:00:00Z"},
+		{number: 3, updated: "2026-11-01T00:00:00Z", created: "2026-10-20T00:00:00Z"},
+		{number: 4, updated: "2026-10-31T23:59:59Z", created: "2026-10-01T00:00:00Z"},
+		{number: 5, updated: "2026-10-10T00:00:00Z", created: "2026-10-01T00:00:00Z"},
+		{number: 7, updated: "2026-10-05T00:00:00Z", created: "2026-10-01T00:00:00Z"},
+	} {
+		pr.base, pr.head = main, f.g.chain(main, i+1)
+		f.addPR("o/r", pr)
+	}
+	s := connectPRFake(t, f)
+
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prs := map[int64]bool{}
+	for _, r := range rows {
+		prs[r["pr_number"].(int64)] = true
+		updated, _ := time.Parse(time.RFC3339, r["pr_updated_at"].(string))
+		if updated.Before(start) || !updated.Before(end) {
+			t.Fatalf("row with pr_updated_at %s outside [%s, %s): %v", updated, start, end, r)
+		}
+	}
+	if fmt.Sprint(prs) != "map[2:true 3:true]" {
+		t.Fatalf("pull requests read %v, want 2 (updated in the interval) and 3 (updated at the start); 1 (created before the end, updated after it) and 6 (updated at the end) are skipped", prs)
+	}
+	if got := fmt.Sprint(f.calls(&f.gqlCalls)); got != "[list o/r  list o/r 2 list o/r 4]" {
+		t.Fatalf("listing did not page past the pull requests updated after the end, or did not stop at the first one updated before the start: %s", got)
+	}
+
+	f2 := newPRFake(t)
+	main2 := f2.g.chain("", 1)
+	f2.addPR("o/r", &fakePR{number: 8, base: main2, head: f2.g.chain(main2, 1), updated: "2020-01-01T00:00:00Z"})
+	s2 := connectPRFake(t, f2)
+	_, rows, err = readPRCommitTable(t, s2, "pull_request_commits", source.ReadOptions{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("without an interval every pull request is read: rows=%d err=%v", len(rows), err)
+	}
+}
+
+func TestGithubPRCommitsEmitsEachPullRequestOnce(t *testing.T) {
+	f := newPRFake(t)
+	f.listPageSize, f.listStep = 2, 1
+	main := f.g.chain("", 1)
+	shared := f.g.chain(main, 1)
+	f.addPR("o/r", &fakePR{number: 1, base: main, head: shared, updated: "2026-11-10T00:00:00Z"})
+	f.addPR("o/r", &fakePR{number: 2, base: main, head: f.g.chain(shared, 1), updated: "2026-11-09T00:00:00Z"})
+	f.addPR("o/r", &fakePR{number: 3, base: main, head: f.g.chain(main, 2), updated: "2026-11-08T00:00:00Z"})
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if seen[r.key()] {
+			t.Fatalf("row emitted twice: %s", r.key())
+		}
+		seen[r.key()] = true
+	}
+	if len(rows) != 5 || !seen["o/r#1 "+shared] || !seen["o/r#2 "+shared] {
+		t.Fatalf("rows %v", seen)
+	}
+}
+
+func TestGithubPRCommitsLimit(t *testing.T) {
+	f := newPRFake(t)
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 1, base: main, head: f.g.chain(main, 4), updated: "2026-11-10T00:00:00Z"})
+	f.addPR("o/r", &fakePR{number: 2, base: main, head: f.g.chain(main, 4), updated: "2026-11-09T00:00:00Z"})
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{Limit: 3})
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+}
+
+func TestGithubPRCommitsRepositoryModes(t *testing.T) {
+	newFake := func(t *testing.T) *prFake {
+		f := newPRFake(t)
+		main := f.g.chain("", 1)
+		for i, repo := range []string{"o/r", "o/ingestr", "o/Bruin", "other/tool", "u/app"} {
+			f.addPR(repo, &fakePR{number: i + 1, base: main, head: f.g.chain(main, 1)})
+		}
+		return f
+	}
+	repos := func(rows []prRow) string {
+		var out []string
+		for _, r := range rows {
+			out = append(out, fmt.Sprintf("%v#%v", r["repo"], r["pr_number"]))
+		}
+		return strings.Join(out, " ")
+	}
+
+	t.Run("single", func(t *testing.T) {
+		f := newFake(t)
+		s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=O&repo=R")
+		table, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+		if err != nil || repos(rows) != "o/r#1" || fmt.Sprint(table.PrimaryKeys()) != "[repo pr_number sha]" {
+			t.Fatalf("rows=%s err=%v", repos(rows), err)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		f := newFake(t)
+		s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+		_, rows, err := readPRCommitTable(t, s, "pull_request_commits:other/tool, u/app", source.ReadOptions{})
+		if err != nil || repos(rows) != "other/tool#4 u/app#5" {
+			t.Fatalf("rows=%s err=%v", repos(rows), err)
+		}
+	})
+
+	t.Run("all skips repositories GraphQL can't find", func(t *testing.T) {
+		f := newFake(t)
+		f.gqlErrors["o/old"] = "NOT_FOUND"
+		logs := captureOutput(t)
+		s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+		_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+		if err != nil || repos(rows) != "o/r#1 o/ingestr#2 o/Bruin#3" {
+			t.Fatalf("rows=%s err=%v", repos(rows), err)
+		}
+		if !strings.Contains(logs.String(), "Warning: skipping the pull request commits of o/old, GitHub answered NOT_FOUND") {
+			t.Fatalf("logs:\n%s", logs.String())
+		}
+	})
+
+	t.Run("owner wildcard fails when GraphQL forbids a repository", func(t *testing.T) {
+		f := newFake(t)
+		f.gqlErrors["o/ingestr"] = "FORBIDDEN"
+		captureOutput(t)
+		s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+		_, _, err := readPRCommitTable(t, s, "pull_request_commits:o/*", source.ReadOptions{})
+		if err == nil || !strings.Contains(err.Error(), "FORBIDDEN for o/ingestr") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("named repository GraphQL can't find fails", func(t *testing.T) {
+		f := newFake(t)
+		f.gqlErrors["o/r"] = "NOT_FOUND"
+		s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+		_, _, err := readPRCommitTable(t, s, "pull_request_commits:r", source.ReadOptions{})
+		if err == nil || !strings.Contains(err.Error(), "failed to list the pull requests of o/r") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("missing named repository fails before reading", func(t *testing.T) {
+		f := newFake(t)
+		s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+		_, _, err := readPRCommitTable(t, s, "pull_request_commits:r, nope", source.ReadOptions{})
+		if err == nil || !strings.Contains(err.Error(), "not found or not accessible with this token: o/nope") || len(f.calls(&f.gqlCalls)) != 0 {
+			t.Fatalf("err=%v graphql=%v", err, f.calls(&f.gqlCalls))
+		}
+	})
+
+	t.Run("table errors", func(t *testing.T) {
+		f := newFake(t)
+		s, _ := connectURIToFake(t, f, "github://?access_token=test-token")
+		for name, want := range map[string]string{
+			"pull_request_commits":         "table pull_request_commits needs owner in the URI, or a list of repositories: pull_request_commits:<owner>/<repo>, or pull_request_commits:<owner>/* for every repository of an owner",
+			"pull_request_commits:":        "table pull_request_commits: lists no repositories, use pull_request_commits:<repo>,<owner>/<repo>,<owner>/*",
+			"pull_request_commits:r":       `repository "r" in table pull_request_commits:r has no owner`,
+			"pull_request_commits:o/r/x":   `invalid repository "o/r/x" in table pull_request_commits:o/r/x`,
+			"pull_request_commits:o/bru-*": `a wildcard can only be <owner>/*`,
+			"pull_requests:o/r":            "unsupported table: pull_requests:o/r",
+		} {
+			if _, err := s.GetTable(context.Background(), source.TableRequest{Name: name}); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("GetTable(%q) err=%v want %q", name, err, want)
+			}
+		}
+	})
+}
+
+func TestGithubPRCommitsNeedAToken(t *testing.T) {
+	f := newPRFake(t)
+	s, _ := connectURIToFake(t, f, "github://?owner=o&repo=r")
+	_, _, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "the pull_request_commits table reads GitHub's GraphQL API, which needs an access_token") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// GitHub's schema allows a commit without an author or committer, and a Git actor without a name,
+// email or date: such fields are NULL, never an empty string.
+func TestGithubPRCommitsMissingActorFieldsAreNull(t *testing.T) {
+	var c gqlCommit
+	raw := `{"oid":"c1","url":"u","message":"m","author":null,"committer":{"name":null,"email":"","date":null,"user":null},"parents":{"totalCount":1},"signature":null}`
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		t.Fatal(err)
+	}
+	row := graphQLCommitRow(c)
+	for _, k := range []string{"author_name", "author_email", "author_login", "authored_at", "committer_name", "committer_email", "committer_login", "committed_at"} {
+		if row[k] != nil {
+			t.Errorf("%s=%#v want nil", k, row[k])
+		}
+	}
+}
+
+func TestGithubPRCommitsSignatureReason(t *testing.T) {
+	for state, want := range map[string]string{
+		"VALID": "valid", "INVALID": "invalid", "MALFORMED_SIG": "malformed_signature", "UNKNOWN_KEY": "unknown_key",
+		"BAD_EMAIL": "bad_email", "UNVERIFIED_EMAIL": "unverified_email", "NO_USER": "no_user",
+		"UNKNOWN_SIG_TYPE": "unknown_signature_type", "UNSIGNED": "unsigned", "GPGVERIFY_UNAVAILABLE": "gpgverify_unavailable",
+		"GPGVERIFY_ERROR": "gpgverify_error", "NOT_SIGNING_KEY": "not_signing_key", "EXPIRED_KEY": "expired_key",
+		"OCSP_PENDING": "ocsp_pending", "OCSP_ERROR": "ocsp_error", "BAD_CERT": "bad_cert", "OCSP_REVOKED": "ocsp_revoked",
+	} {
+		if got := signatureReason(state); got != want {
+			t.Errorf("signatureReason(%s)=%s want %s", state, got, want)
+		}
+	}
+}
+
+// GraphQL shows commits GitHub made itself without an account; the row says web-flow, as REST does.
+func TestGithubPRCommitsGitHubMadeCommits(t *testing.T) {
+	f := newPRFake(t)
+	main := f.g.chain("", 1)
+	signed := f.g.add(main)
+	byGitHub := f.g.add(signed, main)
+	f.committers[signed] = fakeCommitter{name: "Dev", email: "dev@example.com", gqlLogin: "dev", state: "UNKNOWN_KEY"}
+	f.committers[byGitHub] = fakeCommitter{name: "GitHub", email: "noreply@github.com", state: "VALID", valid: true, byGitHub: true}
+	f.addPR("o/r", &fakePR{number: 1, base: main, head: byGitHub})
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r["sha"].(string)] = fmt.Sprintf("%v %v %v %v %v", r["committer_login"], r["verified"], r["verification_reason"], r["signed_by_github"], r["parent_count"])
+	}
+	if got[signed] != "dev false unknown_key false 1" || got[byGitHub] != "web-flow true valid true 2" {
+		t.Fatalf("rows %v", got)
 	}
 }
