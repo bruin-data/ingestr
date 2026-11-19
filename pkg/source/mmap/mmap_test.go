@@ -7,13 +7,45 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/destination/duckdb"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMMapDeleteInsertIntervalTypes(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		keyType     schema.DataType
+		ignoreDates bool
+	}{
+		{name: "text", keyType: schema.TypeString, ignoreDates: true},
+		{name: "integer", keyType: schema.TypeInt64, ignoreDates: true},
+		{name: "date", keyType: schema.TypeDate},
+		{name: "timestamp", keyType: schema.TypeTimestamp},
+		{name: "timestamp with time zone", keyType: schema.TypeTimestampTZ},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := NewMMapSource()
+			src.knownSchema = &schema.TableSchema{
+				Columns: []schema.Column{{Name: "Key", DataType: tc.keyType}},
+			}
+			table, err := src.GetTable(context.Background(), source.TableRequest{
+				Name:           "rows",
+				IncrementalKey: "key",
+				Strategy:       config.StrategyDeleteInsert,
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.ignoreDates, table.(source.IntervalIgnoringTable).IgnoresInterval())
+		})
+	}
+}
 
 func TestMMapSourceSingleFile(t *testing.T) {
 	t.Parallel()

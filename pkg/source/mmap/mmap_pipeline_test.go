@@ -21,6 +21,63 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMMapDeleteInsertTextKeyWithTimestampBounds(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "features.arrow")
+	destPath := filepath.Join(dir, "repro.duckdb")
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "layer", Type: arrow.BinaryTypes.String},
+		{Name: "row_number", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Field(0).(*array.StringBuilder).AppendValues([]string{"a", "a", "b"}, nil)
+	builder.Field(1).(*array.Int64Builder).AppendValues([]int64{0, 1, 0}, nil)
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+
+	file, err := os.Create(sourcePath)
+	require.NoError(t, err)
+	defer func() { _ = file.Close() }()
+	writer, err := ipc.NewFileWriter(file, ipc.WithSchema(arrowSchema))
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(batch))
+	require.NoError(t, writer.Close())
+	require.NoError(t, file.Close())
+
+	start := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24*time.Hour - time.Microsecond)
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mmap://" + sourcePath
+	cfg.SourceTable = "asset_data"
+	cfg.DestURI = "duckdb://" + destPath
+	cfg.DestTable = "raw.features"
+	cfg.IncrementalStrategy = config.StrategyDeleteInsert
+	cfg.IncrementalKey = "layer"
+	cfg.IntervalStart = &start
+	cfg.IntervalEnd = &end
+	cfg.Yes = true
+	cfg.Progress = config.ProgressLog
+
+	for range 2 {
+		require.NoError(t, pipeline.New(cfg).Run(ctx))
+	}
+
+	db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", destPath))
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	var features string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT string_agg(layer || ':' || row_number, ',' ORDER BY layer, row_number)
+		FROM raw.features
+	`).Scan(&features))
+	require.Equal(t, "a:0,a:1,b:0", features)
+}
+
 func TestMMapPipelineColumnOverridePreservesSlicedTimestamps(t *testing.T) {
 	t.Parallel()
 

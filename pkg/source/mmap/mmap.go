@@ -80,12 +80,28 @@ func (s *MMapSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 		strategy = config.StrategyReplace
 	}
 
+	ignoresInterval := false
+	if strategy == config.StrategyDeleteInsert && s.knownSchema != nil {
+		for _, column := range s.knownSchema.Columns {
+			if strings.EqualFold(column.Name, req.IncrementalKey) {
+				// CLI interval bounds are timestamps. Other key types use staged Arrow values.
+				switch column.DataType {
+				case schema.TypeDate, schema.TypeTimestamp, schema.TypeTimestampTZ, schema.TypeUnknown:
+				default:
+					ignoresInterval = true
+				}
+				break
+			}
+		}
+	}
+
 	return &source.DynamicSourceTable{
-		TableName:           req.Name,
-		TablePrimaryKeys:    req.PrimaryKeys,
-		TableIncrementalKey: req.IncrementalKey,
-		TableStrategy:       strategy,
-		KnownSchema:         s.knownSchema != nil,
+		TableName:            req.Name,
+		TablePrimaryKeys:     req.PrimaryKeys,
+		TableIncrementalKey:  req.IncrementalKey,
+		TableStrategy:        strategy,
+		TableIgnoresInterval: ignoresInterval,
+		KnownSchema:          s.knownSchema != nil,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			if s.knownSchema == nil {
 				return nil, fmt.Errorf("mmap source has no preloaded schema")
