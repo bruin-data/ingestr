@@ -157,9 +157,9 @@ ingestr ingest \
 
 `pull_request_commits` has one row per commit of each pull request: `repo`, `pr_number` and `sha`. A commit that is part of several pull requests gets a row in each.
 
-Which pull requests are read: those updated at or after `--interval-start` and, when `--interval-end` is set, created before it. Pull requests are listed from the most recently updated and the listing stops at the first one updated before `--interval-start`. Without an interval, every pull request of the repository is read. Commits are not filtered by their own dates. Any change to a pull request (a push, a comment, a label, a merge) updates it, so a lookback window such as `--interval-start` 30 days ago picks up every pull request that changed in that window.
+Which pull requests are read: those last updated at or after `--interval-start` and, when `--interval-end` is set, before it, so `pr_updated_at` always falls inside the interval. Pull requests are listed from the most recently updated: those updated at or after `--interval-end` are skipped (the run whose interval holds their last update reads them), and the listing stops at the first one updated before `--interval-start`. Without an interval, every pull request of the repository is read. Commits are not filtered by their own dates. Any change to a pull request (a push, a comment, a label, a merge) updates it, so a lookback window such as `--interval-start` 30 days ago picks up every pull request that changed in that window.
 
-The commits of a pull request are the ones it lists, as GitHub shows them on its Commits tab. GitHub lists at most 250 commits of a pull request; for a larger pull request only the newest 250 are read, with a warning naming it.
+The commits of a pull request are the ones it lists, as GitHub shows them on its Commits tab. GitHub lists at most 250 commits of a pull request; for a larger pull request only the newest 250 are read, with a warning naming it. If the pull request changes while its commits are read (for example a push between two pages), they are read again from the start, with a warning, up to 3 times; if they still don't match, the run fails.
 
 Columns:
 

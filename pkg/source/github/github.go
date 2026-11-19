@@ -2107,6 +2107,10 @@ func (s *GithubSource) paginateGraphQL(
 // GitHub lists at most the newest 250 commits of a pull request, in GraphQL as in REST.
 const prCommitListCap = 250
 
+// prCommitListRetries is how many times a pull request's commit list is read again when it changed
+// while being read.
+const prCommitListRetries = 3
+
 const (
 	gitHubCommitterEmail = "noreply@github.com"
 	webFlowLogin         = "web-flow"
@@ -2159,7 +2163,9 @@ const prCommitsPageQuery = `
 query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      headRefOid
       commits(first: 100, after: $after) {
+        totalCount
         pageInfo { hasNextPage endCursor }
         nodes { commit { ...prCommit } }
       }
@@ -2320,33 +2326,28 @@ func prRepoUnavailable(err graphQLErrors) bool {
 	return err.allOfType("NOT_FOUND")
 }
 
-// prInInterval reads a pull request updated at or after the interval start and created before the
-// interval end. Pull requests come newest update first, so the first one updated before the start
-// stops the listing.
+// prInInterval reads a pull request last updated in the interval, like pr_updated_at, the incremental
+// key. Pull requests come newest update first: those updated at or after the end are skipped, and the
+// first one updated before the start stops the listing.
 func prInInterval(pr pullRequestNode, opts source.ReadOptions) (read, stop bool, err error) {
-	if opts.IntervalStart != nil {
-		updated, err := time.Parse(time.RFC3339, pr.UpdatedAt)
-		if err != nil {
-			return false, false, fmt.Errorf("invalid updatedAt %q: %w", pr.UpdatedAt, err)
-		}
-		if updated.Before(*opts.IntervalStart) {
-			return false, true, nil
-		}
+	if opts.IntervalStart == nil && opts.IntervalEnd == nil {
+		return true, false, nil
 	}
-	if opts.IntervalEnd != nil {
-		created, err := time.Parse(time.RFC3339, pr.CreatedAt)
-		if err != nil {
-			return false, false, fmt.Errorf("invalid createdAt %q: %w", pr.CreatedAt, err)
-		}
-		if !created.Before(*opts.IntervalEnd) {
-			return false, false, nil
-		}
+	updated, err := time.Parse(time.RFC3339, pr.UpdatedAt)
+	if err != nil {
+		return false, false, fmt.Errorf("invalid updatedAt %q: %w", pr.UpdatedAt, err)
+	}
+	if opts.IntervalStart != nil && updated.Before(*opts.IntervalStart) {
+		return false, true, nil
+	}
+	if opts.IntervalEnd != nil && !updated.Before(*opts.IntervalEnd) {
+		return false, false, nil
 	}
 	return true, false, nil
 }
 
 func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName string, pr pullRequestNode) ([]map[string]interface{}, error) {
-	commits, err := s.listedPRCommits(ctx, fullName, pr)
+	commits, _, err := s.listedPRCommits(ctx, fullName, pr)
 	if err != nil {
 		return nil, err
 	}
@@ -2369,18 +2370,60 @@ func prCommitRow(prColumns, commit map[string]interface{}) map[string]interface{
 	return row
 }
 
-// listedPRCommits returns the pull request's commits as GitHub lists them, reading the pages after
-// the first 100. Over prCommitListCap commits GitHub lists only the newest ones.
-func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr pullRequestNode) ([]gqlCommit, error) {
-	nodes := pr.Commits.Nodes
-	pageInfo := pr.Commits.PageInfo
+// listedPRCommits returns the pull request's commits as GitHub lists them, and the count GitHub
+// gives for them, reading the pages after the first 100. Over prCommitListCap commits GitHub lists
+// only the newest ones. When the pull request changes between two pages (its head moves) or the
+// commits read don't match the count, the list is read again from the start, with a warning, up
+// to prCommitListRetries times; then the run fails.
+func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr pullRequestNode) ([]gqlCommit, int, error) {
+	first, head := pr.Commits, pr.HeadRefOid
+	for retry := 0; ; retry++ {
+		commits, headMoved, err := s.prCommitPages(ctx, fullName, pr.Number, first, head)
+		if err != nil {
+			return nil, 0, err
+		}
+		total := first.TotalCount
+		want := min(total, prCommitListCap)
+		if !headMoved && len(commits) == want {
+			if total > prCommitListCap {
+				output.Warnf("\nWarning: pull request %s#%d has more than %d commits, GitHub lists only the newest %d, reading those\n", fullName, pr.Number, prCommitListCap, len(commits))
+			}
+			return commits, total, nil
+		}
+		problem := fmt.Sprintf("GitHub listed %d commits, expected %d", len(commits), want)
+		if headMoved {
+			problem = "its head changed while its commits were read"
+		}
+		if retry == prCommitListRetries {
+			return nil, 0, fmt.Errorf("pull request %s#%d: %s, after %d retries", fullName, pr.Number, problem, prCommitListRetries)
+		}
+		output.Warnf("\nWarning: pull request %s#%d: %s, reading its commits again (retry %d of %d)\n", fullName, pr.Number, problem, retry+1, prCommitListRetries)
+		var page struct {
+			HeadRefOid string             `json:"headRefOid"`
+			Commits    prCommitConnection `json:"commits"`
+		}
+		if err := s.pullRequestPage(ctx, fullName, pr.Number, prCommitsPageQuery, "", &page); err != nil {
+			return nil, 0, err
+		}
+		first, head = page.Commits, page.HeadRefOid
+	}
+}
+
+// prCommitPages reads the commit pages after first and reports whether the pull request's head moved
+// away from head meanwhile.
+func (s *GithubSource) prCommitPages(ctx context.Context, fullName string, number int, first prCommitConnection, head string) ([]gqlCommit, bool, error) {
+	nodes := first.Nodes
+	pageInfo := first.PageInfo
+	headMoved := false
 	for pageInfo.HasNextPage {
 		var page struct {
-			Commits prCommitConnection `json:"commits"`
+			HeadRefOid string             `json:"headRefOid"`
+			Commits    prCommitConnection `json:"commits"`
 		}
-		if err := s.pullRequestPage(ctx, fullName, pr.Number, prCommitsPageQuery, pageInfo.EndCursor, &page); err != nil {
-			return nil, err
+		if err := s.pullRequestPage(ctx, fullName, number, prCommitsPageQuery, pageInfo.EndCursor, &page); err != nil {
+			return nil, false, err
 		}
+		headMoved = headMoved || page.HeadRefOid != head
 		nodes = append(nodes, page.Commits.Nodes...)
 		pageInfo = page.Commits.PageInfo
 	}
@@ -2388,19 +2431,17 @@ func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr 
 	for _, n := range nodes {
 		commits = append(commits, n.Commit)
 	}
-	if want := min(pr.Commits.TotalCount, prCommitListCap); len(commits) != want {
-		return nil, fmt.Errorf("pull request %s#%d: GitHub listed %d commits, expected %d", fullName, pr.Number, len(commits), want)
-	}
-	if pr.Commits.TotalCount > prCommitListCap {
-		output.Warnf("\nWarning: pull request %s#%d has more than %d commits, GitHub lists only the newest %d, reading those\n", fullName, pr.Number, prCommitListCap, len(commits))
-	}
-	return commits, nil
+	return commits, headMoved, nil
 }
 
 // pullRequestPage runs a per-pull-request follow-up query and decodes its pullRequest object.
 func (s *GithubSource) pullRequestPage(ctx context.Context, fullName string, number int, query, after string, into interface{}) error {
 	owner, name, _ := strings.Cut(fullName, "/")
-	data, _, err := s.executeGraphQL(ctx, query, map[string]interface{}{"owner": owner, "name": name, "number": number, "after": after})
+	vars := map[string]interface{}{"owner": owner, "name": name, "number": number}
+	if after != "" {
+		vars["after"] = after
+	}
+	data, _, err := s.executeGraphQL(ctx, query, vars)
 	if err != nil {
 		return fmt.Errorf("failed to read pull request %s#%d: %w", fullName, number, err)
 	}

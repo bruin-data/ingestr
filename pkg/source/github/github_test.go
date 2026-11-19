@@ -2142,6 +2142,7 @@ type fakePR struct {
 	base, head, mergeCommit string
 	baseRef, headRef        string
 	headRepo, author        string
+	reads                   int
 }
 
 // fakeCommitter overrides who committed a commit and its signature.
@@ -2156,15 +2157,17 @@ type fakeCommitter struct {
 // commitsFake.
 type prFake struct {
 	*commitsFake
-	g            *fakeGraph
-	mu           sync.Mutex
-	prs          map[string][]*fakePR
-	gqlErrors    map[string]string
-	committers   map[string]fakeCommitter
-	listPageSize int
-	listStep     int
-	gqlNodeLimit int
-	gqlCalls     []string
+	g                  *fakeGraph
+	mu                 sync.Mutex
+	prs                map[string][]*fakePR
+	gqlErrors          map[string]string
+	committers         map[string]fakeCommitter
+	listPageSize       int
+	listStep           int
+	gqlNodeLimit       int
+	pushDuringReads    int
+	rewriteDuringReads int
+	gqlCalls           []string
 }
 
 func newPRFake(t *testing.T) *prFake {
@@ -2328,6 +2331,9 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 		for _, pr := range prs[offset:end] {
 			nodes = append(nodes, f.prNode(pr))
 		}
+		for _, pr := range prs[offset:end] {
+			f.afterFirstCommitPage(pr)
+		}
 		writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequests": map[string]interface{}{
 			"pageInfo": map[string]interface{}{"hasNextPage": end < len(prs), "endCursor": strconv.Itoa(next)},
 			"nodes":    nodes,
@@ -2341,7 +2347,23 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.record(&f.gqlCalls, fmt.Sprintf("commits %s#%d %s", key, number, after))
-	writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": map[string]interface{}{"commits": f.commitConnection(pr, after)}}}})
+	pull := map[string]interface{}{"headRefOid": pr.head, "commits": f.commitConnection(pr, after)}
+	if after == "" {
+		f.afterFirstCommitPage(pr)
+	}
+	writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": pull}}})
+}
+
+// afterFirstCommitPage simulates a push (pushDuringReads) or a rewrite of the whole pull request
+// with as many commits (rewriteDuringReads) right after the first page of each of its first reads.
+func (f *prFake) afterFirstCommitPage(pr *fakePR) {
+	pr.reads++
+	if pr.reads <= f.pushDuringReads {
+		pr.head = f.g.add(pr.head)
+	}
+	if pr.reads <= f.rewriteDuringReads {
+		pr.head = f.g.chain(pr.base, len(f.g.between(pr.base, pr.head)))
+	}
 }
 
 func (f *prFake) addPR(repo string, pr *fakePR) *fakePR {
@@ -2545,11 +2567,57 @@ func TestGithubPRCommitsGraphQLCountCheckFails(t *testing.T) {
 	f.gqlNodeLimit = 5
 	main := f.g.chain("", 1)
 	f.addPR("o/r", &fakePR{number: 3, base: main, head: f.g.chain(main, 6)})
+	logs := captureOutput(t)
 	s := connectPRFake(t, f)
 
 	_, _, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
-	if err == nil || !strings.Contains(err.Error(), "GitHub listed 5 commits, expected 6") {
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#3: GitHub listed 5 commits, expected 6, after 3 retries") {
 		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Count(logs.String(), "pull request o/r#3: GitHub listed 5 commits, expected 6, reading its commits again"); got != 3 {
+		t.Fatalf("%d retry warnings, want 3:\n%s", got, logs.String())
+	}
+}
+
+func TestGithubPRCommitsChangeDuringReadIsRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		pushes, rewrite int
+	}{{"push between pages twice", 2, 0}, {"rewrite with as many commits", 0, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPRFake(t)
+			f.pushDuringReads, f.rewriteDuringReads = tc.pushes, tc.rewrite
+			main := f.g.chain("", 1)
+			pr := f.addPR("o/r", &fakePR{number: 7, base: main, head: f.g.chain(main, 130)})
+			logs := captureOutput(t)
+			s := connectPRFake(t, f)
+
+			_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustEqualSet(t, "the version read last", shasOf(rows, 7), f.g.between(main, pr.head))
+			if got := strings.Count(logs.String(), "reading its commits again"); got != tc.pushes+tc.rewrite {
+				t.Fatalf("%d retry warnings, want %d:\n%s", got, tc.pushes+tc.rewrite, logs.String())
+			}
+		})
+	}
+}
+
+func TestGithubPRCommitsChangingOnEveryReadFails(t *testing.T) {
+	f := newPRFake(t)
+	f.pushDuringReads = 4
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 7, base: main, head: f.g.chain(main, 130)})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#7: its head changed while its commits were read, after 3 retries") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(rows) != 0 || strings.Count(logs.String(), "reading its commits again (retry") != 3 {
+		t.Fatalf("rows=%d logs:\n%s", len(rows), logs.String())
 	}
 }
 
@@ -2595,10 +2663,12 @@ func TestGithubPRCommitsInterval(t *testing.T) {
 	main := f.g.chain("", 1)
 	for i, pr := range []*fakePR{
 		{number: 1, updated: "2026-11-10T00:00:00Z", created: "2026-11-02T00:00:00Z"},
-		{number: 2, updated: "2026-11-05T00:00:00Z", created: "2026-11-04T00:00:00Z"},
+		{number: 6, updated: "2026-11-04T00:00:00Z", created: "2026-11-01T00:00:00Z"},
+		{number: 2, updated: "2026-11-03T00:00:00Z", created: "2026-10-25T00:00:00Z"},
 		{number: 3, updated: "2026-11-01T00:00:00Z", created: "2026-10-20T00:00:00Z"},
 		{number: 4, updated: "2026-10-31T23:59:59Z", created: "2026-10-01T00:00:00Z"},
 		{number: 5, updated: "2026-10-10T00:00:00Z", created: "2026-10-01T00:00:00Z"},
+		{number: 7, updated: "2026-10-05T00:00:00Z", created: "2026-10-01T00:00:00Z"},
 	} {
 		pr.base, pr.head = main, f.g.chain(main, i+1)
 		f.addPR("o/r", pr)
@@ -2614,12 +2684,16 @@ func TestGithubPRCommitsInterval(t *testing.T) {
 	prs := map[int64]bool{}
 	for _, r := range rows {
 		prs[r["pr_number"].(int64)] = true
+		updated, _ := time.Parse(time.RFC3339, r["pr_updated_at"].(string))
+		if updated.Before(start) || !updated.Before(end) {
+			t.Fatalf("row with pr_updated_at %s outside [%s, %s): %v", updated, start, end, r)
+		}
 	}
-	if fmt.Sprint(prs) != "map[1:true 3:true]" {
-		t.Fatalf("pull requests read %v, want 1 (updated in, created before end) and 3 (updated at the start)", prs)
+	if fmt.Sprint(prs) != "map[2:true 3:true]" {
+		t.Fatalf("pull requests read %v, want 2 (updated in the interval) and 3 (updated at the start); 1 (created before the end, updated after it) and 6 (updated at the end) are skipped", prs)
 	}
-	if got := fmt.Sprint(f.calls(&f.gqlCalls)); got != "[list o/r  list o/r 2]" {
-		t.Fatalf("listing did not stop at the first pull request updated before the start: %s", got)
+	if got := fmt.Sprint(f.calls(&f.gqlCalls)); got != "[list o/r  list o/r 2 list o/r 4]" {
+		t.Fatalf("listing did not page past the pull requests updated after the end, or did not stop at the first one updated before the start: %s", got)
 	}
 
 	f2 := newPRFake(t)
