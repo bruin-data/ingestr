@@ -56,7 +56,7 @@ To connect to GitHub, you need to create a Personal Access Token (PAT).
 4. Under **Permissions**, set:
    - **Issues**: Read-only (for issues table)
    - **Pull requests**: Read-only (for pull_requests and pull_request_commits tables)
-   - **Contents**: Read-only (for commits and repo_events)
+   - **Contents**: Read-only (for commits, pull_request_commits and repo_events)
    - **Metadata**: Read-only (required)
 5. Click **Generate token**
 6. Copy the token (starts with `github_pat_`)
@@ -83,7 +83,7 @@ GitHub source allows ingesting the following sources into separate tables:
 | `commits`       | `sha` (single repository) or `repo`, `sha` (list and all modes) | `committed_at` | merge | Retrieves commits on the default branch of one, several or all repositories of `owner` (see [Reading commits from several repositories](#reading-commits-from-several-repositories)), with the repository in `repo`, including signature verification (`commit.verification`). `--interval-start`/`--interval-end` filter on the committer date, which `committed_at` mirrors. Commits pushed after their interval has already run are not picked up; use a lookback window. |
 | `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
-| `pull_request_commits` | `repo`, `pr_number`, `sha` | `pr_updated_at` | merge | Retrieves every commit of every pull request (open, closed and merged) of one, several or all repositories of `owner`, with signature verification. See [Pull request commits](#pull-request-commits). |
+| `pull_request_commits` | `repo`, `pr_number`, `sha` | `pr_updated_at` | merge | Retrieves every commit of every pull request (open, closed and merged) of one, several or all repositories of `owner`, including the commits of versions replaced by force pushes, with signature verification. See [Pull request commits](#pull-request-commits). |
 | `repo_events`   | `id` | `created_at`     | merge  | Retrieves recent repository events. Appends only new events using `created_at` filter. Only events from the past 30 days allowed. |
 | `repositories`  | `id` | –                | replace               | Retrieves the repositories owned by `owner`, including forks and archived repositories. Private repositories are included when the token can see them: the organization's repositories the token has access to, a user's own repositories when `owner` is the token's user, or the repositories a GitHub App installation token was granted. Otherwise only public repositories are returned. `id`, `node_id`, `name`, `full_name`, `owner`, `private`, `fork`, `html_url` and `description` are always present; other fields GitHub returns are added when at least one repository has a value for them. Full reload on each run. |
 | `stargazers`    | - | –                | replace               | Retrieves stargazers. Full reload on each run.                                  |
@@ -159,7 +159,10 @@ ingestr ingest \
 
 Which pull requests are read: those last updated at or after `--interval-start` and, when `--interval-end` is set, before it, so `pr_updated_at` always falls inside the interval. Pull requests are listed from the most recently updated: those updated at or after `--interval-end` are skipped (the run whose interval holds their last update reads them), and the listing stops at the first one updated before `--interval-start`. Without an interval, every pull request of the repository is read. Commits are not filtered by their own dates. Any change to a pull request (a push, a comment, a label, a merge) updates it, so a lookback window such as `--interval-start` 30 days ago picks up every pull request that changed in that window.
 
-The commits of a pull request are the ones it lists, as GitHub shows them on its Commits tab. GitHub lists at most 250 commits of a pull request; for a larger pull request only the newest 250 are read, with a warning naming it. If the pull request changes while its commits are read (for example a push between two pages), the whole pull request is read again, with a warning, up to 3 times, and its rows carry the details of that last read. If that read shows it updated at or after `--interval-end`, it is skipped and left to the run whose interval holds its last update. If its commits still don't match after 3 retries, the run fails.
+What is read for each pull request:
+
+- **The final version**: the commits the pull request lists, as GitHub shows them on its Commits tab. If the pull request changes while its commits are read (for example a push between two pages), the whole pull request is read again, with a warning, up to 3 times, and its rows carry the details of that last read. If that read shows it updated at or after `--interval-end`, it is skipped and left to the run whose interval holds its last update. If its commits still don't match after 3 retries, the run fails. GitHub lists at most 250 commits of a pull request, so larger pull requests are read with the compare API from the pull request's base commit to its head commit. A compare stops at about 10,000 commits; larger pull requests are split into several compares, and the commits read must add up to the count GitHub reports, otherwise the run fails.
+- **Force-pushed versions**: for every force push GitHub records on the pull request, the version that was replaced is read, and its commits that are not in the final version get `replaced_by_force_push = true` and `replaced_at` = the time of the last force push that removed them. If GitHub no longer serves a replaced version, a warning names the pull request and the rest is still read.
 
 Columns:
 
@@ -178,7 +181,9 @@ Columns:
 | `committer_name`, `committer_email`, `committer_login`, `committed_at` | Committer; commits GitHub itself made (merges or edits in the web UI) have `committer_login = web-flow` |
 | `parent_count` | Number of parents (2 or more for merge commits) |
 | `verified`, `verification_reason` | Signature verification as in the REST API (`valid`, `unsigned`, `unknown_key`, ...) |
-| `signed_by_github` | The commit was signed by GitHub's own key (made through the web UI or the API) |
+| `signed_by_github` | The commit was signed by GitHub's own key (made through the web UI or the API). REST doesn't return this, so for rows read through compare it is read from GraphQL as well; if GitHub can't find such a commit there, it is inferred from the committer (`web-flow`), with a warning |
+| `replaced_by_force_push`, `replaced_at` | See above |
+| `source_api` | `graphql` when the row came from GitHub's pull request commit list, `compare` when it came from the REST API (pull requests over 250 commits and force-pushed versions) |
 
 Example: read the pull request commits of every repository of `bruin-data` updated in the last 30 days:
 
@@ -194,8 +199,8 @@ ingestr ingest \
 
 Limits:
 
-- A pull request with more than 250 commits: only its newest 250 commits are read.
-- Commits a force push removed from a pull request are not read; only the commits the pull request lists now.
 - A rebase merge creates new commits on the base branch; they are not pull request commits, so they don't appear in this table.
-- Branches that never had a pull request are not read.
-- `author_login` and `committer_login` can be empty for some commits although the REST API links the same email to an account.
+- Force pushes made before the pull request was opened are not recorded on the pull request, and branches that never had a pull request are not read.
+- Replaced versions are read as long as GitHub still serves their commits; GitHub documents no retention period for them.
+- `author_login` and `committer_login` can be empty for some commits read through GraphQL although the REST API links the same email to an account.
+- A pull request over 250 commits costs about one REST request per 100 commits. A pull request with force pushes costs one more REST request, plus, for each force push, about one per 100 commits only in the replaced version (per 100 commits of the whole replaced version when the pull request's base is not inside its head). Commits read through compare also cost one GraphQL query per 100 commits per pull request, to read `signed_by_github`.

@@ -2134,6 +2134,8 @@ func (g *fakeGraph) date(sha string) string {
 	return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(g.order[sha]) * time.Minute).Format(time.RFC3339)
 }
 
+type fakeForcePush struct{ at, before string }
+
 type fakePR struct {
 	number                  int
 	state                   string
@@ -2142,52 +2144,71 @@ type fakePR struct {
 	base, head, mergeCommit string
 	baseRef, headRef        string
 	headRepo, author        string
+	pushes                  []fakeForcePush
 	reads                   int
 }
 
 // fakeCommitter overrides who committed a commit and its signature.
 type fakeCommitter struct {
-	name, email, gqlLogin string
-	state                 string
-	valid, byGitHub       bool
+	name, email, gqlLogin, restLogin string
+	state, reason                    string
+	valid, byGitHub                  bool
 }
 
-// prFake serves pull requests over a fakeGraph through GraphQL: the listing and the per-pull-request
-// commit pages, with GitHub's 250-commit cap. Repository lookups and owner listings go to
-// commitsFake.
+// prFake serves pull requests over a fakeGraph: the GraphQL listing and its per-pull-request
+// commit and force-push pages, with GitHub's 250-commit cap, REST compare (cut to the newest
+// compareCap commits, like GitHub's ~10,000 cut that drops the oldest) and the commit history
+// listing. Repository lookups and owner listings go to commitsFake.
 type prFake struct {
 	*commitsFake
 	g                  *fakeGraph
 	mu                 sync.Mutex
 	prs                map[string][]*fakePR
 	gqlErrors          map[string]string
+	compareStatus      map[string]int
 	committers         map[string]fakeCommitter
+	aheadExtra         int
+	compareCap         int
 	listPageSize       int
 	listStep           int
 	gqlNodeLimit       int
 	pushDuringReads    int
 	rewriteDuringReads int
 	updatedOnChange    string
+	noCursor           bool
+	unknownSignatures  map[string]bool
+	timelinePageSize   int
 	gqlCalls           []string
+	compares           []string
+	histories          []string
 }
 
 func newPRFake(t *testing.T) *prFake {
 	return &prFake{
-		commitsFake:  newCommitsFake(t),
-		g:            newFakeGraph(),
-		prs:          map[string][]*fakePR{},
-		gqlErrors:    map[string]string{},
-		committers:   map[string]fakeCommitter{},
-		listPageSize: 50,
+		commitsFake:      newCommitsFake(t),
+		g:                newFakeGraph(),
+		prs:              map[string][]*fakePR{},
+		gqlErrors:        map[string]string{},
+		compareStatus:    map[string]int{},
+		committers:       map[string]fakeCommitter{},
+		compareCap:       10000,
+		listPageSize:     50,
+		timelinePageSize: 100,
 	}
 }
 
 func (f *prFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/graphql" {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	switch {
+	case r.URL.Path == "/graphql":
 		f.serveGraphQL(w, r)
-		return
+	case len(parts) == 5 && parts[0] == "repos" && parts[3] == "compare":
+		f.serveCompare(w, r, parts[4])
+	case len(parts) == 4 && parts[0] == "repos" && parts[3] == "commits" && r.URL.Query().Get("sha") != "":
+		f.serveHistory(w, r)
+	default:
+		f.commitsFake.ServeHTTP(w, r)
 	}
-	f.commitsFake.ServeHTTP(w, r)
 }
 
 func (f *prFake) record(list *[]string, entry string) {
@@ -2206,7 +2227,7 @@ func (f *prFake) committer(sha string) fakeCommitter {
 	if c, ok := f.committers[sha]; ok {
 		return c
 	}
-	return fakeCommitter{name: "Dev", email: "dev@example.com", gqlLogin: "dev"}
+	return fakeCommitter{name: "Dev", email: "dev@example.com", gqlLogin: "dev", restLogin: "dev", reason: "unsigned"}
 }
 
 func (f *prFake) gqlCommit(sha string) map[string]interface{} {
@@ -2227,6 +2248,31 @@ func (f *prFake) gqlCommit(sha string) map[string]interface{} {
 		"committer": map[string]interface{}{"name": c.name, "email": c.email, "date": f.g.date(sha), "user": committerUser},
 		"parents":   map[string]interface{}{"totalCount": len(f.g.parents[sha])},
 		"signature": signature,
+	}
+}
+
+func (f *prFake) restCommit(sha string) map[string]interface{} {
+	c := f.committer(sha)
+	parents := make([]map[string]interface{}, 0, len(f.g.parents[sha]))
+	for _, p := range f.g.parents[sha] {
+		parents = append(parents, map[string]interface{}{"sha": p})
+	}
+	var committer interface{}
+	if c.restLogin != "" {
+		committer = map[string]interface{}{"login": c.restLogin}
+	}
+	return map[string]interface{}{
+		"sha":      sha,
+		"html_url": "https://github.com/o/r/commit/" + sha,
+		"commit": map[string]interface{}{
+			"message":      "commit " + sha,
+			"author":       map[string]interface{}{"name": "Dev", "email": "dev@example.com", "date": f.g.date(sha)},
+			"committer":    map[string]interface{}{"name": c.name, "email": c.email, "date": f.g.date(sha)},
+			"verification": map[string]interface{}{"verified": c.valid, "reason": c.reason},
+		},
+		"author":    map[string]interface{}{"login": "dev"},
+		"committer": committer,
+		"parents":   parents,
 	}
 }
 
@@ -2252,11 +2298,30 @@ func (f *prFake) commitConnection(pr *fakePR, after string) map[string]interface
 		list = list[:min(f.gqlNodeLimit, len(list))]
 	}
 	page, info := pageOf(list, after, 100)
+	if f.noCursor {
+		info["endCursor"] = nil
+	}
 	nodes := make([]interface{}, 0, len(page))
 	for _, sha := range page {
 		nodes = append(nodes, map[string]interface{}{"commit": f.gqlCommit(sha)})
 	}
 	return map[string]interface{}{"totalCount": total, "pageInfo": info, "nodes": nodes}
+}
+
+func (f *prFake) pushConnection(pr *fakePR, after string) map[string]interface{} {
+	page, info := pageOf(pr.pushes, after, f.timelinePageSize)
+	if f.noCursor {
+		info["endCursor"] = nil
+	}
+	nodes := make([]interface{}, 0, len(page))
+	for _, e := range page {
+		var before interface{}
+		if e.before != "" {
+			before = map[string]interface{}{"oid": e.before}
+		}
+		nodes = append(nodes, map[string]interface{}{"createdAt": e.at, "beforeCommit": before})
+	}
+	return map[string]interface{}{"pageInfo": info, "nodes": nodes}
 }
 
 func nullable(s string) interface{} {
@@ -2273,7 +2338,8 @@ func (f *prFake) prNode(pr *fakePR) map[string]interface{} {
 		"createdAt": pr.created, "updatedAt": pr.updated, "closedAt": nullable(pr.closed), "mergedAt": nullable(pr.merged),
 		"baseRefName": pr.baseRef, "baseRefOid": pr.base, "headRefName": pr.headRef, "headRefOid": pr.head,
 		"headRepository": nil, "mergeCommit": nil,
-		"commits": f.commitConnection(pr, ""),
+		"commits":     f.commitConnection(pr, ""),
+		"forcePushes": f.pushConnection(pr, ""),
 	}
 	if pr.headRepo != "" {
 		node["headRepository"] = map[string]interface{}{"nameWithOwner": pr.headRepo}
@@ -2313,6 +2379,10 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 	after, _ := req.Variables["after"].(string)
 	key := strings.ToLower(owner + "/" + name)
 
+	if strings.Contains(req.Query, "object(oid:") {
+		f.serveSignatures(w, key, req.Query)
+		return
+	}
 	if strings.Contains(req.Query, "pullRequests(") {
 		f.record(&f.gqlCalls, "list "+key+" "+after)
 		if typ, ok := f.gqlErrors[key]; ok {
@@ -2354,8 +2424,15 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": node}}})
 		return
 	}
-	f.record(&f.gqlCalls, fmt.Sprintf("commits %s#%d %s", key, number, after))
-	pull := map[string]interface{}{"headRefOid": pr.head, "commits": f.commitConnection(pr, after)}
+	pull := map[string]interface{}{}
+	if strings.Contains(req.Query, "forcePushes") {
+		f.record(&f.gqlCalls, fmt.Sprintf("pushes %s#%d %s", key, number, after))
+		pull["forcePushes"] = f.pushConnection(pr, after)
+	} else {
+		f.record(&f.gqlCalls, fmt.Sprintf("commits %s#%d %s", key, number, after))
+		pull["headRefOid"] = pr.head
+		pull["commits"] = f.commitConnection(pr, after)
+	}
 	writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": map[string]interface{}{"pullRequest": pull}}})
 }
 
@@ -2375,6 +2452,87 @@ func (f *prFake) afterFirstCommitPage(pr *fakePR) {
 	if changed && f.updatedOnChange != "" {
 		pr.updated = f.updatedOnChange
 	}
+}
+
+var signatureAlias = regexp.MustCompile(`(c\d+): object\(oid: "([^"]+)"\)`)
+
+// serveSignatures answers the batched commit lookups: a commit unknown to the graph, or listed in
+// unknownSignatures, is null.
+func (f *prFake) serveSignatures(w http.ResponseWriter, key, query string) {
+	matches := signatureAlias.FindAllStringSubmatch(query, -1)
+	f.record(&f.gqlCalls, fmt.Sprintf("signatures %s %d", key, len(matches)))
+	repo := map[string]interface{}{}
+	for _, m := range matches {
+		if _, ok := f.g.order[m[2]]; !ok || f.unknownSignatures[m[2]] {
+			repo[m[1]] = nil
+			continue
+		}
+		var signature interface{}
+		if c := f.committer(m[2]); c.state != "" {
+			signature = map[string]interface{}{"wasSignedByGitHub": c.byGitHub}
+		}
+		repo[m[1]] = map[string]interface{}{"signature": signature}
+	}
+	writeJSON(w, map[string]interface{}{"data": map[string]interface{}{"repository": repo}})
+}
+
+func (f *prFake) serveCompare(w http.ResponseWriter, r *http.Request, spec string) {
+	base, head, _ := strings.Cut(spec, "...")
+	f.record(&f.compares, spec)
+	if status, ok := f.compareStatus[head]; ok {
+		writeStatus(w, status)
+		return
+	}
+	if _, ok := f.g.order[head]; !ok {
+		writeStatus(w, http.StatusNotFound)
+		return
+	}
+	headReach, baseReach := f.g.reach(head), f.g.reach(base)
+	common := false
+	for s := range headReach {
+		if baseReach[s] {
+			common = true
+			break
+		}
+	}
+	if !common {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprintf(w, `{"message":"No common ancestor between %s and %s."}`, base, head)
+		return
+	}
+	ahead := f.g.between(base, head)
+	behind := len(f.g.between(head, base))
+	visible := ahead
+	if len(visible) > f.compareCap {
+		visible = visible[len(visible)-f.compareCap:]
+	}
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	start := min((page-1)*perPage, len(visible))
+	commits := make([]interface{}, 0)
+	for _, sha := range visible[start:min(start+perPage, len(visible))] {
+		commits = append(commits, f.restCommit(sha))
+	}
+	writeJSON(w, map[string]interface{}{"ahead_by": len(ahead) + f.aheadExtra, "behind_by": behind, "commits": commits})
+}
+
+func (f *prFake) serveHistory(w http.ResponseWriter, r *http.Request) {
+	head := r.URL.Query().Get("sha")
+	f.record(&f.histories, head)
+	all := f.g.between("", head)
+	sort.Slice(all, func(i, j int) bool { return f.g.order[all[i]] > f.g.order[all[j]] })
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	page = max(page, 1)
+	start := min((page-1)*100, len(all))
+	end := min(start+100, len(all))
+	if end < len(all) {
+		w.Header().Set("Link", fmt.Sprintf("<%s%s?sha=%s&per_page=100&page=%d>; rel=\"next\"", restApiBaseUrl, r.URL.Path, head, page+1))
+	}
+	commits := make([]interface{}, 0)
+	for _, sha := range all[start:end] {
+		commits = append(commits, f.restCommit(sha))
+	}
+	writeJSON(w, commits)
 }
 
 func (f *prFake) addPR(repo string, pr *fakePR) *fakePR {
@@ -2459,7 +2617,7 @@ func connectPRFake(t *testing.T, f *prFake) *GithubSource {
 func shasOf(rows []prRow, pr int64) []string {
 	var out []string
 	for _, r := range rows {
-		if r["pr_number"] == pr {
+		if r["pr_number"] == pr && r["replaced_by_force_push"] != true {
 			out = append(out, r["sha"].(string))
 		}
 	}
@@ -2499,7 +2657,7 @@ func prCommitColumnNames(t *testing.T, s *GithubSource) string {
 
 func TestGithubPRCommitsTable(t *testing.T) {
 	s := connectPRFake(t, newPRFake(t))
-	want := "repo pr_number sha pr_state pr_url pr_title pr_author pr_created_at pr_updated_at pr_closed_at pr_merged_at base_ref head_ref head_repo merge_commit_sha commit_url message author_name author_email author_login authored_at committer_name committer_email committer_login committed_at parent_count verified verification_reason signed_by_github"
+	want := "repo pr_number sha pr_state pr_url pr_title pr_author pr_created_at pr_updated_at pr_closed_at pr_merged_at base_ref head_ref head_repo merge_commit_sha commit_url message author_name author_email author_login authored_at committer_name committer_email committer_login committed_at parent_count verified verification_reason signed_by_github replaced_by_force_push replaced_at source_api"
 	if got := prCommitColumnNames(t, s); got != want {
 		t.Fatalf("columns=%s", got)
 	}
@@ -2540,6 +2698,9 @@ func TestGithubPRCommitsStatesAndColumns(t *testing.T) {
 		if r["repo"] != "o/r" || r["verified"] != false || r["verification_reason"] != "unsigned" || r["signed_by_github"] != false || r["parent_count"] != int64(1) {
 			t.Fatalf("row %v", r)
 		}
+		if r["source_api"] != "graphql" || r["replaced_by_force_push"] != false || r["replaced_at"] != nil {
+			t.Fatalf("row %v", r)
+		}
 		sha := r["sha"].(string)
 		if r["committed_at"] != f.g.date(sha) || r["authored_at"] != f.g.date(sha) || r["commit_url"] != "https://github.com/o/r/commit/"+sha || r["author_login"] != "dev" {
 			t.Fatalf("commit columns %v", r)
@@ -2553,6 +2714,9 @@ func TestGithubPRCommitsStatesAndColumns(t *testing.T) {
 	}
 	if r := byPR[3]; r["pr_state"] != "merged" || r["merge_commit_sha"] != mergeCommit || r["pr_merged_at"] != "2026-11-10T00:00:00Z" || r["base_ref"] != "main" || r["head_ref"] != "feature-3" || r["pr_updated_at"] != "2026-11-10T00:00:00Z" {
 		t.Fatalf("merged PR row %v", r)
+	}
+	if len(f.calls(&f.compares)) != 0 {
+		t.Fatalf("compare called for small pull requests: %v", f.calls(&f.compares))
 	}
 }
 
@@ -2655,11 +2819,367 @@ func TestGithubPRCommitsChangingOnEveryReadFails(t *testing.T) {
 	}
 }
 
-func TestGithubPRCommitsOver250ReadsTheNewest250(t *testing.T) {
+func TestGithubPRCommitsOver250ReadThroughCompare(t *testing.T) {
+	for _, shape := range []string{"open", "fast-forward merge"} {
+		t.Run(shape, func(t *testing.T) {
+			f := newPRFake(t)
+			main := f.g.chain("", 2)
+			head := f.g.chain(main, 300)
+			pr := &fakePR{number: 9, base: main, head: head}
+			if shape != "open" {
+				pr.state, pr.mergeCommit, pr.merged = "MERGED", head, "2026-11-09T00:00:00Z"
+			}
+			f.addPR("o/r", pr)
+			s := connectPRFake(t, f)
+
+			_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustEqualSet(t, "300 commits", shasOf(rows, 9), f.g.between(main, head))
+			for _, r := range rows {
+				if r["source_api"] != "compare" {
+					t.Fatalf("row %v", r)
+				}
+			}
+			for _, c := range f.calls(&f.compares) {
+				if !strings.HasPrefix(c, main+"...") {
+					t.Fatalf("compare %s does not start from baseRefOid %s", c, main)
+				}
+			}
+			if got := fmt.Sprint(f.calls(&f.gqlCalls)); got != "[list o/r  signatures o/r 100 signatures o/r 100 signatures o/r 100]" {
+				t.Fatalf("GraphQL calls for a pull request over 250 commits, want no commit pages and signatures 100 per query: %s", got)
+			}
+		})
+	}
+}
+
+// A pull request that grows past 250 commits while it is read is read through compare instead.
+func TestGithubPRCommitsGrowingPast250DuringReadUsesCompare(t *testing.T) {
+	f := newPRFake(t)
+	f.pushDuringReads = 1
+	f.updatedOnChange = "2026-11-11T00:00:00Z"
+	main := f.g.chain("", 1)
+	pr := f.addPR("o/r", &fakePR{number: 8, base: main, head: f.g.chain(main, 250)})
+	captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqualSet(t, "the head read last, through compare", shasOf(rows, 8), f.g.between(main, pr.head))
+	if len(rows) != 251 {
+		t.Fatalf("rows=%d want 251", len(rows))
+	}
+	for _, r := range rows {
+		if r["source_api"] != "compare" || r["pr_updated_at"] != "2026-11-11T00:00:00Z" {
+			t.Fatalf("row %v", r)
+		}
+	}
+}
+
+func TestGithubPRCommitsCompareCountCheckFails(t *testing.T) {
 	f := newPRFake(t)
 	main := f.g.chain("", 1)
-	head := f.g.chain(main, 300)
-	f.addPR("o/r", &fakePR{number: 9, base: main, head: head})
+	head := f.g.chain(main, 260)
+	f.addPR("o/r", &fakePR{number: 3, base: main, head: head})
+	f.aheadExtra = 1
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "found 260 commits, GitHub counts 261") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows written for an incomplete pull request: %d", len(rows))
+	}
+}
+
+// splitShape builds the sandbox PR #45 shape small: two interleaved lines merged, main moves and
+// is merged in, then a few more commits. compareCap below the PR size forces a split.
+func splitShape(f *prFake) (base, head string) {
+	base0 := f.g.chain("", 2)
+	x, y := base0, base0
+	for i := 0; i < 40; i++ {
+		x = f.g.add(x)
+		y = f.g.add(y)
+	}
+	m1 := f.g.add(x, y)
+	mainNew := f.g.add(base0)
+	m2 := f.g.add(m1, mainNew)
+	return mainNew, f.g.chain(m2, 15)
+}
+
+func compareAllSHAs(t *testing.T, s *GithubSource, base, head string) ([]string, int) {
+	t.Helper()
+	commits, behind, err := s.compareAll(context.Background(), "o/r", base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range commits {
+		got = append(got, c.SHA)
+	}
+	return got, behind
+}
+
+func TestGithubPRCommitsSplitBeyondCompareCut(t *testing.T) {
+	f := newPRFake(t)
+	f.compareCap = 30
+	base, head := splitShape(f)
+	s := connectPRFake(t, f)
+
+	got, behind := compareAllSHAs(t, s, base, head)
+	mustEqualSet(t, "split", got, f.g.between(base, head))
+	if behind != 0 {
+		t.Fatalf("behind_by=%d", behind)
+	}
+	for _, c := range f.calls(&f.compares) {
+		if c == base+"..."+base {
+			t.Fatalf("the base was compared with itself: %v", f.calls(&f.compares))
+		}
+	}
+	if len(f.calls(&f.compares)) < 3 {
+		t.Fatalf("no split happened: %v", f.calls(&f.compares))
+	}
+}
+
+// The compare cuts a long line merged into the pull request; only the merge's second parent leads to it.
+func TestGithubPRCommitsSplitThroughSecondParent(t *testing.T) {
+	f := newPRFake(t)
+	f.compareCap = 26
+	base := f.g.chain("", 1)
+	old := f.g.chain(base, 40)
+	recent := f.g.chain(base, 20)
+	head := f.g.chain(f.g.add(recent, old), 5)
+	s := connectPRFake(t, f)
+
+	got, _ := compareAllSHAs(t, s, base, head)
+	mustEqualSet(t, "split through the second parent", got, f.g.between(base, head))
+}
+
+func TestGithubPRCommitsSplitUnrelatedHistory(t *testing.T) {
+	f := newPRFake(t)
+	f.compareCap = 30
+	main := f.g.chain("", 3)
+	legacy := f.g.chain("", 120)
+	merged := f.g.add(main, legacy)
+	head := f.g.chain(merged, 20)
+	s := connectPRFake(t, f)
+
+	got, _ := compareAllSHAs(t, s, main, head)
+	mustEqualSet(t, "unrelated history", got, f.g.between(main, head))
+	if len(f.calls(&f.histories)) == 0 {
+		t.Fatalf("the unrelated history was not listed")
+	}
+}
+
+// forcePushShape: V0 = 10 commits on base; F1 amends the last 3 (V1); F2 drops the last 5 of V1 and
+// adds 2 (final). Git truth: F1 replaced c8-c10 of V0, F2 replaced the 3 amended and c6-c7.
+func forcePushShape(f *prFake, base string) (v0, v1, final string) {
+	v0 = f.g.chain(base, 10)
+	keep := v0
+	for i := 0; i < 3; i++ {
+		keep = f.g.parents[keep][0]
+	}
+	v1 = f.g.chain(keep, 3)
+	keep = v1
+	for i := 0; i < 5; i++ {
+		keep = f.g.parents[keep][0]
+	}
+	return v0, v1, f.g.chain(keep, 2)
+}
+
+func replacedAtOf(rows []prRow, pr int64) map[string]string {
+	out := map[string]string{}
+	for _, r := range rows {
+		if r["pr_number"] == pr && r["replaced_by_force_push"] == true {
+			out[r["sha"].(string)] = fmt.Sprint(r["replaced_at"])
+		}
+	}
+	return out
+}
+
+func TestGithubPRCommitsForcePushes(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(f *prFake) (prBase, v0, v1, final string)
+		want  int
+		cheap bool
+	}{
+		{name: "base inside final head", want: 8, cheap: true, build: func(f *prFake) (string, string, string, string) {
+			base := f.g.chain("", 2)
+			v0, v1, final := forcePushShape(f, base)
+			return base, v0, v1, final
+		}},
+		{name: "base moved after the branch", want: 8, build: func(f *prFake) (string, string, string, string) {
+			base := f.g.chain("", 2)
+			v0, v1, final := forcePushShape(f, base)
+			return f.g.add(base), v0, v1, final
+		}},
+		{name: "final rebased onto an older base", want: 13, build: func(f *prFake) (string, string, string, string) {
+			base := f.g.chain("", 2)
+			prBase := f.g.add(base)
+			v0, v1, _ := forcePushShape(f, prBase)
+			return prBase, v0, v1, f.g.chain(base, 4)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPRFake(t)
+			prBase, v0, v1, final := tc.build(f)
+			f.addPR("o/r", &fakePR{number: 4, base: prBase, head: final, pushes: []fakeForcePush{
+				{at: "2026-11-05T10:00:00Z", before: v0},
+				{at: "2026-11-04T10:00:00Z", before: ""},
+				{at: "2026-11-06T10:00:00Z", before: v1},
+			}})
+			logs := captureOutput(t)
+			s := connectPRFake(t, f)
+
+			_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			finalSet := f.g.between(prBase, final)
+			mustEqualSet(t, "final", shasOf(rows, 4), finalSet)
+			inFinal := map[string]bool{}
+			for _, sha := range finalSet {
+				inFinal[sha] = true
+			}
+			wantAt := map[string]string{}
+			for _, sha := range f.g.between(prBase, v0) {
+				if !inFinal[sha] {
+					wantAt[sha] = "2026-11-05T10:00:00Z"
+				}
+			}
+			for _, sha := range f.g.between(prBase, v1) {
+				if !inFinal[sha] {
+					wantAt[sha] = "2026-11-06T10:00:00Z"
+				}
+			}
+			if gotAt := replacedAtOf(rows, 4); fmt.Sprint(gotAt) != fmt.Sprint(wantAt) || len(wantAt) != tc.want {
+				t.Fatalf("replaced:\n got %v\nwant %v", gotAt, wantAt)
+			}
+			for _, r := range rows {
+				if r["replaced_by_force_push"] == true && r["source_api"] != "compare" {
+					t.Fatalf("replaced row %v", r)
+				}
+			}
+			if !strings.Contains(logs.String(), "does not show the head replaced by the force push at 2026-11-04T10:00:00Z in pull request o/r#4") {
+				t.Fatalf("no warning for the force push without a replaced head:\n%s", logs.String())
+			}
+			cheap := 0
+			for _, c := range f.calls(&f.compares) {
+				if strings.HasPrefix(c, final+"...") {
+					cheap++
+				}
+			}
+			if tc.cheap != (cheap == 2) || (!tc.cheap && cheap != 0) {
+				t.Fatalf("compares %v", f.calls(&f.compares))
+			}
+		})
+	}
+}
+
+// A pull request force-pushed away from its head and later back to it: one replaced head is the final head itself.
+func TestGithubPRCommitsForcePushBackToFinalHead(t *testing.T) {
+	f := newPRFake(t)
+	base := f.g.chain("", 1)
+	v0, _, final := forcePushShape(f, base)
+	f.addPR("o/r", &fakePR{number: 6, base: base, head: final, pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: final},
+		{at: "2026-11-06T10:00:00Z", before: v0},
+	}})
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(replacedAtOf(rows, 6)); got != 5 {
+		t.Fatalf("replaced rows=%d want 5", got)
+	}
+}
+
+func TestGithubPRCommitsPageWithoutCursorFails(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		build      func(f *prFake, main string)
+	}{
+		{"commits", "pull request o/r#7: GitHub reported more commits without a cursor to read them", func(f *prFake, main string) {
+			f.addPR("o/r", &fakePR{number: 7, base: main, head: f.g.chain(main, 130)})
+		}},
+		{"force pushes", "pull request o/r#7: GitHub reported more force pushes without a cursor to read them", func(f *prFake, main string) {
+			f.timelinePageSize = 1
+			v0, v1, final := forcePushShape(f, main)
+			f.addPR("o/r", &fakePR{number: 7, base: main, head: final, pushes: []fakeForcePush{
+				{at: "2026-11-05T10:00:00Z", before: v0},
+				{at: "2026-11-06T10:00:00Z", before: v1},
+			}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPRFake(t)
+			f.noCursor = true
+			tc.build(f, f.g.chain("", 1))
+			captureOutput(t)
+			s := connectPRFake(t, f)
+
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err=%v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("paging without a cursor did not stop")
+			}
+		})
+	}
+}
+
+// Compare rows take signed_by_github from GraphQL: a commit GitHub signed with someone else as committer
+// (e.g. made in a Codespace) is true, and a web-flow commit GitHub says it didn't sign is false.
+func TestGithubPRCommitsSignedByGitHubOnCompareRowsComesFromGraphQL(t *testing.T) {
+	f := newPRFake(t)
+	base := f.g.chain("", 1)
+	v0, v1, final := forcePushShape(f, base)
+	f.committers[v0] = fakeCommitter{name: "Dev", email: "dev@example.com", gqlLogin: "dev", restLogin: "dev", state: "VALID", reason: "valid", valid: true, byGitHub: true}
+	f.committers[v1] = fakeCommitter{name: "GitHub", email: "noreply@github.com", restLogin: "web-flow", state: "VALID", reason: "valid", valid: true}
+	f.addPR("o/r", &fakePR{number: 4, base: base, head: final, pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: v0},
+		{at: "2026-11-06T10:00:00Z", before: v1},
+	}})
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]interface{}{}
+	for _, r := range rows {
+		got[r["sha"].(string)] = r["signed_by_github"]
+	}
+	if got[v0] != true || got[v1] != false {
+		t.Fatalf("signed_by_github: GitHub-signed commit with a user committer=%v (want true), web-flow commit GitHub didn't sign=%v (want false)", got[v0], got[v1])
+	}
+}
+
+func TestGithubPRCommitsSignatureNotFoundKeepsTheGuess(t *testing.T) {
+	f := newPRFake(t)
+	base := f.g.chain("", 1)
+	v0, v1, final := forcePushShape(f, base)
+	f.committers[v0] = fakeCommitter{name: "GitHub", email: "noreply@github.com", restLogin: "web-flow", state: "VALID", reason: "valid", valid: true, byGitHub: true}
+	f.unknownSignatures = map[string]bool{v0: true}
+	f.addPR("o/r", &fakePR{number: 4, base: base, head: final, pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: v0},
+		{at: "2026-11-06T10:00:00Z", before: v1},
+	}})
 	logs := captureOutput(t)
 	s := connectPRFake(t, f)
 
@@ -2667,27 +3187,73 @@ func TestGithubPRCommitsOver250ReadsTheNewest250(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	all := f.g.between(main, head)
-	mustEqualSet(t, "newest 250", shasOf(rows, 9), all[len(all)-prCommitListCap:])
-	if !strings.Contains(logs.String(), "Warning: pull request o/r#9 has more than 250 commits, GitHub lists only the newest 250, reading those") {
+	for _, r := range rows {
+		if r["sha"] == v0 && r["signed_by_github"] != true {
+			t.Fatalf("a commit GitHub can't find loses the inferred value: %v", r)
+		}
+	}
+	if !strings.Contains(logs.String(), "GitHub did not find 1 commits of pull request o/r#4 when reading their signatures") {
 		t.Fatalf("logs:\n%s", logs.String())
 	}
 }
 
-func TestGithubPRCommitsOver250ShortListingFails(t *testing.T) {
+func TestGithubPRCommitsReplacedHeadUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		wantErr bool
+	}{{http.StatusNotFound, false}, {http.StatusUnprocessableEntity, false}, {http.StatusForbidden, true}} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			f := newPRFake(t)
+			base := f.g.chain("", 1)
+			v0, v1, final := forcePushShape(f, base)
+			f.compareStatus[v0] = tc.status
+			f.addPR("o/r", &fakePR{number: 5, base: base, head: final, pushes: []fakeForcePush{
+				{at: "2026-11-05T10:00:00Z", before: v0},
+				{at: "2026-11-06T10:00:00Z", before: v1},
+			}})
+			logs := captureOutput(t)
+			s := connectPRFake(t, f)
+
+			_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "replaced by the force push at 2026-11-05T10:00:00Z") {
+					t.Fatalf("err=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), "skipping the version of pull request o/r#5 replaced by the force push at 2026-11-05T10:00:00Z") {
+				t.Fatalf("no warning:\n%s", logs.String())
+			}
+			if got := len(replacedAtOf(rows, 5)); got != 5 {
+				t.Fatalf("replaced rows from the readable version=%d want 5", got)
+			}
+		})
+	}
+}
+
+func TestGithubPRCommitsForcePushPages(t *testing.T) {
 	f := newPRFake(t)
-	f.gqlNodeLimit = 5
-	main := f.g.chain("", 1)
-	f.addPR("o/r", &fakePR{number: 9, base: main, head: f.g.chain(main, 300)})
-	captureOutput(t)
+	f.timelinePageSize = 1
+	base := f.g.chain("", 1)
+	v0, v1, final := forcePushShape(f, base)
+	f.addPR("o/r", &fakePR{number: 6, base: base, head: final, pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: v0},
+		{at: "2026-11-06T10:00:00Z", before: v1},
+	}})
 	s := connectPRFake(t, f)
 
 	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
-	if err == nil || !strings.Contains(err.Error(), "pull request o/r#9: GitHub listed 5 commits, expected 250") {
-		t.Fatalf("err=%v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("rows written for an incomplete listing: %d", len(rows))
+	if got := len(replacedAtOf(rows, 6)); got != 8 {
+		t.Fatalf("replaced rows=%d want 8 (calls %v)", got, f.calls(&f.gqlCalls))
+	}
+	if got := fmt.Sprint(f.calls(&f.gqlCalls)); got != "[list o/r  pushes o/r#6 1 signatures o/r 8]" {
+		t.Fatalf("graphql calls %s", got)
 	}
 }
 
@@ -2901,6 +3467,30 @@ func TestGithubPRCommitsMissingActorFieldsAreNull(t *testing.T) {
 	}
 }
 
+func TestGithubPRCommitsMissingActorFieldsMatchInCompareRows(t *testing.T) {
+	var g gqlCommit
+	var r restCommit
+	gqlRaw := `{"oid":"c1","url":"u","message":"m","author":null,"committer":{"name":null,"email":"","date":null,"user":null},"parents":{"totalCount":1},"signature":null}`
+	restRaw := `{"sha":"c1","html_url":"u","commit":{"message":"m","author":null,"committer":{"name":"","email":""},"verification":{"verified":false,"reason":"unsigned"}},"author":null,"committer":{},"parents":[{"sha":"c0"}]}`
+	if err := json.Unmarshal([]byte(gqlRaw), &g); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(restRaw), &r); err != nil {
+		t.Fatal(err)
+	}
+	fromGraphQL, fromCompare := graphQLCommitRow(g), restCommitRow(r)
+	delete(fromGraphQL, "source_api")
+	delete(fromCompare, "source_api")
+	if fmt.Sprint(fromGraphQL) != fmt.Sprint(fromCompare) {
+		t.Fatalf("\ngraphql %v\ncompare %v", fromGraphQL, fromCompare)
+	}
+	for _, k := range []string{"author_name", "author_email", "author_login", "authored_at", "committer_name", "committer_email", "committer_login", "committed_at"} {
+		if fromCompare[k] != nil {
+			t.Errorf("%s=%#v want nil", k, fromCompare[k])
+		}
+	}
+}
+
 func TestGithubPRCommitsSignatureReason(t *testing.T) {
 	for state, want := range map[string]string{
 		"VALID": "valid", "INVALID": "invalid", "MALFORMED_SIG": "malformed_signature", "UNKNOWN_KEY": "unknown_key",
@@ -2936,5 +3526,41 @@ func TestGithubPRCommitsGitHubMadeCommits(t *testing.T) {
 	}
 	if got[signed] != "dev false unknown_key false 1" || got[byGitHub] != "web-flow true valid true 2" {
 		t.Fatalf("rows %v", got)
+	}
+}
+
+// Rows read through GraphQL and through compare must match column for column, GitHub's own
+// commits included: GraphQL shows them without an account, REST as web-flow.
+func TestGithubPRCommitsGraphQLAndCompareRowsMatch(t *testing.T) {
+	f := newPRFake(t)
+	main := f.g.chain("", 1)
+	plain := f.g.add(main)
+	signed := f.g.add(plain)
+	byGitHub := f.g.add(signed, main)
+	userSigned := f.g.add(byGitHub)
+	f.committers[userSigned] = fakeCommitter{name: "Dev", email: "dev@example.com", gqlLogin: "dev", restLogin: "dev", state: "VALID", reason: "valid", valid: true}
+	f.committers[signed] = fakeCommitter{name: "Dev", email: "dev@example.com", gqlLogin: "dev", restLogin: "dev", state: "UNKNOWN_KEY", reason: "unknown_key"}
+	f.committers[byGitHub] = fakeCommitter{name: "GitHub", email: "noreply@github.com", restLogin: "web-flow", state: "VALID", reason: "valid", valid: true, byGitHub: true}
+
+	for _, sha := range []string{plain, signed, byGitHub, userSigned} {
+		var g gqlCommit
+		var r restCommit
+		gb, _ := json.Marshal(f.gqlCommit(sha))
+		rb, _ := json.Marshal(f.restCommit(sha))
+		if err := json.Unmarshal(gb, &g); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(rb, &r); err != nil {
+			t.Fatal(err)
+		}
+		fromGraphQL, fromCompare := graphQLCommitRow(g), restCommitRow(r)
+		if fromGraphQL["source_api"] != "graphql" || fromCompare["source_api"] != "compare" {
+			t.Fatalf("source_api %v %v", fromGraphQL["source_api"], fromCompare["source_api"])
+		}
+		delete(fromGraphQL, "source_api")
+		delete(fromCompare, "source_api")
+		if fmt.Sprint(fromGraphQL) != fmt.Sprint(fromCompare) {
+			t.Fatalf("%s:\ngraphql %v\ncompare %v", sha, fromGraphQL, fromCompare)
+		}
 	}
 }
