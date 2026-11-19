@@ -2635,24 +2635,13 @@ func (d *DuckDBDestination) exec(ctx context.Context, sql string, args ...interf
 		return qerr
 	}
 
-	_, uerr := stmt.ExecuteUpdate(ctx)
-	if uerr == nil {
-		return nil
+	// Don't retry: the first execution consumes the bound parameters, and DuckDB 1.4/1.5
+	// drivers answer a parameterless retry with a broken stream that segfaults on import.
+	if _, err := stmt.ExecuteUpdate(ctx); err != nil {
+		config.LogFailedQuery(sql, err)
+		return err
 	}
-	rdr, _, qerr := stmt.ExecuteQuery(ctx)
-	if qerr == nil {
-		defer rdr.Release()
-		for rdr.Next() {
-			// drain
-		}
-		if err := rdr.Err(); err != nil {
-			config.LogFailedQuery(sql, err)
-			return err
-		}
-		return nil
-	}
-	config.LogFailedQuery(sql, uerr)
-	return uerr
+	return nil
 }
 
 func buildParameterRecord(args []interface{}) (arrow.RecordBatch, error) {
