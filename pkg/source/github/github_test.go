@@ -104,6 +104,11 @@ func TestGithubReadCommits(t *testing.T) {
 		if serveRepoLookup(w, r) {
 			return
 		}
+		if r.URL.Path == "/repos/o/r/activity" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
 		if r.URL.Path != "/repos/o/r/commits" {
 			t.Errorf("path=%s want /repos/o/r/commits", r.URL.Path)
 		}
@@ -175,6 +180,274 @@ func TestGithubReadCommits(t *testing.T) {
 	if rows != 3 {
 		t.Fatalf("rows=%d want 3", rows)
 	}
+}
+
+type fakeCommitsRepo struct {
+	t        *testing.T
+	activity []map[string]string
+	compare  map[string][]string
+	totals   map[string]int
+	byDate   map[string][]string
+	pageSize int
+	limit    int
+	requests []string
+}
+
+func (f *fakeCommitsRepo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if serveRepoLookup(w, r) {
+		return
+	}
+	f.requests = append(f.requests, r.URL.Path+"?"+r.URL.RawQuery)
+	w.Header().Set("Content-Type", "application/json")
+	q := r.URL.Query()
+	commits := func(shas []string) []map[string]interface{} {
+		out := make([]map[string]interface{}, 0, len(shas))
+		for _, sha := range shas {
+			out = append(out, map[string]interface{}{"sha": sha, "commit": map[string]interface{}{"committer": map[string]interface{}{"date": "2026-11-12T14:15:35Z"}}})
+		}
+		return out
+	}
+	switch {
+	case r.URL.Path == "/repos/o/r/activity":
+		if q.Get("ref") != "main" {
+			f.t.Errorf("activity ref=%q want main", q.Get("ref"))
+		}
+		list := f.activity
+		if q.Get("direction") == "asc" && len(list) > 0 {
+			list = list[len(list)-1:]
+		} else if f.pageSize > 0 {
+			page, _ := strconv.Atoi(q.Get("page"))
+			page = max(page, 1)
+			from := min((page-1)*f.pageSize, len(list))
+			to := min(from+f.pageSize, len(list))
+			if to < len(list) {
+				w.Header().Set("Link", fmt.Sprintf("<http://%s/repos/o/r/activity?ref=main&page=%d>; rel=\"next\"", r.Host, page+1))
+			}
+			list = list[from:to]
+		}
+		_ = json.NewEncoder(w).Encode(list)
+	case strings.HasPrefix(r.URL.Path, "/repos/o/r/compare/"):
+		basehead := strings.TrimPrefix(r.URL.Path, "/repos/o/r/compare/")
+		shas, ok := f.compare[basehead]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"No common ancestor"}`))
+			return
+		}
+		total, capped := f.totals[basehead]
+		if !capped {
+			total = len(shas)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"total_commits": total, "commits": commits(shas)})
+	case r.URL.Path == "/repos/o/r/commits":
+		key := q.Get("since") + ".." + q.Get("until")
+		if q.Has("sha") {
+			key = "sha=" + q.Get("sha")
+		}
+		shas, ok := f.byDate[key]
+		if !ok {
+			f.t.Errorf("unexpected commit listing %s", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(commits(shas))
+	default:
+		f.t.Errorf("unexpected request %s", r.URL)
+	}
+}
+
+func (f *fakeCommitsRepo) read(start, end time.Time) []string {
+	f.t.Helper()
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	s := &GithubSource{owner: "o", repo: "r", restClient: ingestrhttp.New(ingestrhttp.WithBaseURL(srv.URL))}
+	results := make(chan source.RecordBatchResult, 16)
+	if err := s.readCommits(context.Background(), source.ReadOptions{IntervalStart: &start, IntervalEnd: &end, Limit: f.limit}, results, nil); err != nil {
+		f.t.Fatal(err)
+	}
+	close(results)
+	var shas []string
+	for res := range results {
+		col := res.Batch.Column(res.Batch.Schema().FieldIndices("sha")[0]).(*array.String)
+		for i := 0; i < col.Len(); i++ {
+			shas = append(shas, col.Value(i))
+		}
+		res.Batch.Release()
+	}
+	sort.Strings(shas)
+	return shas
+}
+
+func activity(ts, before, after string) map[string]string {
+	return map[string]string{"timestamp": ts, "before": before, "after": after, "activity_type": "pr_merge", "ref": "refs/heads/main"}
+}
+
+// PR #1415: commits dated Nov 12 were merged on Nov 13, after the Nov 12 window ran.
+func TestGithubReadCommitsMergedAfterTheirWindow(t *testing.T) {
+	f := &fakeCommitsRepo{
+		t: t,
+		activity: []map[string]string{
+			activity("2026-11-14T07:22:57Z", "7344a0d2", "baf0cb02"),
+			activity("2026-11-13T17:04:40Z", "951ede80", "7344a0d2"),
+			activity("2026-11-13T06:53:34Z", "1cc96da3", "e1394a8f"),
+			activity("2026-11-12T15:25:57Z", "2da3466b", "1cc96da3"),
+			activity("2024-02-12T23:01:27Z", "0000000000000000000000000000000000000000", "5f1e0a01"),
+		},
+		compare: map[string][]string{"1cc96da3...7344a0d2": {"26ca6408", "d7795fcc", "e1394a8f", "951ede80", "7344a0d2"}},
+	}
+	got := f.read(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC))
+	want := []string{"26ca6408", "7344a0d2", "951ede80", "d7795fcc", "e1394a8f"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("shas=%v want %v (requests %v)", got, want, f.requests)
+	}
+}
+
+// GitHub recorded no activity for the merge of PR #1417 (e1394a8f -> ed2fd333 at 07:06 on Nov 13).
+func TestGithubReadCommitsPushMissingFromActivity(t *testing.T) {
+	f := &fakeCommitsRepo{
+		t: t,
+		activity: []map[string]string{
+			activity("2026-11-13T08:11:58Z", "ed2fd333", "951ede80"),
+			activity("2026-11-13T06:53:34Z", "1cc96da3", "e1394a8f"),
+			activity("2026-11-12T15:25:57Z", "2da3466b", "1cc96da3"),
+		},
+		compare: map[string][]string{
+			"1cc96da3...e1394a8f": {"26ca6408", "d7795fcc", "e1394a8f"},
+			"e1394a8f...951ede80": {"a9b04bbc", "03e9c70f", "ed2fd333", "1d30ff6c", "951ede80"},
+		},
+	}
+	var got []string
+	for h := 6; h < 9; h++ {
+		got = append(got, f.read(time.Date(2026, 11, 13, h, 0, 0, 0, time.UTC), time.Date(2026, 11, 13, h+1, 0, 0, 0, time.UTC))...)
+	}
+	sort.Strings(got)
+	want := "[03e9c70f 1d30ff6c 26ca6408 951ede80 a9b04bbc d7795fcc e1394a8f ed2fd333]"
+	if fmt.Sprint(got) != want {
+		t.Fatalf("shas=%v want %s (requests %v)", got, want, f.requests)
+	}
+}
+
+func TestGithubReadCommitsActivityWindowBounds(t *testing.T) {
+	start, end := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	f := &fakeCommitsRepo{
+		t: t,
+		activity: []map[string]string{
+			activity("2026-11-14T00:00:01Z", "b2", "b3"),
+			activity("2026-11-14T00:00:00Z", "b1", "b2"),
+			activity("2026-11-13T00:00:00Z", "b0", "b1"),
+			activity("2026-11-12T23:59:59Z", "a0", "b0"),
+			activity("2026-11-12T12:00:00Z", "a1", "a0"),
+			activity("2024-01-01T00:00:00Z", "0000000000000000000000000000000000000000", "a1"),
+		},
+		compare:  map[string][]string{"b0...b2": {"x", "b1", "b2"}},
+		pageSize: 2,
+	}
+	if got := fmt.Sprint(f.read(start, end)); got != "[b1 b2 x]" {
+		t.Fatalf("shas=%s want [b1 b2 x] (requests %v)", got, f.requests)
+	}
+	pages := 0
+	for _, r := range f.requests {
+		if strings.HasPrefix(r, "/repos/o/r/activity?") && !strings.Contains(r, "direction=asc") {
+			pages++
+		}
+	}
+	if pages != 2 {
+		t.Fatalf("activity pages read=%d want 2 (requests %v)", pages, f.requests)
+	}
+}
+
+func TestGithubReadCommitsActivityEdgeCases(t *testing.T) {
+	start, end := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	pushes := []map[string]string{
+		activity("2026-11-13T18:00:00Z", "s2", "s3"),
+		activity("2026-11-13T12:00:00Z", "s1", "s2"),
+		activity("2026-11-13T06:00:00Z", "s0", "s1"),
+		activity("2024-01-01T00:00:00Z", "0000000000000000000000000000000000000000", "s0"),
+	}
+	cases := []struct {
+		name     string
+		activity []map[string]string
+		compare  map[string][]string
+		totals   map[string]int
+		byDate   map[string][]string
+		want     string
+	}{
+		{
+			name: "branch created in the window",
+			activity: []map[string]string{
+				activity("2026-11-13T09:00:00Z", "s1", "s2"),
+				activity("2026-11-13T06:00:00Z", "0000000000000000000000000000000000000000", "s1"),
+			},
+			byDate: map[string][]string{"sha=s2": {"a", "b", "s1", "s2"}, "2026-11-13T00:00:00Z..2026-11-13T06:00:00Z": {}},
+			want:   "[a b s1 s2]",
+		},
+		{
+			name:     "force push to an unrelated history",
+			activity: pushes,
+			byDate:   map[string][]string{"sha=s3": {"n1", "n2", "s3"}},
+			want:     "[n1 n2 s3]",
+		},
+		{
+			name:     "window over the compare cap splits at the middle push",
+			activity: pushes,
+			compare:  map[string][]string{"s0...s3": {"truncated"}, "s0...s1": {"a", "s1"}, "s1...s3": {"b", "s2", "s3"}},
+			totals:   map[string]int{"s0...s3": 10000},
+			want:     "[a b s1 s2 s3]",
+		},
+		{
+			name:     "one push over the compare cap lists the head's history",
+			activity: pushes[2:],
+			compare:  map[string][]string{"s0...s1": {"truncated"}},
+			totals:   map[string]int{"s0...s1": 10000},
+			byDate:   map[string][]string{"sha=s1": {"old", "s0", "s1"}},
+			want:     "[old s0 s1]",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeCommitsRepo{t: t, activity: c.activity, compare: c.compare, totals: c.totals, byDate: c.byDate}
+			if got := fmt.Sprint(f.read(start, end)); got != c.want {
+				t.Fatalf("shas=%s want %s (requests %v)", got, c.want, f.requests)
+			}
+		})
+	}
+}
+
+func TestGithubReadCommitsBeforeRecordedActivity(t *testing.T) {
+	newRepo := func() *fakeCommitsRepo {
+		return &fakeCommitsRepo{
+			t: t,
+			activity: []map[string]string{
+				activity("2023-03-12T09:00:00Z", "c2", "c3"),
+				activity("2023-03-11T16:23:14Z", "c1", "c2"),
+			},
+			compare: map[string][]string{"c1...c3": {"pr1", "c2", "c3"}},
+			byDate: map[string][]string{
+				"2022-06-28T00:00:00Z..2022-06-29T00:00:00Z": {"old1", "old2"},
+				"2023-03-01T00:00:00Z..2023-03-11T16:23:14Z": {"c0", "c1"},
+			},
+		}
+	}
+
+	t.Run("window before the first activity", func(t *testing.T) {
+		got := newRepo().read(time.Date(2022, 6, 28, 0, 0, 0, 0, time.UTC), time.Date(2022, 6, 29, 0, 0, 0, 0, time.UTC))
+		if fmt.Sprint(got) != "[old1 old2]" {
+			t.Fatalf("shas=%v want [old1 old2]", got)
+		}
+	})
+	t.Run("commit read by both parts counts once toward the limit", func(t *testing.T) {
+		f := newRepo()
+		f.byDate["2023-03-01T00:00:00Z..2023-03-11T16:23:14Z"] = []string{"c0", "pr1"}
+		f.limit = 4
+		got := f.read(time.Date(2023, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2023, 3, 15, 0, 0, 0, 0, time.UTC))
+		if fmt.Sprint(got) != "[c0 c2 c3 pr1]" {
+			t.Fatalf("shas=%v want [c0 c2 c3 pr1]", got)
+		}
+	})
+	t.Run("window across the first activity", func(t *testing.T) {
+		got := newRepo().read(time.Date(2023, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2023, 3, 15, 0, 0, 0, 0, time.UTC))
+		if fmt.Sprint(got) != "[c0 c1 c2 c3 pr1]" {
+			t.Fatalf("shas=%v want [c0 c1 c2 c3 pr1]", got)
+		}
+	})
 }
 
 func TestGithubReadCommitsMissingCommitterDate(t *testing.T) {
@@ -265,7 +538,7 @@ func serveRepoLookup(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"full_name":"o/r"}`))
+	_, _ = w.Write([]byte(`{"full_name":"o/r","default_branch":"main"}`))
 	return true
 }
 
@@ -1260,6 +1533,8 @@ type commitsFake struct {
 	blocked map[string]int
 	commits map[string][]string
 	empty   map[string]bool
+
+	activityBlocked map[string]int
 }
 
 func listedRepo(id int, owner, name string, fork, archived bool) map[string]interface{} {
@@ -1369,6 +1644,12 @@ func (f *commitsFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		_ = json.NewEncoder(w).Encode(page)
+	case len(parts) == 4 && parts[0] == "repos" && parts[3] == "activity":
+		if status, ok := f.activityBlocked[parts[1]+"/"+parts[2]]; ok {
+			writeStatus(w, status)
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
 	default:
 		f.t.Errorf("unexpected path %s", r.URL.Path)
 		writeStatus(w, http.StatusNotFound)
@@ -1435,7 +1716,8 @@ func newCommitsFake(t *testing.T) *commitsFake {
 			"u/app":      {"a1"},
 			"u/secret":   {"s1"},
 		},
-		empty: map[string]bool{},
+		empty:           map[string]bool{},
+		activityBlocked: map[string]int{},
 	}
 }
 
@@ -1727,6 +2009,31 @@ func TestGithubCommitsAllReposSkipsUnreadableRepos(t *testing.T) {
 		"Warning: skipping the commits of o/ingestr, GitHub answered 403",
 		"Warning: skipping the commits of o/old, GitHub answered 451",
 		"Warning: skipping the commits of o/Bruin, GitHub answered 404",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("missing %q in output: %q", want, logs.String())
+		}
+	}
+}
+
+func TestGithubCommitsAllReposWithIntervalSkipsReposWithoutActivityAccess(t *testing.T) {
+	logs := captureOutput(t)
+	f := newCommitsFake(t)
+	f.activityBlocked["o/ingestr"] = http.StatusNotFound
+	f.activityBlocked["o/Bruin"] = http.StatusForbidden
+	s, _ := connectURIToFake(t, f, "github://?access_token=test-token&owner=o")
+
+	start, end := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+	_, rows, _, err := readCommitRows(t, s, "commits", source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(rows); got != "[{o/r r1} {o/old o1}]" {
+		t.Fatalf("rows=%s", got)
+	}
+	for _, want := range []string{
+		"Warning: skipping the commits of o/ingestr, GitHub answered 404",
+		"Warning: skipping the commits of o/Bruin, GitHub answered 403",
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("missing %q in output: %q", want, logs.String())
