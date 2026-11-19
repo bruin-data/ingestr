@@ -2388,12 +2388,11 @@ func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr 
 	for _, n := range nodes {
 		commits = append(commits, n.Commit)
 	}
+	if want := min(pr.Commits.TotalCount, prCommitListCap); len(commits) != want {
+		return nil, fmt.Errorf("pull request %s#%d: GitHub listed %d commits, expected %d", fullName, pr.Number, len(commits), want)
+	}
 	if pr.Commits.TotalCount > prCommitListCap {
 		output.Warnf("\nWarning: pull request %s#%d has more than %d commits, GitHub lists only the newest %d, reading those\n", fullName, pr.Number, prCommitListCap, len(commits))
-		return commits, nil
-	}
-	if len(commits) != pr.Commits.TotalCount {
-		return nil, fmt.Errorf("pull request %s#%d: GitHub listed %d of its %d commits", fullName, pr.Number, len(commits), pr.Commits.TotalCount)
 	}
 	return commits, nil
 }

@@ -2548,7 +2548,7 @@ func TestGithubPRCommitsGraphQLCountCheckFails(t *testing.T) {
 	s := connectPRFake(t, f)
 
 	_, _, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
-	if err == nil || !strings.Contains(err.Error(), "GitHub listed 5 of its 6 commits") {
+	if err == nil || !strings.Contains(err.Error(), "GitHub listed 5 commits, expected 6") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -2569,6 +2569,23 @@ func TestGithubPRCommitsOver250ReadsTheNewest250(t *testing.T) {
 	mustEqualSet(t, "newest 250", shasOf(rows, 9), all[len(all)-prCommitListCap:])
 	if !strings.Contains(logs.String(), "Warning: pull request o/r#9 has more than 250 commits, GitHub lists only the newest 250, reading those") {
 		t.Fatalf("logs:\n%s", logs.String())
+	}
+}
+
+func TestGithubPRCommitsOver250ShortListingFails(t *testing.T) {
+	f := newPRFake(t)
+	f.gqlNodeLimit = 5
+	main := f.g.chain("", 1)
+	f.addPR("o/r", &fakePR{number: 9, base: main, head: f.g.chain(main, 300)})
+	captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#9: GitHub listed 5 commits, expected 250") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows written for an incomplete listing: %d", len(rows))
 	}
 }
 
