@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,6 +185,8 @@ var prCommitFields = []schema.Column{
 	{Name: "verified", DataType: schema.TypeBoolean, Nullable: true},
 	{Name: "verification_reason", DataType: schema.TypeString, Nullable: true},
 	{Name: "signed_by_github", DataType: schema.TypeBoolean, Nullable: true},
+	{Name: "replaced_by_force_push", DataType: schema.TypeBoolean, Nullable: true},
+	{Name: "replaced_at", DataType: schema.TypeTimestampTZ, Nullable: true},
 }
 
 var stargazerFields = []schema.Column{
@@ -2107,9 +2110,14 @@ func (s *GithubSource) paginateGraphQL(
 // GitHub lists at most the newest 250 commits of a pull request, in GraphQL as in REST.
 const prCommitListCap = 250
 
-// prCommitListRetries is how many times a pull request's commit list is read again when it changed
-// while being read.
-const prCommitListRetries = 3
+// When a pull request changes while it is read, it is read again: at most prCommitPageRetries
+// times while its commit pages are read, and at most prForcePushPageRetries times while its force
+// pushes are read, which reads its commit pages again too. With 1 and 1, a pull request is read at
+// most 4 times.
+const (
+	prCommitPageRetries    = 1
+	prForcePushPageRetries = 1
+)
 
 const (
 	gitHubCommitterEmail = "noreply@github.com"
@@ -2126,6 +2134,8 @@ fragment prCommit on Commit {
   parents { totalCount }
   signature { isValid state wasSignedByGitHub }
 }`
+
+const prForcePushNodes = `nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } } }`
 
 // prNodeFragment is everything read about a pull request, by the listing and when a pull request is
 // read again.
@@ -2150,6 +2160,10 @@ fragment prNode on PullRequest {
     totalCount
     pageInfo { hasNextPage endCursor }
     nodes { commit { ...prCommit } }
+  }
+  forcePushes: timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100) {
+    pageInfo { hasNextPage endCursor }
+    ` + prForcePushNodes + `
   }
 }`
 
@@ -2185,6 +2199,20 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
   }
   rateLimit { limit cost remaining resetAt }
 }` + prCommitFragment
+
+const prForcePushesPageQuery = `
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      forcePushes: timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        ` + prForcePushNodes + `
+      }
+    }
+  }
+  rateLimit { limit cost remaining resetAt }
+}`
 
 type gqlPageInfo struct {
 	HasNextPage bool   `json:"hasNextPage"`
@@ -2226,6 +2254,18 @@ type prCommitConnection struct {
 	} `json:"nodes"`
 }
 
+type forcePushEvent struct {
+	CreatedAt    string `json:"createdAt"`
+	BeforeCommit *struct {
+		Oid string `json:"oid"`
+	} `json:"beforeCommit"`
+}
+
+type forcePushConnection struct {
+	PageInfo gqlPageInfo       `json:"pageInfo"`
+	Nodes    []*forcePushEvent `json:"nodes"`
+}
+
 type pullRequestNode struct {
 	Number         int       `json:"number"`
 	URL            string    `json:"url"`
@@ -2246,7 +2286,71 @@ type pullRequestNode struct {
 	MergeCommit *struct {
 		Oid string `json:"oid"`
 	} `json:"mergeCommit"`
-	Commits prCommitConnection `json:"commits"`
+	Commits     prCommitConnection  `json:"commits"`
+	ForcePushes forcePushConnection `json:"forcePushes"`
+}
+
+type restGitActor struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Date  string `json:"date"`
+}
+
+type restCommit struct {
+	SHA     string `json:"sha"`
+	HTMLURL string `json:"html_url"`
+	Commit  struct {
+		Message      string        `json:"message"`
+		Author       *restGitActor `json:"author"`
+		Committer    *restGitActor `json:"committer"`
+		Verification *struct {
+			Verified bool   `json:"verified"`
+			Reason   string `json:"reason"`
+		} `json:"verification"`
+	} `json:"commit"`
+	Author    *gqlLogin `json:"author"`
+	Committer *gqlLogin `json:"committer"`
+	Parents   []struct {
+		SHA string `json:"sha"`
+	} `json:"parents"`
+}
+
+type compareResponse struct {
+	Status   string       `json:"status"`
+	AheadBy  int          `json:"ahead_by"`
+	BehindBy int          `json:"behind_by"`
+	Commits  []restCommit `json:"commits"`
+}
+
+var errNoCommonAncestor = errors.New("no common ancestor")
+
+// compareFailedError is a compare GitHub refused, with its status.
+type compareFailedError struct {
+	error
+	status int
+}
+
+// commitSet keeps rows by SHA in the order they were first added.
+type commitSet struct {
+	order []string
+	rows  map[string]map[string]interface{}
+}
+
+func newCommitSet() *commitSet {
+	return &commitSet{rows: make(map[string]map[string]interface{})}
+}
+
+func (c *commitSet) add(sha string, row map[string]interface{}) {
+	if _, ok := c.rows[sha]; ok {
+		return
+	}
+	c.order = append(c.order, sha)
+	c.rows[sha] = row
+}
+
+func (c *commitSet) has(sha string) bool {
+	_, ok := c.rows[sha]
+	return ok
 }
 
 func (s *GithubSource) readPRCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, sel *repoSelection) error {
@@ -2256,7 +2360,8 @@ func (s *GithubSource) readPRCommits(ctx context.Context, opts source.ReadOption
 }
 
 // readRepoPRCommits lists one repository's pull requests by last update, newest first, and emits
-// the commits of each pull request in the interval. Each pull request is emitted once per run.
+// the commits of each pull request in the interval: its final version and the commits only found
+// in versions replaced by force pushes. Each pull request is emitted once per run.
 func (s *GithubSource) readRepoPRCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName string) (int, error) {
 	config.Debug("[GITHUB] Reading pull request commits for %s", fullName)
 	owner, name, _ := strings.Cut(fullName, "/")
@@ -2358,34 +2463,285 @@ func prInInterval(pr pullRequestNode, opts source.ReadOptions) (read, stop bool,
 	return true, false, nil
 }
 
+// pullRequestCommitRows reads the pull request's final version and its force pushes. When its head
+// changes while more than one page of force pushes is read, the whole pull request is read again,
+// with a warning, up to prForcePushPageRetries times, so the force pushes belong to the version read.
 func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) ([]map[string]interface{}, error) {
-	pr, commits, read, err := s.listedPRCommits(ctx, fullName, pr, opts)
-	if err != nil || !read {
+	var final *commitSet
+	var baseInFinal *bool
+	var events []*forcePushEvent
+	for retry := 0; ; retry++ {
+		var read, headMoved bool
+		var err error
+		pr, final, baseInFinal, read, err = s.finalPRVersion(ctx, fullName, pr, opts)
+		if err != nil || !read {
+			return nil, err
+		}
+		if events, headMoved, err = s.forcePushEvents(ctx, fullName, pr); err != nil {
+			return nil, err
+		}
+		if !headMoved {
+			break
+		}
+		if retry == prForcePushPageRetries {
+			return nil, fmt.Errorf("pull request %s#%d: its head changed while its force pushes were read, also when read again", fullName, pr.Number)
+		}
+		output.Warnf("\nWarning: pull request %s#%d: its head changed while its force pushes were read, reading it again (retry %d of %d)\n", fullName, pr.Number, retry+1, prForcePushPageRetries)
+		if pr, read, err = s.rereadPullRequest(ctx, fullName, pr.Number, opts); err != nil || !read {
+			return nil, err
+		}
+	}
+	replaced, replacedAt, err := s.replacedPRCommits(ctx, fullName, pr, final, baseInFinal, events)
+	if err != nil {
 		return nil, err
 	}
+	fromCompare := []*commitSet{replaced}
+	if baseInFinal != nil {
+		fromCompare = append(fromCompare, final)
+	}
+	if err := s.applyGitHubSignatures(ctx, fullName, pr.Number, fromCompare...); err != nil {
+		return nil, err
+	}
+
 	prColumns := pullRequestColumns(fullName, pr)
-	rows := make([]map[string]interface{}, 0, len(commits))
-	for _, c := range commits {
-		rows = append(rows, prCommitRow(prColumns, graphQLCommitRow(c)))
+	rows := make([]map[string]interface{}, 0, len(final.order)+len(replaced.order))
+	for _, sha := range final.order {
+		rows = append(rows, prCommitRow(prColumns, final.rows[sha], false, nil))
+	}
+	for _, sha := range replaced.order {
+		rows = append(rows, prCommitRow(prColumns, replaced.rows[sha], true, replacedAt[sha].UTC()))
 	}
 	return rows, nil
 }
 
-func prCommitRow(prColumns, commit map[string]interface{}) map[string]interface{} {
-	row := make(map[string]interface{}, len(prColumns)+len(commit))
+// applyGitHubSignatures sets signed_by_github on the rows of sets, all read through compare, from
+// GraphQL's wasSignedByGitHub, which REST doesn't return. A commit GitHub can't find keeps the value
+// restCommitRow infers, with a warning.
+func (s *GithubSource) applyGitHubSignatures(ctx context.Context, fullName string, number int, sets ...*commitSet) error {
+	var shas []string
+	for _, set := range sets {
+		shas = append(shas, set.order...)
+	}
+	if len(shas) == 0 {
+		return nil
+	}
+	signed, err := s.githubSignatures(ctx, fullName, shas)
+	if err != nil {
+		return fmt.Errorf("failed to read the signatures of pull request %s#%d: %w", fullName, number, err)
+	}
+	missing := 0
+	for _, set := range sets {
+		for _, sha := range set.order {
+			if v, ok := signed[sha]; ok {
+				set.rows[sha]["signed_by_github"] = v
+			} else {
+				missing++
+			}
+		}
+	}
+	if missing > 0 {
+		output.Warnf("\nWarning: GitHub did not find %d commits of pull request %s#%d when reading their signatures, their signed_by_github is inferred from the committer\n", missing, fullName, number)
+	}
+	return nil
+}
+
+// githubSignatures reads wasSignedByGitHub for the given commits, maxPageSize per GraphQL query.
+// Commits GitHub can't find are left out.
+func (s *GithubSource) githubSignatures(ctx context.Context, fullName string, shas []string) (map[string]bool, error) {
+	owner, name, _ := strings.Cut(fullName, "/")
+	signed := make(map[string]bool, len(shas))
+	for start := 0; start < len(shas); start += maxPageSize {
+		batch := shas[start:min(start+maxPageSize, len(shas))]
+		parts := make([]string, len(batch))
+		for i, sha := range batch {
+			parts[i] = fmt.Sprintf("c%d: object(oid: %q) { ... on Commit { signature { wasSignedByGitHub } } }", i, sha)
+		}
+		query := "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { " + strings.Join(parts, " ") + " } rateLimit { limit cost remaining resetAt } }"
+		data, _, err := s.executeGraphQL(ctx, query, map[string]interface{}{"owner": owner, "name": name})
+		if err != nil {
+			return nil, err
+		}
+		var res struct {
+			Repository map[string]*struct {
+				Signature *struct {
+					WasSignedByGitHub bool `json:"wasSignedByGitHub"`
+				} `json:"signature"`
+			} `json:"repository"`
+		}
+		if err := json.Unmarshal(data, &res); err != nil {
+			return nil, fmt.Errorf("failed to decode commit signatures: %w", err)
+		}
+		for i, sha := range batch {
+			if c := res.Repository[fmt.Sprintf("c%d", i)]; c != nil {
+				signed[sha] = c.Signature != nil && c.Signature.WasSignedByGitHub
+			}
+		}
+	}
+	return signed, nil
+}
+
+func prCommitRow(prColumns, commit map[string]interface{}, replaced bool, replacedAt interface{}) map[string]interface{} {
+	row := make(map[string]interface{}, len(prColumns)+len(commit)+2)
 	for k, v := range prColumns {
 		row[k] = v
 	}
 	for k, v := range commit {
 		row[k] = v
 	}
+	row["replaced_by_force_push"] = replaced
+	row["replaced_at"] = replacedAt
 	return row
+}
+
+// prCompareBase is the base every compare of a pull request starts from. GitHub freezes baseRefOid
+// at the merge, so it also holds for merged pull requests, fast-forward merges included.
+func prCompareBase(pr pullRequestNode) string {
+	return pr.BaseRefOid
+}
+
+// finalPRVersion returns the commits of the pull request's head: GraphQL's list up to
+// prCommitListCap commits, else every commit compare finds between the base and the head. It returns
+// the pull request as last read (listedPRCommits may read it again) and read = false when it is to be
+// skipped. baseInFinal is set when the compare shows the base inside the head, nil when no compare
+// was needed.
+func (s *GithubSource) finalPRVersion(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) (pullRequestNode, *commitSet, *bool, bool, error) {
+	final := newCommitSet()
+	if pr.Commits.TotalCount <= prCommitListCap {
+		listed, commits, read, err := s.listedPRCommits(ctx, fullName, pr, opts)
+		if err != nil || !read {
+			return listed, nil, nil, false, err
+		}
+		pr = listed
+		if pr.Commits.TotalCount <= prCommitListCap {
+			for _, c := range commits {
+				final.add(c.Oid, graphQLCommitRow(c))
+			}
+			return pr, final, nil, true, nil
+		}
+	}
+
+	commits, behindBy, err := s.compareAll(ctx, fullName, prCompareBase(pr), pr.HeadRefOid)
+	if err != nil {
+		return pr, nil, nil, false, fmt.Errorf("failed to read the commits of pull request %s#%d: %w", fullName, pr.Number, err)
+	}
+	for _, c := range commits {
+		final.add(c.SHA, restCommitRow(c))
+	}
+	baseInFinal := behindBy == 0
+	return pr, final, &baseInFinal, true, nil
+}
+
+// replacedPRCommits reads the version each force push replaced and keeps the commits that are not
+// in the final version. When the base is inside the final head, compare(head...before) gives
+// exactly those commits; otherwise the version is read from the base and the final version is
+// taken out.
+func (s *GithubSource) replacedPRCommits(ctx context.Context, fullName string, pr pullRequestNode, final *commitSet, baseInFinal *bool, events []*forcePushEvent) (*commitSet, map[string]time.Time, error) {
+	replaced := newCommitSet()
+	replacedAt := make(map[string]time.Time)
+	if len(events) == 0 {
+		return replaced, replacedAt, nil
+	}
+	var err error
+
+	base := prCompareBase(pr)
+	if baseInFinal == nil {
+		res, err := s.fetchCompare(ctx, fullName, base, pr.HeadRefOid, 1)
+		if err != nil && !errors.Is(err, errNoCommonAncestor) {
+			return nil, nil, fmt.Errorf("failed to compare pull request %s#%d with its base: %w", fullName, pr.Number, err)
+		}
+		inside := err == nil && res.BehindBy == 0
+		baseInFinal = &inside
+	}
+
+	for _, e := range events {
+		before := e.BeforeCommit.Oid
+		var version []restCommit
+		if *baseInFinal {
+			version, _, err = s.compareAll(ctx, fullName, pr.HeadRefOid, before)
+		} else {
+			version, _, err = s.compareAll(ctx, fullName, base, before)
+		}
+		if replacedVersionUnavailable(err) {
+			output.Warnf("\nWarning: skipping the version of pull request %s#%d replaced by the force push at %s: %v\n", fullName, pr.Number, e.CreatedAt, err)
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read the version of pull request %s#%d replaced by the force push at %s: %w", fullName, pr.Number, e.CreatedAt, err)
+		}
+		at, err := time.Parse(time.RFC3339, e.CreatedAt)
+		if err != nil {
+			return nil, nil, fmt.Errorf("pull request %s#%d: invalid force push time %q: %w", fullName, pr.Number, e.CreatedAt, err)
+		}
+		for _, c := range version {
+			if final.has(c.SHA) {
+				continue
+			}
+			replaced.add(c.SHA, restCommitRow(c))
+			markReplaced(replacedAt, c.SHA, at)
+		}
+	}
+	return replaced, replacedAt, nil
+}
+
+// markReplaced keeps the latest force push that replaced a version holding the commit: the push
+// that took it out of the pull request for good. Normal pushes only add commits, so every earlier
+// replaced version holding it was followed by one that still had it.
+func markReplaced(replacedAt map[string]time.Time, sha string, at time.Time) {
+	if prev, ok := replacedAt[sha]; !ok || at.After(prev) {
+		replacedAt[sha] = at
+	}
+}
+
+// replacedVersionUnavailable reports a replaced head GitHub no longer serves (404) or doesn't know
+// (422). The rest of the pull request is still read.
+func replacedVersionUnavailable(err error) bool {
+	var failed compareFailedError
+	return errors.As(err, &failed) && (failed.status == http.StatusNotFound || failed.status == http.StatusUnprocessableEntity)
+}
+
+// forcePushEvents returns the pull request's force pushes with a replaced head, oldest first, and
+// whether its head moved away from pr's while the pages after the first were read. A force push
+// whose replaced head GitHub no longer shows is skipped with a warning.
+func (s *GithubSource) forcePushEvents(ctx context.Context, fullName string, pr pullRequestNode) ([]*forcePushEvent, bool, error) {
+	nodes := pr.ForcePushes.Nodes
+	pageInfo := pr.ForcePushes.PageInfo
+	for pageInfo.HasNextPage {
+		if pageInfo.EndCursor == "" {
+			return nil, false, fmt.Errorf("pull request %s#%d: GitHub reported more force pushes without a cursor to read them", fullName, pr.Number)
+		}
+		var page struct {
+			HeadRefOid  string              `json:"headRefOid"`
+			ForcePushes forcePushConnection `json:"forcePushes"`
+		}
+		if err := s.pullRequestPage(ctx, fullName, pr.Number, prForcePushesPageQuery, pageInfo.EndCursor, &page); err != nil {
+			return nil, false, err
+		}
+		if page.HeadRefOid != pr.HeadRefOid {
+			return nil, true, nil
+		}
+		nodes = append(nodes, page.ForcePushes.Nodes...)
+		pageInfo = page.ForcePushes.PageInfo
+	}
+
+	var events []*forcePushEvent
+	for _, e := range nodes {
+		if e == nil {
+			continue
+		}
+		if e.BeforeCommit == nil || e.BeforeCommit.Oid == "" {
+			output.Warnf("\nWarning: GitHub does not show the head replaced by the force push at %s in pull request %s#%d, skipping that version\n", e.CreatedAt, fullName, pr.Number)
+			continue
+		}
+		events = append(events, e)
+	}
+	sort.SliceStable(events, func(i, j int) bool { return events[i].CreatedAt < events[j].CreatedAt })
+	return events, false, nil
 }
 
 // listedPRCommits returns the pull request's commits as GitHub lists them, reading the pages after
 // the first 100. Over prCommitListCap commits GitHub lists only the newest ones. When the pull
 // request changes between two pages (its head moves) or the commits read don't match the count, the
-// whole pull request is read again, with a warning, up to prCommitListRetries times; then the run
+// whole pull request is read again, with a warning, up to prCommitPageRetries times; then the run
 // fails. It returns the pull request as last read, and read = false when that read shows it updated
 // outside the interval, so the run whose interval holds its last update reads it.
 func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) (pullRequestNode, []gqlCommit, bool, error) {
@@ -2396,31 +2752,36 @@ func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr 
 		}
 		want := min(pr.Commits.TotalCount, prCommitListCap)
 		if !headMoved && len(commits) == want {
-			if pr.Commits.TotalCount > prCommitListCap {
-				output.Warnf("\nWarning: pull request %s#%d has more than %d commits, GitHub lists only the newest %d, reading those\n", fullName, pr.Number, prCommitListCap, len(commits))
-			}
 			return pr, commits, true, nil
 		}
 		problem := fmt.Sprintf("GitHub listed %d commits, expected %d", len(commits), want)
 		if headMoved {
 			problem = "its head changed while its commits were read"
 		}
-		if retry == prCommitListRetries {
-			return pr, nil, false, fmt.Errorf("pull request %s#%d: %s, after %d retries", fullName, pr.Number, problem, prCommitListRetries)
+		if retry == prCommitPageRetries {
+			return pr, nil, false, fmt.Errorf("pull request %s#%d: %s, also when read again", fullName, pr.Number, problem)
 		}
-		output.Warnf("\nWarning: pull request %s#%d: %s, reading its commits again (retry %d of %d)\n", fullName, pr.Number, problem, retry+1, prCommitListRetries)
-		var fresh pullRequestNode
-		if err := s.pullRequestPage(ctx, fullName, pr.Number, pullRequestQuery, "", &fresh); err != nil {
-			return pr, nil, false, err
-		}
-		pr = fresh
-		if read, _, err := prInInterval(pr, opts); err != nil || !read {
-			if err == nil {
-				output.Warnf("\nWarning: pull request %s#%d was updated after the interval while its commits were read, skipping it; the run whose interval holds its last update reads it\n", fullName, pr.Number)
-			}
+		output.Warnf("\nWarning: pull request %s#%d: %s, reading its commits again (retry %d of %d)\n", fullName, pr.Number, problem, retry+1, prCommitPageRetries)
+		var read bool
+		if pr, read, err = s.rereadPullRequest(ctx, fullName, pr.Number, opts); err != nil || !read {
 			return pr, nil, false, err
 		}
 	}
+}
+
+// rereadPullRequest reads a pull request again with everything the listing reads. read is false when
+// it was updated outside the interval meanwhile: it is skipped, with a warning, and the run whose
+// interval holds its last update reads it.
+func (s *GithubSource) rereadPullRequest(ctx context.Context, fullName string, number int, opts source.ReadOptions) (pullRequestNode, bool, error) {
+	var pr pullRequestNode
+	if err := s.pullRequestPage(ctx, fullName, number, pullRequestQuery, "", &pr); err != nil {
+		return pr, false, err
+	}
+	read, _, err := prInInterval(pr, opts)
+	if err == nil && !read {
+		output.Warnf("\nWarning: pull request %s#%d was updated after the interval while it was read, skipping it; the run whose interval holds its last update reads it\n", fullName, number)
+	}
+	return pr, read, err
 }
 
 // prCommitPages reads the commit pages after first and reports whether the pull request's head moved
@@ -2430,6 +2791,9 @@ func (s *GithubSource) prCommitPages(ctx context.Context, fullName string, numbe
 	pageInfo := first.PageInfo
 	headMoved := false
 	for pageInfo.HasNextPage {
+		if pageInfo.EndCursor == "" {
+			return nil, false, fmt.Errorf("pull request %s#%d: GitHub reported more commits without a cursor to read them", fullName, number)
+		}
 		var page struct {
 			HeadRefOid string             `json:"headRefOid"`
 			Commits    prCommitConnection `json:"commits"`
@@ -2474,6 +2838,149 @@ func (s *GithubSource) pullRequestPage(ctx context.Context, fullName string, num
 		return fmt.Errorf("failed to decode pull request %s#%d: %w", fullName, number, err)
 	}
 	return nil
+}
+
+// compareAll returns every commit reachable from head and not from base, which a single compare
+// cuts at about 10,000. When fewer commits come back than ahead_by, the parents of returned commits
+// that were not returned become new heads, each compared with base, level by level. A head with no
+// common ancestor with base is listed whole. The union must match ahead_by of base...head. It also
+// returns behind_by of base...head (-1 without a common ancestor).
+func (s *GithubSource) compareAll(ctx context.Context, fullName, base, head string) ([]restCommit, int, error) {
+	var collected []restCommit
+	found := make(map[string]bool)
+	queued := map[string]bool{head: true}
+	queue := []string{head}
+	total, behindBy := -1, -1
+
+	for len(queue) > 0 {
+		h := queue[0]
+		queue = queue[1:]
+		if found[h] || (h == base && total >= 0) {
+			continue
+		}
+
+		var commits []restCommit
+		var aheadBy int
+		res, err := s.fetchCompare(ctx, fullName, base, h, maxPageSize)
+		switch {
+		case errors.Is(err, errNoCommonAncestor):
+			commits, err = s.listCommitHistory(ctx, fullName, h)
+			if err != nil {
+				return nil, 0, err
+			}
+			aheadBy = len(commits)
+		case err != nil:
+			return nil, 0, err
+		default:
+			commits, aheadBy = res.Commits, res.AheadBy
+		}
+		if total < 0 {
+			total = aheadBy
+			if res != nil {
+				behindBy = res.BehindBy
+			}
+		}
+
+		returned := make(map[string]bool, len(commits))
+		for _, c := range commits {
+			returned[c.SHA] = true
+			if !found[c.SHA] {
+				found[c.SHA] = true
+				collected = append(collected, c)
+			}
+		}
+		if len(commits) < aheadBy {
+			var frontier []string
+			for _, c := range commits {
+				for _, p := range c.Parents {
+					if !returned[p.SHA] && !found[p.SHA] && !queued[p.SHA] {
+						queued[p.SHA] = true
+						frontier = append(frontier, p.SHA)
+					}
+				}
+			}
+			config.Debug("[GITHUB] compare %s...%s in %s returned %d of %d commits, splitting at %d heads", shortSHA(base), shortSHA(h), fullName, len(commits), aheadBy, len(frontier))
+			queue = append(queue, frontier...)
+		}
+	}
+
+	if len(collected) != total {
+		return nil, 0, fmt.Errorf("compare %s...%s in %s found %d commits, GitHub counts %d", shortSHA(base), shortSHA(head), fullName, len(collected), total)
+	}
+	return collected, behindBy, nil
+}
+
+// fetchCompare reads compare base...head, all pages of perPage commits: until a short page, a page
+// with nothing new, or ahead_by commits.
+func (s *GithubSource) fetchCompare(ctx context.Context, fullName, base, head string, perPage int) (*compareResponse, error) {
+	owner, name, _ := strings.Cut(fullName, "/")
+	path := fmt.Sprintf("/repos/%s/%s/compare/%s...%s", url.PathEscape(owner), url.PathEscape(name), url.PathEscape(base), url.PathEscape(head))
+	var res *compareResponse
+	seen := make(map[string]bool)
+
+	for page := 1; ; page++ {
+		resp, err := s.restClient.R(ctx).Get(path + "?per_page=" + strconv.Itoa(perPage) + "&page=" + strconv.Itoa(page))
+		if err != nil {
+			return nil, fmt.Errorf("failed to compare %s...%s in %s: %w", shortSHA(base), shortSHA(head), fullName, err)
+		}
+		if !resp.IsSuccess() {
+			if resp.StatusCode() == http.StatusNotFound && strings.Contains(resp.String(), "No common ancestor") {
+				return nil, errNoCommonAncestor
+			}
+			return nil, compareFailedError{fmt.Errorf("compare %s...%s in %s failed with status %d: %s", shortSHA(base), shortSHA(head), fullName, resp.StatusCode(), resp.String()), resp.StatusCode()}
+		}
+		var pageRes compareResponse
+		if err := json.Unmarshal(resp.Body(), &pageRes); err != nil {
+			return nil, fmt.Errorf("failed to decode compare %s...%s in %s: %w", shortSHA(base), shortSHA(head), fullName, err)
+		}
+		if res == nil {
+			res = &compareResponse{Status: pageRes.Status, AheadBy: pageRes.AheadBy, BehindBy: pageRes.BehindBy}
+		}
+		added := 0
+		for _, c := range pageRes.Commits {
+			if !seen[c.SHA] {
+				seen[c.SHA] = true
+				res.Commits = append(res.Commits, c)
+				added++
+			}
+		}
+		if perPage < maxPageSize || len(pageRes.Commits) < perPage || added == 0 || len(res.Commits) >= res.AheadBy {
+			return res, nil
+		}
+	}
+}
+
+// listCommitHistory lists every commit reachable from head, for a head that shares no history with
+// the base. This listing has no 10,000 cap.
+func (s *GithubSource) listCommitHistory(ctx context.Context, fullName, head string) ([]restCommit, error) {
+	owner, name, _ := strings.Cut(fullName, "/")
+	params := url.Values{}
+	params.Set("sha", head)
+	params.Set("per_page", strconv.Itoa(maxPageSize))
+	var commits []restCommit
+	for next := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(owner), url.PathEscape(name), params.Encode()); next != ""; {
+		resp, err := s.restClient.R(ctx).Get(next)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list the history of %s in %s: %w", shortSHA(head), fullName, err)
+		}
+		if !resp.IsSuccess() {
+			return nil, compareFailedError{fmt.Errorf("listing the history of %s in %s failed with status %d: %s", shortSHA(head), fullName, resp.StatusCode(), resp.String()), resp.StatusCode()}
+		}
+		var page []restCommit
+		if err := json.Unmarshal(resp.Body(), &page); err != nil {
+			return nil, fmt.Errorf("failed to decode the history of %s in %s: %w", shortSHA(head), fullName, err)
+		}
+		commits = append(commits, page...)
+		next = extractNextPageURL(resp.Header().Get("Link"))
+	}
+	return commits, nil
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 10 {
+		return sha[:10]
+	}
+	return sha
 }
 
 func pullRequestColumns(fullName string, pr pullRequestNode) map[string]interface{} {
@@ -2560,6 +3067,48 @@ func signatureReason(state string) string {
 		return reason
 	}
 	return strings.ToLower(state)
+}
+
+func restCommitRow(c restCommit) map[string]interface{} {
+	row := map[string]interface{}{
+		"sha":                 c.SHA,
+		"commit_url":          c.HTMLURL,
+		"message":             c.Commit.Message,
+		"author_name":         nil,
+		"author_email":        nil,
+		"author_login":        nil,
+		"authored_at":         nil,
+		"committer_name":      nil,
+		"committer_email":     nil,
+		"committer_login":     nil,
+		"committed_at":        nil,
+		"parent_count":        len(c.Parents),
+		"verified":            false,
+		"verification_reason": nil,
+		"signed_by_github":    false,
+	}
+	if a := c.Commit.Author; a != nil {
+		row["author_name"], row["author_email"], row["authored_at"] = nullIfEmpty(a.Name), nullIfEmpty(a.Email), nullIfEmpty(a.Date)
+	}
+	if a := c.Commit.Committer; a != nil {
+		row["committer_name"], row["committer_email"], row["committed_at"] = nullIfEmpty(a.Name), nullIfEmpty(a.Email), nullIfEmpty(a.Date)
+	}
+	if c.Author != nil && c.Author.Login != "" {
+		row["author_login"] = c.Author.Login
+	}
+	committerLogin := ""
+	if c.Committer != nil {
+		committerLogin = c.Committer.Login
+	}
+	if committerLogin != "" {
+		row["committer_login"] = committerLogin
+	}
+	if v := c.Commit.Verification; v != nil {
+		row["verified"] = v.Verified
+		row["verification_reason"] = nullIfEmpty(v.Reason)
+		row["signed_by_github"] = v.Verified && committerLogin == webFlowLogin
+	}
+	return row
 }
 
 func nullIfEmpty(s string) interface{} {
