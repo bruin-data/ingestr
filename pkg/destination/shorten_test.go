@@ -180,8 +180,8 @@ func TestResolveMultiTableName(t *testing.T) {
 	})
 
 	t.Run("uses the given limit rather than the scheme's", func(t *testing.T) {
-		const source = "hr.employee_assignment_history"
-		require.Equal(t, "landing.hr_employee_assignment_history", ResolveMultiTableName(128, nil, "landing", source, config.TableNamingSchemaTable))
+		const source = "hr.employee_assignment_history_log"
+		require.Equal(t, "landing.hr_employee_assignment_history_log", ResolveMultiTableName(128, nil, "landing", source, config.TableNamingSchemaTable))
 		parts := strings.Split(ResolveMultiTableName(30, nil, "landing", source, config.TableNamingSchemaTable), ".")
 		require.Equal(t, "landing", parts[0])
 		require.LessOrEqual(t, len(parts[1]), 30, parts[1])
