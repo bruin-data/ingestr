@@ -1621,7 +1621,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
 	namer, _ := p.dest.(destination.MultiTableNamer)
-	tableDestNames, err := multiTableDestinationNames(tables, p.dest.GetScheme(), namer, p.config.CDCTableNaming)
+	tableDestNames, err := multiTableDestinationNames(tables, destination.IdentifierLimit(p.dest), namer, p.config.CDCTableNaming)
 	if err != nil {
 		return err
 	}
@@ -1978,7 +1978,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	return nil
 }
 
-func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, namer destination.MultiTableNamer, naming config.TableNaming) (map[string]string, error) {
+func multiTableDestinationNames(tables []source.SourceTableInfo, maxLen int, namer destination.MultiTableNamer, naming config.TableNaming) (map[string]string, error) {
 	destinations := make(map[string]string, len(tables))
 	sourcesByDestination := make(map[string]string, len(tables))
 	for _, table := range tables {
@@ -1988,7 +1988,7 @@ func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, 
 		// looks like a catalog.schema.table reference; --cdc-table-naming=table drops
 		// the qualifier instead. Destinations with their own naming rules (e.g.
 		// BigQuery) override via MultiTableNamer.
-		destName := destination.ResolveMultiTableName(scheme, namer, table.DestSchema, table.Name, naming)
+		destName := destination.ResolveMultiTableName(maxLen, namer, table.DestSchema, table.Name, naming)
 		if existingSource, exists := sourcesByDestination[destName]; exists && existingSource != table.Name {
 			return nil, fmt.Errorf("multi-table destination collision: source tables %q and %q both map to destination table %q", existingSource, table.Name, destName)
 		}
@@ -2558,7 +2558,7 @@ func (p *Pipeline) normalizeMultiTableInfo(ctx context.Context, table source.Sou
 		applyColumnMappingToSchema(normalized.Schema, namingMapping)
 	}
 
-	maxLen := destination.MaxIdentifierLength(p.dest.GetScheme())
+	maxLen := destination.IdentifierLimit(p.dest)
 	shorteningMapping := destination.ShortenColumnNames(normalized.Schema.Columns, maxLen, namingMapping)
 	for sourceName := range shorteningMapping {
 		if destination.IsCDCMetaColumn(sourceName) {
@@ -2681,7 +2681,7 @@ func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namin
 }
 
 func (p *Pipeline) shortenLongIdentifiers(sourceSchema *schema.TableSchema) {
-	maxLen := destination.MaxIdentifierLength(p.dest.GetScheme())
+	maxLen := destination.IdentifierLimit(p.dest)
 	mapping := destination.ShortenColumnNames(sourceSchema.Columns, maxLen, p.namingMapping)
 	if len(mapping) == 0 {
 		return

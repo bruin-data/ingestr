@@ -1051,7 +1051,7 @@ func TestRunMultiTableRejectsHardDeleteAppendForLateKeyedTable(t *testing.T) {
 func TestMultiTableDestinationNamesChecksDestinationOverrideCollisions(t *testing.T) {
 	tables := []source.SourceTableInfo{{Name: "public.orders"}, {Name: "sales.orders"}}
 
-	_, err := multiTableDestinationNames(tables, "", constantMultiTableNamer{}, config.TableNamingSchemaTable)
+	_, err := multiTableDestinationNames(tables, 0, constantMultiTableNamer{}, config.TableNamingSchemaTable)
 	require.ErrorContains(t, err, "multi-table destination collision")
 	require.ErrorContains(t, err, "project.landing.shared")
 }
@@ -1062,7 +1062,7 @@ func TestMultiTableDestinationNamesTableNaming(t *testing.T) {
 		{Name: "foo.B", DestSchema: "foo_cdc"},
 	}
 
-	names, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingTable)
+	names, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingTable)
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"foo.A": "foo_cdc.A", "foo.B": "foo_cdc.B"}, names)
 }
@@ -1073,7 +1073,7 @@ func TestMultiTableDestinationNamesTableNamingRejectsBasenameCollisions(t *testi
 		{Name: "bar.orders", DestSchema: "landing"},
 	}
 
-	_, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingTable)
+	_, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingTable)
 	require.ErrorContains(t, err, "multi-table destination collision")
 	require.ErrorContains(t, err, "foo.orders")
 	require.ErrorContains(t, err, "bar.orders")
@@ -1088,9 +1088,9 @@ func TestMultiTableDestinationNamesShortensLongFinalComponents(t *testing.T) {
 		{Name: schemaPrefix + "." + tablePrefix + "_two", DestSchema: "landing"},
 	}
 
-	first, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	first, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
-	second, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	second, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
 	require.Equal(t, first, second, "destination mapping changed across restart")
 	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])
@@ -1109,9 +1109,9 @@ func TestMultiTableDestinationNamesShortensMultibyteFinalComponents(t *testing.T
 		{Name: strings.Repeat("é", 20) + "." + strings.Repeat("界", 14) + "二", DestSchema: "landing"},
 	}
 
-	first, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	first, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
-	second, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	second, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
 	require.Equal(t, first, second, "multibyte destination mapping changed across restart")
 	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])

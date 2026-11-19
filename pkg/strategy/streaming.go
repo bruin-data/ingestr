@@ -395,7 +395,7 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 // discovered mid-stream, matching the pipeline's upfront naming.
 func multiTableDestName(dest destination.Destination, ti source.SourceTableInfo, naming config.TableNaming) string {
 	namer, _ := dest.(destination.MultiTableNamer)
-	return destination.ResolveMultiTableName(dest.GetScheme(), namer, ti.DestSchema, ti.Name, naming)
+	return destination.ResolveMultiTableName(destination.IdentifierLimit(dest), namer, ti.DestSchema, ti.Name, naming)
 }
 
 // withLoadTimestampColumn mirrors the pipeline's schema decoration for tables
