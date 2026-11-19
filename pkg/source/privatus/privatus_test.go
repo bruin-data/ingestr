@@ -147,7 +147,7 @@ func TestGetTableStrategy(t *testing.T) {
 	tbl, err = s.GetTable(context.Background(), source.TableRequest{Name: "breakdown:country"})
 	require.NoError(t, err)
 	dyn = tbl.(*source.DynamicSourceTable)
-	assert.Equal(t, config.StrategyMerge, dyn.TableStrategy)
+	assert.Equal(t, config.StrategyDeleteInsert, dyn.TableStrategy)
 	assert.Equal(t, "date", dyn.TableIncrementalKey)
 }
 
@@ -206,8 +206,16 @@ func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
 			page := q.Get("page")
 			rows := []map[string]interface{}{{"value": "/p" + page, "pageviews": 4}}
 			hasMore := page == "1"
+			if strings.HasSuffix(r.URL.Path, "/event.json") {
+				rows = []map[string]interface{}{{"value": "signup", "completions": 9, "revenue": "7600.0"}, {"value": "download", "completions": 5, "revenue": "0.0"}}
+				hasMore = false
+			}
 			if strings.HasSuffix(r.URL.Path, "/goal.json") {
 				rows = []map[string]interface{}{{"value": "Signup", "goal_id": "goal_X", "completions": 2}}
+				hasMore = false
+			}
+			if strings.HasSuffix(r.URL.Path, "/referrer.json") {
+				rows = []map[string]interface{}{{"value": nil, "visitors": 5}}
 				hasMore = false
 			}
 			writeJSON(t, w, map[string]interface{}{"data": map[string]interface{}{"has_more": hasMore, "rows": rows}})
@@ -354,6 +362,25 @@ func TestReadGoalConversions(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "goal_X", rows[0]["goal_id"])
+}
+
+func TestReadBreakdownNullValueBecomesEmpty(t *testing.T) {
+	s, _ := newTestSource(t, "pat_test", "pa_AAA")
+	rows, err := readRows(t, s, "referrers", interval("2026-10-01", "2026-10-01"))
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	value, ok := rows[0]["value"]
+	assert.True(t, ok, "value must not be null")
+	assert.Empty(t, value)
+}
+
+func TestReadEventsRevenueIsInteger(t *testing.T) {
+	s, _ := newTestSource(t, "pat_test", "pa_AAA")
+	rows, err := readRows(t, s, "events", interval("2026-10-01", "2026-10-01"))
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "7600", rows[0]["revenue"])
+	assert.Equal(t, "0", rows[1]["revenue"])
 }
 
 func TestReadBreakdownDiscoversSites(t *testing.T) {

@@ -53,15 +53,17 @@ ingestr ingest \
 | `workspaces` | `id` | - | replace | The workspace the token belongs to: name, time zone, currency and plan. |
 | `sites` | `id` | - | replace | Each site with its domain, time zone and privacy settings. |
 | `goals` | `id` | - | replace | Goals set up on each site, active and archived. |
-| `daily_stats` | `site_id`, `date` | `date` | merge | One row per site per day: visitors, visits, pageviews, views per visit, bounce rate, visit duration and revenue. |
-| `pages` | `site_id`, `date`, `value` | `date` | merge | Pageviews, visits, time on page and scroll depth per page path per day. |
-| `referrers` | `site_id`, `date`, `value` | `date` | merge | Visitors per referring domain per day. An empty `value` means a direct visit. |
-| `events` | `site_id`, `date`, `value` | `date` | merge | Completions, visits and revenue per custom event per day. |
-| `goal_conversions` | `site_id`, `date`, `goal_id` | `date` | merge | Completions, conversions, conversion rate and revenue per goal per day. |
-| `breakdown:<dimension>` | `site_id`, `date`, `value` | `date` | merge | Any other dimension per day, for example `breakdown:country`, `breakdown:channel`, `breakdown:utm_campaign` or `breakdown:prop:plan`. |
+| `daily_stats` | `site_id`, `date` | `date` | delete+insert | One row per site per day: visitors, visits, pageviews, views per visit, bounce rate, visit duration and revenue. |
+| `pages` | `site_id`, `date`, `value` | `date` | delete+insert | Pageviews, visits, time on page and scroll depth per page path per day. |
+| `referrers` | `site_id`, `date`, `value` | `date` | delete+insert | Visitors per referring domain per day. An empty `value` means a direct visit. |
+| `events` | `site_id`, `date`, `value` | `date` | delete+insert | Completions, visits and revenue per custom event per day. |
+| `goal_conversions` | `site_id`, `date`, `goal_id` | `date` | delete+insert | Completions, conversions, conversion rate and revenue per goal per day. |
+| `breakdown:<dimension>` | `site_id`, `date`, `value` | `date` | delete+insert | Any other dimension per day, for example `breakdown:country`, `breakdown:channel`, `breakdown:utm_campaign` or `breakdown:prop:plan`. |
 
 Every row from a site has `site_id`, so all tables join on it. Days follow the time zone set on each site. Durations are in milliseconds, rates are percents from 0 to 100, and revenue is in cents.
 
-Without `--interval-start` and `--interval-end`, the daily tables copy the last 30 days. Each run replaces the rows for the days it reads, so running it daily keeps today's numbers right as the day goes on.
+Without `--interval-start` and `--interval-end`, the daily tables copy the last 30 days. Each run deletes the rows for the days it reads and writes them again, so running it daily keeps today's numbers right as the day goes on. Past days can change in Privatus Analytics, for example when you rename or merge events, edit a goal or reset data, and the next run that reads those days picks up the change.
+
+Because a run replaces whole days, it also removes rows from sites that are not in `site_ids`. Copy each `site_ids` selection into its own table. A run with dates older than your plan's history removes those days from the table, because the API no longer returns them.
 
 The per-page, per-referrer and other breakdown tables need one request per site per day. A long date range on many sites can take a while on the Free plan. See the [API docs](https://privatusanalytics.com/docs/api) for the full list of dimensions.

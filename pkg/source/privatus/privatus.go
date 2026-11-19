@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -213,7 +214,8 @@ func (s *PrivatusSource) GetTable(ctx context.Context, req source.TableRequest) 
 	strategy := config.StrategyReplace
 	incrementalKey := ""
 	if spec.isDaily() {
-		strategy = config.StrategyMerge
+		// Renamed or merged events, edited goals and data resets change past days, so each run rewrites its days.
+		strategy = config.StrategyDeleteInsert
 		incrementalKey = "date"
 	}
 
@@ -595,6 +597,19 @@ func (s *PrivatusSource) readBreakdown(ctx context.Context, spec tableSpec, opts
 					return fmt.Errorf("failed to fetch %s breakdown for %s on %s: %w", spec.dimension, siteID, date, err)
 				}
 				for _, row := range resp.Data.Rows {
+					// value is part of the primary key, so a missing one (a direct visit) must not be null.
+					if row["value"] == nil {
+						row["value"] = ""
+					}
+					// Event and property breakdowns send revenue as a decimal string ("7600.0"); other endpoints send integer cents.
+					if s, ok := row["revenue"].(string); ok {
+						if f, err := strconv.ParseFloat(s, 64); err == nil {
+							row["revenue"] = json.Number(s)
+							if f == math.Trunc(f) {
+								row["revenue"] = json.Number(strconv.FormatInt(int64(f), 10))
+							}
+						}
+					}
 					row["site_id"] = siteID
 					row["date"] = date
 					if err := b.add(row); err != nil {
