@@ -453,7 +453,7 @@ func TestMapPostgresColumnTypeScalarHasNoArrayElement(t *testing.T) {
 
 func TestResolvedMultiTableNameFitsPostgresClaimLimit(t *testing.T) {
 	sourceTable := strings.Repeat("s", 40) + "." + strings.Repeat("t", 40)
-	resolved := destination.ResolveMultiTableName("postgres", nil, "landing", sourceTable, config.TableNamingSchemaTable)
+	resolved := destination.ResolveMultiTableName(destination.MaxIdentifierLength("postgres"), nil, "landing", sourceTable, config.TableNamingSchemaTable)
 	parts, err := validatePostgresClaimTarget(resolved)
 	if err != nil {
 		t.Fatal(err)

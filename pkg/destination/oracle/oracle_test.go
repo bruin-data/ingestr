@@ -338,13 +338,13 @@ func TestOracleStagingNamesPreserveQuotedSchemaSemantics(t *testing.T) {
 
 	for _, suffix := range []string{"staging", "merge", "stream"} {
 		t.Run(suffix, func(t *testing.T) {
-			quoted := strategy.GenerateReplaceStagingTableName(`"appUser".orders`, suffix, "", policy, "")
+			quoted := strategy.GenerateReplaceStagingTableName(`"appUser".orders`, suffix, "", policy, "", 0)
 			require.True(t, strings.HasPrefix(quoteTable(quoted), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), quoted)
 
-			unquoted := strategy.GenerateReplaceStagingTableName(`appUser.orders`, suffix, "", policy, "")
+			unquoted := strategy.GenerateReplaceStagingTableName(`appUser.orders`, suffix, "", policy, "", 0)
 			require.True(t, strings.HasPrefix(quoteTable(unquoted), `"APPUSER"."ORDERS_`+strings.ToUpper(suffix)+`_`), unquoted)
 
-			defaultSchema := strategy.GenerateReplaceStagingTableName("orders", suffix, "", policy, "")
+			defaultSchema := strategy.GenerateReplaceStagingTableName("orders", suffix, "", policy, "", 0)
 			require.True(t, strings.HasPrefix(quoteTable(defaultSchema), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), defaultSchema)
 		})
 	}
@@ -356,7 +356,7 @@ func TestOracleStagingNamesEncodeQuotedTableDots(t *testing.T) {
 
 	for _, suffix := range []string{"staging", "merge", "stream"} {
 		t.Run(suffix, func(t *testing.T) {
-			staging := strategy.GenerateReplaceStagingTableName(`"appUser"."order.events"`, suffix, "", policy, "")
+			staging := strategy.GenerateReplaceStagingTableName(`"appUser"."order.events"`, suffix, "", policy, "", 0)
 			require.NoError(t, tablename.TwoLevel("oracle").CheckName(staging))
 			parts := splitOracleIdentifiers(staging)
 			require.Len(t, parts, 2)
@@ -844,13 +844,16 @@ func TestOracleManagedStagingUsesCurrentUserByDefault(t *testing.T) {
 }
 
 func TestBackupTableName(t *testing.T) {
-	got := backupTableName("hr", "employees")
+	got := backupTableName("hr", "employees", destination.MaxIdentifierLength("oracle"))
 
 	assert.True(t, strings.HasPrefix(got, "hr.EMPLOYEES_OLD_"), got)
 	_, tableName := parseTableName(got)
 	assert.LessOrEqual(t, len(tableName), destination.MaxIdentifierLength("oracle"))
 
-	quoted := backupTableName(`"appUser"`, `"order.events"`)
+	_, legacyName := parseTableName(backupTableName("hr", "test10000", 30))
+	assert.LessOrEqual(t, len(canonicalIdentifier(legacyName)), 30, legacyName)
+
+	quoted := backupTableName(`"appUser"`, `"order.events"`, destination.MaxIdentifierLength("oracle"))
 	parts := splitOracleIdentifiers(quoted)
 	require.Len(t, parts, 2)
 	require.Equal(t, `"appUser"`, parts[0])
