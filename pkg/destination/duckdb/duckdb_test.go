@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-adbc/go/adbc"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -2601,4 +2602,39 @@ func TestGetTableSchema_SpecialCharacterColumnNames(t *testing.T) {
 	assert.True(t, colMap["UPPERCASE"], "should preserve uppercase column name")
 	assert.True(t, colMap["MixedCase"], "should preserve mixed case column name")
 	assert.True(t, colMap["with_underscore"], "should preserve underscore column name")
+}
+
+// consumedParamsStatement mimics DuckDB 1.4/1.5 drivers: a failed parameterised
+// execution consumes the bound parameters, and a retry reports success.
+type consumedParamsStatement struct {
+	adbc.Statement
+	updateErr error
+}
+
+func (s *consumedParamsStatement) SetSqlQuery(string) error                      { return nil }
+func (s *consumedParamsStatement) Prepare(context.Context) error                 { return nil }
+func (s *consumedParamsStatement) Bind(context.Context, arrow.RecordBatch) error { return nil }
+func (s *consumedParamsStatement) Close() error                                  { return nil }
+func (s *consumedParamsStatement) ExecuteUpdate(context.Context) (int64, error) {
+	return -1, s.updateErr
+}
+
+func (s *consumedParamsStatement) ExecuteQuery(context.Context) (array.RecordReader, int64, error) {
+	rdr, err := array.NewRecordReader(arrow.NewSchema(nil, nil), nil)
+	return rdr, 0, err
+}
+
+type consumedParamsConnection struct {
+	adbc.Connection
+	stmt *consumedParamsStatement
+}
+
+func (c *consumedParamsConnection) NewStatement() (adbc.Statement, error) { return c.stmt, nil }
+
+func TestExecReturnsFailedParameterisedUpdateError(t *testing.T) {
+	updateErr := fmt.Errorf("Binder Error: Cannot compare values of type VARCHAR and type TIMESTAMP")
+	d := &DuckDBDestination{conn: &consumedParamsConnection{stmt: &consumedParamsStatement{updateErr: updateErr}}}
+
+	err := d.exec(t.Context(), `DELETE FROM t WHERE k >= ? AND k <= ?`, "a", "b")
+	require.ErrorIs(t, err, updateErr)
 }
