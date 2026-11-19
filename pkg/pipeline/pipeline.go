@@ -439,7 +439,6 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		Streaming:      usesStreamingExecutor(p.config),
 		StrategySet:    p.config.IncrementalStrategyExplicit,
 		FullRefresh:    p.config.FullRefresh,
-		Columns:        p.config.Columns,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get table: %w", err)
@@ -847,7 +846,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.RunID = runID
 	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
 	resolvedConfig.WriteNulls = config.ResolveWriteNulls(resolvedConfig.ReverseETLDestination, resolvedConfig.WriteNullsSet, resolvedConfig.WriteNulls)
-	resolvedConfig.IntervalStart, resolvedConfig.IntervalEnd = resolveInterval(&resolvedConfig, table)
+	resolvedConfig.IntervalStart, resolvedConfig.IntervalEnd = resolveInterval(&resolvedConfig, table, fullSchema)
 
 	applyPartitionNaming(&resolvedConfig, originalSourceSchema, tableSchema, namingConv)
 	if err := validatePartitionBy(&resolvedConfig, p.config.PartitionBy, tableSchema); err != nil {
@@ -2905,14 +2904,37 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	return s
 }
 
-func resolveInterval(cfg *config.IngestConfig, table source.SourceTable) (*time.Time, *time.Time) {
+// resolveInterval reads the incremental key's type from keySchema, which must have --columns overrides applied.
+func resolveInterval(cfg *config.IngestConfig, table source.SourceTable, keySchema *schema.TableSchema) (*time.Time, *time.Time) {
 	if it, ok := table.(source.IntervalIgnoringTable); ok && it.IgnoresInterval() {
 		if cfg.IntervalStart != nil || cfg.IntervalEnd != nil {
 			config.Debug("[PIPELINE] Table %s ignores --interval-start/--interval-end", table.Name())
 		}
 		return nil, nil
 	}
+	if ut, ok := table.(source.IntervalUnfilteredTable); ok && ut.ReadsIgnoreInterval() &&
+		cfg.IncrementalStrategy == config.StrategyDeleteInsert && !temporalOrUnknownKey(keySchema, cfg.IncrementalKey) {
+		// The interval bounds are timestamps; a non-temporal key deletes the staged data's range instead.
+		config.Debug("[PIPELINE] Ignoring --interval-start/--interval-end for non-temporal key %s", cfg.IncrementalKey)
+		return nil, nil
+	}
 	return cfg.IntervalStart, cfg.IntervalEnd
+}
+
+func temporalOrUnknownKey(s *schema.TableSchema, key string) bool {
+	if s == nil {
+		return true
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, key) {
+			switch col.DataType {
+			case schema.TypeDate, schema.TypeTimestamp, schema.TypeTimestampTZ, schema.TypeUnknown:
+				return true
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {

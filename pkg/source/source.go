@@ -444,7 +444,6 @@ type TableRequest struct {
 	Streaming      bool                       // Table will be read in streaming mode (--stream)
 	StrategySet    bool                       // Whether strategy was explicitly supplied by the caller
 	FullRefresh    bool                       // Whether the run ignores incremental state and fully refreshes the destination
-	Columns        string                     // Raw --columns overrides, applied by the pipeline after GetTable
 }
 
 // Source represents a data source that can provide tables.
@@ -490,6 +489,12 @@ type SnapshotResetEmitter interface {
 // IntervalIgnoringTable is implemented by tables that ignore --interval-start/--interval-end.
 type IntervalIgnoringTable interface {
 	IgnoresInterval() bool
+}
+
+// IntervalUnfilteredTable is implemented by tables whose reads are never filtered by the interval.
+// For delete+insert with a non-temporal key, the pipeline drops the interval so the delete uses the data's range.
+type IntervalUnfilteredTable interface {
+	ReadsIgnoreInterval() bool
 }
 
 // PartitionedTable is an optional interface that a SourceTable can implement

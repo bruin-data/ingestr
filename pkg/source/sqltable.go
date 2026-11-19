@@ -21,6 +21,7 @@ type DynamicSourceTable struct {
 	TablePartitionBy                 string
 	TableSupportsExtractPartitioning bool
 	TableIgnoresInterval             bool
+	TableReadsIgnoreInterval         bool
 	KnownSchema                      bool
 	SchemaFn                         func(ctx context.Context) (*schema.TableSchema, error)
 	ReadSchemaFn                     func(ctx context.Context, opts ReadOptions) (*schema.TableSchema, error)
@@ -53,6 +54,10 @@ func (t *DynamicSourceTable) PartitionBy() string {
 
 func (t *DynamicSourceTable) IgnoresInterval() bool {
 	return t.TableIgnoresInterval
+}
+
+func (t *DynamicSourceTable) ReadsIgnoreInterval() bool {
+	return t.TableReadsIgnoreInterval
 }
 
 func (t *DynamicSourceTable) SupportsExtractPartitioning() bool {

@@ -4577,9 +4577,42 @@ func TestResolveInterval(t *testing.T) {
 		{name: "table without the interface keeps interval", table: &mockSourceTable{}, wantStart: &start, wantEnd: &end},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotStart, gotEnd := resolveInterval(cfg, tc.table)
+			gotStart, gotEnd := resolveInterval(cfg, tc.table, nil)
 			require.Equal(t, tc.wantStart, gotStart)
 			require.Equal(t, tc.wantEnd, gotEnd)
+		})
+	}
+}
+
+func TestResolveIntervalUnfilteredTableByKeyType(t *testing.T) {
+	start := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	unfiltered := &source.DynamicSourceTable{TableName: "asset_data", TableReadsIgnoreInterval: true}
+	for _, tc := range []struct {
+		name         string
+		table        source.SourceTable
+		strategy     config.IncrementalStrategy
+		keyType      schema.DataType
+		keepInterval bool
+	}{
+		{name: "text key drops interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeString},
+		{name: "integer key drops interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeInt64},
+		{name: "date key keeps interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeDate, keepInterval: true},
+		{name: "timestamp key keeps interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeTimestamp, keepInterval: true},
+		{name: "timestamptz key keeps interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeTimestampTZ, keepInterval: true},
+		{name: "merge keeps interval", table: unfiltered, strategy: config.StrategyMerge, keyType: schema.TypeString, keepInterval: true},
+		{name: "filtering table keeps interval", table: &source.DynamicSourceTable{TableName: "t"}, strategy: config.StrategyDeleteInsert, keyType: schema.TypeString, keepInterval: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.IngestConfig{IntervalStart: &start, IntervalEnd: &end, IncrementalStrategy: tc.strategy, IncrementalKey: "key"}
+			gotStart, gotEnd := resolveInterval(cfg, tc.table, tschema("t", tcol("other", schema.TypeTimestamp), tcol("Key", tc.keyType)))
+			if tc.keepInterval {
+				require.Equal(t, &start, gotStart)
+				require.Equal(t, &end, gotEnd)
+			} else {
+				require.Nil(t, gotStart)
+				require.Nil(t, gotEnd)
+			}
 		})
 	}
 }
