@@ -2203,6 +2203,7 @@ const prForcePushesPageQuery = `
 query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      headRefOid
       forcePushes: timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         ` + prForcePushNodes + `
@@ -2461,12 +2462,35 @@ func prInInterval(pr pullRequestNode, opts source.ReadOptions) (read, stop bool,
 	return true, false, nil
 }
 
+// pullRequestCommitRows reads the pull request's final version and its force pushes. When its head
+// changes while more than one page of force pushes is read, the whole pull request is read again,
+// with a warning, up to prCommitListRetries times, so the force pushes belong to the version read.
 func (s *GithubSource) pullRequestCommitRows(ctx context.Context, fullName string, pr pullRequestNode, opts source.ReadOptions) ([]map[string]interface{}, error) {
-	pr, final, baseInFinal, read, err := s.finalPRVersion(ctx, fullName, pr, opts)
-	if err != nil || !read {
-		return nil, err
+	var final *commitSet
+	var baseInFinal *bool
+	var events []*forcePushEvent
+	for retry := 0; ; retry++ {
+		var read, headMoved bool
+		var err error
+		pr, final, baseInFinal, read, err = s.finalPRVersion(ctx, fullName, pr, opts)
+		if err != nil || !read {
+			return nil, err
+		}
+		if events, headMoved, err = s.forcePushEvents(ctx, fullName, pr); err != nil {
+			return nil, err
+		}
+		if !headMoved {
+			break
+		}
+		if retry == prCommitListRetries {
+			return nil, fmt.Errorf("pull request %s#%d: its head changed while its force pushes were read, after %d retries", fullName, pr.Number, prCommitListRetries)
+		}
+		output.Warnf("\nWarning: pull request %s#%d: its head changed while its force pushes were read, reading it again (retry %d of %d)\n", fullName, pr.Number, retry+1, prCommitListRetries)
+		if pr, read, err = s.rereadPullRequest(ctx, fullName, pr.Number, opts); err != nil || !read {
+			return nil, err
+		}
 	}
-	replaced, replacedAt, err := s.replacedPRCommits(ctx, fullName, pr, final, baseInFinal)
+	replaced, replacedAt, err := s.replacedPRCommits(ctx, fullName, pr, final, baseInFinal, events)
 	if err != nil {
 		return nil, err
 	}
@@ -2613,14 +2637,13 @@ func (s *GithubSource) finalPRVersion(ctx context.Context, fullName string, pr p
 // in the final version. When the base is inside the final head, compare(head...before) gives
 // exactly those commits; otherwise the version is read from the base and the final version is
 // taken out.
-func (s *GithubSource) replacedPRCommits(ctx context.Context, fullName string, pr pullRequestNode, final *commitSet, baseInFinal *bool) (*commitSet, map[string]time.Time, error) {
+func (s *GithubSource) replacedPRCommits(ctx context.Context, fullName string, pr pullRequestNode, final *commitSet, baseInFinal *bool, events []*forcePushEvent) (*commitSet, map[string]time.Time, error) {
 	replaced := newCommitSet()
 	replacedAt := make(map[string]time.Time)
-
-	events, err := s.forcePushEvents(ctx, fullName, pr)
-	if err != nil || len(events) == 0 {
-		return replaced, replacedAt, err
+	if len(events) == 0 {
+		return replaced, replacedAt, nil
 	}
+	var err error
 
 	base := prCompareBase(pr)
 	if baseInFinal == nil {
@@ -2678,20 +2701,25 @@ func replacedVersionUnavailable(err error) bool {
 	return errors.As(err, &failed) && (failed.status == http.StatusNotFound || failed.status == http.StatusUnprocessableEntity)
 }
 
-// forcePushEvents returns the pull request's force pushes with a replaced head, oldest first. A
-// force push whose replaced head GitHub no longer shows is skipped with a warning.
-func (s *GithubSource) forcePushEvents(ctx context.Context, fullName string, pr pullRequestNode) ([]*forcePushEvent, error) {
+// forcePushEvents returns the pull request's force pushes with a replaced head, oldest first, and
+// whether its head moved away from pr's while the pages after the first were read. A force push
+// whose replaced head GitHub no longer shows is skipped with a warning.
+func (s *GithubSource) forcePushEvents(ctx context.Context, fullName string, pr pullRequestNode) ([]*forcePushEvent, bool, error) {
 	nodes := pr.ForcePushes.Nodes
 	pageInfo := pr.ForcePushes.PageInfo
 	for pageInfo.HasNextPage {
 		if pageInfo.EndCursor == "" {
-			return nil, fmt.Errorf("pull request %s#%d: GitHub reported more force pushes without a cursor to read them", fullName, pr.Number)
+			return nil, false, fmt.Errorf("pull request %s#%d: GitHub reported more force pushes without a cursor to read them", fullName, pr.Number)
 		}
 		var page struct {
+			HeadRefOid  string              `json:"headRefOid"`
 			ForcePushes forcePushConnection `json:"forcePushes"`
 		}
 		if err := s.pullRequestPage(ctx, fullName, pr.Number, prForcePushesPageQuery, pageInfo.EndCursor, &page); err != nil {
-			return nil, err
+			return nil, false, err
+		}
+		if page.HeadRefOid != pr.HeadRefOid {
+			return nil, true, nil
 		}
 		nodes = append(nodes, page.ForcePushes.Nodes...)
 		pageInfo = page.ForcePushes.PageInfo
@@ -2709,7 +2737,7 @@ func (s *GithubSource) forcePushEvents(ctx context.Context, fullName string, pr 
 		events = append(events, e)
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].CreatedAt < events[j].CreatedAt })
-	return events, nil
+	return events, false, nil
 }
 
 // listedPRCommits returns the pull request's commits as GitHub lists them, reading the pages after
@@ -2736,18 +2764,26 @@ func (s *GithubSource) listedPRCommits(ctx context.Context, fullName string, pr 
 			return pr, nil, false, fmt.Errorf("pull request %s#%d: %s, after %d retries", fullName, pr.Number, problem, prCommitListRetries)
 		}
 		output.Warnf("\nWarning: pull request %s#%d: %s, reading its commits again (retry %d of %d)\n", fullName, pr.Number, problem, retry+1, prCommitListRetries)
-		var fresh pullRequestNode
-		if err := s.pullRequestPage(ctx, fullName, pr.Number, pullRequestQuery, "", &fresh); err != nil {
-			return pr, nil, false, err
-		}
-		pr = fresh
-		if read, _, err := prInInterval(pr, opts); err != nil || !read {
-			if err == nil {
-				output.Warnf("\nWarning: pull request %s#%d was updated after the interval while its commits were read, skipping it; the run whose interval holds its last update reads it\n", fullName, pr.Number)
-			}
+		var read bool
+		if pr, read, err = s.rereadPullRequest(ctx, fullName, pr.Number, opts); err != nil || !read {
 			return pr, nil, false, err
 		}
 	}
+}
+
+// rereadPullRequest reads a pull request again with everything the listing reads. read is false when
+// it was updated outside the interval meanwhile: it is skipped, with a warning, and the run whose
+// interval holds its last update reads it.
+func (s *GithubSource) rereadPullRequest(ctx context.Context, fullName string, number int, opts source.ReadOptions) (pullRequestNode, bool, error) {
+	var pr pullRequestNode
+	if err := s.pullRequestPage(ctx, fullName, number, pullRequestQuery, "", &pr); err != nil {
+		return pr, false, err
+	}
+	read, _, err := prInInterval(pr, opts)
+	if err == nil && !read {
+		output.Warnf("\nWarning: pull request %s#%d was updated after the interval while it was read, skipping it; the run whose interval holds its last update reads it\n", fullName, number)
+	}
+	return pr, read, err
 }
 
 // prCommitPages reads the commit pages after first and reports whether the pull request's head moved

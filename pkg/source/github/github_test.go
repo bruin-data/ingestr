@@ -2161,26 +2161,28 @@ type fakeCommitter struct {
 // listing. Repository lookups and owner listings go to commitsFake.
 type prFake struct {
 	*commitsFake
-	g                  *fakeGraph
-	mu                 sync.Mutex
-	prs                map[string][]*fakePR
-	gqlErrors          map[string]string
-	compareStatus      map[string]int
-	committers         map[string]fakeCommitter
-	aheadExtra         int
-	compareCap         int
-	listPageSize       int
-	listStep           int
-	gqlNodeLimit       int
-	pushDuringReads    int
-	rewriteDuringReads int
-	updatedOnChange    string
-	noCursor           bool
-	unknownSignatures  map[string]bool
-	timelinePageSize   int
-	gqlCalls           []string
-	compares           []string
-	histories          []string
+	g                          *fakeGraph
+	mu                         sync.Mutex
+	prs                        map[string][]*fakePR
+	gqlErrors                  map[string]string
+	compareStatus              map[string]int
+	committers                 map[string]fakeCommitter
+	aheadExtra                 int
+	compareCap                 int
+	listPageSize               int
+	listStep                   int
+	gqlNodeLimit               int
+	pushDuringReads            int
+	rewriteDuringReads         int
+	updatedOnChange            string
+	noCursor                   bool
+	unknownSignatures          map[string]bool
+	forcePushesDuringPushPages int
+	pushPagesServed            int
+	timelinePageSize           int
+	gqlCalls                   []string
+	compares                   []string
+	histories                  []string
 }
 
 func newPRFake(t *testing.T) *prFake {
@@ -2427,6 +2429,11 @@ func (f *prFake) serveGraphQL(w http.ResponseWriter, r *http.Request) {
 	pull := map[string]interface{}{}
 	if strings.Contains(req.Query, "forcePushes") {
 		f.record(&f.gqlCalls, fmt.Sprintf("pushes %s#%d %s", key, number, after))
+		f.pushPagesServed++
+		if f.pushPagesServed <= f.forcePushesDuringPushPages {
+			f.pushThenForcePush(pr)
+		}
+		pull["headRefOid"] = pr.head
 		pull["forcePushes"] = f.pushConnection(pr, after)
 	} else {
 		f.record(&f.gqlCalls, fmt.Sprintf("commits %s#%d %s", key, number, after))
@@ -2450,6 +2457,18 @@ func (f *prFake) afterFirstCommitPage(pr *fakePR) {
 		changed = true
 	}
 	if changed && f.updatedOnChange != "" {
+		pr.updated = f.updatedOnChange
+	}
+}
+
+// pushThenForcePush simulates, while force-push pages are read, a push of commit C and a force push
+// that replaces C, recorded as a new force-push event.
+func (f *prFake) pushThenForcePush(pr *fakePR) {
+	c := f.g.add(pr.head)
+	at := time.Date(2026, 11, 7, 10, 0, len(pr.pushes), 0, time.UTC).Format(time.RFC3339)
+	pr.pushes = append(pr.pushes, fakeForcePush{at: at, before: c})
+	pr.head = f.g.add(pr.head)
+	if f.updatedOnChange != "" {
 		pr.updated = f.updatedOnChange
 	}
 }
@@ -2797,7 +2816,7 @@ func TestGithubPRCommitsUpdatedPastTheEndDuringReadIsSkipped(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatalf("%d rows written for a pull request updated after the interval end while it was read", len(rows))
 	}
-	if !strings.Contains(logs.String(), "pull request o/r#7 was updated after the interval while its commits were read, skipping it") {
+	if !strings.Contains(logs.String(), "pull request o/r#7 was updated after the interval while it was read, skipping it") {
 		t.Fatalf("logs:\n%s", logs.String())
 	}
 }
@@ -3194,6 +3213,89 @@ func TestGithubPRCommitsSignatureNotFoundKeepsTheGuess(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "GitHub did not find 1 commits of pull request o/r#4 when reading their signatures") {
 		t.Fatalf("logs:\n%s", logs.String())
+	}
+}
+
+// Force pushes are read page by page; a push and a force push in between belong to a newer version,
+// so the whole pull request is read again and the rows describe that version only.
+func TestGithubPRCommitsForcePushDuringPagingIsRetried(t *testing.T) {
+	f := newPRFake(t)
+	f.timelinePageSize = 1
+	f.forcePushesDuringPushPages = 1
+	f.updatedOnChange = "2026-11-11T00:00:00Z"
+	base := f.g.chain("", 1)
+	v0, v1, final := forcePushShape(f, base)
+	pr := f.addPR("o/r", &fakePR{number: 6, base: base, head: final, updated: "2026-11-10T00:00:00Z", pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: v0},
+		{at: "2026-11-06T10:00:00Z", before: v1},
+	}})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqualSet(t, "final version read last", shasOf(rows, 6), f.g.between(base, pr.head))
+	pushedThenReplaced := pr.pushes[2].before
+	at := replacedAtOf(rows, 6)
+	if at[pushedThenReplaced] != pr.pushes[2].at || len(at) != 9 {
+		t.Fatalf("replaced %v, want the 8 earlier ones and %s at %s", at, pushedThenReplaced, pr.pushes[2].at)
+	}
+	for _, r := range rows {
+		if r["pr_updated_at"] != "2026-11-11T00:00:00Z" {
+			t.Fatalf("row keeps the details from before the force push: %v", r)
+		}
+	}
+	if !strings.Contains(logs.String(), "pull request o/r#6: its head changed while its force pushes were read, reading it again (retry 1 of 3)") {
+		t.Fatalf("logs:\n%s", logs.String())
+	}
+}
+
+func TestGithubPRCommitsForcePushDuringPagingPastTheEndIsSkipped(t *testing.T) {
+	f := newPRFake(t)
+	f.timelinePageSize = 1
+	f.forcePushesDuringPushPages = 1
+	f.updatedOnChange = "2026-11-12T00:00:00Z"
+	base := f.g.chain("", 1)
+	v0, v1, final := forcePushShape(f, base)
+	f.addPR("o/r", &fakePR{number: 6, base: base, head: final, updated: "2026-11-10T00:00:00Z", pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: v0},
+		{at: "2026-11-06T10:00:00Z", before: v1},
+	}})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rows=%d err=%v, want the pull request skipped", len(rows), err)
+	}
+	if !strings.Contains(logs.String(), "pull request o/r#6 was updated after the interval while it was read, skipping it") {
+		t.Fatalf("logs:\n%s", logs.String())
+	}
+}
+
+func TestGithubPRCommitsForcePushesChangingOnEveryReadFails(t *testing.T) {
+	f := newPRFake(t)
+	f.timelinePageSize = 1
+	f.forcePushesDuringPushPages = 100
+	base := f.g.chain("", 1)
+	v0, v1, final := forcePushShape(f, base)
+	f.addPR("o/r", &fakePR{number: 6, base: base, head: final, pushes: []fakeForcePush{
+		{at: "2026-11-05T10:00:00Z", before: v0},
+		{at: "2026-11-06T10:00:00Z", before: v1},
+	}})
+	logs := captureOutput(t)
+	s := connectPRFake(t, f)
+
+	_, rows, err := readPRCommitTable(t, s, "pull_request_commits", source.ReadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pull request o/r#6: its head changed while its force pushes were read, after 3 retries") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(rows) != 0 || strings.Count(logs.String(), "while its force pushes were read, reading it again") != 3 {
+		t.Fatalf("rows=%d logs:\n%s", len(rows), logs.String())
 	}
 }
 
