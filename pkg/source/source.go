@@ -491,6 +491,12 @@ type IntervalIgnoringTable interface {
 	IgnoresInterval() bool
 }
 
+// IntervalUnfilteredTable is implemented by tables whose reads are never filtered by the interval.
+// For delete+insert with a non-temporal key, the pipeline drops the interval so the delete uses the data's range.
+type IntervalUnfilteredTable interface {
+	ReadsIgnoreInterval() bool
+}
+
 // PartitionedTable is an optional interface that a SourceTable can implement
 // to declare a partition key for the destination table.
 type PartitionedTable interface {
