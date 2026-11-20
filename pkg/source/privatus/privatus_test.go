@@ -62,6 +62,25 @@ func TestRequestsPerHour(t *testing.T) {
 	assert.Equal(t, 1000, requestsPerHour([]string{"business", "trial_something"}), "unknown plans count as Free")
 }
 
+func TestConnectSetsRateLimitFromPlan(t *testing.T) {
+	server := httptest.NewServer((&fakeAPI{}).handler(t))
+	t.Cleanup(server.Close)
+	original := baseURL
+	baseURL = server.URL
+	t.Cleanup(func() { baseURL = original })
+
+	s := NewPrivatusSource()
+	require.NoError(t, s.Connect(context.Background(), "privatus://?api_key=pat_test"))
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+	assert.InDelta(t, 20000*0.8/3600.0, s.limiter.Limit(), 1e-9)
+
+	bad := NewPrivatusSource()
+	err := bad.Connect(context.Background(), "privatus://?api_key=pat_wrong")
+	t.Cleanup(func() { _ = bad.Close(context.Background()) })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "401")
+}
+
 func TestIsValidTable(t *testing.T) {
 	for _, table := range supportedTables {
 		assert.True(t, isValidTable(table), table)
@@ -175,7 +194,7 @@ func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
 		switch {
 		case r.URL.Path == "/workspaces.json":
 			writeJSON(t, w, map[string]interface{}{
-				"data": []map[string]interface{}{{"id": "ws_ONE", "name": "Main"}},
+				"data": []map[string]interface{}{{"id": "ws_ONE", "name": "Main", "plan": "business"}},
 				"meta": map[string]interface{}{"page": 1, "per_page": 100, "total_pages": 1},
 			})
 		case r.URL.Path == "/workspaces/ws_ONE/sites.json":

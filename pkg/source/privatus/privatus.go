@@ -19,9 +19,9 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-const (
-	baseURL = "https://privatusanalytics.com"
+var baseURL = "https://privatusanalytics.com"
 
+const (
 	maxPageSize          = 100
 	maxBreakdownPageSize = 1000
 	maxPages             = 10000
@@ -70,6 +70,7 @@ var (
 
 type PrivatusSource struct {
 	client  *httpclient.Client
+	limiter *httpclient.RateLimiter
 	siteIDs []string
 }
 
@@ -102,13 +103,13 @@ func (s *PrivatusSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.siteIDs = conn.siteIDs
-	limiter := httpclient.NewRateLimiter(requestsPerSecond(defaultRequestsPerHour), rateLimitBurst)
+	s.limiter = httpclient.NewRateLimiter(requestsPerSecond(defaultRequestsPerHour), rateLimitBurst)
 	s.client = httpclient.New(
 		httpclient.WithBaseURL(baseURL),
 		httpclient.WithTimeout(60*time.Second),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithAuth(httpclient.NewBearerAuth(conn.apiKey)),
-		httpclient.WithRateLimiterInstance(limiter),
+		httpclient.WithRateLimiterInstance(s.limiter),
 	)
 
 	plans, err := s.workspacePlans(ctx)
@@ -116,7 +117,7 @@ func (s *PrivatusSource) Connect(ctx context.Context, uri string) error {
 		return err
 	}
 	perHour := requestsPerHour(plans)
-	limiter.SetLimit(requestsPerSecond(perHour))
+	s.limiter.SetLimit(requestsPerSecond(perHour))
 
 	config.Debug("[PRIVATUS] Connected (plans: %v, sites filter: %d, requests per hour: %d)", plans, len(conn.siteIDs), perHour)
 	return nil
