@@ -83,10 +83,10 @@ func TestMMapDeleteInsertOverriddenTimestampKeyKeepsBounds(t *testing.T) {
 	cfg.Yes = true
 	cfg.Progress = config.ProgressLog
 
-	writeStringKeyArrowFile(t, sourcePath, "event_time", []string{"2026-11-18 08:00:00", "2026-11-18 12:00:00"}, []int64{1, 2})
+	writeStringKeyArrowFile(t, sourcePath, "event_time", []string{"2026-11-17 23:00:00", "2026-11-18 08:00:00", "2026-11-18 12:00:00", "2026-11-19 01:00:00"}, []int64{1, 2, 3, 4})
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
-	// The rerun has only the noon row; the whole-day bounds must still delete the morning row.
-	writeStringKeyArrowFile(t, sourcePath, "event_time", []string{"2026-11-18 12:00:00"}, []int64{3})
+	// The rerun drops the morning row; the whole-day bounds must still delete it, and rows outside the window are never loaded.
+	writeStringKeyArrowFile(t, sourcePath, "event_time", []string{"2026-11-17 23:00:00", "2026-11-18 12:00:00", "2026-11-19 01:00:00"}, []int64{5, 6, 7})
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
 	db, err := sql.Open("adbc_generic", fmt.Sprintf("driver=duckdb;path=%s", destPath))
@@ -98,7 +98,7 @@ func TestMMapDeleteInsertOverriddenTimestampKeyKeepsBounds(t *testing.T) {
 		SELECT string_agg(strftime(event_time, '%H:%M') || ':' || row_number, ',' ORDER BY event_time)
 		FROM raw.events
 	`).Scan(&rows))
-	require.Equal(t, "12:00:3", rows)
+	require.Equal(t, "12:00:6", rows)
 }
 
 func writeStringKeyArrowFile(t *testing.T, path, key string, keys []string, rowNumbers []int64) {

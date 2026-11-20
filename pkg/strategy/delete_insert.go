@@ -5,8 +5,13 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -107,6 +112,12 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("failed to get records: %w", err)
 	}
 
+	var outsideInterval atomic.Int64
+	if ut, ok := job.Table.(source.IntervalUnfilteredTable); ok && ut.ReadsIgnoreInterval() &&
+		(job.Config.IntervalStart != nil || job.Config.IntervalEnd != nil) {
+		records = filterToInterval(ctx, records, destinationIncrementalKey, job.Config.IntervalStart, job.Config.IntervalEnd, &outsideInterval)
+	}
+
 	intervalTracker := NewIntervalTracker(destinationIncrementalKey)
 	records = intervalTracker.Wrap(records)
 
@@ -124,6 +135,9 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		LoaderFileFormat: job.Config.LoaderFileFormat,
 	}); err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
+	}
+	if n := outsideInterval.Load(); n > 0 {
+		output.Warnf("Skipped %d rows whose %q is outside --interval-start/--interval-end\n", n, destinationIncrementalKey)
 	}
 
 	intervalStart := resolveIntervalBound(job.Config.IntervalStart, intervalTracker.Min)
@@ -213,6 +227,97 @@ func isNilInterface(v interface{}) bool {
 		return rv.IsNil()
 	default:
 		return false
+	}
+}
+
+// filterToInterval drops rows whose key is outside [start, end], for tables whose reads ignore the
+// interval. Otherwise rows outside the delete window are inserted on every run without being deleted.
+func filterToInterval(ctx context.Context, records <-chan source.RecordBatchResult, key string, start, end *time.Time, dropped *atomic.Int64) <-chan source.RecordBatchResult {
+	out := make(chan source.RecordBatchResult)
+	go func() {
+		defer close(out)
+		for result := range records {
+			if result.Batch != nil && result.Err == nil {
+				filtered, n, err := filterBatchToInterval(ctx, result.Batch, key, start, end)
+				if err != nil {
+					result = source.RecordBatchResult{Err: fmt.Errorf("failed to filter rows to the interval: %w", err)}
+				} else {
+					result.Batch = filtered
+					dropped.Add(n)
+				}
+			}
+			out <- result
+		}
+	}()
+	return out
+}
+
+func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key string, start, end *time.Time) (arrow.RecordBatch, int64, error) {
+	idx := -1
+	for i := 0; i < int(batch.NumCols()); i++ {
+		if batch.ColumnName(i) == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return batch, 0, nil
+	}
+	col := batch.Column(idx)
+	inInterval := intervalMatcher(col, start, end)
+	if inInterval == nil {
+		return batch, 0, nil
+	}
+
+	mask := array.NewBooleanBuilder(memory.DefaultAllocator)
+	defer mask.Release()
+	var dropped int64
+	for i := 0; i < col.Len(); i++ {
+		keep := col.IsNull(i) || inInterval(i)
+		if !keep {
+			dropped++
+		}
+		mask.Append(keep)
+	}
+	if dropped == 0 {
+		return batch, 0, nil
+	}
+	maskArr := mask.NewArray()
+	defer maskArr.Release()
+	defer batch.Release()
+	filtered, err := compute.FilterRecordBatch(ctx, batch, maskArr, compute.DefaultFilterOptions())
+	if err != nil {
+		return nil, 0, err
+	}
+	return filtered, dropped, nil
+}
+
+// intervalMatcher mirrors the DELETE bounds: DATE keys compare whole days (see toDateOnly),
+// timestamps compare exactly. It returns nil for key types the interval doesn't apply to.
+func intervalMatcher(col arrow.Array, start, end *time.Time) func(int) bool {
+	within := func(t time.Time, s, e *time.Time) bool {
+		return (s == nil || !t.Before(*s)) && (e == nil || !t.After(*e))
+	}
+	day := func(t *time.Time) *time.Time {
+		if t == nil {
+			return nil
+		}
+		y, m, d := t.Date()
+		midnight := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		return &midnight
+	}
+	switch arr := col.(type) {
+	case *array.Timestamp:
+		unit := arr.DataType().(*arrow.TimestampType).Unit
+		return func(i int) bool { return within(arr.Value(i).ToTime(unit), start, end) }
+	case *array.Date32:
+		s, e := day(start), day(end)
+		return func(i int) bool { return within(arr.Value(i).ToTime(), s, e) }
+	case *array.Date64:
+		s, e := day(start), day(end)
+		return func(i int) bool { return within(arr.Value(i).ToTime(), s, e) }
+	default:
+		return nil
 	}
 }
 
