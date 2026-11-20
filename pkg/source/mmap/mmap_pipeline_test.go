@@ -15,6 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	_ "github.com/bruin-data/ingestr/pkg/destination/duckdb"
+	_ "github.com/bruin-data/ingestr/pkg/destination/sqlite"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	_ "github.com/bruin-data/ingestr/pkg/source/adbc"
 	_ "github.com/bruin-data/ingestr/pkg/source/mmap"
@@ -99,6 +100,57 @@ func TestMMapDeleteInsertOverriddenTimestampKeyKeepsBounds(t *testing.T) {
 		FROM raw.events
 	`).Scan(&rows))
 	require.Equal(t, "12:00:6", rows)
+}
+
+func TestMMapDeleteInsertSQLiteRerunSkipsRowsOutsideInterval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "events.arrow")
+	destPath := filepath.Join(dir, "events.db")
+
+	start := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24*time.Hour - time.Microsecond)
+	cfg := config.DefaultConfig()
+	cfg.SourceURI = "mmap://" + sourcePath
+	cfg.SourceTable = "asset_data"
+	cfg.DestURI = "sqlite:///" + destPath
+	cfg.DestTable = "events"
+	cfg.IncrementalStrategy = config.StrategyDeleteInsert
+	cfg.IncrementalKey = "event_date"
+	cfg.IntervalStart = &start
+	cfg.IntervalEnd = &end
+	cfg.Yes = true
+	cfg.Progress = config.ProgressLog
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "event_date", Type: arrow.FixedWidthTypes.Date32}}, nil)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	for _, day := range []int{17, 18, 19} {
+		builder.Field(0).(*array.Date32Builder).Append(arrow.Date32FromTime(time.Date(2026, 11, day, 0, 0, 0, 0, time.UTC)))
+	}
+	batch := builder.NewRecordBatch()
+	defer batch.Release()
+	file, err := os.Create(sourcePath)
+	require.NoError(t, err)
+	writer, err := ipc.NewFileWriter(file, ipc.WithSchema(arrowSchema))
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(batch))
+	require.NoError(t, writer.Close())
+	require.NoError(t, file.Close())
+
+	// SQLite reports the existing DATE column as text, so reruns cast the key to a string before staging.
+	for range 3 {
+		require.NoError(t, pipeline.New(cfg).Run(ctx))
+	}
+
+	db, err := sql.Open("sqlite", destPath)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	var rows string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT group_concat(event_date, ',') FROM events`).Scan(&rows))
+	require.Equal(t, "2026-11-18", rows)
 }
 
 func writeStringKeyArrowFile(t *testing.T, path, key string, keys []string, rowNumbers []int64) {

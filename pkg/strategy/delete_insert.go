@@ -107,15 +107,15 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
+	filter := &intervalFilter{ctx: ctx, key: destinationIncrementalKey, start: job.Config.IntervalStart, end: job.Config.IntervalEnd}
+	if ut, ok := job.Table.(source.IntervalUnfilteredTable); ok && ut.ReadsIgnoreInterval() &&
+		(filter.start != nil || filter.end != nil) {
+		job.RowFilter = filter
+	}
+
 	records, err := job.GetRecords(ctx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
-	}
-
-	var outsideInterval atomic.Int64
-	if ut, ok := job.Table.(source.IntervalUnfilteredTable); ok && ut.ReadsIgnoreInterval() &&
-		(job.Config.IntervalStart != nil || job.Config.IntervalEnd != nil) {
-		records = filterToInterval(ctx, records, destinationIncrementalKey, job.Config.IntervalStart, job.Config.IntervalEnd, &outsideInterval)
 	}
 
 	intervalTracker := NewIntervalTracker(destinationIncrementalKey)
@@ -136,7 +136,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	}); err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
-	if n := outsideInterval.Load(); n > 0 {
+	if n := filter.dropped.Load(); n > 0 {
 		output.Warnf("Skipped %d rows whose %q is outside --interval-start/--interval-end\n", n, destinationIncrementalKey)
 	}
 
@@ -230,26 +230,26 @@ func isNilInterface(v interface{}) bool {
 	}
 }
 
-// filterToInterval drops rows whose key is outside [start, end], for tables whose reads ignore the
+// intervalFilter drops rows whose key is outside [start, end], for tables whose reads ignore the
 // interval. Otherwise rows outside the delete window are inserted on every run without being deleted.
-func filterToInterval(ctx context.Context, records <-chan source.RecordBatchResult, key string, start, end *time.Time, dropped *atomic.Int64) <-chan source.RecordBatchResult {
-	out := make(chan source.RecordBatchResult)
-	go func() {
-		defer close(out)
-		for result := range records {
-			if result.Batch != nil && result.Err == nil {
-				filtered, n, err := filterBatchToInterval(ctx, result.Batch, key, start, end)
-				if err != nil {
-					result = source.RecordBatchResult{Err: fmt.Errorf("failed to filter rows to the interval: %w", err)}
-				} else {
-					result.Batch = filtered
-					dropped.Add(n)
-				}
-			}
-			out <- result
-		}
-	}()
-	return out
+type intervalFilter struct {
+	ctx        context.Context
+	key        string
+	start, end *time.Time
+	dropped    atomic.Int64
+}
+
+func (f *intervalFilter) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+	filtered, n, err := filterBatchToInterval(f.ctx, batch, f.key, f.start, f.end)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter rows to the interval: %w", err)
+	}
+	f.dropped.Add(n)
+	return filtered, nil
+}
+
+func (f *intervalFilter) OutputSchema(inputSchema *arrow.Schema) *arrow.Schema {
+	return inputSchema
 }
 
 func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key string, start, end *time.Time) (arrow.RecordBatch, int64, error) {
@@ -261,11 +261,13 @@ func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key str
 		}
 	}
 	if idx < 0 {
+		batch.Retain()
 		return batch, 0, nil
 	}
 	col := batch.Column(idx)
 	inInterval := intervalMatcher(col, start, end)
 	if inInterval == nil {
+		batch.Retain()
 		return batch, 0, nil
 	}
 
@@ -280,11 +282,11 @@ func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key str
 		mask.Append(keep)
 	}
 	if dropped == 0 {
+		batch.Retain()
 		return batch, 0, nil
 	}
 	maskArr := mask.NewArray()
 	defer maskArr.Release()
-	defer batch.Release()
 	filtered, err := compute.FilterRecordBatch(ctx, batch, maskArr, compute.DefaultFilterOptions())
 	if err != nil {
 		return nil, 0, err
