@@ -109,7 +109,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 
 	filter := &intervalFilter{
 		ctx: ctx, key: destinationIncrementalKey, start: job.Config.IntervalStart, end: job.Config.IntervalEnd,
-		wholeDays: incrementalKeyType == schema.TypeDate,
+		keyType: incrementalKeyType,
 	}
 	if ut, ok := job.Table.(source.IntervalUnfilteredTable); ok && ut.ReadsIgnoreInterval() &&
 		(filter.start != nil || filter.end != nil) {
@@ -239,12 +239,12 @@ type intervalFilter struct {
 	ctx        context.Context
 	key        string
 	start, end *time.Time
-	wholeDays  bool
+	keyType    schema.DataType
 	dropped    atomic.Int64
 }
 
 func (f *intervalFilter) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
-	filtered, n, err := filterBatchToInterval(f.ctx, batch, f.key, f.start, f.end, f.wholeDays)
+	filtered, n, err := filterBatchToInterval(f.ctx, batch, f.key, f.keyType, f.start, f.end)
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter rows to the interval: %w", err)
 	}
@@ -256,7 +256,7 @@ func (f *intervalFilter) OutputSchema(inputSchema *arrow.Schema) *arrow.Schema {
 	return inputSchema
 }
 
-func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key string, start, end *time.Time, wholeDays bool) (arrow.RecordBatch, int64, error) {
+func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key string, keyType schema.DataType, start, end *time.Time) (arrow.RecordBatch, int64, error) {
 	idx := -1
 	for i := 0; i < int(batch.NumCols()); i++ {
 		if batch.ColumnName(i) == key {
@@ -269,7 +269,13 @@ func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key str
 		return batch, 0, nil
 	}
 	col := batch.Column(idx)
-	inInterval := intervalMatcher(col, start, end, wholeDays)
+	dataIsDate := col.DataType().ID() == arrow.DATE32 || col.DataType().ID() == arrow.DATE64
+	tableIsTimestamp := keyType == schema.TypeTimestamp || keyType == schema.TypeTimestampTZ
+	if (dataIsDate && tableIsTimestamp) || (col.DataType().ID() == arrow.TIMESTAMP && keyType == schema.TypeDate) {
+		return nil, 0, fmt.Errorf("incremental key %q is %s in the data but %s in the destination table; set its type with --columns %s:%s",
+			key, col.DataType(), keyType, key, keyType)
+	}
+	inInterval := intervalMatcher(col, start, end)
 	if inInterval == nil {
 		batch.Retain()
 		return batch, 0, nil
@@ -298,40 +304,32 @@ func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key str
 	return filtered, dropped, nil
 }
 
-// intervalMatcher mirrors the DELETE bounds, which follow the written key type: DATE keys compare
-// whole days (see toDateOnly), others compare exactly. It returns nil for non-temporal columns.
-func intervalMatcher(col arrow.Array, start, end *time.Time, wholeDays bool) func(int) bool {
-	var value func(int) time.Time
+// intervalMatcher mirrors the DELETE bounds: DATE keys compare whole days (see toDateOnly),
+// timestamps compare exactly. It returns nil for key types the interval doesn't apply to.
+func intervalMatcher(col arrow.Array, start, end *time.Time) func(int) bool {
+	within := func(t time.Time, s, e *time.Time) bool {
+		return (s == nil || !t.Before(*s)) && (e == nil || !t.After(*e))
+	}
+	day := func(t *time.Time) *time.Time {
+		if t == nil {
+			return nil
+		}
+		y, m, d := t.Date()
+		midnight := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		return &midnight
+	}
 	switch arr := col.(type) {
 	case *array.Timestamp:
 		unit := arr.DataType().(*arrow.TimestampType).Unit
-		value = func(i int) time.Time { return arr.Value(i).ToTime(unit) }
+		return func(i int) bool { return within(arr.Value(i).ToTime(unit), start, end) }
 	case *array.Date32:
-		value = func(i int) time.Time { return arr.Value(i).ToTime() }
+		s, e := day(start), day(end)
+		return func(i int) bool { return within(arr.Value(i).ToTime(), s, e) }
 	case *array.Date64:
-		value = func(i int) time.Time { return arr.Value(i).ToTime() }
+		s, e := day(start), day(end)
+		return func(i int) bool { return within(arr.Value(i).ToTime(), s, e) }
 	default:
 		return nil
-	}
-	day := func(t time.Time) time.Time {
-		y, m, d := t.Date()
-		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	}
-	if wholeDays {
-		inner := value
-		value = func(i int) time.Time { return day(inner(i)) }
-		if start != nil {
-			s := day(*start)
-			start = &s
-		}
-		if end != nil {
-			e := day(*end)
-			end = &e
-		}
-	}
-	return func(i int) bool {
-		t := value(i)
-		return (start == nil || !t.Before(*start)) && (end == nil || !t.After(*end))
 	}
 }
 
