@@ -134,7 +134,16 @@ func fakeBreezy(t *testing.T, positions string, routes map[string]http.HandlerFu
 
 func readColumn(t *testing.T, s *BreezyHRSource, table, column string) []string {
 	t.Helper()
-	results, err := s.read(context.Background(), table, source.ReadOptions{})
+	return readTableColumn(t, s, table, column, source.ReadOptions{})
+}
+
+func readTableColumn(t *testing.T, s *BreezyHRSource, table, column string, opts source.ReadOptions) []string {
+	t.Helper()
+	tbl, err := s.GetTable(context.Background(), source.TableRequest{Name: table})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := tbl.Read(context.Background(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,4 +298,52 @@ func TestReadCandidateStreamRereadsTruncatedStreams(t *testing.T) {
 			t.Errorf("re-read a complete stream: %s", r)
 		}
 	}
+}
+
+func TestReadPositionStreamPagesWithCursorAndStopsAtIntervalStart(t *testing.T) {
+	// 70 events, newest first, one minute apart: e0 at base, e69 at base-69m.
+	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	var events []map[string]any
+	for i := 0; i < 70; i++ {
+		events = append(events, map[string]any{"_id": fmt.Sprintf("e%d", i), "timestamp": base.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339)})
+	}
+	var befores []string
+	s, _ := fakeBreezy(t, `[{"_id":"p1","candidate_access":true}]`, map[string]http.HandlerFunc{
+		"/p1/stream": func(w http.ResponseWriter, r *http.Request) {
+			before := r.URL.Query().Get("before")
+			befores = append(befores, before)
+			start := 0
+			for i, e := range events {
+				if e["_id"] == before {
+					start = i + 1
+				}
+			}
+			_ = json.NewEncoder(w).Encode(events[start:min(start+30, len(events))])
+		},
+	})
+
+	assertUnique(t, readTableColumn(t, s, "position_stream", "_id", source.ReadOptions{}), 70)
+	if fmt.Sprint(befores) != "[ e29 e59]" {
+		t.Errorf("full read sent before cursors %q, want [\"\" e29 e59]", befores)
+	}
+
+	befores = nil
+	start, end := base.Add(-45*time.Minute), base.Add(-10*time.Minute)
+	got := readTableColumn(t, s, "position_stream", "_id", source.ReadOptions{IntervalStart: &start, IntervalEnd: &end})
+	// Both bounds are inclusive: e10 sits exactly on the end, e45 exactly on the start.
+	if fmt.Sprint(got) != fmt.Sprint(idList("e", 10, 46)) {
+		t.Errorf("interval read got %v, want e10..e45", got)
+	}
+	// Page 2 ends at e59, older than the start, so page 3 is never requested.
+	if len(befores) != 2 {
+		t.Errorf("interval read made %d requests, want 2", len(befores))
+	}
+}
+
+func idList(prefix string, from, to int) []string {
+	var out []string
+	for i := from; i < to; i++ {
+		out = append(out, fmt.Sprintf("%s%d", prefix, i))
+	}
+	return out
 }

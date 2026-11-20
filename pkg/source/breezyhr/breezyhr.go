@@ -704,8 +704,8 @@ func (s *BreezyHRSource) positionCandidateIDs(ctx context.Context, companyID, po
 			return ids, nil
 		}
 	}
-	output.Warnf("Warning: position %s has more than %d pages of candidates; only the first %d are loaded\n", positionID, maxCandidatePages, len(ids))
-	return ids, nil
+	// A partial list would make the replace load delete the candidates it missed.
+	return nil, fmt.Errorf("position %s has more than %d pages of candidates; stopping instead of loading a partial list", positionID, maxCandidatePages)
 }
 
 func appendCandidateIDs(ids []string, seen map[string]bool, items []candidateSummary) []string {
