@@ -518,8 +518,8 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
 	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
-	changeConditions := buildChangeConditionsClickHouse(nonPKColumns, "target", "source")
-	onCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
+	changeConditions := buildChangeConditionsClickHouse(nonPKColumns, "__ingestr_target", "__ingestr_source")
+	onCondition := buildJoinCondition(opts.PrimaryKeys, "__ingestr_target", "__ingestr_source")
 	// Format timestamp as ClickHouse DateTime64 literal
 	tsLiteral := fmt.Sprintf("toDateTime64('%s', 6)", opts.Timestamp.Format("2006-01-02 15:04:05.999999"))
 
@@ -552,7 +552,7 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	// that finds PKs of records that exist in staging AND have changed
 	pkSelectTarget := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		pkSelectTarget[i] = fmt.Sprintf("target.%s", quoteIdentifier(pk))
+		pkSelectTarget[i] = fmt.Sprintf("__ingestr_target.%s", quoteIdentifier(pk))
 	}
 	updateSQL := fmt.Sprintf(
 		`
@@ -562,9 +562,9 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 			_scd_is_current = 0
 		WHERE _scd_is_current = 1
 		  AND (%s) IN (
-			SELECT %s FROM %s.%s AS target
-			INNER JOIN %s.%s AS source ON %s
-			WHERE target._scd_is_current = 1 AND (%s)
+			SELECT %s FROM %s.%s AS __ingestr_target
+			INNER JOIN %s.%s AS __ingestr_source ON %s
+			WHERE __ingestr_target._scd_is_current = 1 AND (%s)
 		  )%s`,
 		quoteIdentifier(targetDB), quoteIdentifier(targetName), onClusterClause(d.cluster),
 		tsLiteral,
@@ -618,16 +618,16 @@ func (d *ClickHouseDestination) SCD2Table(ctx context.Context, opts destination.
 	quotedColumns := quoteColumns(allColumns)
 	sourceColumns := make([]string, len(quotedColumns))
 	for i, col := range quotedColumns {
-		sourceColumns[i] = "source." + col
+		sourceColumns[i] = "__ingestr_source." + col
 	}
 
 	// ANTI JOIN works with either join_use_nulls setting; unmatched keys normally contain defaults.
 	insertSQL := fmt.Sprintf(
 		`
 		INSERT INTO %s.%s (%s)
-		SELECT %s FROM %s.%s AS source
-		LEFT ANTI JOIN %s.%s AS target
-		  ON %s AND target._scd_is_current = 1`,
+		SELECT %s FROM %s.%s AS __ingestr_source
+		LEFT ANTI JOIN %s.%s AS __ingestr_target
+		  ON %s AND __ingestr_target._scd_is_current = 1`,
 		quoteIdentifier(targetDB), quoteIdentifier(targetName),
 		strings.Join(quotedColumns, ", "),
 		strings.Join(sourceColumns, ", "), quoteIdentifier(stagingDB), quoteIdentifier(stagingName),

@@ -102,13 +102,13 @@ func TestSCD2ExpectedSQL(t *testing.T) {
 			}
 			require.NoError(t, d.SCD2Table(t.Context(), opts))
 			want := []string{
-				"ALTER TABLE `warehouse`.`order` UPDATE _scd_valid_to = toDateTime64('2026-02-03 04:05:06.123456', 6), _scd_is_current = 0 WHERE _scd_is_current = 1 AND (`tenant`, `key``id`) IN ( SELECT target.`tenant`, target.`key``id` FROM `warehouse`.`order` AS target INNER JOIN `landing`.`stage` AS source ON target.`tenant` = source.`tenant` AND target.`key``id` = source.`key``id` WHERE target._scd_is_current = 1 AND (NOT (ifNull(target.`value` = source.`value`, 0) OR (target.`value` IS NULL AND source.`value` IS NULL))) )",
+				"ALTER TABLE `warehouse`.`order` UPDATE _scd_valid_to = toDateTime64('2026-02-03 04:05:06.123456', 6), _scd_is_current = 0 WHERE _scd_is_current = 1 AND (`tenant`, `key``id`) IN ( SELECT __ingestr_target.`tenant`, __ingestr_target.`key``id` FROM `warehouse`.`order` AS __ingestr_target INNER JOIN `landing`.`stage` AS __ingestr_source ON __ingestr_target.`tenant` = __ingestr_source.`tenant` AND __ingestr_target.`key``id` = __ingestr_source.`key``id` WHERE __ingestr_target._scd_is_current = 1 AND (NOT (ifNull(__ingestr_target.`value` = __ingestr_source.`value`, 0) OR (__ingestr_target.`value` IS NULL AND __ingestr_source.`value` IS NULL))) )",
 				"WAIT FOR MUTATIONS",
 			}
 			if !incremental {
 				want = append(want, "ALTER TABLE `warehouse`.`order` UPDATE _scd_valid_to = toDateTime64('2026-02-03 04:05:06.123456', 6), _scd_is_current = 0 WHERE _scd_is_current = 1 AND (`tenant`, `key``id`) NOT IN (SELECT `tenant`, `key``id` FROM `landing`.`stage`)", "WAIT FOR MUTATIONS")
 			}
-			want = append(want, "INSERT INTO `warehouse`.`order` (`tenant`, `key``id`, `value`, `_scd_valid_from`, `_scd_valid_to`, `_scd_is_current`) SELECT source.`tenant`, source.`key``id`, source.`value`, source.`_scd_valid_from`, source.`_scd_valid_to`, source.`_scd_is_current` FROM `landing`.`stage` AS source LEFT ANTI JOIN `warehouse`.`order` AS target ON target.`tenant` = source.`tenant` AND target.`key``id` = source.`key``id` AND target._scd_is_current = 1")
+			want = append(want, "INSERT INTO `warehouse`.`order` (`tenant`, `key``id`, `value`, `_scd_valid_from`, `_scd_valid_to`, `_scd_is_current`) SELECT __ingestr_source.`tenant`, __ingestr_source.`key``id`, __ingestr_source.`value`, __ingestr_source.`_scd_valid_from`, __ingestr_source.`_scd_valid_to`, __ingestr_source.`_scd_is_current` FROM `landing`.`stage` AS __ingestr_source LEFT ANTI JOIN `warehouse`.`order` AS __ingestr_target ON __ingestr_target.`tenant` = __ingestr_source.`tenant` AND __ingestr_target.`key``id` = __ingestr_source.`key``id` AND __ingestr_target._scd_is_current = 1")
 			require.Equal(t, want, c.statements)
 		})
 	}

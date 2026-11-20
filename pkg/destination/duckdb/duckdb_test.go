@@ -1931,6 +1931,84 @@ func TestMergeTable_CDCInternalAliasesDoNotCollide(t *testing.T) {
 	assert.Equal(t, []string{"user-dedup", "user-image", "user-equal-delete", "user-lsn", "user-deleted", "user-synced"}, []string{string(values[0]), string(values[1]), string(values[2]), string(values[3]), string(values[4]), string(values[5])})
 }
 
+func TestMergeTable_ColumnsNamedLikeAliases(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE candidates (_id VARCHAR PRIMARY KEY, source JSON, target STRUCT(_id VARCHAR), name VARCHAR);
+		INSERT INTO candidates VALUES ('a1', '{"id":"linkedin"}', {'_id': 'b2'}, 'old');
+		CREATE TABLE staging_candidates AS SELECT * FROM candidates WHERE false;
+		INSERT INTO staging_candidates VALUES
+			('a1', '{"id":"indeed"}', {'_id': 'zz'}, 'updated'),
+			('b2', '{"id":"x"}', {'_id': 'a1'}, 'new');
+	`))
+
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_candidates",
+		TargetTable:  "candidates",
+		PrimaryKeys:  []string{"_id"},
+		Columns:      []string{"_id", "source", "target", "name"},
+	}))
+	require.NoError(t, dest.Close(ctx))
+
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, `SELECT _id || ':' || name || ':' || (source->>'id') FROM candidates ORDER BY _id`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var row []byte
+		require.NoError(t, rows.Scan(&row))
+		got = append(got, string(row))
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"a1:updated:indeed", "b2:new:x"}, got)
+}
+
+func TestSCD2Table_ColumnsNamedLikeAliases(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	// Struct fields hold keys that differ from _id, so binding source."_id" or
+	// target."_id" to these columns changes which rows match.
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE dim (
+			_id VARCHAR, source STRUCT(_id VARCHAR), target STRUCT(_id VARCHAR), name VARCHAR,
+			"_scd_valid_from" TIMESTAMP, "_scd_valid_to" TIMESTAMP, "_scd_is_current" BOOLEAN
+		);
+		INSERT INTO dim VALUES
+			('a1', {'_id': 'zz'}, {'_id': 'zz'}, 'kept', '2026-01-01', NULL, true),
+			('c3', {'_id': 'zz'}, {'_id': 'zz'}, 'gone', '2026-01-01', NULL, true);
+		CREATE TABLE staging_dim AS SELECT * FROM dim WHERE false;
+		INSERT INTO staging_dim VALUES
+			('a1', {'_id': 'zz'}, {'_id': 'zz'}, 'kept', '2026-02-01', NULL, true),
+			('b2', {'_id': 'zz'}, {'_id': 'zz'}, 'new', '2026-02-01', NULL, true);
+	`))
+
+	require.NoError(t, dest.SCD2Table(ctx, destination.SCD2Options{
+		StagingTable: "staging_dim",
+		TargetTable:  "dim",
+		PrimaryKeys:  []string{"_id"},
+		Columns:      []string{"_id", "source", "target", "name"},
+		Timestamp:    time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}))
+	require.NoError(t, dest.Close(ctx))
+
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, `SELECT _id || ':' || "_scd_is_current" FROM dim ORDER BY _id, "_scd_valid_from"`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var row []byte
+		require.NoError(t, rows.Scan(&row))
+		got = append(got, string(row))
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"a1:true", "b2:true", "c3:false"}, got)
+}
+
 func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)

@@ -796,18 +796,18 @@ func buildCDCHardDeleteSQL(targetDB, targetName, stagingDB, stagingName string, 
 	deleted := quoteIdentifier(destination.CDCDeletedColumn)
 
 	pkExpr := pkTupleExpr(primaryKeys, "")
-	targetPKExpr := pkTupleExpr(primaryKeys, "target")
+	targetPKExpr := pkTupleExpr(primaryKeys, "__ingestr_target")
 	joinConds := make([]string, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		qk := quoteIdentifier(pk)
-		joinConds[i] = fmt.Sprintf("target.%s = s.%s", qk, qk)
+		joinConds[i] = fmt.Sprintf("__ingestr_target.%s = __ingestr_source.%s", qk, qk)
 	}
 
 	return fmt.Sprintf(
 		"ALTER TABLE %s%s DELETE WHERE %s IN ("+
-			"SELECT %s FROM %s AS target FINAL "+
-			"INNER JOIN %s AS s ON %s "+
-			"WHERE target.%s = true AND s.%s = true AND target.%s = s.%s"+
+			"SELECT %s FROM %s AS __ingestr_target FINAL "+
+			"INNER JOIN %s AS __ingestr_source ON %s "+
+			"WHERE __ingestr_target.%s = true AND __ingestr_source.%s = true AND __ingestr_target.%s = __ingestr_source.%s"+
 			")%s",
 		target, onClusterClause(cluster), pkExpr,
 		targetPKExpr, target,
@@ -876,20 +876,20 @@ func buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName string, op
 
 	unchangedSelect := "'[]'"
 	if hasUnchanged {
-		unchangedSelect = fmt.Sprintf("ifNull(s.%s, '[]')", quoteIdentifier(destination.CDCUnchangedColsColumn))
+		unchangedSelect = fmt.Sprintf("ifNull(__ingestr_source.%s, '[]')", quoteIdentifier(destination.CDCUnchangedColsColumn))
 	}
 
 	changesCTE := fmt.Sprintf(
 		"changes AS ("+
-			"SELECT %s, %s AS %s FROM %s AS s "+
-			"LEFT JOIN %s AS t ON %s "+
-			"LEFT JOIN (SELECT %s, %s, toUInt8(1) AS %s FROM %s WHERE %s = true GROUP BY %s, %s) AS __ingestr_tb ON %s AND s.%s = __ingestr_tb.%s "+
-			"WHERE ifNull(t.%s, 0) = 0 OR t.%s IS NULL OR s.%s > t.%s "+
-			"OR (s.%s = t.%s AND ifNull(t.%s, false) = false AND ifNull(__ingestr_tb.%s, 0) = 1)"+
+			"SELECT %s, %s AS %s FROM %s AS __ingestr_source "+
+			"LEFT JOIN %s AS __ingestr_target ON %s "+
+			"LEFT JOIN (SELECT %s, %s, toUInt8(1) AS %s FROM %s WHERE %s = true GROUP BY %s, %s) AS __ingestr_tb ON %s AND __ingestr_source.%s = __ingestr_tb.%s "+
+			"WHERE ifNull(__ingestr_target.%s, 0) = 0 OR __ingestr_target.%s IS NULL OR __ingestr_source.%s > __ingestr_target.%s "+
+			"OR (__ingestr_source.%s = __ingestr_target.%s AND ifNull(__ingestr_target.%s, false) = false AND ifNull(__ingestr_tb.%s, 0) = 1)"+
 			")",
-		aliased("s"), unchangedSelect, unchangedCol, staging,
-		targetScoped, joinOn("s", "t"),
-		pkList, lsn, tombstoneCol, staging, deleted, pkList, lsn, joinOn("s", "__ingestr_tb"), lsn, lsn,
+		aliased("__ingestr_source"), unchangedSelect, unchangedCol, staging,
+		targetScoped, joinOn("__ingestr_source", "__ingestr_target"),
+		pkList, lsn, tombstoneCol, staging, deleted, pkList, lsn, joinOn("__ingestr_source", "__ingestr_tb"), lsn, lsn,
 		presentCol, lsn, lsn, lsn,
 		lsn, lsn, deleted, tombstoneCol,
 	)
@@ -897,8 +897,8 @@ func buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName string, op
 	quotedCols := strings.Join(quoteColumns(cols), ", ")
 	if opts.CDCSnapshot {
 		return fmt.Sprintf(
-			"INSERT INTO %s (%s) WITH %s SELECT %s FROM (SELECT * FROM changes ORDER BY %s DESC, %s DESC LIMIT 1 BY %s) AS l",
-			target, quotedCols, changesCTE, aliased("l"), lsn, deleted, pkList,
+			"INSERT INTO %s (%s) WITH %s SELECT %s FROM (SELECT * FROM changes ORDER BY %s DESC, %s DESC LIMIT 1 BY %s) AS __ingestr_latest",
+			target, quotedCols, changesCTE, aliased("__ingestr_latest"), lsn, deleted, pkList,
 		)
 	}
 
@@ -906,10 +906,10 @@ func buildCDCMergeInsert(targetDB, targetName, stagingDB, stagingName string, op
 		"history AS ("+
 			"SELECT %s, %s, toUInt8(1) AS %s FROM changes "+
 			"UNION ALL "+
-			"SELECT %s, '[]' AS %s, toUInt8(0) AS %s FROM (SELECT %s FROM %s FINAL WHERE %s IN (SELECT %s FROM changes)) AS t"+
+			"SELECT %s, '[]' AS %s, toUInt8(0) AS %s FROM (SELECT %s FROM %s FINAL WHERE %s IN (SELECT %s FROM changes)) AS __ingestr_target"+
 			")",
 		quotedCols, unchangedCol, originCol,
-		aliased("t"), unchangedCol, originCol, quotedCols, target, pkExpr, pkExpr,
+		aliased("__ingestr_target"), unchangedCol, originCol, quotedCols, target, pkExpr, pkExpr,
 	)
 
 	overallWeight := fmt.Sprintf("(ifNull(%s, ''), toUInt8(ifNull(%s, false)), %s)", lsn, deleted, originCol)
