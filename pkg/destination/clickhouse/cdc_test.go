@@ -455,7 +455,7 @@ func TestBuildCDCMergeInsertAndHardDeleteSQL(t *testing.T) {
 	sqlStr := buildCDCMergeInsert("warehouse", "users", "_bruin_staging", "users_stage", opts)
 	require.Contains(t, sqlStr, "INSERT INTO `warehouse`.`users` (`id`, `name`, `bio`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)")
 	require.NotContains(t, sqlStr, "INSERT INTO `warehouse`.`users` (`id`, `name`, `bio`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`, `_cdc_unchanged_cols`)")
-	require.Contains(t, sqlStr, "ifNull(t.`__ingestr_present`, 0) = 0 OR t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`")
+	require.Contains(t, sqlStr, "ifNull(__ingestr_target.`__ingestr_present`, 0) = 0 OR __ingestr_target.`_cdc_lsn` IS NULL OR __ingestr_source.`_cdc_lsn` > __ingestr_target.`_cdc_lsn`")
 	require.Contains(t, sqlStr, "ifNull(__ingestr_tb.`__ingestr_tombstone`, 0) = 1")
 	require.Contains(t, sqlStr, "arrayMap(x -> lowerUTF8(x), JSONExtract(ifNull(`__ingestr_unchanged`, '[]'), 'Array(String)'))")
 	require.Contains(t, sqlStr, "argMaxIf(tuple(`bio`), (ifNull(`_cdc_lsn`, ''), `__ingestr_origin`),")
@@ -476,7 +476,7 @@ func TestBuildCDCMergeInsertAndHardDeleteSQL(t *testing.T) {
 
 	hardDeleteSQL := buildCDCHardDeleteSQL("warehouse", "users", "_bruin_staging", "users_stage", []string{"tenant", "id"}, "c1", " SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2")
 	require.Equal(t,
-		"ALTER TABLE `warehouse`.`users` ON CLUSTER `c1` DELETE WHERE (`tenant`, `id`) IN (SELECT (target.`tenant`, target.`id`) FROM `warehouse`.`users` AS target FINAL INNER JOIN `_bruin_staging`.`users_stage` AS s ON target.`tenant` = s.`tenant` AND target.`id` = s.`id` WHERE target.`_cdc_deleted` = true AND s.`_cdc_deleted` = true AND target.`_cdc_lsn` = s.`_cdc_lsn`) SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2",
+		"ALTER TABLE `warehouse`.`users` ON CLUSTER `c1` DELETE WHERE (`tenant`, `id`) IN (SELECT (__ingestr_target.`tenant`, __ingestr_target.`id`) FROM `warehouse`.`users` AS __ingestr_target FINAL INNER JOIN `_bruin_staging`.`users_stage` AS __ingestr_source ON __ingestr_target.`tenant` = __ingestr_source.`tenant` AND __ingestr_target.`id` = __ingestr_source.`id` WHERE __ingestr_target.`_cdc_deleted` = true AND __ingestr_source.`_cdc_deleted` = true AND __ingestr_target.`_cdc_lsn` = __ingestr_source.`_cdc_lsn`) SETTINGS allow_nondeterministic_mutations = 1, mutations_sync = 2",
 		hardDeleteSQL,
 	)
 }

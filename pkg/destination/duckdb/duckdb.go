@@ -1227,8 +1227,10 @@ func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destinati
 	}
 
 	runInsert := func() error {
+		// An anti-join keeps both aliases in one scope; in a correlated NOT EXISTS,
+		// DuckDB binds source."col" to a target column named "source" (field access).
 		insertSQL := fmt.Sprintf(
-			`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			`INSERT INTO %s (%s) SELECT %s FROM %s ANTI JOIN %s AS target ON %s`,
 			quotedTargetTable,
 			strings.Join(destQuoted, ", "),
 			strings.Join(destQuoted, ", "),
@@ -1515,16 +1517,18 @@ func (d *DuckDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 
 	// Step 2: Soft-delete missing records (only if no incremental_key)
 	if opts.IncrementalKey == "" {
+		// The correlated subquery binds target."col" to a staging column named
+		// "target" first, so the outer table needs an alias no column uses.
 		softDeleteSQL := fmt.Sprintf(
 			`
-			UPDATE %s AS target SET
+			UPDATE %s AS __ingestr_target SET
 				"_scd_valid_to" = $1,
 				"_scd_is_current" = false
-			WHERE target."_scd_is_current" = true
+			WHERE __ingestr_target."_scd_is_current" = true
 			  AND NOT EXISTS (SELECT 1 FROM %s AS source WHERE %s)`,
 			quotedTargetTable,
 			quotedStagingTable,
-			onCondition,
+			buildJoinCondition(opts.PrimaryKeys, "__ingestr_target", "source"),
 		)
 		config.Debug("[DUCKDB SCD2] Step 2 - Soft-delete missing: %s", softDeleteSQL)
 
@@ -1544,11 +1548,9 @@ func (d *DuckDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 		`
 		INSERT INTO %s (%s)
 		SELECT %s FROM %s AS source
-		WHERE NOT EXISTS (
-			SELECT 1 FROM %s AS target
-			WHERE %s
-			  AND target."_scd_is_current" = true
-		)`,
+		ANTI JOIN %s AS target
+			ON %s
+			AND target."_scd_is_current" = true`,
 		quotedTargetTable,
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),

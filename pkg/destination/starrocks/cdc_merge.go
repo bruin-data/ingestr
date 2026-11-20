@@ -57,10 +57,10 @@ func (d *StarRocksDestination) buildCDCHardDeleteSQL(opts destination.MergeOptio
 	lsn, deleted := quoteColumn(destination.CDCLSNColumn), quoteColumn(destination.CDCDeletedColumn)
 	conditions := make([]string, 0, len(opts.PrimaryKeys)+3)
 	for _, key := range opts.PrimaryKeys {
-		conditions = append(conditions, t+"."+quoteColumn(key)+" = s."+quoteColumn(key))
+		conditions = append(conditions, t+"."+quoteColumn(key)+" = __ingestr_s."+quoteColumn(key))
 	}
-	conditions = append(conditions, t+"."+deleted+" = TRUE", "s."+deleted+" = TRUE", "s."+lsn+" = "+t+"."+lsn)
-	return fmt.Sprintf("DELETE FROM %s USING %s s WHERE %s",
+	conditions = append(conditions, t+"."+deleted+" = TRUE", "__ingestr_s."+deleted+" = TRUE", "__ingestr_s."+lsn+" = "+t+"."+lsn)
+	return fmt.Sprintf("DELETE FROM %s USING %s __ingestr_s WHERE %s",
 		d.tableRef(opts.TargetTable), d.tableRef(opts.StagingTable), strings.Join(conditions, " AND "))
 }
 
@@ -106,7 +106,7 @@ func (d *StarRocksDestination) buildCDCMergeSQL(opts destination.MergeOptions) s
 	origin, rank := unique("__ingestr_target"), unique("__ingestr_rank")
 	unchanged := "'[]'"
 	if destination.HasCDCUnchangedColsColumn(opts.Columns) {
-		unchanged = "s." + quoteColumn(destination.CDCUnchangedColsColumn)
+		unchanged = "__ingestr_s." + quoteColumn(destination.CDCUnchangedColsColumn)
 	}
 	target, stage := d.tableRef(opts.TargetTable), d.tableRef(opts.StagingTable)
 	if opts.CDCSnapshot {
@@ -117,37 +117,37 @@ func (d *StarRocksDestination) buildCDCMergeSQL(opts destination.MergeOptions) s
 	lsn, deleted := quoteColumn(destination.CDCLSNColumn), quoteColumn(destination.CDCDeletedColumn)
 	ctes := []string{
 		fmt.Sprintf(`changes AS (
- SELECT %s, %s AS %s FROM %s s LEFT JOIN %s t ON %s
- WHERE t.%s IS NULL OR t.%s IS NULL OR s.%s > t.%s
- OR (s.%s = t.%s AND COALESCE(t.%s, FALSE) = FALSE
-     AND EXISTS (SELECT 1 FROM %s tombstone WHERE %s AND tombstone.%s = s.%s AND tombstone.%s = TRUE))
-)`, prefixed("s"), unchanged, quoteColumn(destination.CDCUnchangedColsColumn), stage, target, join("s", "t"), quoteColumn(opts.PrimaryKeys[0]), lsn, lsn, lsn, lsn, lsn, deleted, stage, join("s", "tombstone"), lsn, lsn, deleted),
+ SELECT %s, %s AS %s FROM %s __ingestr_s LEFT JOIN %s __ingestr_t ON %s
+ WHERE __ingestr_t.%s IS NULL OR __ingestr_t.%s IS NULL OR __ingestr_s.%s > __ingestr_t.%s
+ OR (__ingestr_s.%s = __ingestr_t.%s AND COALESCE(__ingestr_t.%s, FALSE) = FALSE
+     AND EXISTS (SELECT 1 FROM %s __ingestr_tombstone WHERE %s AND __ingestr_tombstone.%s = __ingestr_s.%s AND __ingestr_tombstone.%s = TRUE))
+)`, prefixed("__ingestr_s"), unchanged, quoteColumn(destination.CDCUnchangedColsColumn), stage, target, join("__ingestr_s", "__ingestr_t"), quoteColumn(opts.PrimaryKeys[0]), lsn, lsn, lsn, lsn, lsn, deleted, stage, join("__ingestr_s", "__ingestr_tombstone"), lsn, lsn, deleted),
 	}
 	if opts.CDCSnapshot {
 		ctes = append(ctes, fmt.Sprintf("latest AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s DESC, %s DESC) AS %s FROM changes)", keys, lsn, deleted, rank))
-		return fmt.Sprintf("(%s) WITH %s SELECT %s FROM latest l WHERE l.%s = 1", strings.Join(quoteColumns(cols), ", "), strings.Join(ctes, ",\n"), prefixed("l"), rank)
+		return fmt.Sprintf("(%s) WITH %s SELECT %s FROM latest __ingestr_l WHERE __ingestr_l.%s = 1", strings.Join(quoteColumns(cols), ", "), strings.Join(ctes, ",\n"), prefixed("__ingestr_l"), rank)
 	}
 	ctes = append(ctes,
 		fmt.Sprintf(`history AS (
  SELECT %s, %s, 0 AS %s FROM changes
  UNION ALL
- SELECT %s, '[]', 1 FROM %s t WHERE EXISTS (SELECT 1 FROM changes s WHERE %s)
-)`, strings.Join(quoteColumns(cols), ", "), quoteColumn(destination.CDCUnchangedColsColumn), origin, prefixed("t"), target, join("s", "t")),
+ SELECT %s, '[]', 1 FROM %s __ingestr_t WHERE EXISTS (SELECT 1 FROM changes __ingestr_s WHERE %s)
+)`, strings.Join(quoteColumns(cols), ", "), quoteColumn(destination.CDCUnchangedColsColumn), origin, prefixed("__ingestr_t"), target, join("__ingestr_s", "__ingestr_t")),
 		fmt.Sprintf("latest AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s DESC, %s DESC, %s DESC) AS %s FROM history)", keys, lsn, deleted, origin, rank),
 	)
 	selected, joins := make([]string, len(cols)), []string{}
 	for i, col := range cols {
-		selected[i] = "l." + quoteColumn(col)
+		selected[i] = "__ingestr_l." + quoteColumn(col)
 		if keySet[strings.ToLower(col)] || destination.IsCDCColumn(col) {
 			continue
 		}
 		materialized := fmt.Sprintf("%s = 1 OR (COALESCE(%s, FALSE) = FALSE AND NOT COALESCE(array_contains(CAST(parse_json(%s) AS ARRAY<VARCHAR>), %s), FALSE))", origin, deleted, quoteColumn(destination.CDCUnchangedColsColumn), sqlString(col))
-		name := fmt.Sprintf("value_%d", i)
+		name := fmt.Sprintf("__ingestr_value_%d", i)
 		ctes = append(ctes, fmt.Sprintf("%s AS (SELECT %s, %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s DESC, %s ASC) AS %s FROM history WHERE %s)", name, keys, quoteColumn(col), keys, lsn, origin, rank, materialized))
-		joins = append(joins, fmt.Sprintf("LEFT JOIN %s ON %s AND %s.%s = 1", name, join("l", name), name, rank))
+		joins = append(joins, fmt.Sprintf("LEFT JOIN %s ON %s AND %s.%s = 1", name, join("__ingestr_l", name), name, rank))
 		selected[i] = name + "." + quoteColumn(col)
 	}
-	return fmt.Sprintf("(%s) WITH %s SELECT %s FROM latest l %s WHERE l.%s = 1", strings.Join(quoteColumns(cols), ", "), strings.Join(ctes, ",\n"), strings.Join(selected, ", "), strings.Join(joins, "\n"), rank)
+	return fmt.Sprintf("(%s) WITH %s SELECT %s FROM latest __ingestr_l %s WHERE __ingestr_l.%s = 1", strings.Join(quoteColumns(cols), ", "), strings.Join(ctes, ",\n"), strings.Join(selected, ", "), strings.Join(joins, "\n"), rank)
 }
 
 func snapshotKeyRange(opts destination.MergeOptions) string {

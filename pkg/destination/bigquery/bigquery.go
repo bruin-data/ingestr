@@ -2335,22 +2335,24 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
 	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
-	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "t", "s")
+	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "__ingestr_t", "__ingestr_s")
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		onConditions[i] = fmt.Sprintf("(t.%s = s.%s OR (t.%s IS NULL AND s.%s IS NULL))", quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk))
+		onConditions[i] = fmt.Sprintf("(__ingestr_t.%s = __ingestr_s.%s OR (__ingestr_t.%s IS NULL AND __ingestr_s.%s IS NULL))", quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk))
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
+	// Correlated subqueries resolve an inner column before an outer alias, so
+	// aliases must not match user columns such as "s" or "t".
 	// Step 1: Close changed records (update _scd_valid_to and _scd_is_current)
 	updateSQL := fmt.Sprintf(
 		`
-		MERGE INTO %s.%s.%s AS t
-		USING %s.%s.%s AS s
-		ON %s AND t._scd_is_current = true AND (%s)
+		MERGE INTO %s.%s.%s AS __ingestr_t
+		USING %s.%s.%s AS __ingestr_s
+		ON %s AND __ingestr_t._scd_is_current = true AND (%s)
 		WHEN MATCHED THEN UPDATE SET
-			t._scd_valid_to = s._scd_valid_from,
-			t._scd_is_current = false`,
+			__ingestr_t._scd_valid_to = __ingestr_s._scd_valid_from,
+			__ingestr_t._scd_is_current = false`,
 		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
 		onClause,
@@ -2372,12 +2374,12 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 		tsLiteral := fmt.Sprintf("TIMESTAMP '%s'", opts.Timestamp.Format("2006-01-02 15:04:05.999999"))
 		softDeleteSQL := fmt.Sprintf(
 			`
-			UPDATE %s.%s.%s AS t SET
-				t._scd_valid_to = %s,
-				t._scd_is_current = false
-			WHERE t._scd_is_current = true
+			UPDATE %s.%s.%s AS __ingestr_t SET
+				__ingestr_t._scd_valid_to = %s,
+				__ingestr_t._scd_is_current = false
+			WHERE __ingestr_t._scd_is_current = true
 			  AND NOT EXISTS (
-				SELECT 1 FROM %s.%s.%s AS s
+				SELECT 1 FROM %s.%s.%s AS __ingestr_s
 				WHERE %s
 			  )`,
 			quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
@@ -2402,11 +2404,11 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	insertSQL := fmt.Sprintf(
 		`
 		INSERT INTO %s.%s.%s (%s)
-		SELECT %s FROM %s.%s.%s AS s
+		SELECT %s FROM %s.%s.%s AS __ingestr_s
 		WHERE NOT EXISTS (
-			SELECT 1 FROM %s.%s.%s AS t
+			SELECT 1 FROM %s.%s.%s AS __ingestr_t
 			WHERE %s
-			  AND t._scd_is_current = true
+			  AND __ingestr_t._scd_is_current = true
 		)`,
 		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		strings.Join(quotedColumns, ", "),
