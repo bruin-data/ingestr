@@ -183,7 +183,7 @@ func (s *BreezyHRSource) GetTable(ctx context.Context, req source.TableRequest) 
 		primaryKeys = []string{"position_id", "_id"}
 	case "position_stream":
 		incrementalKey = "timestamp"
-		strategy = config.StrategyMerge
+		strategy = config.StrategyDeleteInsert
 	}
 	if _, ok := candidateExtras[name]; ok {
 		primaryKeys = []string{"candidate_id", "_id"}
