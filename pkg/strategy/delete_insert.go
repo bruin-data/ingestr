@@ -130,7 +130,11 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	intervalEnd := resolveIntervalBound(job.Config.IntervalEnd, intervalTracker.Max)
 
 	if intervalStart == nil || intervalEnd == nil {
-		config.Debug("[DELETE+INSERT] No interval detected (empty data?), skipping delete+insert")
+		if intervalTracker.Rows > 0 {
+			return fmt.Errorf("delete+insert could not derive an interval from incremental key %q (type %s) for %d rows: use a date, timestamp, numeric, or string key with non-null values, or pass --interval-start and --interval-end",
+				destinationIncrementalKey, incrementalKeyType, intervalTracker.Rows)
+		}
+		config.Debug("[DELETE+INSERT] No rows read, skipping delete+insert")
 		if !job.Config.KeepStaging {
 			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
 				config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
