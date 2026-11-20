@@ -112,7 +112,7 @@ func (s *inPlaceReplaceStrategy) executeWithStaging(ctx context.Context, job *In
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey:                  job.Config.IncrementalKey,
+		IncrementalKey:                  sourceIncrementalKeyForRead(job),
 		IntervalStart:                   job.Config.IntervalStart,
 		IntervalEnd:                     job.Config.IntervalEnd,
 		ExtractPartitionBy:              job.Config.ExtractPartitionBy,

@@ -203,6 +203,8 @@ func TestSerialChunkedSnapshotResumesAndCatchesUp(t *testing.T) {
 		require.NoError(t, result.Err)
 		if result.Truncate {
 			require.True(t, result.CDCSnapshotResumed, "restart must retain durable incomplete snapshot rows")
+			require.NotEmpty(t, persisted.Identity)
+			require.Equal(t, persisted.Identity, result.CDCChunkedSnapshotIdentity)
 			resumed = true
 		}
 		if result.Batch != nil && !copiedAll {
@@ -310,6 +312,8 @@ func TestSerialChunkedSnapshotResumesCopiedTablesBeforeCertification(t *testing.
 		require.NoError(t, result.Err)
 		if result.Truncate {
 			require.True(t, result.CDCSnapshotResumed)
+			require.NotEmpty(t, persisted.Identity)
+			require.Equal(t, persisted.Identity, result.CDCChunkedSnapshotIdentity)
 			resumed = true
 		}
 		if result.Batch != nil {

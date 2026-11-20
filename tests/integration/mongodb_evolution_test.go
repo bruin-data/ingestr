@@ -30,6 +30,7 @@ import (
 //  4. Numeric promotion int → float across batches (final type: float)
 //  5. Mixed types within a single batch (typed builder promotes to unknown)
 func TestMongoDB_SchemaEvolution_EndToEnd(t *testing.T) {
+	t.Parallel()
 	requireDocker(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -230,6 +231,7 @@ func TestMongoDB_SchemaEvolution_EndToEnd(t *testing.T) {
 }
 
 func TestMongoDB_NumericExtractPartitioning_EndToEnd(t *testing.T) {
+	t.Parallel()
 	requireDocker(t)
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

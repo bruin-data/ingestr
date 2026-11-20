@@ -135,6 +135,11 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("INGESTR_CDC_START_LSN"),
 			},
 			&cli.BoolFlag{
+				Name:    "cdc-snapshot-spool",
+				Usage:   "Capture changes while a normal PostgreSQL CDC snapshot runs and apply them after copying",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_SPOOL"),
+			},
+			&cli.BoolFlag{
 				Name:    "cdc-snapshot-chunked",
 				Usage:   "Read PostgreSQL CDC snapshots in resumable chunks using short transactions",
 				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNKED"),
@@ -159,13 +164,18 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "cdc-wal-staging",
-				Usage:   "Pending changes during parallel chunked snapshots: inmemory (retain source WAL) or destination (managed staging table); serial requires inmemory and retains source WAL",
+				Usage:   "Snapshot change storage: memory/inmemory (retain source WAL), destination (managed staging), or disk (normal snapshot spool only); defaults to destination with --cdc-snapshot-spool, inmemory otherwise",
 				Value:   "inmemory",
 				Sources: cli.EnvVars("INGESTR_CDC_WAL_STAGING"),
 			},
+			&cli.StringFlag{
+				Name:    "cdc-wal-spool-dir",
+				Usage:   "Persistent directory for normal snapshot changes with --cdc-wal-staging disk; reuse it after a restart",
+				Sources: cli.EnvVars("INGESTR_CDC_WAL_SPOOL_DIR"),
+			},
 			&cli.IntFlag{
 				Name:    "cdc-wal-buffer-bytes",
-				Usage:   "Memory budget in bytes for pending changes during chunked snapshots",
+				Usage:   "Memory budget in bytes for pending changes during CDC snapshots",
 				Value:   config.DefaultCDCWALBufferBytes,
 				Sources: cli.EnvVars("INGESTR_CDC_WAL_BUFFER_BYTES"),
 			},
@@ -210,6 +220,12 @@ func IngestCommand() *cli.Command {
 				Usage:   "The number of parallel jobs to run for extracting data from the source",
 				Value:   config.DefaultExtractParallelism,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
+			},
+			&cli.IntFlag{
+				Name:        "destination-parallelism",
+				Usage:       "The number of parallel jobs to run for writing data to the destination; overrides extract-parallelism for writes",
+				DefaultText: "destination-specific",
+				Sources:     cli.EnvVars("DESTINATION_PARALLELISM", "INGESTR_DESTINATION_PARALLELISM"),
 			},
 			&cli.StringFlag{
 				Name:    "extract-partition-by",
@@ -324,7 +340,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "metrics-addr",
-				Usage:   "Serve streaming metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Usage:   "Serve ingestion metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060",
 				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
 			},
 			&cli.StringFlag{
@@ -419,10 +435,15 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.CDCSnapshotMode = c.String("cdc-snapshot-mode")
 	cfg.CDCStartLSN = c.String("cdc-start-lsn")
 	cfg.CDCChunkedSnapshot = c.Bool("cdc-snapshot-chunked")
+	cfg.CDCSnapshotSpool = c.Bool("cdc-snapshot-spool")
 	cfg.CDCSnapshotExecution = c.String("cdc-snapshot-execution")
 	cfg.CDCSnapshotChunkSize = int(c.Int("cdc-snapshot-chunk-size"))
 	cfg.CDCSnapshotChunkTimeout = c.Duration("cdc-snapshot-chunk-timeout")
 	cfg.CDCWALStaging = c.String("cdc-wal-staging")
+	if cfg.CDCSnapshotSpool && !c.IsSet("cdc-wal-staging") {
+		cfg.CDCWALStaging = "destination"
+	}
+	cfg.CDCWALSpoolDir = c.String("cdc-wal-spool-dir")
 	cfg.CDCWALBufferBytes = c.Int("cdc-wal-buffer-bytes")
 	if cfg.CDCChunkedSnapshot {
 		if cfg.CDCSnapshotChunkSize <= 0 {
@@ -431,6 +452,8 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 		if cfg.CDCSnapshotChunkTimeout <= 0 {
 			return &config.ValidationError{Field: "cdc-snapshot-chunk-timeout", Message: "must be positive"}
 		}
+	}
+	if cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool {
 		if cfg.CDCWALBufferBytes <= 0 {
 			return &config.ValidationError{Field: "cdc-wal-buffer-bytes", Message: "must be positive"}
 		}
@@ -449,7 +472,12 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
-	if c.IsSet("extract-parallelism") {
+	cfg.DestinationParallelism = int(c.Int("destination-parallelism"))
+	if c.IsSet("destination-parallelism") {
+		if cfg.DestinationParallelism <= 0 {
+			return &config.ValidationError{Field: "destination-parallelism", Message: "must be positive"}
+		}
+	} else if c.IsSet("extract-parallelism") {
 		cfg.DestinationParallelism = cfg.ExtractParallelism
 	}
 	cfg.ExtractPartitionBy = c.String("extract-partition-by")
@@ -472,7 +500,7 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.Stream = c.Bool("stream")
 	cfg.FlushInterval = c.Duration("flush-interval")
 	cfg.FlushRecords = int(c.Int("flush-records"))
-	if cfg.CDCChunkedSnapshot && cfg.Stream {
+	if (cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool) && cfg.Stream {
 		if cfg.FlushInterval <= 0 {
 			return &config.ValidationError{Field: "flush-interval", Message: "must be positive"}
 		}
@@ -483,10 +511,6 @@ func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
-	}
-	metricsAddr := c.String("metrics-addr")
-	if !cfg.Stream && metricsAddr != "" {
-		return fmt.Errorf("--metrics-addr is only valid together with --stream")
 	}
 	// In streaming mode the source decides the default strategy (merge for CDC,
 	// append for brokers); only treat the strategy as a user override when the

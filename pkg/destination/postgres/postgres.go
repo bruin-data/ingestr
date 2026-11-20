@@ -447,12 +447,16 @@ func (d *PostgresDestination) copyRecordGroup(ctx context.Context, record arrow.
 		return rows, 1, nil, err
 	}
 
-	stream, err := newPostgresRecordCopyStream(ctx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	stream, err := newPostgresRecordCopyStream(readCtx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 	defer stream.Close()
-	tag, err := pgxConn.PgConn().CopyFrom(ctx, stream, plan.copySQL)
+	reader := newPostgresCopyReader(stream, cancelRead)
+	tag, err := pgxConn.PgConn().CopyFrom(readCtx, reader, plan.copySQL)
+	reader.Close()
 	return tag.RowsAffected(), stream.Batches(), stream.Pending(), err
 }
 
@@ -469,7 +473,10 @@ func copyPostgresRecord(ctx context.Context, pgxConn *pgx.Conn, record arrow.Rec
 		}))
 	}
 
-	tag, err := pgxConn.PgConn().CopyFrom(ctx, reader, plan.copySQL)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	copyReader := newPostgresCopyReader(reader, cancelRead)
+	defer copyReader.Close()
+	tag, err := pgxConn.PgConn().CopyFrom(readCtx, copyReader, plan.copySQL)
 	if err != nil {
 		return 0, err
 	}

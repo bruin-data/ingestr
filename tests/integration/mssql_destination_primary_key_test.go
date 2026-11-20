@@ -16,6 +16,7 @@ import (
 )
 
 func TestMSSQLDestinationCDCPrepareRequiresMatchingPrimaryKey(t *testing.T) {
+	t.Parallel()
 	if mssqlDest.uri == "" {
 		t.Skip("shared SQL Server destination container not available")
 	}

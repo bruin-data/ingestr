@@ -48,6 +48,9 @@ type Dialect struct {
 	nativeDB   *sql.DB   // Cached native gosnowflake connection for reuse
 	nativeOnce sync.Once // Ensures native connection is created only once
 	nativeErr  error     // Error from native connection creation
+
+	columnsMu    sync.RWMutex
+	knownColumns map[string]struct{} // Exact column names seen by GetSchema
 }
 
 // NewDialect creates a new Snowflake dialect.
@@ -164,8 +167,27 @@ func (d *Dialect) MapDataType(dbType string) (schema.DataType, int, int, schema.
 	return MapSnowflakeToDataType(dbType)
 }
 
+// QuoteIdentifier keeps the exact case of columns reported by GetSchema so
+// case-sensitive (quoted) names resolve; other names fold to uppercase.
 func (d *Dialect) QuoteIdentifier(name string) string {
-	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(strings.ToUpper(name), `"`, `""`))
+	d.columnsMu.RLock()
+	_, known := d.knownColumns[name]
+	d.columnsMu.RUnlock()
+	if !known {
+		name = strings.ToUpper(name)
+	}
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
+}
+
+func (d *Dialect) rememberColumns(columns []schema.Column) {
+	d.columnsMu.Lock()
+	defer d.columnsMu.Unlock()
+	if d.knownColumns == nil {
+		d.knownColumns = make(map[string]struct{}, len(columns))
+	}
+	for _, col := range columns {
+		d.knownColumns[col.Name] = struct{}{}
+	}
 }
 
 func (d *Dialect) QuoteCustomQueryIdentifier(name string) string {
@@ -246,6 +268,7 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 	if len(columns) == 0 {
 		return nil, fmt.Errorf("table %s not found or has no columns", table)
 	}
+	d.rememberColumns(columns)
 
 	return &schema.TableSchema{
 		Name:    tableName,

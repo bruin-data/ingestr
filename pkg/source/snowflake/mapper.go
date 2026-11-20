@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	numberPrecisionRegex  = regexp.MustCompile(`(?i)number\((\d+)(?:,\s*(\d+))?\)`)
-	decimalPrecisionRegex = regexp.MustCompile(`(?i)(?:decimal|numeric)\((\d+)(?:,\s*(\d+))?\)`)
+	numberPrecisionRegex  = regexp.MustCompile(`(?i)^number\((\d+)(?:,\s*(\d+))?\)`)
+	decimalPrecisionRegex = regexp.MustCompile(`(?i)^(?:decimal|numeric)\((\d+)(?:,\s*(\d+))?\)`)
 	stringLengthRegex     = regexp.MustCompile(`(?i)(?:varchar|nvarchar|nchar|character|char|string|text)\((\d+)\)`)
 )
 
@@ -97,7 +97,7 @@ func MapSnowflakeToDataType(sfType string) (schema.DataType, int, int, schema.Da
 		return schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown
 
 	// Semi-structured data - serialize as JSON strings
-	case "VARIANT", "OBJECT", "ARRAY":
+	case "VARIANT", "OBJECT", "ARRAY", "MAP":
 		return schema.TypeJSON, 0, 0, schema.TypeUnknown
 
 	// Geospatial - return as string (WKT/GeoJSON)

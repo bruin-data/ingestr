@@ -157,26 +157,9 @@ func validateSnapshotChunkBounds(keys, after, upper []string) error {
 }
 
 func snapshotChunkQuery(columns []string, table string, keys, keyTypes, after, upper []string, size int) (string, []any) {
-	query, args := keyedSnapshotQuery(columns, table, keys, keyTypes, after)
-	orderAt := strings.LastIndex(query, " ORDER BY ")
-	order := query[orderAt:]
-	query = query[:orderAt]
-	quotedKeys, params := make([]string, len(keys)), make([]string, len(keys))
-	for i, key := range keys {
-		quotedKeys[i] = "__ingestr_snapshot." + quoteIdentifier(key)
-		params[i] = fmt.Sprintf("$%d::text::%s", len(args)+i+1, keyTypes[i])
-	}
-	if after == nil {
-		query += " WHERE "
-	} else {
-		query += " AND "
-	}
-	query += fmt.Sprintf("(%s) <= (%s)", strings.Join(quotedKeys, ", "), strings.Join(params, ", "))
-	for _, value := range upper {
-		args = append(args, value)
-	}
+	query, args := boundedSnapshotQuery(columns, table, keys, keyTypes, after, upper)
 	args = append(args, size)
-	return query + order + fmt.Sprintf(" LIMIT $%d", len(args)), args
+	return query + fmt.Sprintf(" LIMIT $%d", len(args)), args
 }
 
 func snapshotUpperKey(ctx context.Context, tx pgx.Tx, table source.SourceTableInfo) ([]string, error) {

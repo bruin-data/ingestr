@@ -29,6 +29,8 @@ const keepaliveInterval = 5 * time.Second
 
 const finalizeConfirmationTimeout = 5 * time.Second
 
+const defaultCDCQueryPoolMaxConns = 32
+
 // defaultPublicationName is the publication ingestr creates and manages when the
 // URI does not specify one.
 const defaultPublicationName = "ingestr_publication"
@@ -96,6 +98,10 @@ type PostgresCDCSource struct {
 	// lag tracks the server's WAL head for replication-lag reporting.
 	lag *lagState
 
+	walRetentionMu     sync.RWMutex
+	walRetentionSlot   string
+	walRetentionConfig *pgx.ConnConfig
+
 	// keepalive coordinates a goroutine that periodically pings the
 	// walsender with a WALWritePosition-only standby update during the
 	// destination-write phase. Without it, a write that outlasts
@@ -138,6 +144,7 @@ func NewPostgresCDCSource() *PostgresCDCSource {
 
 var (
 	_ source.LagReporter                    = (*PostgresCDCSource)(nil)
+	_ source.WALRetentionReporter           = (*PostgresCDCSource)(nil)
 	_ source.CDCStateProvider               = (*PostgresCDCSource)(nil)
 	_ source.ConnectorLeaser                = (*PostgresCDCSource)(nil)
 	_ source.ConnectorIdentityProvider      = (*PostgresCDCSource)(nil)
@@ -234,6 +241,7 @@ func (s *PostgresCDCSource) Schemes() []string {
 }
 
 func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
+	s.resetWALRetention()
 	cdcConfig, normalizedURI, err := parseURIConfig(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse CDC config: %w", err)
@@ -251,6 +259,12 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
 		return fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	// pgx defaults to max(4, NumCPU) connections, which silently caps snapshot
+	// readers below --extract-parallelism. Connections open lazily, so a higher
+	// ceiling costs nothing until readers ask for them.
+	if !strings.Contains(normalizedURI, "pool_max_conns") {
+		pgConfig.MaxConns = max(pgConfig.MaxConns, defaultCDCQueryPoolMaxConns)
 	}
 
 	queryPool, err := pgxpool.NewWithConfig(ctx, pgConfig)
@@ -310,6 +324,9 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.standby = standby
 	s.generatedColumns.Clear()
 	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, database, cdcConfig)
+	s.walRetentionMu.Lock()
+	s.walRetentionConfig = pgConfig.ConnConfig.Copy()
+	s.walRetentionMu.Unlock()
 
 	return nil
 }
@@ -325,9 +342,13 @@ func (s *PostgresCDCSource) TableIncarnation(ctx context.Context, table string) 
 	if s.queryPool == nil {
 		return "", fmt.Errorf("postgres CDC source is not connected")
 	}
+	return tableIncarnation(ctx, s.queryPool, table)
+}
+
+func tableIncarnation(ctx context.Context, query tableMetadataQuerier, table string) (string, error) {
 	schemaName, tableName := parseTableName(table)
 	var oid string
-	err := s.queryPool.QueryRow(ctx, `
+	err := query.QueryRow(ctx, `
 		SELECT c.oid::text
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -423,6 +444,7 @@ func (s *PostgresCDCSource) reconnectReplication(ctx context.Context) error {
 }
 
 func (s *PostgresCDCSource) Close(ctx context.Context) error {
+	s.resetWALRetention()
 	var errs []error
 
 	// Stop the keepalive goroutine first so it does not race the connection
@@ -578,6 +600,23 @@ func (s *PostgresCDCSource) CommitStream(ctx context.Context, token any) error {
 		if token == nil {
 			return nil
 		}
+	}
+	if _, ok := token.(snapshotSpoolBatchCommit); ok {
+		return s.FinalizeBatch(ctx)
+	}
+	if commit, ok := token.(*snapshotSpoolCommit); ok {
+		if s.pos == nil {
+			return fmt.Errorf("postgres cdc: stream position not initialized")
+		}
+		if err := commit.persist(ctx); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		s.pos.Commit(commit.state.Applied)
+		commit.ack.Do(func() { close(commit.done) })
+		return nil
 	}
 	if commit, ok := token.(*chunkedCommit); ok {
 		if s.pos == nil {
@@ -1643,19 +1682,9 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 	}
 	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, resumeLSNs, opts.CDCSlotSuffix)
 	reader.initialInvalidations = invalidations
-	if opts.Streaming && len(resumeLSNs) > 0 {
-		// A table resumes its snapshot only while the stream itself resumes;
-		// a run without any resume position snapshots everything afresh.
-		for _, table := range tables {
-			resume, ok := opts.CDCSnapshotResumes[table.Name]
-			if !ok || resumeLSNs[table.Name] != "" || resumableSnapshotKeys(table) == nil ||
-				resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
-				continue
-			}
-			if reader.snapshotResumes == nil {
-				reader.snapshotResumes = make(map[string]source.CDCSnapshotProgress)
-			}
-			reader.snapshotResumes[table.Name] = resume
+	if opts.Streaming || opts.CDCSnapshotProgress {
+		if err := reader.setSnapshotResumes(ctx, opts.CDCSnapshotResumes); err != nil {
+			return nil, err
 		}
 	}
 	if opts.Streaming {

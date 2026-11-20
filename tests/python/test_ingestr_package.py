@@ -64,6 +64,8 @@ class IngestrPackageTest(unittest.TestCase):
             cluster_by=["tenant_id", "id"],
             cdc_table_naming="table",
             cdc_delete_behavior="hard",
+            extract_parallelism=2,
+            destination_parallelism=8,
             sql_exclude_columns="internal_note",
             mask=["email:sha256", "phone:redact"],
             trim_whitespace=True,
@@ -109,6 +111,10 @@ class IngestrPackageTest(unittest.TestCase):
                 "table",
                 "--cdc-delete-behavior",
                 "hard",
+                "--extract-parallelism",
+                "2",
+                "--destination-parallelism",
+                "8",
                 "--sql-exclude-columns",
                 "internal_note",
                 "--mask",
@@ -122,6 +128,26 @@ class IngestrPackageTest(unittest.TestCase):
                 '{"asset":"users","pipeline":"daily"}',
                 "--progress",
                 "log",
+            ],
+        )
+
+    def test_build_ingest_args_omits_unspecified_destination_parallelism(self):
+        args = ingestr.build_ingest_args(
+            source_uri="postgres://source",
+            dest_uri="postgres://destination",
+            extract_parallelism=2,
+        )
+
+        self.assertEqual(
+            args,
+            [
+                "ingest",
+                "--source-uri",
+                "postgres://source",
+                "--dest-uri",
+                "postgres://destination",
+                "--extract-parallelism",
+                "2",
             ],
         )
 
@@ -151,6 +177,8 @@ class IngestrPackageTest(unittest.TestCase):
                 dest_table="main.users",
                 incremental_predicate="t.event_date >= DATE '2026-01-01'",
                 progress="log",
+                extract_parallelism=2,
+                destination_parallelism=8,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -172,6 +200,10 @@ class IngestrPackageTest(unittest.TestCase):
                 "t.event_date >= DATE '2026-01-01'",
                 "--progress",
                 "log",
+                "--extract-parallelism",
+                "2",
+                "--destination-parallelism",
+                "8",
             ],
             check=False,
             executable=None,

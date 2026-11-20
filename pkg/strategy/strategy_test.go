@@ -613,6 +613,38 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+func TestStrategiesReadRenamedIncrementalKeyBySourceName(t *testing.T) {
+	for _, strat := range []WriteStrategy{&ReplaceStrategy{}, &AppendStrategy{}, &MergeStrategy{}, &DeleteInsertStrategy{}} {
+		t.Run(string(strat.Name()), func(t *testing.T) {
+			job, src, _ := minimalJob()
+			job.Config.IncrementalKey = "create_date"
+			job.Config.IncrementalStrategy = strat.Name()
+			job.SourceSchema = &schema.TableSchema{
+				Columns: []schema.Column{
+					{Name: "ID", DataType: schema.TypeInt64},
+					{Name: "CREATE_DATE", DataType: schema.TypeTimestamp},
+				},
+				PrimaryKeys:    []string{"ID"},
+				IncrementalKey: "CREATE_DATE",
+			}
+			job.Schema = &schema.TableSchema{
+				Columns: []schema.Column{
+					{Name: "id", DataType: schema.TypeInt64},
+					{Name: "create_date", DataType: schema.TypeTimestamp},
+				},
+				PrimaryKeys:    []string{"id"},
+				IncrementalKey: "create_date",
+			}
+			job.ColumnRenamer = transformer.NewColumnRenamer(map[string]string{"ID": "id", "CREATE_DATE": "create_date"})
+			src.readCh = mustClosedRecords()
+
+			_ = strat.Execute(context.Background(), job)
+			require.True(t, src.readCalled)
+			assert.Equal(t, "CREATE_DATE", src.readOpts.IncrementalKey)
+		})
+	}
+}
+
 func TestDeleteInsertStrategy_UsesIncrementalKeyFromLaterBatch(t *testing.T) {
 	job, src, dest := minimalJob()
 	strategy := &DeleteInsertStrategy{}

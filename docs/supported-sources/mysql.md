@@ -64,8 +64,9 @@ Requirements:
 - `binlog_row_image` must be `FULL`.
 - `binlog_row_value_options` must not include `PARTIAL_JSON`.
 - Source tables must have primary keys, or `--primary-key` must be provided.
-- Source tables must not contain `ENUM`, `SET`, or `BIT` columns.
 - The source user needs normal read access, permission to run `FLUSH TABLES WITH READ LOCK` for the initial snapshot, and replication privileges required to stream binary logs.
+
+CDC supports `ENUM` and `SET` columns as strings: enum labels are preserved, and set members are represented as a comma-separated string in their declaration order. `BIT(n)` columns are ingested as binary values, preserving their bytes and leading zeros, including for `BIT(1)` and `BIT(64)`. Spatial columns (`GEOMETRY`, `POINT`, `POLYGON`, etc.) are ingested as WKT strings such as `POINT(-73.9857 40.7484)`; coordinates are written in the stored X Y order, which is longitude latitude for geographic SRIDs such as 4326, and the SRID is not included. These representations are the same for the initial snapshot and subsequent changes. SQL `NULL` values remain null.
 
 CDC URI parameters:
 - `mode`: **deprecated and ignored.** Continuous ingestion is controlled by `--stream`. `mode=batch` is accepted as a no-op; `mode=stream` is rejected unless `--stream` is also passed.

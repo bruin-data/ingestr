@@ -35,9 +35,37 @@ func TestStagingUniqueToken(t *testing.T) {
 
 func TestGenerateStagingTableNameEmbedsRunID(t *testing.T) {
 	runID := "c0cb3a69-242d-4d87-8c88-4c55fd85f131"
-	got := GenerateStagingTableName("analytics.users", "merge", "", runID)
+	got := GenerateStagingTableName("analytics.users", "merge", "", runID, 0)
 	if !strings.HasSuffix(got, "_merge_c0cb3a69242d4d878c884c55fd85f131") {
 		t.Fatalf("staging name %q does not end with the run id token", got)
+	}
+}
+
+func TestStagingTableNamesFitDestinationIdentifierLimit(t *testing.T) {
+	const runA = "a1df6105-3919-4973-9625-e3b67f0ec419"
+	const runB = "a1df6105-3919-4973-9626-e3b67f0ec419"
+	policy := destination.ReplaceStagingPolicy{DefaultPlacement: destination.ReplaceStagingTargetSchema}
+	names := map[string]func(runID string, maxLen int) string{
+		"replace": func(runID string, maxLen int) string {
+			return GenerateReplaceStagingTableName("SCHEMA.TEST10000", "staging", "", policy, runID, maxLen)
+		},
+		"merge": func(runID string, maxLen int) string {
+			return GenerateStagingTableName("SCHEMA.TEST10000", "merge", "", runID, maxLen)
+		},
+		"normalised": func(runID string, maxLen int) string {
+			return GenerateNormalisedStagingTableName("SCHEMA.a_rather_long_target_table_name", "", runID, maxLen)
+		},
+	}
+	for name, generate := range names {
+		t.Run(name, func(t *testing.T) {
+			a, b := generate(runA, 30), generate(runB, 30)
+			for _, got := range []string{a, b} {
+				parts := tablename.Split(got)
+				require.LessOrEqual(t, len(parts[len(parts)-1]), 30, got)
+			}
+			require.NotEqual(t, a, b, "run ids differing mid-token must not collide")
+			require.Equal(t, generate(runA, 0), generate(runA, 64), "limits above the default cap keep today's names")
+		})
 	}
 }
 
@@ -66,7 +94,7 @@ func TestGenerateStagingTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateStagingTableName(tt.targetTable, tt.suffix, tt.stagingDataset, "")
+			got := GenerateStagingTableName(tt.targetTable, tt.suffix, tt.stagingDataset, "", 0)
 			if !strings.HasPrefix(got, tt.wantPrefix) {
 				t.Fatalf("GenerateStagingTableName(%q, %q, %q) = %q, want prefix %q",
 					tt.targetTable, tt.suffix, tt.stagingDataset, got, tt.wantPrefix)
@@ -123,10 +151,10 @@ func TestQuotedDotsRemainPlacementOnlyAcrossStagingPaths(t *testing.T) {
 		wantSchema string
 		wantSuffix string
 	}{
-		{name: "regular managed schema", got: GenerateStagingTableName(target, "merge", "", ""), wantSchema: DefaultStagingSchema, wantSuffix: "_merge_"},
-		{name: "replace target schema", got: GenerateReplaceStagingTableName(target, "staging", "", targetPolicy, ""), wantSchema: `"appUser"`, wantSuffix: "_staging_"},
-		{name: "replace managed schema", got: GenerateReplaceStagingTableName(target, "staging", "", managedPolicy, ""), wantSchema: DefaultStagingSchema, wantSuffix: "_staging_"},
-		{name: "normalised target schema", got: GenerateNormalisedStagingTableName(target, "", ""), wantSchema: `"appUser"`, wantSuffix: "_staging_normalised_"},
+		{name: "regular managed schema", got: GenerateStagingTableName(target, "merge", "", "", 0), wantSchema: DefaultStagingSchema, wantSuffix: "_merge_"},
+		{name: "replace target schema", got: GenerateReplaceStagingTableName(target, "staging", "", targetPolicy, "", 0), wantSchema: `"appUser"`, wantSuffix: "_staging_"},
+		{name: "replace managed schema", got: GenerateReplaceStagingTableName(target, "staging", "", managedPolicy, "", 0), wantSchema: DefaultStagingSchema, wantSuffix: "_staging_"},
+		{name: "normalised target schema", got: GenerateNormalisedStagingTableName(target, "", "", 0), wantSchema: `"appUser"`, wantSuffix: "_staging_normalised_"},
 		{name: "merge target schema", got: managedStagingTableName(targetDest, target, "merge", "", ""), wantSchema: `"appUser"`, wantSuffix: "_merge_"},
 		{name: "streaming CDC target schema", got: managedStagingTableName(targetDest, target, "stream", "", ""), wantSchema: `"appUser"`, wantSuffix: "_stream_"},
 	}
@@ -150,7 +178,7 @@ func TestQuotedDotsRemainPlacementOnlyAcrossStagingPaths(t *testing.T) {
 }
 
 func TestQuotedCatalogAndStagingSchemaRemainPlacementComponents(t *testing.T) {
-	got := GenerateStagingTableName(`"catalog.name"."app.schema"."order.events"`, "merge", `"stage.schema"`, "")
+	got := GenerateStagingTableName(`"catalog.name"."app.schema"."order.events"`, "merge", `"stage.schema"`, "", 0)
 	parts := tablename.SplitRaw(got)
 	if len(parts) != 3 {
 		t.Fatalf("staging table %q has %d components, want catalog.schema.table", got, len(parts))
@@ -223,7 +251,7 @@ func TestGenerateReplaceStagingTableName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GenerateReplaceStagingTableName(tt.targetTable, "staging", tt.stagingDataset, tt.policy, "")
+			got := GenerateReplaceStagingTableName(tt.targetTable, "staging", tt.stagingDataset, tt.policy, "", 0)
 			if !strings.HasPrefix(got, tt.wantPrefix) {
 				t.Fatalf("GenerateReplaceStagingTableName(%q, %q) = %q, want prefix %q",
 					tt.targetTable, tt.stagingDataset, got, tt.wantPrefix)

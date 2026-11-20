@@ -57,7 +57,7 @@ func startStarRocksContainerWithCleanup(ctx context.Context, t *testing.T) (dsn,
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "starrocks/allin1-ubuntu:3.3-latest",
-			ExposedPorts: []string{"9030/tcp", "8040/tcp"},
+			ExposedPorts: []string{"9030/tcp", "8030/tcp", "8040/tcp"},
 			// Relax the backend disk-flood thresholds before startup: the defaults
 			// (~1 GiB free / <95% used) mark the BE unavailable for tablet placement
 			// on disk-constrained CI runners, so CREATE TABLE finds no usable backend.
@@ -82,13 +82,16 @@ func startStarRocksContainerWithCleanup(ctx context.Context, t *testing.T) (dsn,
 	require.NoError(t, err)
 	port, err := container.MappedPort(ctx, "9030")
 	require.NoError(t, err)
-	httpPort, err := container.MappedPort(ctx, "8040")
+	fePort, err := container.MappedPort(ctx, "8030")
 	require.NoError(t, err)
+	bePort, err := container.MappedPort(ctx, "8040")
+	require.NoError(t, err)
+	dsn, uri, closeProxy := proxyStarRocksPorts(t, host, port.Port(), fePort.Port(), bePort.Port())
+	cleanup = func() {
+		closeProxy()
+		_ = container.Terminate(context.Background())
+	}
 
-	dsn = fmt.Sprintf("root@tcp(%s:%s)/", host, port.Port())
-	// Connect directly to this single BE for Stream Load: an FE redirect would
-	// advertise the container-private BE address, unreachable from the test host.
-	uri = fmt.Sprintf("starrocks://root@%s:%s/?http_port=%s&replication_num=1", host, port.Port(), httpPort.Port())
 	handedOff = true
 	return dsn, uri, cleanup
 }

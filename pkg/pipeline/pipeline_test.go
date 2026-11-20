@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1058,7 +1059,7 @@ func TestRunMultiTableRejectsHardDeleteAppendForLateKeyedTable(t *testing.T) {
 func TestMultiTableDestinationNamesChecksDestinationOverrideCollisions(t *testing.T) {
 	tables := []source.SourceTableInfo{{Name: "public.orders"}, {Name: "sales.orders"}}
 
-	_, err := multiTableDestinationNames(tables, "", constantMultiTableNamer{}, config.TableNamingSchemaTable)
+	_, err := multiTableDestinationNames(tables, 0, constantMultiTableNamer{}, config.TableNamingSchemaTable)
 	require.ErrorContains(t, err, "multi-table destination collision")
 	require.ErrorContains(t, err, "project.landing.shared")
 }
@@ -1069,7 +1070,7 @@ func TestMultiTableDestinationNamesTableNaming(t *testing.T) {
 		{Name: "foo.B", DestSchema: "foo_cdc"},
 	}
 
-	names, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingTable)
+	names, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingTable)
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"foo.A": "foo_cdc.A", "foo.B": "foo_cdc.B"}, names)
 }
@@ -1080,7 +1081,7 @@ func TestMultiTableDestinationNamesTableNamingRejectsBasenameCollisions(t *testi
 		{Name: "bar.orders", DestSchema: "landing"},
 	}
 
-	_, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingTable)
+	_, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingTable)
 	require.ErrorContains(t, err, "multi-table destination collision")
 	require.ErrorContains(t, err, "foo.orders")
 	require.ErrorContains(t, err, "bar.orders")
@@ -1095,9 +1096,9 @@ func TestMultiTableDestinationNamesShortensLongFinalComponents(t *testing.T) {
 		{Name: schemaPrefix + "." + tablePrefix + "_two", DestSchema: "landing"},
 	}
 
-	first, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	first, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
-	second, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	second, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
 	require.Equal(t, first, second, "destination mapping changed across restart")
 	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])
@@ -1116,9 +1117,9 @@ func TestMultiTableDestinationNamesShortensMultibyteFinalComponents(t *testing.T
 		{Name: strings.Repeat("é", 20) + "." + strings.Repeat("界", 14) + "二", DestSchema: "landing"},
 	}
 
-	first, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	first, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
-	second, err := multiTableDestinationNames(tables, "postgres", nil, config.TableNamingSchemaTable)
+	second, err := multiTableDestinationNames(tables, destination.MaxIdentifierLength("postgres"), nil, config.TableNamingSchemaTable)
 	require.NoError(t, err)
 	require.Equal(t, first, second, "multibyte destination mapping changed across restart")
 	require.NotEqual(t, first[tables[0].Name], first[tables[1].Name])
@@ -4526,6 +4527,15 @@ func TestCanonicalCDCStateURIIgnoresStarRocksConnectionSettings(t *testing.T) {
 	require.Contains(t, canonicalCDCStateURI("clickhouse://u@ch:9000/db?http_port=8123"), "http_port=8123")
 }
 
+func TestCanonicalCDCStateURIDropsOracleDescriptorCredentials(t *testing.T) {
+	const descriptor = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))"
+	base := canonicalCDCStateURI("oracle://loader:old@" + descriptor)
+	require.NotContains(t, base, "old")
+	require.Equal(t, base, canonicalCDCStateURI("oracle://loader:rotated@"+descriptor))
+	require.Equal(t, base, canonicalCDCStateURI("oracle://loader:rotated@/?dsn="+url.QueryEscape(descriptor)))
+	require.NotEqual(t, base, canonicalCDCStateURI("oracle://loader:old@"+strings.Replace(descriptor, "ORCLPDB", "OTHER", 1)))
+}
+
 func TestStreamingRefreshPreservesCDCStrategyRestrictions(t *testing.T) {
 	for _, sourceURI := range []string{"mysql+cdc://source/db", "mariadb+cdc://source/db", "mssql+cdc://source/db"} {
 		t.Run(sourceURI, func(t *testing.T) {
@@ -4589,9 +4599,42 @@ func TestResolveInterval(t *testing.T) {
 		{name: "table without the interface keeps interval", table: &mockSourceTable{}, wantStart: &start, wantEnd: &end},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotStart, gotEnd := resolveInterval(cfg, tc.table)
+			gotStart, gotEnd := resolveInterval(cfg, tc.table, nil)
 			require.Equal(t, tc.wantStart, gotStart)
 			require.Equal(t, tc.wantEnd, gotEnd)
+		})
+	}
+}
+
+func TestResolveIntervalUnfilteredTableByKeyType(t *testing.T) {
+	start := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	unfiltered := &source.DynamicSourceTable{TableName: "asset_data", TableReadsIgnoreInterval: true}
+	for _, tc := range []struct {
+		name         string
+		table        source.SourceTable
+		strategy     config.IncrementalStrategy
+		keyType      schema.DataType
+		keepInterval bool
+	}{
+		{name: "text key drops interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeString},
+		{name: "integer key drops interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeInt64},
+		{name: "date key keeps interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeDate, keepInterval: true},
+		{name: "timestamp key keeps interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeTimestamp, keepInterval: true},
+		{name: "timestamptz key keeps interval", table: unfiltered, strategy: config.StrategyDeleteInsert, keyType: schema.TypeTimestampTZ, keepInterval: true},
+		{name: "merge keeps interval", table: unfiltered, strategy: config.StrategyMerge, keyType: schema.TypeString, keepInterval: true},
+		{name: "filtering table keeps interval", table: &source.DynamicSourceTable{TableName: "t"}, strategy: config.StrategyDeleteInsert, keyType: schema.TypeString, keepInterval: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.IngestConfig{IntervalStart: &start, IntervalEnd: &end, IncrementalStrategy: tc.strategy, IncrementalKey: "key"}
+			gotStart, gotEnd := resolveInterval(cfg, tc.table, tschema("t", tcol("other", schema.TypeTimestamp), tcol("Key", tc.keyType)))
+			if tc.keepInterval {
+				require.Equal(t, &start, gotStart)
+				require.Equal(t, &end, gotEnd)
+			} else {
+				require.Nil(t, gotStart)
+				require.Nil(t, gotEnd)
+			}
 		})
 	}
 }

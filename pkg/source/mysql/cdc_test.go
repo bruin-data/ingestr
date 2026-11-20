@@ -167,9 +167,6 @@ func TestMySQLCDCReadAllValidatesOnlySelectedTables(t *testing.T) {
 			AddRow("bad").
 			AddRow("good"))
 	expectMySQLCDCTableSchema(mock, "app", "good")
-	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
-		WithArgs("app", "good").
-		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
 
 	src := &MySQLCDCSource{db: db, database: "app"}
 	require.NoError(t, src.SelectTables([]string{"good"}))
@@ -189,9 +186,6 @@ func TestMySQLCDCReadAllInitializesFilteredDiscoveryWithoutGetTables(t *testing.
 		WithArgs("app").
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("bad").AddRow("good"))
 	expectMySQLCDCTableSchema(mock, "app", "good")
-	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
-		WithArgs("app", "good").
-		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
 
 	mock.ExpectExec("SET time_zone = '\\+00:00'").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH TABLES WITH READ LOCK").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -238,9 +232,6 @@ func TestMySQLCDCReadAllInitializesUnfilteredDiscoveryWithoutGetTables(t *testin
 		WithArgs("app").
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("good"))
 	expectMySQLCDCTableSchema(mock, "app", "good")
-	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
-		WithArgs("app", "good").
-		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
 
 	mock.ExpectExec("SET time_zone = '\\+00:00'").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH TABLES WITH READ LOCK").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -319,11 +310,6 @@ func TestMySQLCDCReadAllValidatesInventoryAtEverySnapshotBoundary(t *testing.T) 
 	for _, table := range []string{"first", "second"} {
 		expectMySQLCDCTableSchema(mock, "app", table)
 	}
-	for _, table := range []string{"first", "second"} {
-		mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
-			WithArgs("app", table).
-			WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
-	}
 
 	mock.ExpectExec("SET time_zone = '\\+00:00'").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("FLUSH TABLES WITH READ LOCK").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -383,11 +369,6 @@ func TestMySQLCDCReadAllValidatesInventoryAfterResumedTable(t *testing.T) {
 	for _, table := range []string{"first", "second"} {
 		expectMySQLCDCTableSchema(mock, "app", table)
 	}
-	for _, table := range []string{"first", "second"} {
-		mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
-			WithArgs("app", table).
-			WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
-	}
 	mock.ExpectQuery("SHOW BINARY LOGS").
 		WillReturnRows(sqlmock.NewRows([]string{"Log_name", "File_size"}).AddRow("mysql-bin.000012", "1000"))
 	mock.ExpectExec("SET time_zone = '\\+00:00'").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -433,11 +414,6 @@ func TestMySQLCDCReadAllIgnoresUnrequestedInventoryChangesAtSnapshotBoundaries(t
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("first").AddRow("ignored").AddRow("second"))
 	for _, table := range []string{"first", "second"} {
 		expectMySQLCDCTableSchema(mock, "app", table)
-	}
-	for _, table := range []string{"first", "second"} {
-		mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
-			WithArgs("app", table).
-			WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
 	}
 
 	for i, table := range []string{"first", "second"} {
@@ -504,9 +480,6 @@ func TestMySQLCDCRejectsNonMergeStrategies(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	expectMySQLCDCTableSchema(mock, "app", "items")
-	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
-		WithArgs("app", "items").
-		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}))
 
 	src := &MySQLCDCSource{db: db, database: "app"}
 	_, err = src.GetTable(t.Context(), source.TableRequest{Name: "items", Strategy: config.StrategyAppend})
@@ -913,6 +886,165 @@ func TestConvertMySQLCDCBinlogValueUnsigned(t *testing.T) {
 			assert.Equal(t, tc.want, convertMySQLCDCBinlogValue(tc.value, tc.col))
 		})
 	}
+}
+
+// mysqlCDCTestPoint is HEX(ST_SRID(POINT(-73.9857, 40.7484), 4326)) from
+// MySQL 8.4: a little-endian SRID followed by WKB.
+var mysqlCDCTestPoint = []byte{
+	0xe6, 0x10, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00,
+	0xb3, 0xea, 0x73, 0xb5, 0x15, 0x7f, 0x52, 0xc0,
+	0xc7, 0x29, 0x3a, 0x92, 0xcb, 0x5f, 0x44, 0x40,
+}
+
+func TestDecodeMySQLCDCBinlogValueEnumSetBitSpatial(t *testing.T) {
+	enumCol := schema.Column{Name: "status", DataType: schema.TypeString, EnumValues: []string{"", "draft", "it's"}}
+	setCol := schema.Column{Name: "tags", DataType: schema.TypeString, SetValues: []string{"red", "green", "blue"}}
+	wideSet := make([]string, 64)
+	for i := range wideSet {
+		wideSet[i] = fmt.Sprintf("m%d", i)
+	}
+	cases := []struct {
+		name  string
+		value interface{}
+		col   schema.Column
+		want  interface{}
+	}{
+		{"enum invalid-value index", int64(0), enumCol, ""},
+		{"enum declared empty member", int64(1), enumCol, ""},
+		{"enum label", int64(3), enumCol, "it's"},
+		{"enum null", nil, enumCol, nil},
+		{"set empty", int64(0), setCol, ""},
+		{"set members in declaration order", int64(0b101), setCol, "red,blue"},
+		{"set all members", int64(0b111), setCol, "red,green,blue"},
+		{"set 64th member", int64(-1 << 63), schema.Column{Name: "wide", DataType: schema.TypeString, SetValues: wideSet}, "m63"},
+		{"bit(1)", int64(1), schema.Column{DataType: schema.TypeBinary, Precision: 1}, []byte{1}},
+		{"bit(9)", int64(257), schema.Column{DataType: schema.TypeBinary, Precision: 9}, []byte{1, 1}},
+		{"bit(9) zero keeps width", int64(0), schema.Column{DataType: schema.TypeBinary, Precision: 9}, []byte{0, 0}},
+		{"bit(64) max", int64(-1), schema.Column{DataType: schema.TypeBinary, Precision: 64}, []byte{255, 255, 255, 255, 255, 255, 255, 255}},
+		{"bit(64) high bit", int64(-1 << 63), schema.Column{DataType: schema.TypeBinary, Precision: 64}, []byte{128, 0, 0, 0, 0, 0, 0, 0}},
+		{"blob untouched", []byte{1, 2}, schema.Column{DataType: schema.TypeBinary}, []byte{1, 2}},
+		{"geometry", mysqlCDCTestPoint, schema.Column{Name: "location", DataType: schema.TypeString, Spatial: true}, "POINT(-73.9857 40.7484)"},
+		{"geometry null", nil, schema.Column{Name: "location", DataType: schema.TypeString, Spatial: true}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeMySQLCDCBinlogValue(tc.value, tc.col)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestDecodeMySQLCDCBinlogValueRejectsUndecodableValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		value interface{}
+		col   schema.Column
+		want  string
+	}{
+		{"enum index past declared members", int64(3), schema.Column{Name: "status", DataType: schema.TypeString, EnumValues: []string{"a", "b"}}, "outside its 2 declared members"},
+		{"set bit past declared members", int64(0b100), schema.Column{Name: "tags", DataType: schema.TypeString, SetValues: []string{"a", "b"}}, "beyond its 2 declared members"},
+		{"member number without declared members", int64(1), schema.Column{Name: "status", DataType: schema.TypeString}, "declared members could not be read"},
+		{"bit without width", int64(1), schema.Column{Name: "flags", DataType: schema.TypeBinary}, "bit width 0"},
+		{"malformed geometry", []byte{1, 2, 3}, schema.Column{Name: "location", DataType: schema.TypeString, Spatial: true}, "column location"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := decodeMySQLCDCBinlogValue(tc.value, tc.col)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestMySQLRowsEventToChangesDecodesEnumSetBitSpatial(t *testing.T) {
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "status", DataType: schema.TypeString, EnumValues: []string{"draft", "live"}},
+			{Name: "tags", DataType: schema.TypeString, SetValues: []string{"red", "blue"}},
+			{Name: "flags", DataType: schema.TypeBinary, Precision: 9},
+			{Name: "location", DataType: schema.TypeString, Spatial: true, Nullable: true},
+		},
+		PrimaryKeys: []string{"status", "tags", "flags"},
+	})
+	pos := gomysql.Position{Name: "mysql-bin.000001", Pos: 500}
+
+	changes, err := mysqlRowsEventToChanges(replication.EnumRowsEventTypeUpdate, [][]interface{}{
+		{int64(1), int64(0b01), int64(256), mysqlCDCTestPoint},
+		{int64(2), int64(0b11), int64(511), nil},
+	}, tableSchema, tableSchema, pos)
+	require.NoError(t, err)
+	require.Len(t, changes, 2, "a primary-key change must tombstone the decoded old key")
+	assert.True(t, changes[0].deleted)
+	assert.Equal(t, []interface{}{"draft", "red", []byte{1, 0}, "POINT(-73.9857 40.7484)"}, changes[0].values)
+	assert.False(t, changes[1].deleted)
+	assert.Equal(t, []interface{}{"live", "red,blue", []byte{1, 255}, nil}, changes[1].values)
+}
+
+func TestRowsToMySQLCDCSnapshotBatchesConvertsGeometryToWKT(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"id", "location"}).
+		AddRow(int64(1), mysqlCDCTestPoint).
+		AddRow(int64(2), nil))
+	rows, err := db.Query("SELECT")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	tableSchema := addMySQLCDCColumns(&schema.TableSchema{
+		Name: "items",
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "location", DataType: schema.TypeString, Spatial: true, Nullable: true},
+		},
+		PrimaryKeys: []string{"id"},
+	})
+	results := make(chan source.RecordBatchResult, 1)
+	require.NoError(t, rowsToMySQLCDCSnapshotBatches(rows, tableSchema, source.ReadOptions{}, gomysql.Position{Name: "mysql-bin.000001", Pos: 100}, results, "items"))
+
+	result := <-results
+	require.NoError(t, result.Err)
+	defer result.Batch.Release()
+	locations := result.Batch.Column(1).(*array.String)
+	require.Equal(t, 2, locations.Len())
+	assert.Equal(t, "POINT(-73.9857 40.7484)", locations.Value(0))
+	assert.True(t, locations.IsNull(1))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMySQLCDCGetTableAcceptsEnumSetBitSpatialColumns(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+COLUMN_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
+		WithArgs("app", "address").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"COLUMN_NAME", "COLUMN_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH",
+		}).
+			AddRow("id", "bigint", "NO", nil, nil, nil).
+			AddRow("kind", "enum('home','work')", "YES", nil, nil, int64(4)).
+			AddRow("tags", "set('a','b')", "YES", nil, nil, int64(3)).
+			AddRow("flags", "bit(3)", "YES", int64(3), nil, nil).
+			AddRow("coordinates", "point", "YES", nil, nil, nil))
+	mock.ExpectQuery("INFORMATION_SCHEMA\\.KEY_COLUMN_USAGE").
+		WithArgs("app", "address").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("id"))
+
+	src := &MySQLCDCSource{db: db, database: "app"}
+	table, err := src.GetTable(t.Context(), source.TableRequest{Name: "address"})
+	require.NoError(t, err)
+	tableSchema, err := table.GetSchema(t.Context())
+	require.NoError(t, err)
+	columns := removeMySQLCDCColumns(tableSchema).Columns
+	require.Len(t, columns, 5)
+	assert.Equal(t, []string{"home", "work"}, columns[1].EnumValues)
+	assert.Equal(t, []string{"a", "b"}, columns[2].SetValues)
+	assert.Equal(t, 3, columns[3].Precision)
+	assert.True(t, columns[4].Spatial)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestConvertMySQLCDCValueNormalizesZeroDates(t *testing.T) {

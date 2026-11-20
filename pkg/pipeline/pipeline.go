@@ -19,6 +19,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/display"
 	"github.com/bruin-data/ingestr/internal/metrics"
+	"github.com/bruin-data/ingestr/internal/oracleutil"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/internal/uri"
 	"github.com/bruin-data/ingestr/pkg/databuffer"
@@ -145,6 +146,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
+	if wr, ok := src.(source.WALRetentionReporter); ok {
+		metrics.SetWALRetentionReporter(wr)
+		defer metrics.SetWALRetentionReporter(nil)
+	}
+
 	if usesStreamingExecutor(p.config) {
 		ss, ok := src.(source.StreamingSource)
 		if !ok || !ss.SupportsStreaming() {
@@ -174,6 +180,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}()
 	if p.config.CDCChunkedSnapshot {
 		if err := strategy.ValidateCDCChunkedSnapshotDestination(dest); err != nil {
+			return err
+		}
+	}
+	if p.config.CDCSnapshotSpool {
+		if err := strategy.ValidateCDCSnapshotSpoolDestination(dest); err != nil {
 			return err
 		}
 	}
@@ -835,7 +846,7 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	resolvedConfig.RunID = runID
 	resolvedConfig.ReverseETLDestination = destination.IsReverseETL(dest)
 	resolvedConfig.WriteNulls = config.ResolveWriteNulls(resolvedConfig.ReverseETLDestination, resolvedConfig.WriteNullsSet, resolvedConfig.WriteNulls)
-	resolvedConfig.IntervalStart, resolvedConfig.IntervalEnd = resolveInterval(&resolvedConfig, table)
+	resolvedConfig.IntervalStart, resolvedConfig.IntervalEnd = resolveInterval(&resolvedConfig, table, fullSchema)
 
 	applyPartitionNaming(&resolvedConfig, originalSourceSchema, tableSchema, namingConv)
 	if err := validatePartitionBy(&resolvedConfig, p.config.PartitionBy, tableSchema); err != nil {
@@ -1570,6 +1581,11 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 			return err
 		}
 	}
+	if p.config.CDCSnapshotSpool {
+		if err := strategy.ValidateCDCSnapshotSpoolDestination(p.dest); err != nil {
+			return err
+		}
+	}
 	if err := p.validateCDCChunkedSnapshotSource(ctx, src, tables); err != nil {
 		return err
 	}
@@ -1605,7 +1621,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	config.Debug("[PIPELINE] Multi-table mode: %d tables", len(tables))
 
 	namer, _ := p.dest.(destination.MultiTableNamer)
-	tableDestNames, err := multiTableDestinationNames(tables, p.dest.GetScheme(), namer, p.config.CDCTableNaming)
+	tableDestNames, err := multiTableDestinationNames(tables, destination.IdentifierLimit(p.dest), namer, p.config.CDCTableNaming)
 	if err != nil {
 		return err
 	}
@@ -1746,7 +1762,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 				cdcResumeLSNs[table.Name] = resumeLSN
 				config.Debug("[PIPELINE] Found destination-managed CDC state for %s: %s", table.Name, resumeLSN)
 			} else {
-				if p.config.Stream && resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
+				if (p.config.Stream || destination.SupportsDirectCDCSnapshot(p.dest)) && resolvedStrategy == config.StrategyMerge && len(table.PrimaryKeys) > 0 {
 					resume, ok, err := cdcStateManager.SnapshotResume(ctx, table.Name)
 					if err != nil {
 						return err
@@ -1962,7 +1978,7 @@ func (p *Pipeline) runMultiTable(ctx context.Context, src source.MultiTableSourc
 	return nil
 }
 
-func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, namer destination.MultiTableNamer, naming config.TableNaming) (map[string]string, error) {
+func multiTableDestinationNames(tables []source.SourceTableInfo, maxLen int, namer destination.MultiTableNamer, naming config.TableNaming) (map[string]string, error) {
 	destinations := make(map[string]string, len(tables))
 	sourcesByDestination := make(map[string]string, len(tables))
 	for _, table := range tables {
@@ -1972,7 +1988,7 @@ func multiTableDestinationNames(tables []source.SourceTableInfo, scheme string, 
 		// looks like a catalog.schema.table reference; --cdc-table-naming=table drops
 		// the qualifier instead. Destinations with their own naming rules (e.g.
 		// BigQuery) override via MultiTableNamer.
-		destName := destination.ResolveMultiTableName(scheme, namer, table.DestSchema, table.Name, naming)
+		destName := destination.ResolveMultiTableName(maxLen, namer, table.DestSchema, table.Name, naming)
 		if existingSource, exists := sourcesByDestination[destName]; exists && existingSource != table.Name {
 			return nil, fmt.Errorf("multi-table destination collision: source tables %q and %q both map to destination table %q", existingSource, table.Name, destName)
 		}
@@ -2542,7 +2558,7 @@ func (p *Pipeline) normalizeMultiTableInfo(ctx context.Context, table source.Sou
 		applyColumnMappingToSchema(normalized.Schema, namingMapping)
 	}
 
-	maxLen := destination.MaxIdentifierLength(p.dest.GetScheme())
+	maxLen := destination.IdentifierLimit(p.dest)
 	shorteningMapping := destination.ShortenColumnNames(normalized.Schema.Columns, maxLen, namingMapping)
 	for sourceName := range shorteningMapping {
 		if destination.IsCDCMetaColumn(sourceName) {
@@ -2665,7 +2681,7 @@ func (p *Pipeline) applyNamingConvention(sourceSchema *schema.TableSchema, namin
 }
 
 func (p *Pipeline) shortenLongIdentifiers(sourceSchema *schema.TableSchema) {
-	maxLen := destination.MaxIdentifierLength(p.dest.GetScheme())
+	maxLen := destination.IdentifierLimit(p.dest)
 	mapping := destination.ShortenColumnNames(sourceSchema.Columns, maxLen, p.namingMapping)
 	if len(mapping) == 0 {
 		return
@@ -2860,7 +2876,7 @@ func shouldWarnCDCStrategy(cfg *config.IngestConfig, resolvedStrategy config.Inc
 }
 
 func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.SourceTable) config.IncrementalStrategy {
-	if cfg.CDCChunkedSnapshot {
+	if cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool {
 		return config.StrategyMerge
 	}
 	var s config.IncrementalStrategy
@@ -2888,14 +2904,37 @@ func resolveStrategy(cfg *config.IngestConfig, src source.Source, table source.S
 	return s
 }
 
-func resolveInterval(cfg *config.IngestConfig, table source.SourceTable) (*time.Time, *time.Time) {
+// resolveInterval reads the incremental key's type from keySchema, which must have --columns overrides applied.
+func resolveInterval(cfg *config.IngestConfig, table source.SourceTable, keySchema *schema.TableSchema) (*time.Time, *time.Time) {
 	if it, ok := table.(source.IntervalIgnoringTable); ok && it.IgnoresInterval() {
 		if cfg.IntervalStart != nil || cfg.IntervalEnd != nil {
 			config.Debug("[PIPELINE] Table %s ignores --interval-start/--interval-end", table.Name())
 		}
 		return nil, nil
 	}
+	if ut, ok := table.(source.IntervalUnfilteredTable); ok && ut.ReadsIgnoreInterval() &&
+		cfg.IncrementalStrategy == config.StrategyDeleteInsert && !temporalOrUnknownKey(keySchema, cfg.IncrementalKey) {
+		// The interval bounds are timestamps; a non-temporal key deletes the staged data's range instead.
+		config.Debug("[PIPELINE] Ignoring --interval-start/--interval-end for non-temporal key %s", cfg.IncrementalKey)
+		return nil, nil
+	}
 	return cfg.IntervalStart, cfg.IntervalEnd
+}
+
+func temporalOrUnknownKey(s *schema.TableSchema, key string) bool {
+	if s == nil {
+		return true
+	}
+	for _, col := range s.Columns {
+		if strings.EqualFold(col.Name, key) {
+			switch col.DataType {
+			case schema.TypeDate, schema.TypeTimestamp, schema.TypeTimestampTZ, schema.TypeUnknown:
+				return true
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func resolveIncrementalKey(cfg *config.IngestConfig, src source.Source, table source.SourceTable) string {
@@ -3224,6 +3263,9 @@ func cdcTableNamingIdentity(cfg *config.IngestConfig) string {
 }
 
 func canonicalCDCStateURI(rawURI string) string {
+	if lifted, err := oracleutil.LiftInlineDescriptor(rawURI); err == nil {
+		rawURI = lifted
+	}
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
 		return rawURI
@@ -3462,7 +3504,7 @@ func validateReverseETLOverrideColumns(columnsSpec string, sourceSchema *schema.
 }
 
 func validateManagedChangeConfig(cfg *config.IngestConfig) error {
-	if cfg.CDCChunkedSnapshot {
+	if cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool {
 		if err := cfg.Validate(); err != nil {
 			return err
 		}

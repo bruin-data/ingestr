@@ -133,6 +133,7 @@ type CDCStateManager struct {
 	lateTargetRaw        map[string]string
 	snapshotEpochs       map[string]uint64
 	progressSequence     int64
+	progressGeneration   int64
 	entries              []destination.CDCStateEntry
 	generations          []int64
 	generationRuns       map[int64]map[string]struct{}
@@ -257,10 +258,27 @@ func (m *CDCStateManager) ResumeSnapshot(ctx context.Context, sourceTable, destT
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if !m.started || m.generation == 0 {
+		return fmt.Errorf("CDC state run has not started")
+	}
+	entry, progress, ok := m.latestSnapshotProgress(sourceTable)
+	_, valid := decodeCDCSnapshotProgress(entry)
+	if !ok || !valid || entry.Status != cdcStateStatusInProgress || entry.DestinationTable != destTable || progress.Destination == "" {
+		return fmt.Errorf("CDC snapshot of %s has no resumable progress for destination table %q", sourceTable, destTable)
+	}
+	raw, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || current != progress.Destination {
+		return fmt.Errorf("CDC destination table %q changed before resuming its snapshot", destTable)
+	}
+	m.boundDestinations[sourceTable] = progress.Destination
+	m.boundRawDestinations[sourceTable] = raw
 	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, false)
 }
 
-// InvalidateBatchSnapshot prevents resume while a fully staged replacement is
+// InvalidateBatchSnapshot prevents resume while a batch replacement is
 // applied. Keep the accepted snapshot and target binding so a successful WAL
 // truncate can be certified by a checkpoint-only commit token.
 func (m *CDCStateManager) InvalidateBatchSnapshot(ctx context.Context, sourceTable, destTable string) error {
@@ -291,7 +309,11 @@ func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, d
 	position := encodeCDCStatePositionWithSchema(zeroCDCPosition, incarnation, m.currentSchemas[sourceTable], epoch)
 	events := []cdcStateWriteEvent{m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, position)}
 	if resetProgress {
-		if reset, ok := m.snapshotProgressReset(sourceTable, destTable); ok {
+		reset, ok, err := m.snapshotProgressReset(sourceTable, destTable)
+		if err != nil {
+			return err
+		}
+		if ok {
 			events = append(events, reset)
 		}
 	}
@@ -307,8 +329,10 @@ func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, d
 	delete(m.knownIncarnations, sourceTable)
 	delete(m.knownSchemas, sourceTable)
 	delete(m.knownDestinations, sourceTable)
-	delete(m.boundDestinations, sourceTable)
-	delete(m.boundRawDestinations, sourceTable)
+	if resetProgress {
+		delete(m.boundDestinations, sourceTable)
+		delete(m.boundRawDestinations, sourceTable)
+	}
 	return nil
 }
 
@@ -1314,7 +1338,11 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 		position = encodeCDCStatePositionWithSchema(position, incarnation, schemaFingerprint, m.snapshotEpochs[sourceTable])
 		events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, destination.CDCStateStatusComplete, position))
 		if _, completed := token.SnapshotPositions[sourceTable]; completed {
-			if reset, ok := m.snapshotProgressReset(sourceTable, destTable); ok {
+			reset, ok, err := m.snapshotProgressReset(sourceTable, destTable)
+			if err != nil {
+				return err
+			}
+			if ok {
 				events = append(events, reset)
 			}
 		}
@@ -1323,7 +1351,11 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 			events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindDestination, m.generation, destination.CDCStateStatusComplete, destinationPosition))
 		}
 	}
-	events = append(events, m.snapshotProgressEvents(token)...)
+	progressEvents, err := m.snapshotProgressEvents(token)
+	if err != nil {
+		return err
+	}
+	events = append(events, progressEvents...)
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
 	}

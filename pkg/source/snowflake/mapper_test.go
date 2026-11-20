@@ -61,3 +61,16 @@ func TestMapSnowflakeArrowTypeNames(t *testing.T) {
 		})
 	}
 }
+
+func TestMapSnowflakeStructuredTypesAsJSON(t *testing.T) {
+	for _, sfType := range []string{
+		"OBJECT(K VARCHAR(16777216), N NUMBER(38,0))",
+		"ARRAY(NUMBER(38,0))",
+		"MAP(VARCHAR(16777216), NUMBER(10,2))",
+		"VARIANT",
+	} {
+		if got, _, _, _ := MapSnowflakeToDataType(sfType); got != schema.TypeJSON {
+			t.Errorf("MapSnowflakeToDataType(%q) = %v, want %v", sfType, got, schema.TypeJSON)
+		}
+	}
+}

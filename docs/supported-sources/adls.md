@@ -4,6 +4,8 @@
 
 `ingestr` supports Azure Data Lake Storage Gen2 as both a source and destination.
 
+To read through the Blob endpoint instead, for example when the account has no hierarchical namespace or only a blob private endpoint, use [Azure Blob Storage](/supported-sources/azure-blob.md).
+
 ## URI format
 
 The URI for connecting to Azure Data Lake Storage Gen2 is structured as follows:

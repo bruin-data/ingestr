@@ -21,7 +21,10 @@ func (p *Pipeline) resolveCDCSnapshotMode(ctx context.Context, manager *strategy
 		return err
 	}
 	p.config.CDCSnapshotMode = mode
-	return p.config.ValidateCDCSnapshotMode()
+	if err := p.config.ValidateCDCSnapshotMode(); err != nil {
+		return err
+	}
+	return strategy.ValidateCDCSnapshotSpoolResume(ctx, p.config, manager)
 }
 
 // prepareCDCNoSnapshot validates all targets before any are adopted or mutated.

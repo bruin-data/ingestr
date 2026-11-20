@@ -29,6 +29,9 @@ type Dialect struct {
 	location  string
 	credPath  string // Path to credentials file
 	credJSON  string // JSON credentials string
+	readAPI   ReadAPI
+	// extraClientOptions lets tests point the REST client at a fake server.
+	extraClientOptions []option.ClientOption
 }
 
 // NewDialect creates a new BigQuery dialect.
@@ -108,6 +111,12 @@ func (d *Dialect) BuildConnectionString(uri string) (string, error) {
 	}
 
 	query := u.Query()
+
+	readAPI, err := ParseReadAPI(query.Get("read_api"))
+	if err != nil {
+		return "", err
+	}
+	d.readAPI = readAPI
 
 	// Handle credentials - BigQuery ADBC driver supports direct file path and JSON string
 	if credPath := query.Get("credentials_path"); credPath != "" {
@@ -254,22 +263,11 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 
 	project, dataset, tableName := d.ParseTableNameWithCatalog(table)
 
-	// Create BigQuery client with appropriate credentials
-	var client *bigquery.Client
-	var err error
-	var options []option.ClientOption
-
-	if d.credPath != "" {
-		options = append(options, option.WithAuthCredentialsFile(option.ServiceAccount, d.credPath))
-	} else if d.credJSON != "" {
-		options = append(options, option.WithAuthCredentialsJSON(option.ServiceAccount, []byte(d.credJSON)))
-	}
-
 	// The client uses the connection (billing) project; the table is read from
 	// its own project, which may differ for a three-part name.
-	client, err = bigquery.NewClient(ctx, d.projectID, options...)
+	client, err := d.newClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create BigQuery client: %w", err)
+		return nil, err
 	}
 	defer func() { _ = client.Close() }()
 
@@ -280,6 +278,29 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 		return nil, fmt.Errorf("failed to get table metadata: %w", err)
 	}
 
+	return d.tableSchemaFromMetadata(dataset, tableName, metadata), nil
+}
+
+func (d *Dialect) clientOptions() []option.ClientOption {
+	var options []option.ClientOption
+	if d.credPath != "" {
+		options = append(options, option.WithAuthCredentialsFile(option.ServiceAccount, d.credPath))
+	} else if d.credJSON != "" {
+		options = append(options, option.WithAuthCredentialsJSON(option.ServiceAccount, []byte(d.credJSON)))
+	}
+	return append(options, d.extraClientOptions...)
+}
+
+// newClient creates a BigQuery REST client billed to the connection project.
+func (d *Dialect) newClient(ctx context.Context) (*bigquery.Client, error) {
+	client, err := bigquery.NewClient(ctx, d.projectID, d.clientOptions()...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create BigQuery client: %w", err)
+	}
+	return client, nil
+}
+
+func (d *Dialect) tableSchemaFromMetadata(dataset, tableName string, metadata *bigquery.TableMetadata) *schema.TableSchema {
 	// Convert BigQuery schema to our schema format
 	columns := make([]schema.Column, 0, len(metadata.Schema))
 	for _, field := range metadata.Schema {
@@ -318,7 +339,7 @@ func (d *Dialect) GetSchema(ctx context.Context, table string) (*schema.TableSch
 		Schema:      dataset,
 		Columns:     columns,
 		PrimaryKeys: primaryKeys,
-	}, nil
+	}
 }
 
 // mapBigQueryFieldToDataType maps a BigQuery field schema to our internal data types.

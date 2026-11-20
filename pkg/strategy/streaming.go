@@ -46,8 +46,8 @@ type StreamingOptions struct {
 // StreamingExecutor runs continuous ingestion: it buffers record batches from
 // the source and flushes them to the destination whenever FlushInterval
 // elapses or FlushRecords rows are buffered, whichever comes first. Merge mode
-// reuses one staging table per destination table across cycles; append mode
-// writes directly. After each successful flush the source's CommitStream is
+// reuses staging tables for changes and can load complete snapshots directly
+// when the destination supports it. After each successful flush CommitStream is
 // invoked so it can confirm the durable position (LSN, delivery tag, offsets).
 type StreamingExecutor struct {
 	opts StreamingOptions
@@ -62,14 +62,22 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	if err != nil {
 		return err
 	}
-	if chunked != nil {
+	spool, err := e.snapshotSpoolOptions(job.Config, job.Destination)
+	if err != nil {
+		return err
+	}
+	if chunked != nil || spool != nil {
 		tableSchema, keys := job.SourceSchema, job.Config.PrimaryKeys
 		if tableSchema == nil {
 			tableSchema = job.Schema
 		} else {
 			keys = tableSchema.PrimaryKeys
 		}
-		if err := ValidateCDCChunkedSnapshotTable(job.Config.SourceTable, tableSchema, keys); err != nil {
+		validateTable := ValidateCDCChunkedSnapshotTable
+		if spool != nil {
+			validateTable = ValidateCDCSnapshotSpoolTable
+		}
+		if err := validateTable(job.Config.SourceTable, tableSchema, keys); err != nil {
 			return err
 		}
 	}
@@ -98,7 +106,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
 	records, err := job.GetRecords(readCtx, source.ReadOptions{
-		IncrementalKey:             job.Config.IncrementalKey,
+		IncrementalKey:             sourceIncrementalKeyForRead(job),
 		IntervalStart:              job.Config.IntervalStart,
 		PageSize:                   job.Config.PageSize,
 		MaxBatchBytes:              job.Config.MaxBatchBytes,
@@ -113,6 +121,7 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 		CDCManagedState:            e.opts.StateManager != nil,
 		CDCSnapshotReplace:         st.isCDC && supportsCDCSnapshotReplace(job.Destination),
 		CDCChunkedSnapshot:         chunked,
+		CDCSnapshotSpool:           spool,
 		FullRefresh:                job.Config.FullRefresh,
 		Streaming:                  true,
 		FlushInterval:              job.Config.FlushInterval,
@@ -149,9 +158,17 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 	if err != nil {
 		return err
 	}
-	if chunked != nil {
+	spool, err := e.snapshotSpoolOptions(job.Config, job.Destination)
+	if err != nil {
+		return err
+	}
+	if chunked != nil || spool != nil {
+		validateTable := ValidateCDCChunkedSnapshotTable
+		if spool != nil {
+			validateTable = ValidateCDCSnapshotSpoolTable
+		}
 		for _, table := range job.Tables {
-			if err := ValidateCDCChunkedSnapshotTable(table.Name, table.Schema, table.PrimaryKeys); err != nil {
+			if err := validateTable(table.Name, table.Schema, table.PrimaryKeys); err != nil {
 				return err
 			}
 		}
@@ -210,6 +227,7 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			CDCManagedState:     e.opts.StateManager != nil,
 			CDCSnapshotReplace:  (anyTableHasCDC || e.opts.StateManager != nil) && supportsCDCSnapshotReplace(job.Destination),
 			CDCChunkedSnapshot:  chunked,
+			CDCSnapshotSpool:    spool,
 			FullRefresh:         job.Config.FullRefresh,
 			Streaming:           true,
 			FlushInterval:       job.Config.FlushInterval,
@@ -349,10 +367,14 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 		return err
 	}
 	st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
-	output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 	if e.opts.StateManager != nil {
 		dropStaleStagingTables(ctx, dest, st.destTable, st.stagingTable)
 	}
+	if canDirectStreamSnapshot(dest, cfg, st) {
+		st.stagingDeferred = true
+		return nil
+	}
+	output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 	if err := dest.PrepareTable(ctx, destination.PrepareOptions{
 		Table:        st.stagingTable,
 		Schema:       st.schema,
@@ -373,7 +395,7 @@ func (e *StreamingExecutor) prepareLateStagingTable(ctx context.Context, dest de
 // discovered mid-stream, matching the pipeline's upfront naming.
 func multiTableDestName(dest destination.Destination, ti source.SourceTableInfo, naming config.TableNaming) string {
 	namer, _ := dest.(destination.MultiTableNamer)
-	return destination.ResolveMultiTableName(dest.GetScheme(), namer, ti.DestSchema, ti.Name, naming)
+	return destination.ResolveMultiTableName(destination.IdentifierLimit(dest), namer, ti.DestSchema, ti.Name, naming)
 }
 
 // withLoadTimestampColumn mirrors the pipeline's schema decoration for tables
@@ -430,10 +452,17 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 			return prepareAppendOnlyCDCTable(ctx, dest, st.destTable, st.schema)
 		}
 		st.stagingTable = managedStagingTableName(dest, st.destTable, "stream", cfg.StagingDataset, cfg.RunID)
-		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 		if e.opts.StateManager != nil {
 			dropStaleStagingTables(ctx, dest, st.destTable, st.stagingTable)
 		}
+		if canDirectStreamSnapshot(dest, cfg, st) {
+			st.stagingDeferred = true
+			return prepareMergeTarget(ctx, dest, mergeTableParams{
+				DestTable: st.destTable, Schema: st.schema, PrimaryKeys: st.primaryKeys,
+				PartitionBy: st.partitionBy, ClusterBy: st.clusterBy, IsCDC: st.isCDC,
+			})
+		}
+		output.Statusf("[STREAM] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), st.stagingTable)
 		return prepareMergeTables(ctx, dest, mergeTableParams{
 			DestTable:    st.destTable,
 			StagingTable: st.stagingTable,
@@ -476,10 +505,12 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 }
 
 // streamTableState tracks one destination table's buffered batches across
-// flush cycles. stagingTable is empty in append mode.
+// flush cycles. stagingTable is empty in append mode; stagingDeferred means
+// its name is reserved but the table is not created until a staged write.
 type streamTableState struct {
 	destTable            string
 	stagingTable         string
+	stagingDeferred      bool
 	schema               *schema.TableSchema
 	primaryKeys          []string
 	incrementalKey       string
@@ -492,6 +523,8 @@ type streamTableState struct {
 
 	pending                     []arrow.RecordBatch
 	pendingRows                 int64
+	pendingSnapshot             bool
+	snapshotUseStaging          bool
 	snapshotBoundaryInvalidated bool
 	softReplace                 *pendingSoftReplace
 	snapshotRows                int64
@@ -557,47 +590,31 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 	ticker := time.NewTicker(l.opts.FlushInterval)
 	defer ticker.Stop()
 
+	var pending *source.RecordBatchResult
+	defer func() { releaseCDCSnapshotBatchResult(pending) }()
 	for {
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return l.abortLeaseLoss(records, err)
 		}
-		select {
-		case res, ok := <-records:
-			if !ok {
-				// Source ended on its own (e.g. its context was cancelled and
-				// it closed the channel before we observed ctx.Done).
-				return l.finalFlush(ctx)
-			}
-			if res.Err != nil {
-				if res.Batch != nil {
-					res.Batch.Release()
+		var res source.RecordBatchResult
+		if pending != nil {
+			res, pending = *pending, nil
+		} else {
+			select {
+			case next, ok := <-records:
+				if !ok {
+					// Source ended on its own (e.g. its context was cancelled and
+					// it closed the channel before we observed ctx.Done).
+					return l.finalFlush(ctx)
 				}
-				if ctx.Err() != nil {
-					return l.shutdown(ctx, records)
-				}
-				return fmt.Errorf("source error: %w", res.Err)
-			}
-			if err := connectorLeaseLoss(ctx); err != nil {
-				if res.Batch != nil {
-					res.Batch.Release()
-				}
-				return l.abortLeaseLoss(records, err)
-			}
-			var processErr error
-			if res.CDCSnapshotChunk != nil {
-				processErr = l.loadSnapshotChunk(ctx, records, res)
-			} else {
-				processErr = l.processResult(ctx, res)
-			}
-			if processErr != nil {
-				if loss := connectorLeaseLoss(ctx); loss != nil {
-					return l.abortLeaseLoss(records, loss)
-				}
-				return processErr
-			}
-			if l.buffered >= l.opts.FlushRecords {
+				res = next
+
+			case <-ticker.C:
 				if err := connectorLeaseLoss(ctx); err != nil {
 					return l.abortLeaseLoss(records, err)
+				}
+				if l.buffered == 0 && !l.tokenDirty {
+					continue
 				}
 				if err := l.flush(ctx); err != nil {
 					if loss := connectorLeaseLoss(ctx); loss != nil {
@@ -605,15 +622,44 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 					}
 					return err
 				}
-				ticker.Reset(l.opts.FlushInterval)
-			}
+				continue
 
-		case <-ticker.C:
+			case <-ctx.Done():
+				return l.shutdown(ctx, records)
+			}
+		}
+		if res.Err != nil {
+			if res.Batch != nil {
+				res.Batch.Release()
+			}
+			if ctx.Err() != nil {
+				return l.shutdown(ctx, records)
+			}
+			return fmt.Errorf("source error: %w", res.Err)
+		}
+		if err := connectorLeaseLoss(ctx); err != nil {
+			if res.Batch != nil {
+				res.Batch.Release()
+			}
+			return l.abortLeaseLoss(records, err)
+		}
+		var processErr error
+		if res.CDCSnapshotChunk != nil {
+			processErr = l.loadSnapshotChunk(ctx, records, res)
+		} else if l.canLoadContinuousSnapshot(res) {
+			pending, processErr = l.loadContinuousSnapshot(ctx, records, res)
+		} else {
+			processErr = l.processResult(ctx, res)
+		}
+		if processErr != nil {
+			if loss := connectorLeaseLoss(ctx); loss != nil {
+				return l.abortLeaseLoss(records, loss)
+			}
+			return processErr
+		}
+		if l.buffered >= l.opts.FlushRecords {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return l.abortLeaseLoss(records, err)
-			}
-			if l.buffered == 0 && !l.tokenDirty {
-				continue
 			}
 			if err := l.flush(ctx); err != nil {
 				if loss := connectorLeaseLoss(ctx); loss != nil {
@@ -621,9 +667,7 @@ func (l *flushLoop) run(ctx context.Context, records <-chan source.RecordBatchRe
 				}
 				return err
 			}
-
-		case <-ctx.Done():
-			return l.shutdown(ctx, records)
+			ticker.Reset(l.opts.FlushInterval)
 		}
 	}
 }
@@ -706,6 +750,14 @@ func (l *flushLoop) tableState(sourceTable string) (*streamTableState, bool) {
 
 func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResult) error {
 	if !res.Truncate {
+		if res.Batch != nil {
+			if st, ok := l.tableState(res.TableName); ok && st.pendingRows > 0 && st.pendingSnapshot != res.CDCSnapshot {
+				if err := l.flush(ctx); err != nil {
+					res.Batch.Release()
+					return fmt.Errorf("failed to flush at snapshot boundary: %w", err)
+				}
+			}
+		}
 		l.buffer(res)
 		return nil
 	}
@@ -722,6 +774,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 	if !ok {
 		return fmt.Errorf("source requested truncate for unknown table %q", res.TableName)
 	}
+	st.snapshotUseStaging = false
 	if res.CDCSnapshotResumed {
 		return l.resumeSnapshotReplacement(ctx, res, st)
 	}
@@ -808,7 +861,15 @@ func (l *flushLoop) resumeSnapshotReplacement(ctx context.Context, res source.Re
 	if l.opts.StateManager == nil || stateTable == "" || !st.isCDC || st.stagingTable == "" || len(st.primaryKeys) == 0 {
 		return fmt.Errorf("source resumed the snapshot of %q, which needs a keyed CDC merge with destination-managed state", res.TableName)
 	}
-	if err := l.opts.StateManager.ResumeSnapshot(ctx, stateTable, st.destTable, st.incarnation); err != nil {
+	var err error
+	if l.cfg != nil && l.cfg.CDCChunkedSnapshot {
+		err = l.opts.StateManager.ResumeChunkedSnapshot(ctx, stateTable, st.destTable, st.incarnation, res.CDCChunkedSnapshotIdentity)
+	} else if l.cfg != nil && l.cfg.CDCSnapshotSpool {
+		err = l.opts.StateManager.ResumeSpoolSnapshot(ctx, stateTable, st.destTable, st.incarnation, res.CDCSnapshotSpoolIdentity)
+	} else {
+		err = l.opts.StateManager.ResumeSnapshot(ctx, stateTable, st.destTable, st.incarnation)
+	}
+	if err != nil {
 		return fmt.Errorf("failed to resume CDC snapshot state for %s: %w", stateTable, err)
 	}
 	if err := l.opts.StateManager.BindDestinationIncarnation(ctx, stateTable, st.destTable); err != nil {
@@ -881,7 +942,7 @@ func canonicalPostgresRowLSN(position string) (pglogrepl.LSN, bool) {
 
 // retireSoftReplacedRows completes in-place snapshot replacements whose
 // completion token is about to be persisted. It must run after the snapshot
-// rows are merged and before the state certifies the snapshot, so a failure
+// rows are visible and before the state certifies the snapshot, so a failure
 // leaves the table to be snapshotted again.
 func (l *flushLoop) retireSoftReplacedRows(ctx context.Context) error {
 	if l.opts.StateManager == nil || !l.tokenDirty {
@@ -980,6 +1041,7 @@ func (l *flushLoop) ensureTable(ctx context.Context, ti source.SourceTableInfo) 
 // first, then the destination table is evolved and the staging table
 // recreated so the new-shape batches following the announcement land cleanly.
 func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTableInfo, st *streamTableState) error {
+	st.snapshotUseStaging = false
 	if l.opts.StateManager != nil {
 		if err := l.opts.StateManager.RegisterTableState(ctx, ti.Name, st.destTable, ti.Incarnation, ti.SchemaFingerprint); err != nil {
 			return fmt.Errorf("failed to register CDC state for table %s: %w", ti.Name, err)
@@ -1042,7 +1104,7 @@ func (l *flushLoop) refreshTableSchema(ctx context.Context, ti source.SourceTabl
 	if len(ti.PrimaryKeys) > 0 {
 		st.primaryKeys = ti.PrimaryKeys
 	}
-	if st.stagingTable != "" {
+	if st.stagingTable != "" && !st.stagingDeferred {
 		if err := connectorLeaseLoss(ctx); err != nil {
 			return err
 		}
@@ -1115,7 +1177,7 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 				if l.pendingState.SnapshotProgress == nil {
 					l.pendingState.SnapshotProgress = make(map[string]source.CDCSnapshotProgress)
 				}
-				l.pendingState.SnapshotProgress[table] = progress
+				l.pendingState.SnapshotProgress[table] = progress.Clone()
 			}
 			if token.Position != "" && len(l.pendingTruncates) > 0 {
 				if l.pendingState.SnapshotPositions == nil {
@@ -1145,16 +1207,20 @@ func (l *flushLoop) buffer(res source.RecordBatchResult) {
 		res.Batch.Release()
 		return
 	}
+	if st.pendingRows == 0 {
+		st.pendingSnapshot = res.CDCSnapshot
+	} else {
+		st.pendingSnapshot = st.pendingSnapshot && res.CDCSnapshot
+	}
 	st.pending = append(st.pending, res.Batch)
 	st.pendingRows += res.Batch.NumRows()
 	l.buffered += res.Batch.NumRows()
 }
 
-// flush writes all buffered batches to the destination (one write+merge cycle
-// per table) and then confirms the durable position with the source. The
-// ordering write → merge → reset staging → commit is what makes delivery
-// at-least-once: a crash before commit re-delivers from the last committed
-// position and the merge is idempotent by primary key.
+// flush publishes all buffered batches before confirming their durable
+// position with the source. Snapshot-capable destinations can load complete
+// images directly; staged writes merge and reset staging before commit.
+// A crash before commit re-delivers from the last committed position.
 //
 // Tables flush concurrently when the destination declares its cross-table
 // cycles independent (destination.ConcurrentFlusher); the position is
@@ -1189,9 +1255,10 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		name string
 		st   *streamTableState
 
-		batches []arrow.RecordBatch
-		rows    int64
-		bytes   uint64
+		batches  []arrow.RecordBatch
+		rows     int64
+		bytes    uint64
+		snapshot bool
 	}
 
 	var work []flushWork
@@ -1199,10 +1266,11 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		if st.pendingRows == 0 {
 			continue
 		}
-		work = append(work, flushWork{name: name, st: st, batches: st.pending, rows: st.pendingRows})
+		work = append(work, flushWork{name: name, st: st, batches: st.pending, rows: st.pendingRows, snapshot: st.pendingSnapshot})
 		l.buffered -= st.pendingRows
 		st.pending = nil
 		st.pendingRows = 0
+		st.pendingSnapshot = false
 	}
 	keylessSnapshots := make(map[string]*streamTableState)
 	if l.opts.StateManager != nil && l.pendingState.Position != "" {
@@ -1236,9 +1304,26 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			LoaderFileSize:   l.cfg.LoaderFileSize,
 			LoaderFileFormat: l.cfg.LoaderFileFormat,
 		}
-		if st.stagingTable != "" {
+		directSnapshot := w.snapshot && st.stagingTable != "" && canDirectStreamSnapshot(l.dest, l.cfg, st)
+		if directSnapshot {
+			var err error
+			if l.opts.StateManager != nil {
+				writeOpts.CDCExpectedIncarnation, err = l.opts.StateManager.BoundDestinationIncarnation(boundSourceTables[w.name])
+			}
+			if err == nil {
+				directSnapshot, err = destination.CanWriteDirectCDCSnapshot(ctx, l.dest, st.destTable, st.schema, writeOpts.CDCExpectedIncarnation)
+			}
+			if err != nil {
+				for _, batch := range w.batches {
+					batch.Release()
+				}
+				return fmt.Errorf("check direct CDC snapshot target %s: %w", st.destTable, err)
+			}
+		}
+		if st.stagingTable != "" && !directSnapshot {
 			writeOpts.Table = st.stagingTable
 			writeOpts.StagingTable = true
+			writeOpts.CDCExpectedIncarnation = ""
 		}
 
 		if err := connectorLeaseLoss(ctx); err != nil {
@@ -1248,6 +1333,16 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			return err
 		}
 		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
+		if directSnapshot {
+			writeOpts.CDCSnapshot = true
+			writeOpts.PrimaryKeys = st.primaryKeys
+			writeOpts.SkipCDCResume = true
+		} else if st.stagingDeferred {
+			if err := l.prepareDeferredStaging(ctx, st); err != nil {
+				drainAndRelease(records)
+				return err
+			}
+		}
 		if col, ok := loadTimestampColumn(st.schema); ok {
 			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
 		}
@@ -1270,7 +1365,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			return err
 		}
 
-		if st.stagingTable != "" {
+		if st.stagingTable != "" && !directSnapshot {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
@@ -1283,7 +1378,9 @@ func (l *flushLoop) flush(ctx context.Context) error {
 				}
 			}
 			mergeStart := time.Now()
-			mergeErr := mergeStagingInto(ctx, l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation, l.hardDeletesCDC())
+			mergeOpts := mergeStagingOptions(l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation, l.hardDeletesCDC())
+			mergeOpts.CDCSnapshot = w.snapshot && destination.SupportsDirectCDCSnapshot(l.dest)
+			mergeErr := l.dest.MergeTable(ctx, mergeOpts)
 			if l.chunkTiming != nil {
 				l.chunkTiming.MergeNanos.Add(int64(time.Since(mergeStart)))
 			}
@@ -1578,7 +1675,7 @@ func (l *flushLoop) cleanup(ctx context.Context) {
 		if connectorLeaseLoss(dropCtx) != nil {
 			return
 		}
-		if st.stagingTable == "" {
+		if st.stagingTable == "" || st.stagingDeferred {
 			continue
 		}
 		if err := l.dest.DropTable(dropCtx, st.stagingTable); err != nil {

@@ -166,6 +166,7 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 		if state.Initialized {
 			marker.CDCSnapshotResumed = true
 			marker.CDCSnapshotPosition = state.Boundary
+			marker.CDCChunkedSnapshotIdentity = r.state.Identity
 		}
 		if err := r.emit(ctx, marker); err != nil {
 			return err
