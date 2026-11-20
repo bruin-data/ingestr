@@ -85,10 +85,10 @@ so pick the right one here — users can't fix it later.
 - **Lookbacks only shrink the gap**, so add one only when the vendor documents the maximum delay
   (an attribution window, a re-run limit).
 
-`--full-refresh` always runs `replace` with whatever the source returns for no interval. On APIs
-that only keep recent data, that wipes older history: `adapty` fetches the last 30 days by
-default, so a full refresh leaves only those. Don't suggest periodic full refreshes for those
-sources.
+`--full-refresh` always runs `replace` with whatever the source returns for the interval given
+(or its default window if none is given). On APIs that only keep recent data, that wipes older
+history: `adapty` fetches the last 30 days by default, so a full refresh leaves only those.
+Don't suggest periodic full refreshes for those sources.
 
 ## 2. Ask the user for test-account credentials
 
@@ -249,7 +249,8 @@ normalization). Fix discrepancies before continuing.
 - [ ] **Constrained params validated** with a clear error.
 - [ ] **No `opts.Limit` in API sources**: the pipeline handles row limiting. Only database/SQL
   sources use it.
-- [ ] **Strategy per table** follows section 1, and the incremental key is a change time.
+- [ ] **Strategy per table** follows section 1. The incremental key is a change time, the report day,
+  or the creation time of rows that never change.
 - [ ] **Incremental filtering decided per table**: server-side (query params, exact
   operator/field), client-side (fetch all, filter in code), none (replace), or special
   (sub-type loops, custom filters).
@@ -345,7 +346,8 @@ client-side filtered table, run against the real API and confirm by hand that (1
 covering the data returns the expected rows, (2) a range before the data returns 0 rows, (3) no
 interval returns all records.
 
-Then check each incremental table before shipping:
+Then check each `merge` and `delete+insert` table before shipping (for `append`, check instead
+that the cursor never reads the same row twice):
 
 1. Run the same window twice: the row count doesn't change.
 2. One run over `[a, c]` matches runs over `[a, b]` then `[b, c]`.
