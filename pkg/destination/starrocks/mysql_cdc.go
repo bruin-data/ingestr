@@ -267,7 +267,7 @@ func (d *StarRocksDestination) AcquireManagedCDCRunLease(ctx context.Context, co
 		stop:    make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
-	if _, err := d.db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+quoteColumn(lease.db)); err != nil {
+	if err := d.ensureDatabase(ctx, lease.db); err != nil {
 		return nil, fmt.Errorf("ensure StarRocks CDC lease database: %w", err)
 	}
 	// A crashed holder stops heartbeating; wait long enough for its lease to
