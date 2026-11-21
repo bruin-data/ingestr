@@ -152,7 +152,7 @@ func TestWriteCDCSnapshotLoadsConcurrentlyAndProjectsMetadata(t *testing.T) {
 		t.Run(strconv.Itoa(parallelism), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-				const batches = 8
+				const batches = 16
 				records := make(chan source.RecordBatchResult, batches)
 				for id := range batches {
 					records <- source.RecordBatchResult{Batch: snapshotLoadBatch(mem, int64(id), false, "[]")}
@@ -193,7 +193,9 @@ func TestWriteCDCSnapshotLoadsConcurrentlyAndProjectsMetadata(t *testing.T) {
 					workers = 4
 				}
 				require.EqualValues(t, workers, active.Load())
-				require.Len(t, records, batches-workers)
+				// Each worker holds the request its loader is sending and the next one it encoded,
+				// and the coordinator holds one more page.
+				require.GreaterOrEqual(t, len(records), batches-2*workers-1)
 				close(release)
 				require.NoError(t, <-done)
 				require.EqualValues(t, batches, requests.Load())
@@ -343,7 +345,7 @@ func TestWriteCDCSnapshotWaitsForVisibilityAndChecksIncarnation(t *testing.T) {
 			waited := false
 			d.loader = &streamLoader{
 				endpoint: "http://starrocks", client: &http.Client{Transport: parallelLoadTransport(func(r *http.Request) (*http.Response, error) {
-					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"Status":"Publish Timeout","TxnId":42,"NumberLoadedRows":1,"NumberTotalRows":1}`))}, nil
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"Status":"OK","TxnId":42,"NumberLoadedRows":1,"NumberTotalRows":1,"NumberFilteredRows":0,"NumberUnselectedRows":0}`))}, nil
 				})},
 				waitForPublish: func(ctx context.Context, database string, id int64) error {
 					require.Equal(t, "db", database)

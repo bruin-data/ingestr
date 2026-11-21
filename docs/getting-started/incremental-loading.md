@@ -207,6 +207,8 @@ The predicate does not filter source rows. It only limits which destination rows
 
 Destinations whose merge implementation has no target-side SQL match condition do not accept this option. This includes ClickHouse, StarRocks, CrateDB, Cassandra, DynamoDB, MongoDB, Iceberg, OneLake, and discard.
 
+The same flag also works with [`delete+insert`](#limiting-the-delete-scan).
+
 ## Delete+Insert
 Delete+Insert replaces a slice of the destination table. It stages the rows read from the source, works out the interval covered by those staged rows and any explicit bounds, deletes destination rows whose `incremental_key` falls inside that interval, and inserts the staged rows back into the destination. When you provide `--interval-start` or `--interval-end`, ingestr also passes those bounds to the source read, so sources that support interval filtering may return only that slice before the destination replacement happens.
 
@@ -267,6 +269,35 @@ A few important notes about the `delete+insert` strategy:
 
 > [!WARNING]
 > **Breaking change:** `delete+insert` is no longer supported for **CrateDB**. ingestr previously ran the delete and insert as two non-atomic statements that could leave the table partially updated on failure or under concurrent runs. See the [CrateDB](/supported-sources/cratedb) destination notes for details. Trino supports `delete+insert` through catalog transactions; see the [Trino](/supported-sources/trino) destination notes for connector and table restrictions.
+
+### Limiting the delete scan
+
+`--incremental-predicate` also works with `delete+insert`. ingestr adds it to the `DELETE`'s `WHERE` clause, after the interval bounds. This helps when the table is partitioned or clustered on a column other than `incremental_key`. For example, a table partitioned by `event_date` with an `updated_at` incremental key: the interval bounds on `updated_at` alone cannot prune partitions, but a predicate on `event_date` can.
+
+```bash
+ingestr ingest \
+    --source-uri 'postgresql://admin:admin@localhost:8837/web?sslmode=disable' \
+    --source-table 'public.events' \
+    --dest-uri 'bigquery://my-project/analytics' \
+    --dest-table 'analytics.events' \
+    --incremental-strategy delete+insert \
+    --incremental-key updated_at \
+    --partition-by event_date \
+    --interval-start '2026-01-08' \
+    --incremental-predicate "t.event_date >= DATE '2026-01-01'"
+```
+
+The resulting delete is:
+
+```sql
+DELETE FROM target AS t
+WHERE t.updated_at >= <start> AND t.updated_at <= <end>
+  AND (t.event_date >= DATE '2026-01-01');
+```
+
+The destination is aliased the same way as in merge: `t` for BigQuery, `target` for Snowflake, Databricks, Microsoft SQL Server, Oracle, MySQL, MariaDB, PlanetScale, Vitess, PostgreSQL, SQLite, DuckDB, MotherDuck, and DuckLake. Unqualified destination column names also work, since the target is the only table in the statement. Other `delete+insert` destinations, including Redshift, Trino, ClickHouse, Azure Synapse, Microsoft Fabric, SAP HANA, Vertica, Iceberg, and OneLake, reject the option.
+
+The staged rows are always inserted, whether they match the predicate or not. If a destination row inside the interval does not match the predicate, it is kept, so a re-ingested copy of that row lands next to it as a duplicate, or fails the load if the destination enforces a primary key or unique constraint. Only use a predicate that every destination row in the replaced interval satisfies.
 
 ### Example
 Let's assume you had the following source table slice:

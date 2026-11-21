@@ -97,6 +97,7 @@ func (d *directSnapshotResumeStarRocks) MergeTable(ctx context.Context, opts des
 }
 
 func TestStarRocksCDCDirectSnapshotResumesAfterRestart(t *testing.T) {
+	t.Parallel()
 	if testing.Short() || !containerWanted("starrocks") {
 		t.Skip("Docker CDC integration")
 	}

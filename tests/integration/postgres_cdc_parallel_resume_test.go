@@ -143,6 +143,7 @@ func (d *parallelResumePostgres) WriteCDCState(ctx context.Context, records <-ch
 }
 
 func TestPostgresCDCParallelSnapshotDurableResume(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires PostgreSQL logical replication and durable destination state")
 	}

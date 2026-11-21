@@ -188,7 +188,7 @@ The function name only carries the granularity: `partitionByClause` (CTAS swap, 
 
 - Inserts/appends rows directly into the destination table; no swap.
 
-(BigQuery also implements `DeleteInsertTable` — DELETE + INSERT wrapped in a `BEGIN TRANSACTION` script — and SCD2 SQL builders, used by the delete+insert and SCD2 strategies. Neither repartitions.)
+(BigQuery also implements `DeleteInsertTable` — DELETE + INSERT wrapped in a `BEGIN TRANSACTION` script — and SCD2 SQL builders, used by the delete+insert and SCD2 strategies. Neither repartitions. With `--incremental-predicate`, the DELETE aliases the target as `t` (same alias as MERGE) and ANDs the predicate after the interval bounds, so a predicate on a partition column other than the incremental key prunes the DELETE scan; the INSERT is unaffected.)
 
 ## 12. Relevant BigQuery Constraints (all verified live)
 

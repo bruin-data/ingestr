@@ -142,3 +142,23 @@ func TestBeginTransactionUnsupported(t *testing.T) {
 		t.Fatalf("BeginTransaction() error = %v, want transaction unsupported error", err)
 	}
 }
+
+func TestBuildDeleteInsertSQLWithIncrementalPredicate(t *testing.T) {
+	t.Parallel()
+
+	dest := &DatabricksDestination{catalog: "main"}
+	deleteSQL, _, _ := dest.buildDeleteInsertSQL(destination.DeleteInsertOptions{
+		StagingTable:         "scratch.orders_di",
+		TargetTable:          "analytics.orders",
+		IncrementalKey:       "updated_at",
+		IntervalStart:        "2026-01-01",
+		IntervalEnd:          "2026-01-31",
+		Columns:              []string{"id", "updated_at"},
+		IncrementalPredicate: "target.event_date >= '2026-01-01'",
+	})
+
+	want := "DELETE FROM `main`.`analytics`.`orders` AS target WHERE target.`updated_at` >= '2026-01-01' AND target.`updated_at` <= '2026-01-31' AND (target.event_date >= '2026-01-01')"
+	if deleteSQL != want {
+		t.Fatalf("deleteSQL = %q, want %q", deleteSQL, want)
+	}
+}

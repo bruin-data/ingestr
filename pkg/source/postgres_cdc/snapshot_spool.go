@@ -187,6 +187,9 @@ func (r *snapshotSpoolReader) run(ctx context.Context, slot string, resumes map[
 		}
 	}
 	r.state = state
+	if !fresh {
+		r.source.setWALRetentionSlot(state.Slot)
+	}
 	var export *snapshotSpoolExport
 	if !state.CopyComplete {
 		export, err = r.exportSnapshot(ctx, fresh)

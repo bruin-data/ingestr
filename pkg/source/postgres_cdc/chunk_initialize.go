@@ -116,6 +116,7 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 	if err := r.validateSlot(ctx, start); err != nil {
 		return 0, false, err
 	}
+	r.source.setWALRetentionSlot(state.Slot)
 	return start, fresh, nil
 }
 

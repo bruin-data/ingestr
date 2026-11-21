@@ -22,6 +22,7 @@ import (
 )
 
 func TestMSSQLChangeTrackingMaxBatchBytesLive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dbName, db := setupMSSQLCTDatabase(t, ctx)
 	createMSSQLCTItemsTable(t, ctx, db)

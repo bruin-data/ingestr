@@ -243,15 +243,17 @@ func TestStarRocksCDCDirectSnapshot(t *testing.T) {
 	t.Run("partial snapshot retry", func(t *testing.T) {
 		opts := prepare(t, "retry")
 		opts.Parallelism = 1
-		interrupted := errors.New("snapshot interrupted after first load")
+		interrupted := errors.New("snapshot interrupted with uncommitted rows")
 		first := row{ID: 1, Payload: "first chunk", LSN: lsn20}
-		require.ErrorIs(t, write(t, opts, []row{first}, interrupted), interrupted)
+		second := row{ID: 2, Payload: "second chunk", LSN: lsn20}
+		require.NoError(t, write(t, opts, []row{first}, nil))
+		require.ErrorIs(t, write(t, opts, []row{second}, interrupted), interrupted)
 		require.Equal(t, []row{first}, read(t, opts.Table))
 
 		newer := row{ID: 1, Payload: "newer WAL", LSN: lsn20 + "/0000000000000001"}
 		seedChange(t, opts.Table, newer)
 		opts.Parallelism = 4
-		retry := []row{first, {ID: 2, Payload: "second chunk", LSN: lsn20}, {ID: 3, Payload: "third chunk", LSN: lsn20}}
+		retry := []row{first, second, {ID: 3, Payload: "third chunk", LSN: lsn20}}
 		for range 2 {
 			require.NoError(t, write(t, opts, retry, nil))
 			require.Equal(t, []row{newer, retry[1], retry[2]}, read(t, opts.Table), "replaying visible rows must not duplicate keys or overwrite newer WAL")

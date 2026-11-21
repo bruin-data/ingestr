@@ -22,13 +22,18 @@ import (
 )
 
 type PostgresSource struct {
-	pool     *pgxpool.Pool
-	uri      string
-	snapshot string
+	pool            *pgxpool.Pool
+	uri             string
+	snapshot        string
+	primaryKeyQuery string
 }
 
 func NewPostgresSource() *PostgresSource {
 	return &PostgresSource{}
+}
+
+func NewPostgresSourceWithPrimaryKeyQuery(query string) *PostgresSource {
+	return &PostgresSource{primaryKeyQuery: query}
 }
 
 func (s *PostgresSource) Schemes() []string {
@@ -133,8 +138,9 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseTableName(table)
 
-	query := `
-		WITH primary_keys AS (
+	primaryKeyQuery := s.primaryKeyQuery
+	if primaryKeyQuery == "" {
+		primaryKeyQuery = `
 			SELECT attr.attname AS column_name, key_column.ordinality AS ordinal_position
 			FROM pg_catalog.pg_constraint con
 			JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
@@ -145,6 +151,11 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 			WHERE con.contype = 'p'
 				AND nsp.nspname = $1
 				AND rel.relname = $2
+		`
+	}
+
+	query := `
+		WITH primary_keys AS (` + primaryKeyQuery + `
 		)
 		SELECT
 			c.column_name,

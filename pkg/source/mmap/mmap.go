@@ -81,11 +81,12 @@ func (s *MMapSource) GetTable(ctx context.Context, req source.TableRequest) (sou
 	}
 
 	return &source.DynamicSourceTable{
-		TableName:           req.Name,
-		TablePrimaryKeys:    req.PrimaryKeys,
-		TableIncrementalKey: req.IncrementalKey,
-		TableStrategy:       strategy,
-		KnownSchema:         s.knownSchema != nil,
+		TableName:                req.Name,
+		TablePrimaryKeys:         req.PrimaryKeys,
+		TableIncrementalKey:      req.IncrementalKey,
+		TableStrategy:            strategy,
+		TableReadsIgnoreInterval: true,
+		KnownSchema:              s.knownSchema != nil,
 		SchemaFn: func(ctx context.Context) (*schema.TableSchema, error) {
 			if s.knownSchema == nil {
 				return nil, fmt.Errorf("mmap source has no preloaded schema")

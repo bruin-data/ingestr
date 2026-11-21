@@ -311,12 +311,12 @@ func TestDeleteInsertStrategy_Execute_RejectsUnsupportedDestinationBeforeStaging
 	}
 }
 
-func TestDeleteInsertStrategy_Execute_SkipsWhenNoIntervalDetected(t *testing.T) {
+func TestDeleteInsertStrategy_Execute_SkipsWhenNoRowsRead(t *testing.T) {
 	job, src, dest := minimalJob()
 	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
 	job.Config.IncrementalKey = "id"
 
-	rec := int64RecordBatch(t, "other", []int64{1, 2, 3}, nil)
+	rec := int64RecordBatch(t, "id", nil, nil)
 	src.readCh = mustClosedRecords(source.RecordBatchResult{Batch: rec})
 
 	strat := &DeleteInsertStrategy{}
@@ -338,6 +338,35 @@ func TestDeleteInsertStrategy_Execute_SkipsWhenNoIntervalDetected(t *testing.T) 
 
 	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != staging {
 		t.Fatalf("expected DropTable(%q), got %v", staging, dest.dropCalls)
+	}
+}
+
+// Rows the tracker can't place in an interval used to be dropped while the run reported success.
+func TestDeleteInsertStrategy_Execute_FailsWhenRowsHaveNoInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		column string
+		nullAt map[int]bool
+	}{
+		{name: "key column missing", column: "other"},
+		{name: "all keys null", column: "id", nullAt: map[int]bool{0: true, 1: true, 2: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job, src, dest := minimalJob()
+			job.Config.IncrementalStrategy = config.StrategyDeleteInsert
+			job.Config.IncrementalKey = "id"
+
+			rec := int64RecordBatch(t, tc.column, []int64{1, 2, 3}, tc.nullAt)
+			src.readCh = mustClosedRecords(source.RecordBatchResult{Batch: rec})
+
+			err := (&DeleteInsertStrategy{}).Execute(context.Background(), job)
+			if err == nil || !strings.Contains(err.Error(), "could not derive an interval") || !strings.Contains(err.Error(), "3 rows") {
+				t.Fatalf("expected interval error for 3 rows, got %v", err)
+			}
+			if len(dest.diCalls) != 0 {
+				t.Fatalf("expected DeleteInsertTable not to be called, got %+v", dest.diCalls)
+			}
+		})
 	}
 }
 
@@ -380,6 +409,25 @@ func TestDeleteInsertStrategy_Execute_UsesAutoDetectedInterval(t *testing.T) {
 	}
 	if len(dest.dropCalls) != 1 || dest.dropCalls[0] != staging {
 		t.Fatalf("expected DropTable(%q), got %v", staging, dest.dropCalls)
+	}
+}
+
+func TestDeleteInsertStrategy_Execute_PassesIncrementalPredicate(t *testing.T) {
+	job, src, dest := minimalJob()
+	job.Config.IncrementalStrategy = config.StrategyDeleteInsert
+	job.Config.IncrementalKey = "id"
+	job.Config.IncrementalPredicate = "target.region = 'eu'"
+
+	src.readCh = mustClosedRecords(source.RecordBatchResult{Batch: int64RecordBatch(t, "id", []int64{5, 10}, nil)})
+
+	if err := (&DeleteInsertStrategy{}).Execute(context.Background(), job); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(dest.diCalls) != 1 {
+		t.Fatalf("expected 1 DeleteInsertTable call, got %d", len(dest.diCalls))
+	}
+	if got := dest.diCalls[0].IncrementalPredicate; got != job.Config.IncrementalPredicate {
+		t.Fatalf("DeleteInsertOptions.IncrementalPredicate = %q, want %q", got, job.Config.IncrementalPredicate)
 	}
 }
 

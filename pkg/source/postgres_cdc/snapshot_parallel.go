@@ -167,6 +167,7 @@ func (s *Snapshot) readBoundedSnapshot(ctx context.Context, opts boundedSnapshot
 	rows, blocked, err := coordinateSnapshotWorkers(ctx, ranges, cap(opts.budget.slots), results, progress,
 		func(ctx context.Context, workerID int, jobs <-chan int, updates chan<- snapshotRangeResult) error {
 			worker := *s
+			worker.batchDataHint = make([]int, len(s.tableSchema.Columns))
 			workerTx := tx
 			if workerID == 0 {
 				defer stopAdmission()
@@ -253,6 +254,7 @@ func coordinateSnapshotWorkers(ctx context.Context, plan []snapshotRange, concur
 	var rows int64
 	var blocked time.Duration
 	var forwardErr error
+	lastProgress := time.Now()
 	for update := range updates {
 		if forwardErr != nil || ctx.Err() != nil {
 			if update.batch != nil {
@@ -274,8 +276,16 @@ func coordinateSnapshotWorkers(ctx context.Context, plan []snapshotRange, concur
 			ranges[update.index].LastKey = slices.Clone(update.lastKey)
 		}
 		ranges[update.index].Complete = update.done
-		if progress != nil {
+		if progress != nil && (len(plan) <= max(concurrency, 1) || update.done || time.Since(lastProgress) >= time.Second) {
 			if err := progress(ctx, cloneSnapshotRanges(ranges)); err != nil {
+				forwardErr = err
+				cancel(err)
+				continue
+			}
+			lastProgress = time.Now()
+		}
+		if update.done && update.normalSnapshot {
+			if err := sendResult(ctx, results, source.RecordBatchResult{CDCSnapshotRangeEnd: true}); err != nil {
 				forwardErr = err
 				cancel(err)
 			}
@@ -353,7 +363,7 @@ func (s *Snapshot) readSnapshotRange(ctx context.Context, tx pgx.Tx, opts bounde
 	if batchSize <= 0 {
 		batchSize = 100000
 	}
-	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
+	arrowSchema := markValidatedJSON(buildArrowSchema(s.tableSchema.Columns), columns, description.Fields)
 	syncedAt := time.Now().UTC()
 	for {
 		batch, count, lastKey, err := s.rowsToBatch(rows, arrowSchema, columns, len(s.progressKeys), batchSize, opts.read.MaxBatchBytes, FormatLSN(opts.boundary), syncedAt)

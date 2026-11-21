@@ -461,12 +461,11 @@ func (s *ADBCSource) getCustomQuerySchema(ctx context.Context, query string) (*s
 
 func (s *ADBCSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
 	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
-	var minValue, maxValue any
-	var totalCount, nonNullCount int64
-	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+	bounds, err := scanExtractPartitionBounds(s.db.QueryRowContext(ctx, query), opts.ExtractPartitionKind)
+	if err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover custom query extract partition bounds: %w", err)
 	}
-	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+	return bounds, nil
 }
 
 func (s *ADBCSource) customQueryColumns(colTypes []*sql.ColumnType) []schema.Column {
@@ -577,10 +576,27 @@ func (s *ADBCSource) discoverExtractPartitionBounds(ctx context.Context, table s
 	}, source.DefaultSQLTimeFormat)
 	query = annotation.Prepend(annotation.WithStep(ctx, annotation.StepExtract), query)
 
-	var minValue, maxValue any
-	var totalCount, nonNullCount int64
-	if err := s.db.QueryRowContext(ctx, query).Scan(&minValue, &maxValue, &totalCount, &nonNullCount); err != nil {
+	bounds, err := scanExtractPartitionBounds(s.db.QueryRowContext(ctx, query), opts.ExtractPartitionKind)
+	if err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to discover extract partition bounds: %w", err)
 	}
-	return source.ExtractPartitionBoundsFromValues(opts.ExtractPartitionKind, minValue, maxValue, totalCount, nonNullCount)
+	return bounds, nil
+}
+
+// scanExtractPartitionBounds scans counts as any: some drivers (Snowflake)
+// return COUNT(*) as a decimal that database/sql can't scan into int64.
+func scanExtractPartitionBounds(row *sql.Row, kind source.ExtractPartitionKind) (source.ExtractPartitionBounds, error) {
+	var minValue, maxValue, totalValue, nonNullValue any
+	if err := row.Scan(&minValue, &maxValue, &totalValue, &nonNullValue); err != nil {
+		return source.ExtractPartitionBounds{}, err
+	}
+	totalCount, err := source.SQLIntValue(totalValue)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to parse row count: %w", err)
+	}
+	nonNullCount, err := source.SQLIntValue(nonNullValue)
+	if err != nil {
+		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to parse non-null count: %w", err)
+	}
+	return source.ExtractPartitionBoundsFromValues(kind, minValue, maxValue, totalCount, nonNullCount)
 }

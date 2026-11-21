@@ -98,6 +98,11 @@ func (w *cdcSnapshotBatchWriter) write(ctx context.Context, records <-chan sourc
 			continue
 		}
 		if res.Batch == nil {
+			if token, ok := res.CommitToken.(source.CDCStateCommitToken); ok && w.manager != nil && w.snapshotBoundary != "" {
+				if err := w.persistProgress(ctx, token); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if res.CDCSnapshot {
@@ -137,6 +142,8 @@ func (w *cdcSnapshotBatchWriter) write(ctx context.Context, records <-chan sourc
 		if !directSnapshot {
 			opts.Table, opts.StagingTable = w.table.StagingTable, true
 			opts.PrimaryKeys, opts.CDCExpectedIncarnation = nil, ""
+		} else if w.manager != nil {
+			opts.CDCSnapshotProgress = w.persistProgress
 		}
 		var err error
 		pending, err = writeCDCSnapshotBatchSegment(ctx, w.dest, records, res, opts)
@@ -146,23 +153,45 @@ func (w *cdcSnapshotBatchWriter) write(ctx context.Context, records <-chan sourc
 	}
 }
 
+func (w *cdcSnapshotBatchWriter) persistProgress(ctx context.Context, token source.CDCStateCommitToken) error {
+	progress, ok := token.SnapshotProgress[w.sourceTable]
+	if !ok {
+		return nil
+	}
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if err := w.manager.BindDestinationIncarnation(ctx, w.sourceTable, w.table.DestTable); err != nil {
+		return err
+	}
+	if err := w.manager.Persist(ctx, source.CDCStateCommitToken{
+		SnapshotProgress: map[string]source.CDCSnapshotProgress{w.sourceTable: progress},
+	}); err != nil {
+		return fmt.Errorf("persist committed snapshot progress for %s: %w", w.sourceTable, err)
+	}
+	return source.ConnectorLeaseLoss(ctx)
+}
+
 func (w *cdcSnapshotBatchWriter) beginSnapshot(ctx context.Context, marker source.RecordBatchResult) error {
 	if w.manager != nil {
 		if marker.CDCSnapshotResumed {
 			if err := w.manager.ResumeSnapshot(ctx, w.sourceTable, w.table.DestTable, ""); err != nil {
 				return err
 			}
-			if err := w.manager.BindDestinationIncarnation(ctx, w.sourceTable, w.table.DestTable); err != nil {
-				return err
-			}
-			var err error
-			w.expectedIncarnation, err = w.manager.BoundDestinationIncarnation(w.sourceTable)
-			if err != nil {
-				return err
-			}
-		} else if err := w.manager.InvalidateBatchSnapshot(ctx, w.sourceTable, w.table.DestTable); err != nil {
+		} else if err := w.manager.InvalidateSnapshot(ctx, w.sourceTable, w.table.DestTable, ""); err != nil {
 			return err
 		}
+		if err := w.manager.BindDestinationIncarnation(ctx, w.sourceTable, w.table.DestTable); err != nil {
+			return err
+		}
+		bound, err := w.manager.BoundDestinationIncarnation(w.sourceTable)
+		if err != nil {
+			return err
+		}
+		if w.expectedIncarnation != "" && w.expectedIncarnation != bound {
+			return fmt.Errorf("CDC destination for %s changed before its snapshot", w.sourceTable)
+		}
+		w.expectedIncarnation = bound
 	} else if marker.CDCSnapshotResumed {
 		return fmt.Errorf("resuming the snapshot of %s requires destination-managed CDC state", w.sourceTable)
 	}

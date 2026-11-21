@@ -21,6 +21,7 @@ import (
 )
 
 func TestDuckDBCDCReplaceHardDelete_CatchUp(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "cdc_replace_hard_delete.duckdb")
 	dest := duckdbdest.NewDuckDBDestination()

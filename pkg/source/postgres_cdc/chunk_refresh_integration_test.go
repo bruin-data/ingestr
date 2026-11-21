@@ -64,6 +64,7 @@ func TestChunkRefreshRecoversAfterSlotResetBeforeBootstrapCheckpoint(t *testing.
 	require.NoError(t, err)
 	require.True(t, previous.bootstrapComplete())
 	require.NoError(t, first.Close(ctx))
+	requireSlotReleased(t, ctx, pool, slot)
 
 	_, err = pool.Exec(ctx, `
 		UPDATE public.refresh_recovery SET value = 'refreshed' WHERE id = 1;
@@ -101,6 +102,7 @@ func TestChunkRefreshRecoversAfterSlotResetBeforeBootstrapCheckpoint(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, previous, checkpoint, "the first replacement checkpoint was deliberately never acknowledged")
 	require.NoError(t, interrupted.Close(ctx))
+	requireSlotReleased(t, ctx, pool, slot)
 
 	// The ordinary CDC refresh generation is durable, so retries clear FullRefresh.
 	opts.FullRefresh = false
@@ -132,4 +134,14 @@ func TestChunkRefreshRecoversAfterSlotResetBeforeBootstrapCheckpoint(t *testing.
 	require.Equal(t, "refresh-operation", complete.RefreshID)
 	require.True(t, complete.bootstrapComplete())
 	require.GreaterOrEqual(t, complete.Applied, boundary)
+}
+
+// Close returns before the server reaps the walsender, so the slot can still be
+// active briefly and pg_drop_replication_slot would fail with 55006.
+func requireSlotReleased(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slot string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var active bool
+		return pool.QueryRow(ctx, "SELECT active FROM pg_replication_slots WHERE slot_name = $1", slot).Scan(&active) == nil && !active
+	}, 30*time.Second, 50*time.Millisecond, "replication slot %s is still held by a walsender", slot)
 }

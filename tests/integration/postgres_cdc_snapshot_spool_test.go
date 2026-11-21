@@ -145,6 +145,7 @@ func (f *snapshotSpoolFixture) assertEqual(t *testing.T) {
 }
 
 func TestPostgresCDC_SnapshotSpoolFinite(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"destination", "disk"} {
 		for _, restart := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/restart=%t", mode, restart), func(t *testing.T) {

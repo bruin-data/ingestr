@@ -23,6 +23,7 @@ const (
 // - Second load: try to add a new column (email) with freeze mode
 // - Expected: pipeline should fail with contract violation error
 func TestDestinations_SchemaContract_Freeze(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -80,6 +81,7 @@ func TestDestinations_SchemaContract_Freeze(t *testing.T) {
 
 // TestDestinations_SchemaContract_Freeze_TypeChange validates freeze mode rejects type changes.
 func TestDestinations_SchemaContract_Freeze_TypeChange(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -131,6 +133,7 @@ func TestDestinations_SchemaContract_Freeze_TypeChange(t *testing.T) {
 
 // TestDestinations_SchemaContract_Evolve validates that evolve mode (default) allows schema changes.
 func TestDestinations_SchemaContract_Evolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -187,6 +190,7 @@ func TestDestinations_SchemaContract_Evolve(t *testing.T) {
 // - Allows new columns to be added
 // - Type widening changes are not applied (but pipeline succeeds with warning)
 func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -241,6 +245,7 @@ func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
 // discard_value mode allows ingestion by NULLing out incompatible values.
 // The destination schema should NOT be widened, but new rows are added with NULLs for incompatible columns.
 func TestDestinations_SchemaContract_DiscardValue_TypeChange(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -305,6 +310,7 @@ func TestDestinations_SchemaContract_DiscardValue_TypeChange(t *testing.T) {
 // - Schema evolution still applies new columns, but rows with those values are discarded
 // - Pipeline succeeds and older rows are preserved
 func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -369,6 +375,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 
 // TestDestinations_SchemaContract_DefaultIsEvolve validates that empty/default contract is evolve.
 func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -465,6 +472,7 @@ func getColumnTypes(t *testing.T, backend *sqlBackend, uri, table string) map[st
 // - Second load: source loses email column (Fivetran-style soft removal)
 // - Expected: email column stays in destination, new rows have NULL for email
 func TestDestinations_SchemaContract_ColumnRemoval_Evolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -526,6 +534,7 @@ func TestDestinations_SchemaContract_ColumnRemoval_Evolve(t *testing.T) {
 
 // TestDestinations_SchemaContract_ColumnRemoval_Freeze validates that freeze mode rejects column removal.
 func TestDestinations_SchemaContract_ColumnRemoval_Freeze(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

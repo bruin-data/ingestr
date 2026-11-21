@@ -3,11 +3,19 @@ package postgres_cdc
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+)
+
+const (
+	maxSnapshotRanges       = 1024
+	snapshotRowsPerRange    = 75_000
+	snapshotMinRowsPerRange = 10_000
+	snapshotSamplesPerRange = 64
 )
 
 type snapshotRange struct {
@@ -133,7 +141,12 @@ func planSnapshotRanges(ctx context.Context, tx pgx.Tx, table string, keys, keyT
 	if err != nil {
 		return nil, fmt.Errorf("failed to estimate snapshot range sample for %s: %w", table, err)
 	}
-	targetSamples := min(max(parallelism, 4), 16) * 256
+	rangeCount := parallelism
+	// Whole-table statistics do not estimate the size of a bounded chunk.
+	if after == nil && upper == nil {
+		rangeCount = snapshotRangeCount(estimatedRows, parallelism)
+	}
+	targetSamples := max(1024, min(rangeCount, maxSnapshotRanges)*snapshotSamplesPerRange)
 	samplePercent := min(100, float64(targetSamples)*100/estimatedRows)
 	query, args := snapshotRangeSampleQuery(table, keys, keyTypes, after, upper, samplePercent, targetSamples*2)
 	rows, err := tx.Query(ctx, query, args...)
@@ -156,7 +169,17 @@ func planSnapshotRanges(ctx context.Context, tx pgx.Tx, table string, keys, keyT
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read snapshot range samples for %s: %w", table, err)
 	}
-	return snapshotRangesFromSamples(samples, after, upper, parallelism), nil
+	return snapshotRangesFromSamples(samples, after, upper, rangeCount), nil
+}
+
+func snapshotRangeCount(estimatedRows float64, parallelism int) int {
+	if parallelism <= 1 {
+		return 1
+	}
+	parallelism = min(parallelism, maxSnapshotRanges)
+	bySize := int(math.Ceil(min(estimatedRows/snapshotRowsPerRange, float64(maxSnapshotRanges))))
+	byMinimumSize := int(math.Ceil(min(estimatedRows/snapshotMinRowsPerRange, float64(maxSnapshotRanges))))
+	return min(maxSnapshotRanges, max(parallelism, min(parallelism*16, byMinimumSize), bySize))
 }
 
 func snapshotRangeSampleQuery(table string, keys, keyTypes, after, upper []string, percent float64, limit int) (string, []any) {
@@ -178,14 +201,14 @@ func snapshotRangeSampleQuery(table string, keys, keyTypes, after, upper []strin
 
 // samples are distinct and ordered by PostgreSQL; text keys must never be
 // sorted in Go because numeric ordering and database collations differ.
-func snapshotRangesFromSamples(samples [][]string, after, upper []string, parallelism int) []snapshotRange {
+func snapshotRangesFromSamples(samples [][]string, after, upper []string, rangeCount int) []snapshotRange {
 	distinct := make([][]string, 0, len(samples))
 	for _, sample := range samples {
 		if len(distinct) == 0 || !slices.Equal(distinct[len(distinct)-1], sample) {
 			distinct = append(distinct, sample)
 		}
 	}
-	count := min(max(parallelism, 1), max(len(distinct), 1))
+	count := min(max(rangeCount, 1), max(len(distinct), 1))
 	ranges := make([]snapshotRange, 0, count)
 	lower := after
 	for i := 1; i < count; i++ {

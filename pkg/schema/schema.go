@@ -87,6 +87,14 @@ type Column struct {
 	// delivers raw signed values (e.g. MySQL binlog rows) use this to
 	// reinterpret them.
 	Unsigned bool
+	// EnumValues and SetValues list the declared members of MySQL ENUM and SET
+	// columns in declaration order. Sources whose wire format delivers member
+	// indexes or bitmasks instead of labels (e.g. MySQL binlog rows) use them
+	// to recover the labels.
+	EnumValues []string
+	SetValues  []string
+	// Spatial marks string columns that hold geometry values in the source.
+	Spatial bool
 }
 
 type TableSchema struct {

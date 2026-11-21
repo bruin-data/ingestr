@@ -149,7 +149,7 @@ func TestSnapshotCDCMergeTextKeysKeepFullTargetLookup(t *testing.T) {
 	opts.Schema.Columns[0].DataType = schema.TypeString
 	opts.CDCSnapshotRange = &destination.CDCSnapshotRange{After: []string{"A"}, Last: []string{"z"}}
 	query := (&StarRocksDestination{}).buildCDCMergeSQL(opts)
-	require.Contains(t, query, "LEFT JOIN `target` t ON")
+	require.Contains(t, query, "LEFT JOIN `target` __ingestr_t ON")
 	require.Equal(t, 1, strings.Count(query, "ROW_NUMBER()"))
 	require.NotContains(t, query, "history AS")
 }

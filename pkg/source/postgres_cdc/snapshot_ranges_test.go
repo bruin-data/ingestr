@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -195,8 +196,8 @@ func TestPlanSnapshotRangesUsesBoundedSample(t *testing.T) {
 		},
 		query: func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
 			require.Contains(t, sql, "TABLESAMPLE SYSTEM ($1)")
-			require.InDelta(t, 0.0512, args[0], 0.000001)
-			require.Equal(t, 2048, args[1])
+			require.InDelta(t, 0.2048, args[0], 0.000001)
+			require.Equal(t, 8192, args[1])
 			return rows, nil
 		},
 	}
@@ -205,6 +206,69 @@ func TestPlanSnapshotRangesUsesBoundedSample(t *testing.T) {
 	require.Len(t, ranges, 4)
 	require.Equal(t, []string{"9"}, ranges[1].Upper)
 	require.True(t, rows.closed)
+}
+
+func TestSnapshotRangeCountBalancesWorkAndBoundsPlans(t *testing.T) {
+	for _, tc := range []struct {
+		rows    float64
+		readers int
+		want    int
+	}{
+		{rows: 1_000_000, readers: 1, want: 1},
+		{rows: 12, readers: 4, want: 4},
+		{rows: 100_000, readers: 4, want: 10},
+		{rows: 1_000_000, readers: 4, want: 64},
+		{rows: 1_000_000, readers: 8, want: 100},
+		{rows: 10_000_000, readers: 4, want: 134},
+		{rows: 1_000_000_000, readers: 4, want: 1024},
+		{rows: math.MaxFloat64, readers: 4, want: 1024},
+		{rows: 1_000_000, readers: math.MaxInt, want: 1024},
+	} {
+		t.Run(fmt.Sprintf("%g/%d", tc.rows, tc.readers), func(t *testing.T) {
+			require.Equal(t, tc.want, snapshotRangeCount(tc.rows, tc.readers))
+		})
+	}
+}
+
+func TestPlanSnapshotRangesOversplitsOnlyWholeTables(t *testing.T) {
+	for _, bounded := range []bool{false, true} {
+		t.Run(strconv.FormatBool(bounded), func(t *testing.T) {
+			values := make([][]string, 2048)
+			for i := range values {
+				values[i] = []string{strconv.Itoa(i + 1)}
+			}
+			rows := &snapshotRangeTestRows{values: values}
+			tx := snapshotRangeTestTx{
+				queryRow: func(context.Context, string, ...any) pgx.Row {
+					return snapshotRangeTestRow(func(dest ...any) error {
+						*dest[0].(*float64) = 1_000_000_000
+						return nil
+					})
+				},
+				query: func(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
+					limit := 2 * maxSnapshotRanges * snapshotSamplesPerRange
+					if bounded {
+						limit = 2048
+					}
+					require.Equal(t, limit, args[len(args)-1])
+					return rows, nil
+				},
+			}
+			var after []string
+			want := maxSnapshotRanges
+			if bounded {
+				after, want = []string{"0"}, 4
+			}
+			ranges, err := planSnapshotRanges(t.Context(), tx, "public.items", []string{"id"}, []string{"bigint"}, after, nil, 4)
+			require.NoError(t, err)
+			require.Len(t, ranges, want)
+			require.Equal(t, after, ranges[0].After)
+			require.Nil(t, ranges[len(ranges)-1].Upper)
+			for i := 1; i < len(ranges); i++ {
+				require.Equal(t, ranges[i-1].Upper, ranges[i].After)
+			}
+		})
+	}
 }
 
 func TestPlanSnapshotRangesRejectsInvalidBoundsAndSkipsSamplingWhenSerial(t *testing.T) {

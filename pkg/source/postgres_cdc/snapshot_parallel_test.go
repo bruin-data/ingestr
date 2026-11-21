@@ -2,6 +2,8 @@ package postgres_cdc
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -94,5 +96,54 @@ func TestValidateSnapshotRangesUsesNativeTypesAndDeclaredCollations(t *testing.T
 			require.ErrorContains(t, err, "outside their bounds")
 		}
 		require.True(t, rows.closed)
+	}
+}
+
+func TestValidateSnapshotRangesBatchesWideCompositeKeys(t *testing.T) {
+	keys, types := make([]string, 32), make([]string, 32)
+	columns := make([][]string, len(keys))
+	for i := range keys {
+		keys[i], types[i] = fmt.Sprintf("key_%d", i), "text"
+		columns[i] = []string{keys[i], ""}
+	}
+	ranges := make([]snapshotRange, maxSnapshotRanges)
+	var lower []string
+	for i := range ranges {
+		key := make([]string, len(keys))
+		for j := range key {
+			key[j] = fmt.Sprintf("%05d", i+1)
+		}
+		ranges[i] = snapshotRange{ID: strconv.Itoa(i), After: lower, LastKey: key, Upper: key}
+		lower = key
+	}
+	ranges[len(ranges)-1].Upper = nil
+	for _, fail := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+			queries, totalParams := 0, 0
+			tx := snapshotRangeTestTx{
+				query: func(context.Context, string, ...any) (pgx.Rows, error) {
+					return &snapshotRangeTestRows{values: columns}, nil
+				},
+				queryRow: func(_ context.Context, sql string, args ...any) pgx.Row {
+					queries++
+					totalParams += len(args)
+					require.LessOrEqual(t, len(args), 8192)
+					require.Contains(t, sql, "$1::text::text")
+					return snapshotRangeTestRow(func(dest ...any) error {
+						*dest[0].(*bool) = !fail || queries != 2
+						return nil
+					})
+				},
+			}
+			err := validateSnapshotRanges(t.Context(), tx, "public.items", keys, types, nil, nil, ranges)
+			if fail {
+				require.ErrorContains(t, err, "outside their bounds")
+				require.Equal(t, 2, queries)
+			} else {
+				require.NoError(t, err)
+				require.Greater(t, queries, 1)
+				require.Equal(t, (3*len(ranges)-2)*len(keys), totalParams)
+			}
+		})
 	}
 }

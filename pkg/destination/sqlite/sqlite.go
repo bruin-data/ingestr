@@ -709,10 +709,7 @@ func (d *SQLiteDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
-		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
-	)
+	deleteSQL := destination.IntervalDeleteSQL(quotedTargetTable, "target", destination.QuoteIdentifier(opts.IncrementalKey), "?", "?", opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -891,6 +888,8 @@ func (d *SQLiteDestination) SupportsAppendStrategy() bool { return true }
 func (d *SQLiteDestination) SupportsMergeStrategy() bool { return true }
 
 func (d *SQLiteDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *SQLiteDestination) SupportsDeleteInsertPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as SQLite supports the delete+insert strategy.
 func (d *SQLiteDestination) SupportsDeleteInsertStrategy() bool { return true }

@@ -460,9 +460,6 @@ func (s *MySQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 	if err := validateMySQLCDCSourceColumns(fullSchema, req.Name); err != nil {
 		return nil, err
 	}
-	if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, req.Name); err != nil {
-		return nil, err
-	}
 	tableSchema := addMySQLCDCColumns(fullSchema)
 
 	pks := req.PrimaryKeys
@@ -500,7 +497,7 @@ func (s *MySQLCDCSource) IsMultiTable() bool {
 }
 
 func (s *MySQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
-	tables, err := s.getTables(ctx, true)
+	tables, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -513,12 +510,12 @@ func (s *MySQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInf
 	return tables, nil
 }
 
-func (s *MySQLCDCSource) getTables(ctx context.Context, validateSupported bool) ([]source.SourceTableInfo, error) {
+func (s *MySQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	tableNames, err := s.getMySQLCDCTableNames(ctx, s.db)
 	if err != nil {
 		return nil, err
 	}
-	tables, err := s.loadMySQLCDCTables(ctx, tableNames, validateSupported)
+	tables, err := s.loadMySQLCDCTables(ctx, tableNames)
 	if err != nil {
 		return nil, err
 	}
@@ -605,7 +602,7 @@ func (s *MySQLCDCSource) getMySQLCDCTableNames(ctx context.Context, q mysqlCDCPo
 	return tableNames, nil
 }
 
-func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []string, validateSupported bool) ([]source.SourceTableInfo, error) {
+func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []string) ([]source.SourceTableInfo, error) {
 	tables := make([]source.SourceTableInfo, 0, len(tableNames))
 	for _, tableName := range tableNames {
 		fullSchema, err := s.getSchema(ctx, tableName)
@@ -614,11 +611,6 @@ func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []st
 		}
 		if err := validateMySQLCDCSourceColumns(fullSchema, tableName); err != nil {
 			return nil, err
-		}
-		if validateSupported {
-			if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, tableName); err != nil {
-				return nil, err
-			}
 		}
 		tableSchema := addMySQLCDCColumns(fullSchema)
 		if len(tableSchema.PrimaryKeys) == 0 {
@@ -666,16 +658,7 @@ func (s *MySQLCDCSource) getSelectedTables(ctx context.Context) ([]source.Source
 		return nil, fmt.Errorf("no MySQL tables found in database %s", s.database)
 	}
 
-	selected, err := s.loadMySQLCDCTables(ctx, tableNames, false)
-	if err != nil {
-		return nil, err
-	}
-	for _, table := range selected {
-		if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, table.Name); err != nil {
-			return nil, err
-		}
-	}
-	return selected, nil
+	return s.loadMySQLCDCTables(ctx, tableNames)
 }
 
 func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -2558,9 +2541,98 @@ func projectMySQLCDCRow(row []interface{}, fullSourceColumns []schema.Column, ou
 		if err := validateMySQLCDCTimeValue(row[sourceIdx], outputSourceColumns[i]); err != nil {
 			return nil, err
 		}
-		values[i] = convertMySQLCDCBinlogValue(row[sourceIdx], outputSourceColumns[i])
+		value, err := decodeMySQLCDCBinlogValue(row[sourceIdx], outputSourceColumns[i])
+		if err != nil {
+			return nil, err
+		}
+		values[i] = value
 	}
 	return values, nil
+}
+
+// decodeMySQLCDCBinlogValue converts a value decoded from a binlog row image
+// to the representation the snapshot reads. go-mysql delivers ENUM values as
+// 1-based member indexes, SET values as member bitmasks and BIT values as
+// integers.
+func decodeMySQLCDCBinlogValue(value interface{}, col schema.Column) (interface{}, error) {
+	if v, ok := value.(int64); ok {
+		switch {
+		case col.EnumValues != nil:
+			return mysqlCDCEnumLabel(v, col)
+		case col.SetValues != nil:
+			return mysqlCDCSetLabels(v, col)
+		case col.DataType == schema.TypeString:
+			return nil, fmt.Errorf("binlog delivered an ENUM or SET member number for column %s, but its declared members could not be read from INFORMATION_SCHEMA", col.Name)
+		case col.DataType == schema.TypeBinary:
+			return mysqlCDCBitBytes(v, col)
+		}
+	}
+	value, err := convertMySQLCDCSpatialValue(value, col)
+	if err != nil {
+		return nil, err
+	}
+	return convertMySQLCDCBinlogValue(value, col), nil
+}
+
+func mysqlCDCEnumLabel(index int64, col schema.Column) (string, error) {
+	// Index 0 is the empty string MySQL stores for invalid values in
+	// non-strict SQL mode; the snapshot reads it as ''.
+	if index == 0 {
+		return "", nil
+	}
+	if index < 0 || index > int64(len(col.EnumValues)) {
+		return "", fmt.Errorf("binlog ENUM index %d for column %s is outside its %d declared members; the column definition changed since the sync started; run with --full-refresh to rebuild the destination safely", index, col.Name, len(col.EnumValues))
+	}
+	return col.EnumValues[index-1], nil
+}
+
+func mysqlCDCSetLabels(bits int64, col schema.Column) (string, error) {
+	mask := uint64(bits)
+	if len(col.SetValues) < 64 && mask>>len(col.SetValues) != 0 {
+		return "", fmt.Errorf("binlog SET value %#x for column %s references members beyond its %d declared members; the column definition changed since the sync started; run with --full-refresh to rebuild the destination safely", mask, col.Name, len(col.SetValues))
+	}
+	members := make([]string, 0, len(col.SetValues))
+	for i, member := range col.SetValues {
+		if mask&(1<<i) != 0 {
+			members = append(members, member)
+		}
+	}
+	return strings.Join(members, ","), nil
+}
+
+// mysqlCDCBitBytes encodes a BIT(n) value as the ceil(n/8) big-endian bytes
+// the driver returns for it in the snapshot.
+func mysqlCDCBitBytes(value int64, col schema.Column) ([]byte, error) {
+	if col.Precision < 1 || col.Precision > 64 {
+		return nil, fmt.Errorf("binlog delivered a BIT value for column %s, but its bit width %d is not between 1 and 64", col.Name, col.Precision)
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(value))
+	width := (col.Precision + 7) / 8
+	return append([]byte(nil), buf[8-width:]...), nil
+}
+
+// convertMySQLCDCSpatialValue converts geometry values to WKT. The snapshot and
+// the binlog both deliver MySQL's internal geometry bytes, so converting both
+// here keeps their values identical.
+func convertMySQLCDCSpatialValue(value interface{}, col schema.Column) (interface{}, error) {
+	if !col.Spatial {
+		return value, nil
+	}
+	var raw []byte
+	switch v := value.(type) {
+	case []byte:
+		raw = v
+	case string:
+		raw = []byte(v)
+	default:
+		return value, nil
+	}
+	wkt, err := mysqlGeometryToWKT(raw)
+	if err != nil {
+		return nil, fmt.Errorf("column %s: %w", col.Name, err)
+	}
+	return wkt, nil
 }
 
 // convertMySQLCDCBinlogValue converts a value decoded from a binlog row image.
@@ -2771,7 +2843,12 @@ func buildMySQLCDCSQLBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sour
 				releaseMySQLCDCBuilders(builders)
 				return nil, 0, err
 			}
-			arrowconv.AppendValue(builders[i], convertMySQLCDCValue(value, sourceColumns[i]))
+			spatialValue, err := convertMySQLCDCSpatialValue(value, sourceColumns[i])
+			if err != nil {
+				releaseMySQLCDCBuilders(builders)
+				return nil, 0, err
+			}
+			arrowconv.AppendValue(builders[i], convertMySQLCDCValue(spatialValue, sourceColumns[i]))
 			if maxBatchBytes > 0 {
 				accBytes += arrowconv.ValueBytes(value)
 			}

@@ -40,13 +40,29 @@ func MaxIdentifierLength(scheme string) int {
 	return maxIdentifierLengths[scheme]
 }
 
+// IdentifierLimiter reports the identifier limit of the connected server when
+// it can be lower than the scheme's, such as Oracle before 12.2.
+type IdentifierLimiter interface {
+	IdentifierLimit() int
+}
+
+// IdentifierLimit returns the connected destination's identifier limit.
+func IdentifierLimit(dest Destination) int {
+	if limiter, ok := dest.(IdentifierLimiter); ok {
+		if limit := limiter.IdentifierLimit(); limit > 0 {
+			return limit
+		}
+	}
+	return MaxIdentifierLength(dest.GetScheme())
+}
+
 // ResolveMultiTableName builds the destination name for one source table and
 // shortens only its final table component to the destination's identifier
 // limit. Qualification and identifier delimiters from custom namers are kept
 // intact, while the full unshortened physical path seeds the collision tag.
 // TableNamingTable drops the source-schema qualifier before naming, so
 // "foo.A" lands as "<destSchema>.A" instead of the flattened "<destSchema>.foo_A".
-func ResolveMultiTableName(scheme string, namer MultiTableNamer, destSchema, sourceTable string, naming config.TableNaming) string {
+func ResolveMultiTableName(maxLen int, namer MultiTableNamer, destSchema, sourceTable string, naming config.TableNaming) string {
 	name := DefaultMultiTableName(destSchema, sourceTable)
 	if naming == config.TableNamingTable {
 		if parts := tablename.SplitRaw(sourceTable); len(parts) > 1 {
@@ -63,7 +79,6 @@ func ResolveMultiTableName(scheme string, namer MultiTableNamer, destSchema, sou
 	if namer != nil {
 		name = namer.DestTableName(destSchema, sourceTable)
 	}
-	maxLen := MaxIdentifierLength(scheme)
 	if maxLen <= 0 {
 		return name
 	}

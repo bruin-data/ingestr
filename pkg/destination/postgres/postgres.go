@@ -447,12 +447,16 @@ func (d *PostgresDestination) copyRecordGroup(ctx context.Context, record arrow.
 		return rows, 1, nil, err
 	}
 
-	stream, err := newPostgresRecordCopyStream(ctx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	stream, err := newPostgresRecordCopyStream(readCtx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 	defer stream.Close()
-	tag, err := pgxConn.PgConn().CopyFrom(ctx, stream, plan.copySQL)
+	reader := newPostgresCopyReader(stream, cancelRead)
+	tag, err := pgxConn.PgConn().CopyFrom(readCtx, reader, plan.copySQL)
+	reader.Close()
 	return tag.RowsAffected(), stream.Batches(), stream.Pending(), err
 }
 
@@ -469,7 +473,10 @@ func copyPostgresRecord(ctx context.Context, pgxConn *pgx.Conn, record arrow.Rec
 		}))
 	}
 
-	tag, err := pgxConn.PgConn().CopyFrom(ctx, reader, plan.copySQL)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	copyReader := newPostgresCopyReader(reader, cancelRead)
+	defer copyReader.Close()
+	tag, err := pgxConn.PgConn().CopyFrom(readCtx, copyReader, plan.copySQL)
 	if err != nil {
 		return 0, err
 	}
@@ -1232,10 +1239,7 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 		return fmt.Errorf("failed to lock target table: %w", err)
 	}
 
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
-		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
-	)
+	deleteSQL := destination.IntervalDeleteSQL(quotedTargetTable, "target", destination.QuoteIdentifier(opts.IncrementalKey), "$1", "$2", opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1406,6 +1410,8 @@ func (d *PostgresDestination) SupportsAppendStrategy() bool { return true }
 func (d *PostgresDestination) SupportsMergeStrategy() bool { return true }
 
 func (d *PostgresDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *PostgresDestination) SupportsDeleteInsertPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as PostgreSQL supports the delete+insert strategy.
 func (d *PostgresDestination) SupportsDeleteInsertStrategy() bool { return true }

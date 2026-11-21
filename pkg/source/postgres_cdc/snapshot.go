@@ -35,6 +35,10 @@ type Snapshot struct {
 	progressKeys []string
 	progress     source.CDCSnapshotProgress
 	resuming     bool
+	// batchDataHint holds each column's data bytes in recent batches, so a
+	// reader can size its next batch's buffers instead of doubling them. Only
+	// a reader's own copy of the snapshot sets it.
+	batchDataHint []int
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -253,6 +257,14 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 	builders := make([]array.Builder, len(s.tableSchema.Columns))
 	for i, field := range arrowSchema.Fields() {
 		builders[i] = array.NewBuilder(mem, field.Type)
+		if s.batchDataHint != nil {
+			if batchSize > 0 {
+				builders[i].Reserve(batchSize)
+			}
+			if hint := s.batchDataHint[i]; hint > 0 {
+				reserveBuilderData(builders[i], hint+hint/16)
+			}
+		}
 	}
 	defer func() {
 		for _, builder := range builders {
@@ -275,6 +287,26 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 
 		// Append source column values
 		for i, buf := range raw[:len(columns)] {
+			if columns[i].DataType == schema.TypeJSON && (fields[i].DataTypeOID == pgtype.JSONOID || fields[i].DataTypeOID == pgtype.JSONBOID) {
+				if buf == nil {
+					builders[i].AppendNull()
+				} else {
+					if fields[i].DataTypeOID == pgtype.JSONBOID && fields[i].Format == pgx.BinaryFormatCode {
+						if len(buf) < 2 || buf[0] != 1 {
+							return nil, 0, nil, fmt.Errorf("invalid binary JSONB in snapshot column %q", columns[i].Name)
+						}
+						buf = buf[1:]
+					}
+					// PostgreSQL validates the JSON; Arrow copies it before pgx can
+					// reuse the row buffer, without decoding or re-encoding it.
+					storage := builders[i].(*array.ExtensionBuilder).StorageBuilder().(*array.StringBuilder)
+					storage.BinaryBuilder.Append(buf)
+				}
+				if maxBatchBytes > 0 {
+					accBytes += int64(len(buf)) + 8
+				}
+				continue
+			}
 			val, err := snapshotValue(typeMap, fields[i], buf, columns[i])
 			var converted any
 			if err == nil {
@@ -330,6 +362,11 @@ func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns
 
 	arrays := make([]arrow.Array, len(builders))
 	for i, b := range builders {
+		if s.batchDataHint != nil {
+			if n := builderDataLen(b); n > 0 {
+				s.batchDataHint[i] = max(n, s.batchDataHint[i]*7/8)
+			}
+		}
 		arrays[i] = b.NewArray()
 	}
 
@@ -483,4 +520,30 @@ func snapshotKeyTypes(ctx context.Context, tx pgx.Tx, table string, keys []strin
 // a table alias: the text casts would otherwise make the names ambiguous.
 func keyedSnapshotQuery(columns []string, table string, keys, keyTypes, resumeAfter []string) (string, []any) {
 	return boundedSnapshotQuery(columns, table, keys, keyTypes, resumeAfter, nil)
+}
+
+func variableWidthBuilder(builder array.Builder) *array.BinaryBuilder {
+	if extension, ok := builder.(*array.ExtensionBuilder); ok {
+		builder = extension.StorageBuilder()
+	}
+	switch b := builder.(type) {
+	case *array.StringBuilder:
+		return b.BinaryBuilder
+	case *array.BinaryBuilder:
+		return b
+	}
+	return nil
+}
+
+func reserveBuilderData(builder array.Builder, n int) {
+	if b := variableWidthBuilder(builder); b != nil {
+		b.ReserveData(n)
+	}
+}
+
+func builderDataLen(builder array.Builder) int {
+	if b := variableWidthBuilder(builder); b != nil {
+		return b.DataLen()
+	}
+	return 0
 }
