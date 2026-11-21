@@ -364,6 +364,10 @@ func (d *RedshiftDestination) SupportsCDCUnchangedCols() bool { return true }
 
 func (d *RedshiftDestination) SupportsIncrementalPredicate() bool { return true }
 
+// SupportsDeleteInsertPredicate is false: Redshift's DELETE cannot alias its
+// target, so a predicate written against the merge alias would not resolve.
+func (d *RedshiftDestination) SupportsDeleteInsertPredicate() bool { return false }
+
 func (d *RedshiftDestination) SupportsCDCMerge() bool {
 	return true
 }

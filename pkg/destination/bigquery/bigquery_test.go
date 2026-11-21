@@ -4420,3 +4420,24 @@ func TestRenameAsideSwapRestoresOnSwapFailure(t *testing.T) {
 		t.Fatalf("restore must clear the expiration, queries = %v", queries)
 	}
 }
+
+func TestBuildDeleteInsertStatementsWithIncrementalPredicate(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	deleteSQL, _ := dest.buildDeleteInsertStatements("my-project", "staging_ds", "staging_tbl", "target_ds", "target_tbl", destination.DeleteInsertOptions{
+		StagingTable:         "staging_ds.staging_tbl",
+		TargetTable:          "target_ds.target_tbl",
+		IncrementalKey:       "ts",
+		IncrementalKeyType:   schema.TypeInt64,
+		IntervalStart:        int64(1),
+		IntervalEnd:          int64(10),
+		Columns:              []string{"id", "ts"},
+		IncrementalPredicate: "t.event_date >= DATE '2026-01-01'",
+	})
+
+	want := "DELETE FROM `my-project`.`target_ds`.`target_tbl` AS t WHERE t.`ts` >= 1 AND t.`ts` <= 10 AND (t.event_date >= DATE '2026-01-01')"
+	if deleteSQL != want {
+		t.Fatalf("deleteSQL = %q, want %q", deleteSQL, want)
+	}
+}

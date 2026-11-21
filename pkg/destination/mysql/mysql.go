@@ -1419,10 +1419,7 @@ func (d *MySQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= ? AND %s <= ?",
-		quoteTable(opts.TargetTable), quoteColumn(opts.IncrementalKey), quoteColumn(opts.IncrementalKey),
-	)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey, opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1634,6 +1631,20 @@ func (d *MySQLDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *MySQLDestination) SupportsAppendStrategy() bool       { return true }
 func (d *MySQLDestination) SupportsMergeStrategy() bool        { return true }
 func (d *MySQLDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *MySQLDestination) SupportsDeleteInsertPredicate() bool { return true }
+
+// buildDeleteInsertDeleteSQL aliases the target with the multi-table DELETE
+// form, which unlike `DELETE FROM t AS alias` predates MySQL 8.0.16 and works
+// on MariaDB and Vitess.
+func buildDeleteInsertDeleteSQL(targetTable, incrementalKey, predicate string) string {
+	key := quoteColumn(incrementalKey)
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s >= ? AND %s <= ?", quoteTable(targetTable), key, key)
+	}
+	return fmt.Sprintf("DELETE target FROM %s AS target WHERE %s", quoteTable(targetTable),
+		destination.IntervalDeleteCondition("target", key, "?", "?", predicate))
+}
 func (d *MySQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MySQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MySQLDestination) SupportsAtomicSwap() bool           { return true }
