@@ -27,21 +27,16 @@ func TestParseURI(t *testing.T) {
 		uri     string
 		wantKey string
 		wantIDs []string
-		wantRPH int
 		wantErr string
 	}{
-		{name: "token only", uri: "privatus://?api_key=pat_abc", wantKey: "pat_abc", wantRPH: defaultRequestsPerHour},
-		{name: "site ids", uri: "privatus://?api_key=pat_abc&site_ids=pa_AB12, pa_CD34", wantKey: "pat_abc", wantIDs: []string{"pa_AB12", "pa_CD34"}, wantRPH: defaultRequestsPerHour},
-		{name: "empty site ids are skipped", uri: "privatus://?api_key=pat_abc&site_ids=pa_AB12,,", wantKey: "pat_abc", wantIDs: []string{"pa_AB12"}, wantRPH: defaultRequestsPerHour},
-		{name: "requests per hour", uri: "privatus://?api_key=pat_abc&requests_per_hour=5000", wantKey: "pat_abc", wantRPH: 5000},
+		{name: "token only", uri: "privatus://?api_key=pat_abc", wantKey: "pat_abc"},
+		{name: "site ids", uri: "privatus://?api_key=pat_abc&site_ids=pa_AB12, pa_CD34", wantKey: "pat_abc", wantIDs: []string{"pa_AB12", "pa_CD34"}},
+		{name: "empty site ids are skipped", uri: "privatus://?api_key=pat_abc&site_ids=pa_AB12,,", wantKey: "pat_abc", wantIDs: []string{"pa_AB12"}},
 		{name: "wrong scheme", uri: "plausible://?api_key=pat_abc", wantErr: "must start with privatus://"},
 		{name: "missing token", uri: "privatus://", wantErr: "api_key is required"},
 		{name: "blank token", uri: "privatus://?api_key=%20", wantErr: "api_key is required"},
 		{name: "bad site id", uri: "privatus://?api_key=pat_abc&site_ids=pa_AB/../x", wantErr: "invalid site id"},
 		{name: "site id without prefix", uri: "privatus://?api_key=pat_abc&site_ids=AB12", wantErr: "invalid site id"},
-		{name: "requests per hour not a number", uri: "privatus://?api_key=pat_abc&requests_per_hour=lots", wantErr: "requests_per_hour"},
-		{name: "requests per hour zero", uri: "privatus://?api_key=pat_abc&requests_per_hour=0", wantErr: "requests_per_hour"},
-		{name: "requests per hour too high", uri: "privatus://?api_key=pat_abc&requests_per_hour=100001", wantErr: "requests_per_hour"},
 	}
 
 	for _, tt := range tests {
@@ -55,9 +50,35 @@ func TestParseURI(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantKey, conn.apiKey)
 			assert.Equal(t, tt.wantIDs, conn.siteIDs)
-			assert.Equal(t, tt.wantRPH, conn.requestsPerHour)
 		})
 	}
+}
+
+func TestRequestsPerHour(t *testing.T) {
+	assert.Equal(t, 1000, requestsPerHour(nil))
+	assert.Equal(t, 5000, requestsPerHour([]string{"pro"}))
+	assert.Equal(t, 100000, requestsPerHour([]string{"enterprise"}))
+	assert.Equal(t, 5000, requestsPerHour([]string{"business", "pro"}), "lowest workspace limit wins")
+	assert.Equal(t, 1000, requestsPerHour([]string{"business", "trial_something"}), "unknown plans count as Free")
+}
+
+func TestConnectSetsRateLimitFromPlan(t *testing.T) {
+	server := httptest.NewServer((&fakeAPI{}).handler(t))
+	t.Cleanup(server.Close)
+	original := baseURL
+	baseURL = server.URL
+	t.Cleanup(func() { baseURL = original })
+
+	s := NewPrivatusSource()
+	require.NoError(t, s.Connect(context.Background(), "privatus://?api_key=pat_test"))
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+	assert.InDelta(t, 20000*0.8/3600.0, s.limiter.Limit(), 1e-9)
+
+	bad := NewPrivatusSource()
+	err := bad.Connect(context.Background(), "privatus://?api_key=pat_wrong")
+	t.Cleanup(func() { _ = bad.Close(context.Background()) })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "401")
 }
 
 func TestIsValidTable(t *testing.T) {
@@ -173,7 +194,7 @@ func (f *fakeAPI) handler(t *testing.T) http.HandlerFunc {
 		switch {
 		case r.URL.Path == "/workspaces.json":
 			writeJSON(t, w, map[string]interface{}{
-				"data": []map[string]interface{}{{"id": "ws_ONE", "name": "Main"}},
+				"data": []map[string]interface{}{{"id": "ws_ONE", "name": "Main", "plan": "business"}},
 				"meta": map[string]interface{}{"page": 1, "per_page": 100, "total_pages": 1},
 			})
 		case r.URL.Path == "/workspaces/ws_ONE/sites.json":

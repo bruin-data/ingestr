@@ -14,7 +14,8 @@ URI parameters:
 
 - `api_key` (required): an API token. It starts with `pat_` and reads one workspace.
 - `site_ids` (optional): a comma-separated list of site IDs to copy, for example `pa_AB12CD34EF,pa_XY98ZW76VU`. Leave it out to copy every site in the workspace.
-- `requests_per_hour` (optional): the API request limit of your plan. The default is `1000`, the Free plan limit. Set it to `5000` on Pro or `20000` on Business so large copies finish sooner.
+
+ingestr reads your workspace's plan and keeps its API requests under the plan's hourly limit, so larger plans copy faster.
 
 ## Setting up a Privatus Analytics integration
 

@@ -19,9 +19,9 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 )
 
-const (
-	baseURL = "https://privatusanalytics.com"
+var baseURL = "https://privatusanalytics.com"
 
+const (
 	maxPageSize          = 100
 	maxBreakdownPageSize = 1000
 	maxPages             = 10000
@@ -29,9 +29,8 @@ const (
 	defaultDays          = 30
 	maxBatchRows         = 10000
 
-	// The API allows 1,000 requests an hour on the Free plan (Pro 5,000, Business 20,000).
+	// Free plan limit, used until the workspace plan is known and for unknown plans.
 	defaultRequestsPerHour = 1000
-	maxRequestsPerHour     = 100000
 	rateLimitBurst         = 5
 
 	dateLayout = "2006-01-02"
@@ -49,6 +48,14 @@ var supportedTables = []string{
 	"breakdown",
 }
 
+// API requests an hour per workspace, by plan; every token of the workspace shares them.
+var planRequestsPerHour = map[string]int{
+	"free":       1000,
+	"pro":        5000,
+	"business":   20000,
+	"enterprise": 100000,
+}
+
 var namedBreakdowns = map[string]string{
 	"pages":            "page",
 	"referrers":        "referrer",
@@ -63,13 +70,13 @@ var (
 
 type PrivatusSource struct {
 	client  *httpclient.Client
+	limiter *httpclient.RateLimiter
 	siteIDs []string
 }
 
 type connection struct {
-	apiKey          string
-	siteIDs         []string
-	requestsPerHour int
+	apiKey  string
+	siteIDs []string
 }
 
 type tableSpec struct {
@@ -96,16 +103,46 @@ func (s *PrivatusSource) Connect(ctx context.Context, uri string) error {
 	}
 
 	s.siteIDs = conn.siteIDs
+	s.limiter = httpclient.NewRateLimiter(requestsPerSecond(defaultRequestsPerHour), rateLimitBurst)
 	s.client = httpclient.New(
 		httpclient.WithBaseURL(baseURL),
 		httpclient.WithTimeout(60*time.Second),
 		httpclient.WithDebug(config.DebugMode),
 		httpclient.WithAuth(httpclient.NewBearerAuth(conn.apiKey)),
-		httpclient.WithRateLimiter(float64(conn.requestsPerHour)*0.8/3600.0, rateLimitBurst),
+		httpclient.WithRateLimiterInstance(s.limiter),
 	)
 
-	config.Debug("[PRIVATUS] Connected (sites filter: %d, requests per hour: %d)", len(conn.siteIDs), conn.requestsPerHour)
+	plans, err := s.workspacePlans(ctx)
+	if err != nil {
+		return err
+	}
+	perHour := requestsPerHour(plans)
+	s.limiter.SetLimit(requestsPerSecond(perHour))
+
+	config.Debug("[PRIVATUS] Connected (plans: %v, sites filter: %d, requests per hour: %d)", plans, len(conn.siteIDs), perHour)
 	return nil
+}
+
+func requestsPerSecond(perHour int) float64 {
+	return float64(perHour) * 0.8 / 3600.0
+}
+
+// requestsPerHour returns the lowest limit among the token's workspaces, treating unknown plans as Free.
+func requestsPerHour(plans []string) int {
+	limit := 0
+	for _, plan := range plans {
+		n, ok := planRequestsPerHour[plan]
+		if !ok {
+			n = defaultRequestsPerHour
+		}
+		if limit == 0 || n < limit {
+			limit = n
+		}
+	}
+	if limit == 0 {
+		return defaultRequestsPerHour
+	}
+	return limit
 }
 
 func parseURI(uri string) (*connection, error) {
@@ -118,10 +155,7 @@ func parseURI(uri string) (*connection, error) {
 	}
 
 	query := parsed.Query()
-	conn := &connection{
-		apiKey:          strings.TrimSpace(query.Get("api_key")),
-		requestsPerHour: defaultRequestsPerHour,
-	}
+	conn := &connection{apiKey: strings.TrimSpace(query.Get("api_key"))}
 	if conn.apiKey == "" {
 		return nil, fmt.Errorf("api_key is required in the privatus URI, expected format: privatus://?api_key=<pat_token>")
 	}
@@ -137,14 +171,6 @@ func parseURI(uri string) (*connection, error) {
 			}
 			conn.siteIDs = append(conn.siteIDs, id)
 		}
-	}
-
-	if raw := query.Get("requests_per_hour"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > maxRequestsPerHour {
-			return nil, fmt.Errorf("requests_per_hour must be a whole number from 1 to %d", maxRequestsPerHour)
-		}
-		conn.requestsPerHour = n
 	}
 
 	return conn, nil
@@ -374,6 +400,19 @@ func (s *PrivatusSource) listWorkspaceIDs(ctx context.Context) ([]string, error)
 		return nil, fmt.Errorf("failed to fetch workspaces: %w", err)
 	}
 	return ids, nil
+}
+
+func (s *PrivatusSource) workspacePlans(ctx context.Context) ([]string, error) {
+	var plans []string
+	err := s.paginateList(ctx, "/workspaces.json", nil, func(item map[string]interface{}) error {
+		plan, _ := item["plan"].(string)
+		plans = append(plans, plan)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch workspaces: %w", err)
+	}
+	return plans, nil
 }
 
 func (s *PrivatusSource) wantSite(id string) bool {
