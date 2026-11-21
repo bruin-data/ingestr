@@ -215,7 +215,11 @@ func TestStarRocksCDCDirectSnapshotResumesAfterRestart(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(position), &progress))
 	require.Equal(t, 2, progress.Version)
 	require.NotEmpty(t, progress.Attempt)
-	require.Len(t, progress.Ranges, 4)
+	expectedRanges := cfg.ExtractParallelism
+	if maxConns := int(pg.Config().MaxConns); maxConns > 0 && maxConns < expectedRanges {
+		expectedRanges = maxConns
+	}
+	require.Len(t, progress.Ranges, expectedRanges)
 	require.Greater(t, progress.Boundary, initialStamp)
 	durableKeys := make(map[int]bool)
 	parseKey := func(key []string, unbounded int) int {
