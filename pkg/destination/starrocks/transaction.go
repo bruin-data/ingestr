@@ -285,6 +285,9 @@ func (tx *streamLoadTransaction) request(ctx context.Context, operation string, 
 			if tx.options.columns != "" {
 				request.Header.Set("columns", tx.options.columns)
 			}
+			if tx.options.jsonpaths != "" {
+				request.Header.Set("jsonpaths", tx.options.jsonpaths)
+			}
 			if tx.options.mergeCondition != "" {
 				request.Header.Set("merge_condition", tx.options.mergeCondition)
 			}

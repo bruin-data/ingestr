@@ -351,6 +351,7 @@ func (e *StreamingExecutor) lateTargetPrepareOptions(st *streamTableState) desti
 	}
 	if e.opts.Strategy == config.StrategyAppend || (st.isCDC && len(st.primaryKeys) == 0) {
 		opts.PrimaryKeys = nil
+		opts.Strategy = string(config.StrategyAppend)
 		if st.isCDC {
 			opts.Schema = st.schema
 			opts.CDCMode = true
@@ -495,6 +496,7 @@ func (e *StreamingExecutor) prepareTable(ctx context.Context, dest destination.D
 			ClusterBy:   st.clusterBy,
 			CDCMode:     st.isCDC,
 			CDCKeys:     st.primaryKeys,
+			Strategy:    string(config.StrategyAppend),
 		}); err != nil {
 			return fmt.Errorf("failed to prepare destination table %s: %w", st.destTable, err)
 		}

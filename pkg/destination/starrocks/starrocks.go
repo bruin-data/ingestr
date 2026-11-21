@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -56,10 +57,24 @@ func (d *StarRocksDestination) Schemes() []string { return []string{"starrocks"}
 
 func (d *StarRocksDestination) GetScheme() string { return "starrocks" }
 
-func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
+func (d *StarRocksDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
+	return destination.ReplaceStagingPolicy{
+		DefaultPlacement:    destination.ReplaceStagingTargetSchema,
+		DefaultTargetSchema: d.database,
+	}
+}
+
+type connectionConfig struct {
+	dsn            string
+	database       string
+	replicationNum string
+	loader         *streamLoader
+}
+
+func parseConnectionConfig(uri string) (connectionConfig, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return fmt.Errorf("failed to parse StarRocks URI: %w", err)
+		return connectionConfig{}, fmt.Errorf("failed to parse StarRocks URI: %w", err)
 	}
 
 	host := u.Hostname()
@@ -69,38 +84,51 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	port := u.Port()
 	if port == "" {
 		port = "9030"
+	} else if p, convErr := strconv.Atoi(port); convErr != nil || p <= 0 || p > 65535 {
+		return connectionConfig{}, fmt.Errorf("invalid StarRocks port %q", port)
 	}
 	var user, password string
 	if u.User != nil {
 		user = u.User.Username()
 		password, _ = u.User.Password()
 	}
+	var database string
 	// Accept a [catalog/]database path: a connection shared with the source may
 	// carry a catalog, but the destination writes to the native catalog, so use
 	// the last path segment as the database.
 	if trimmed := strings.Trim(u.Path, "/"); trimmed != "" {
 		parts := strings.Split(trimmed, "/")
-		d.database = parts[len(parts)-1]
+		database = parts[len(parts)-1]
 	}
 
-	query := u.Query()
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return connectionConfig{}, fmt.Errorf("invalid StarRocks URI query: %w", err)
+	}
 	httpPort := defaultHTTPPort
 	if v := query.Get("http_port"); v != "" {
 		p, convErr := strconv.Atoi(v)
 		if convErr != nil || p <= 0 || p > 65535 {
-			return fmt.Errorf("invalid StarRocks http_port %q", v)
+			return connectionConfig{}, fmt.Errorf("invalid StarRocks http_port %q", v)
 		}
 		httpPort = p
 	}
-	d.replicationNum = query.Get("replication_num")
+	replicationNum := strings.TrimSpace(query.Get("replication_num"))
+	if replicationNum != "" {
+		n, convErr := strconv.Atoi(replicationNum)
+		if convErr != nil || n <= 0 {
+			return connectionConfig{}, fmt.Errorf("invalid StarRocks replication_num %q: must be a positive integer", replicationNum)
+		}
+		replicationNum = strconv.Itoa(n)
+	}
 
 	tls, err := tlsParam(query.Get("ssl"))
 	if err != nil {
-		return err
+		return connectionConfig{}, err
 	}
 	loader, err := newStreamLoader(host, httpPort, user, password, query.Get("http_scheme"))
 	if err != nil {
-		return err
+		return connectionConfig{}, err
 	}
 
 	dsn := ""
@@ -113,12 +141,28 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	}
 	// The database is omitted from the DSN: it may not exist yet (the destination
 	// creates it), and pinning it would make the driver USE it on connect.
-	dsn += fmt.Sprintf("tcp(%s:%s)/?parseTime=true&interpolateParams=true", host, port)
+	dsn += fmt.Sprintf("tcp(%s)/?parseTime=true&interpolateParams=true", net.JoinHostPort(host, port))
 	if tls != "" {
 		dsn += "&tls=" + tls
 	}
 
-	db, err := sql.Open("mysql", dsn)
+	return connectionConfig{
+		dsn:            dsn,
+		database:       database,
+		replicationNum: replicationNum,
+		loader:         loader,
+	}, nil
+}
+
+func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
+	cfg, err := parseConnectionConfig(uri)
+	if err != nil {
+		return err
+	}
+	d.database = cfg.database
+	d.replicationNum = cfg.replicationNum
+
+	db, err := sql.Open("mysql", cfg.dsn)
 	if err != nil {
 		return fmt.Errorf("failed to open StarRocks connection: %w", err)
 	}
@@ -132,10 +176,10 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 
 	d.db = db
 	d.legacyLoadMetadata.Store(false)
-	d.loader = loader
+	d.loader = cfg.loader
 	d.loader.waitForPublish = d.waitForPublish
 	d.loader.transactionState = d.transactionState
-	config.Debug("[STARROCKS] Connected (database: %s, stream_load: %s)", d.database, loader.endpoint)
+	config.Debug("[STARROCKS] Connected (database: %s, stream_load: %s)", d.database, cfg.loader.endpoint)
 	return nil
 }
 
@@ -173,19 +217,29 @@ func (d *StarRocksDestination) prepareTable(ctx context.Context, opts destinatio
 	}
 
 	if opts.DropFirst {
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", d.tableRef(opts.Table))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s FORCE", d.tableRef(opts.Table))
 		if _, err := d.db.ExecContext(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
 		}
 	}
 
+	isAppend := strings.EqualFold(opts.Strategy, string(config.StrategyAppend))
+	primaryKeys := dedupePrimaryKeys(opts.PrimaryKeys)
+	if isAppend {
+		primaryKeys = nil
+	}
+
 	if opts.Schema != nil {
 		tableSchema := opts.Schema
-		if len(opts.PrimaryKeys) > 0 {
+		if len(primaryKeys) > 0 {
 			tableSchema = destination.DestinationTableSchema(tableSchema)
+			primaryKeys, err = resolvePrimaryKeys(tableSchema.Columns, primaryKeys)
+			if err != nil {
+				return err
+			}
 		}
-		createSQL := d.buildCreateTableSQL(opts.Table, tableSchema.Columns, opts.PrimaryKeys)
+		createSQL := d.buildCreateTableSQL(opts.Table, tableSchema.Columns, primaryKeys)
 		if exclusive {
 			createSQL = strings.Replace(createSQL, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
 		}
@@ -194,10 +248,49 @@ func (d *StarRocksDestination) prepareTable(ctx context.Context, opts destinatio
 			return fmt.Errorf("failed to create table: %w", err)
 		}
 	}
-	if opts.RequirePrimaryKeyMatch {
-		return d.validatePrimaryKey(ctx, "CDC target", opts.Table, opts.PrimaryKeys)
+	if isAppend || (opts.CDCMode && len(primaryKeys) == 0 && !opts.DropFirst && !exclusive) {
+		return d.validateAppendTable(ctx, opts.Table, opts.Schema != nil)
+	}
+	if opts.RequirePrimaryKeyMatch && len(primaryKeys) > 0 {
+		return d.validatePrimaryKey(ctx, "CDC target", opts.Table, primaryKeys)
 	}
 	return nil
+}
+
+func dedupePrimaryKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		lower := strings.ToLower(k)
+		if seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		out = append(out, k)
+	}
+	return out
+}
+
+func resolvePrimaryKeys(columns []schema.Column, keys []string) ([]string, error) {
+	byName := make(map[string]schema.Column, len(columns))
+	for _, col := range columns {
+		byName[strings.ToLower(col.Name)] = col
+	}
+	resolved := make([]string, 0, len(keys))
+	for _, k := range keys {
+		col, ok := byName[strings.ToLower(k)]
+		if !ok {
+			return nil, fmt.Errorf("StarRocks primary key column %q not found in table schema", k)
+		}
+		if !isStarRocksKeyable(col) {
+			return nil, fmt.Errorf("StarRocks primary key column %q has non-keyable type %s", col.Name, col.DataType)
+		}
+		resolved = append(resolved, col.Name)
+	}
+	return resolved, nil
 }
 
 // buildCreateTableSQL renders StarRocks DDL. With primary keys it creates a
@@ -234,6 +327,7 @@ func keyableFirst(columns []schema.Column) []schema.Column {
 }
 
 func (d *StarRocksDestination) buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+	primaryKeys = dedupePrimaryKeys(primaryKeys)
 	pkSet := make(map[string]bool, len(primaryKeys))
 	for _, k := range primaryKeys {
 		pkSet[strings.ToLower(k)] = true
@@ -396,8 +490,8 @@ func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string,
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	encoder := newJSONBatchEncoder(rec, maxStreamLoadJSONBytes)
-	columns := columnsHeader(rec.Schema(), encoder.binaryColumns())
+	encoder, loadOpts := newStreamLoadBatchEncoder(rec, maxStreamLoadJSONBytes)
+	loadOpts.mergeCondition = mergeCondition
 	var loaded int64
 	for {
 		body, rows, err := encoder.next(ctx)
@@ -407,7 +501,7 @@ func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string,
 		if rows == 0 {
 			return loaded, nil
 		}
-		if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, streamLoadOptions{columns: columns, mergeCondition: mergeCondition}); err != nil {
+		if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, loadOpts); err != nil {
 			return loaded, err
 		}
 		loaded += rows
@@ -650,15 +744,15 @@ func (d *StarRocksDestination) MergeTable(ctx context.Context, opts destination.
 	}
 	cols := quoteColumns(opts.Columns)
 	colList := strings.Join(cols, ", ")
-	orderBy := ""
-	if opts.IncrementalKey != "" {
-		orderBy = quoteColumn(opts.IncrementalKey)
-	} else if len(opts.PrimaryKeys) > 0 {
-		// StarRocks rejects the helper's scalar-subquery fallback. A partition
-		// key is constant within each group and likewise leaves ties unordered.
-		orderBy = quoteColumn(opts.PrimaryKeys[0])
+	pks := dedupePrimaryKeys(opts.PrimaryKeys)
+	selectSQL := fmt.Sprintf("SELECT %s FROM %s", colList, d.tableRef(opts.StagingTable))
+	if !opts.StagingPrimaryKeysUnique && len(pks) > 0 {
+		orderBy := quoteColumn(pks[0])
+		if opts.IncrementalKey != "" {
+			orderBy = quoteColumn(opts.IncrementalKey)
+		}
+		selectSQL = destination.DedupStagingSelect(colList, strings.Join(quoteColumns(pks), ", "), d.tableRef(opts.StagingTable), orderBy)
 	}
-	selectSQL := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), d.tableRef(opts.StagingTable), orderBy)
 	// Select the winner before the PRIMARY KEY engine upserts; its replacement
 	// order does not honor the incremental key.
 	mergeSQL := fmt.Sprintf("INSERT INTO %s (%s) %s",
@@ -679,7 +773,7 @@ func (d *StarRocksDestination) SCD2Table(ctx context.Context, opts destination.S
 }
 
 func (d *StarRocksDestination) DropTable(ctx context.Context, table string) error {
-	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", d.tableRef(table))
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s FORCE", d.tableRef(table))
 	if _, err := d.db.ExecContext(ctx, dropSQL); err != nil {
 		config.LogFailedQuery(dropSQL, err)
 		return fmt.Errorf("failed to drop table %s: %w", table, err)
@@ -799,7 +893,10 @@ func (d *StarRocksDestination) SupportsDeleteInsertStrategy() bool { return fals
 func (d *StarRocksDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *StarRocksDestination) SupportsAtomicSwap() bool           { return true }
 
-var _ destination.Destination = (*StarRocksDestination)(nil)
+var (
+	_ destination.Destination                  = (*StarRocksDestination)(nil)
+	_ destination.ReplaceStagingPolicyProvider = (*StarRocksDestination)(nil)
+)
 
 // rejectBacktickName refuses database/table names with backticks: StarRocks
 // drops escaped backticks, so DDL would hit a different table than the
