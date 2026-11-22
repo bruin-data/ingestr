@@ -259,6 +259,105 @@ func TestSerialChunkedSnapshotResumesAndCatchesUp(t *testing.T) {
 	require.True(t, confirmed, "finite catchup must confirm its durable checkpoint before returning")
 }
 
+func TestSerialChunkedSnapshotDefersCheckpointAcrossUploadWindow(t *testing.T) {
+	f := newSerialSnapshotFixture(t)
+	f.opts.CDCChunkedSnapshot.FlushRecords = 6
+	src, table := f.open(t)
+	results, err := table.Read(f.ctx, f.opts)
+	require.NoError(t, err)
+
+	var rows int64
+	sawDeferred := false
+	for result := range results {
+		require.NoError(t, result.Err)
+		if result.CDCSnapshotChunk != nil && result.CDCSnapshotChunk.DeferMerge {
+			sawDeferred = true
+		}
+		if result.Batch != nil {
+			rows += result.Batch.NumRows()
+			result.Batch.Release()
+		}
+		if !result.CDCFlush {
+			continue
+		}
+		token := result.CommitToken.(source.CDCStateCommitToken)
+		checkpoint := token.SourceCommitToken.(*chunkedCommit)
+		after := checkpoint.state.Tables[serialSnapshotTable].After
+		require.NoError(t, src.CommitStream(f.ctx, result.CommitToken))
+		if len(after) == 0 {
+			continue
+		}
+		require.True(t, sawDeferred, "the first chunk of a window must be staged without a merge")
+		require.Equal(t, int64(6), rows)
+		require.Equal(t, []string{"6"}, after)
+		return
+	}
+	t.Fatal("serial reader ended before its first upload window checkpoint")
+}
+
+func TestSerialChunkedSnapshotRecopiesInterruptedUploadWindow(t *testing.T) {
+	f := newSerialSnapshotFixture(t)
+	f.opts.CDCChunkedSnapshot.FlushRecords = 6
+	first, table := f.open(t)
+	readCtx, stopRead := context.WithCancel(f.ctx)
+	defer stopRead()
+	results, err := table.Read(readCtx, f.opts)
+	require.NoError(t, err)
+
+	var firstIDs []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		if result.CDCFlush {
+			require.NoError(t, first.CommitStream(f.ctx, result.CommitToken))
+		}
+		if result.Batch == nil {
+			continue
+		}
+		ids := result.Batch.Column(result.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+		firstIDs = append([]int64(nil), ids.Int64Values()...)
+		result.Batch.Release()
+		stopRead()
+		break
+	}
+	for result := range results {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	require.Equal(t, []int64{1, 2, 3}, firstIDs)
+	require.NoError(t, first.Close(f.ctx))
+	persisted, err := loadChunkState(f.ctx, f.store)
+	require.NoError(t, err)
+	require.Empty(t, persisted.Tables[serialSnapshotTable].After)
+
+	second, table := f.open(t)
+	retryCtx, stopRetry := context.WithCancel(f.ctx)
+	defer stopRetry()
+	results, err = table.Read(retryCtx, f.opts)
+	require.NoError(t, err)
+	var retryIDs []int64
+	for result := range results {
+		require.NoError(t, result.Err)
+		if result.CDCFlush {
+			require.NoError(t, second.CommitStream(f.ctx, result.CommitToken))
+		}
+		if result.Batch == nil {
+			continue
+		}
+		ids := result.Batch.Column(result.Batch.Schema().FieldIndices("id")[0]).(*array.Int64)
+		retryIDs = append([]int64(nil), ids.Int64Values()...)
+		result.Batch.Release()
+		stopRetry()
+		break
+	}
+	for result := range results {
+		if result.Batch != nil {
+			result.Batch.Release()
+		}
+	}
+	require.Equal(t, firstIDs, retryIDs)
+}
+
 func TestSerialChunkedSnapshotResumesCopiedTablesBeforeCertification(t *testing.T) {
 	f := newSerialSnapshotFixture(t)
 	first, table := f.open(t)

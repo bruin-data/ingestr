@@ -285,3 +285,94 @@ func TestStreamingSnapshotChunkShutdownDoesNotFlushQueuedPages(t *testing.T) {
 	require.Empty(t, committer.committed())
 	require.Equal(t, 5, len(records))
 }
+
+func TestStreamingSerialSnapshotWindowMergesSpannedRangeOnce(t *testing.T) {
+	loop, dest, _, committer := snapshotChunkTestLoop(t)
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	first := &source.CDCSnapshotChunk{After: []string{"0"}, Last: []string{"2"}, OrderedIntegerKeys: true, DeferMerge: true}
+	second := &source.CDCSnapshotChunk{After: []string{"2"}, Last: []string{"4"}, OrderedIntegerKeys: true}
+	records := make(chan source.RecordBatchResult, 8)
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunk: first}
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: snapshotChunkTestBatch(mem, 1)}
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunkEnd: first}
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunk: second}
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: snapshotChunkTestBatch(mem, 3)}
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunkEnd: second}
+	records <- source.RecordBatchResult{CDCFlush: true, CommitToken: source.CDCStateCommitToken{Position: "00000000/00000020", SourceCommitToken: "window"}}
+	close(records)
+	t.Cleanup(func() {
+		drainAndRelease(records)
+		mem.AssertSize(t, 0)
+	})
+	writes := 0
+	dest.write = func(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+		writes++
+		return dest.chunkedAdapterDestination.WriteParallel(ctx, records, opts)
+	}
+	require.NoError(t, loop.run(t.Context(), records))
+	require.Equal(t, 2, writes)
+	require.Len(t, dest.mergeCalls, 1)
+	require.Equal(t, &destination.CDCSnapshotRange{After: []string{"0"}, Last: []string{"4"}}, dest.mergeCalls[0].CDCSnapshotRange)
+	require.Len(t, dest.truncateCalls, 1)
+	require.False(t, loop.tables["public.items"].snapshotWindowOpen)
+	require.Len(t, committer.committed(), 1)
+	mem.AssertSize(t, 0)
+}
+
+func TestStreamingSerialSnapshotWindowFailureDoesNotMerge(t *testing.T) {
+	loop, dest, _, committer := snapshotChunkTestLoop(t)
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	first := &source.CDCSnapshotChunk{After: []string{"0"}, Last: []string{"2"}, DeferMerge: true}
+	second := &source.CDCSnapshotChunk{After: []string{"2"}, Last: []string{"4"}}
+	records := make(chan source.RecordBatchResult, 8)
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunk: first}
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: snapshotChunkTestBatch(mem, 1)}
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunkEnd: first}
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunk: second}
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: snapshotChunkTestBatch(mem, 3)}
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunkEnd: second}
+	records <- source.RecordBatchResult{CDCFlush: true, CommitToken: source.CDCStateCommitToken{Position: "00000000/00000020", SourceCommitToken: "window"}}
+	close(records)
+	t.Cleanup(func() {
+		drainAndRelease(records)
+		mem.AssertSize(t, 0)
+	})
+	writes := 0
+	dest.write = func(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+		writes++
+		if writes == 2 {
+			for result := range records {
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
+			}
+			return errors.New("upload failed")
+		}
+		return dest.chunkedAdapterDestination.WriteParallel(ctx, records, opts)
+	}
+	require.ErrorContains(t, loop.run(t.Context(), records), "upload failed")
+	require.Empty(t, dest.mergeCalls)
+	require.Empty(t, committer.committed())
+	mem.AssertSize(t, 0)
+}
+
+func TestStreamingSerialSnapshotDeferredChunkIsNotAcknowledgedWhenSourceEnds(t *testing.T) {
+	loop, dest, _, committer := snapshotChunkTestLoop(t)
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	chunk := &source.CDCSnapshotChunk{After: []string{"0"}, Last: []string{"2"}, DeferMerge: true}
+	records := make(chan source.RecordBatchResult, 4)
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunk: chunk}
+	records <- source.RecordBatchResult{TableName: "public.items", Batch: snapshotChunkTestBatch(mem, 1)}
+	records <- source.RecordBatchResult{TableName: "public.items", CDCSnapshotChunkEnd: chunk}
+	close(records)
+	t.Cleanup(func() {
+		drainAndRelease(records)
+		mem.AssertSize(t, 0)
+	})
+	require.NoError(t, loop.run(t.Context(), records))
+	require.Empty(t, dest.mergeCalls)
+	require.Empty(t, committer.committed())
+	require.True(t, loop.tables["public.items"].snapshotWindowOpen)
+	require.Equal(t, int64(1), loop.tables["public.items"].snapshotRows)
+	mem.AssertSize(t, 0)
+}

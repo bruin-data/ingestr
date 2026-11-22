@@ -186,9 +186,9 @@ func awaitChunkedSnapshotGate(t *testing.T, gate *chunkedSnapshotGate, done <-ch
 	select {
 	case <-gate.blocked:
 	case err := <-done:
-		t.Fatalf("pipeline stopped before the second snapshot chunk: %v", err)
+		t.Fatalf("pipeline stopped before the second snapshot merge: %v", err)
 	case <-time.After(90 * time.Second):
-		t.Fatal("pipeline never reached its second snapshot chunk")
+		t.Fatal("pipeline never reached its second snapshot merge")
 	}
 }
 
@@ -255,6 +255,10 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
 			f := newChunkedCDCFixture(t, mode.staging, false)
 			f.cfg.CDCSnapshotExecution = mode.execution
+			if mode.execution == "serial" {
+				f.cfg.FlushRecords = 4
+				f.cfg.FlushInterval = time.Hour
+			}
 			f.cfg.Stream = true
 			f.cfg.IncrementalStrategy = config.StrategyMerge
 			gate := f.gate(t)
@@ -262,7 +266,11 @@ func TestPostgresCDC_ChunkedSnapshotConcurrentChanges(t *testing.T) {
 			awaitChunkedSnapshotGate(t, gate, done)
 			var copied int
 			require.NoError(t, f.dst.QueryRow(f.ctx, "SELECT count(*) FROM public.items").Scan(&copied))
-			require.Equal(t, 2, copied)
+			expectedCopied := 2
+			if mode.execution == "serial" {
+				expectedCopied = 4
+			}
+			require.Equal(t, expectedCopied, copied)
 			// A statement still in flight holds backend_xmin briefly; a retained
 			// snapshot would never clear while the destination is blocked.
 			require.Eventually(t, func() bool {
@@ -313,6 +321,10 @@ func TestPostgresCDC_ChunkedSnapshotResumesFirstBootstrap(t *testing.T) {
 		t.Run(mode.execution+"/"+mode.staging, func(t *testing.T) {
 			f := newChunkedCDCFixture(t, mode.staging, false)
 			f.cfg.CDCSnapshotExecution = mode.execution
+			if mode.execution == "serial" {
+				f.cfg.FlushRecords = 4
+				f.cfg.FlushInterval = time.Hour
+			}
 			gate := f.gate(t)
 			cancel, done := f.start(t)
 			awaitChunkedSnapshotGate(t, gate, done)

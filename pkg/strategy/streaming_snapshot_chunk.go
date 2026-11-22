@@ -126,12 +126,25 @@ func (l *flushLoop) loadSnapshotChunk(ctx context.Context, records <-chan source
 	if rowCount == 0 {
 		return nil
 	}
+	if end.DeferMerge {
+		if !st.snapshotWindowOpen {
+			st.snapshotWindowAfter = append([]string(nil), end.After...)
+			st.snapshotWindowOpen = true
+		}
+		st.snapshotRows += rowCount
+		st.snapshotBytes += bytes
+		return connectorLeaseLoss(ctx)
+	}
 	opts := mergeStagingOptions(l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation, false)
 	opts.CDCSnapshot = true
 	// Bounds describe source values; masks and column overrides can change
 	// those values or their ordering before they reach staging.
+	rangeAfter := end.After
+	if st.snapshotWindowOpen {
+		rangeAfter = st.snapshotWindowAfter
+	}
 	if end.OrderedIntegerKeys && len(l.cfg.Mask) == 0 && strings.TrimSpace(l.cfg.Columns) == "" {
-		opts.CDCSnapshotRange = &destination.CDCSnapshotRange{After: end.After, Last: end.Last}
+		opts.CDCSnapshotRange = &destination.CDCSnapshotRange{After: rangeAfter, Last: end.Last}
 	}
 	mergeStart := time.Now()
 	err = l.dest.MergeTable(ctx, opts)
@@ -147,6 +160,8 @@ func (l *flushLoop) loadSnapshotChunk(ctx context.Context, records <-chan source
 	if err := l.resetStaging(ctx, st); err != nil {
 		return fmt.Errorf("failed to reset snapshot staging for %s: %w", st.destTable, err)
 	}
+	st.snapshotWindowOpen = false
+	st.snapshotWindowAfter = nil
 	st.snapshotRows += rowCount
 	st.snapshotBytes += bytes
 	return connectorLeaseLoss(ctx)
