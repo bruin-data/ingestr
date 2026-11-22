@@ -136,6 +136,22 @@ func BuildBigQuerySchema(tableSchema *schema.TableSchema) bigquery.Schema {
 	return fields
 }
 
+// bigQueryPartitioning converts a partition_by value into BigQuery time or integer-range partitioning.
+// A bare column keeps the type unset, which BigQuery treats as DAY.
+func bigQueryPartitioning(partitionBy string) (*bigquery.TimePartitioning, *bigquery.RangePartitioning, error) {
+	spec, err := schema.ParseBigQueryPartitionBy(partitionBy)
+	if err != nil {
+		return nil, nil, err
+	}
+	if spec.Range != nil {
+		return nil, &bigquery.RangePartitioning{
+			Field: spec.Column,
+			Range: &bigquery.RangePartitioningRange{Start: spec.Range.Start, End: spec.Range.End, Interval: spec.Range.Interval},
+		}, nil
+	}
+	return &bigquery.TimePartitioning{Field: spec.Column, Type: bigquery.TimePartitioningType(spec.Granularity)}, nil, nil
+}
+
 func BuildTableMetadata(tableSchema *schema.TableSchema, primaryKeys []string, location string, partitionBy string, clusterBy []string, expiresAfter time.Duration) *bigquery.TableMetadata {
 	metadata := &bigquery.TableMetadata{
 		Schema: BuildBigQuerySchema(tableSchema),
@@ -163,9 +179,7 @@ func BuildTableMetadata(tableSchema *schema.TableSchema, primaryKeys []string, l
 	}
 
 	if partitionBy != "" {
-		metadata.TimePartitioning = &bigquery.TimePartitioning{
-			Field: partitionBy,
-		}
+		metadata.TimePartitioning, metadata.RangePartitioning, _ = bigQueryPartitioning(partitionBy)
 	}
 
 	if len(clusterBy) == 0 {

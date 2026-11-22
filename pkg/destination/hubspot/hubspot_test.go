@@ -3,14 +3,18 @@ package hubspot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -953,6 +957,93 @@ func feed(records ...arrow.RecordBatch) <-chan source.RecordBatchResult {
 	}
 	close(ch)
 	return ch
+}
+
+func TestWriteReturnsWithOpenSource(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		for _, failure := range []string{"canceled", "source", "invalid options"} {
+			t.Run(fmt.Sprintf("parallel=%t/%s", parallel, failure), func(t *testing.T) {
+				d := NewHubSpotDestination()
+				records := make(chan source.RecordBatchResult, 1)
+				defer close(records)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				opts := destination.WriteOptions{Table: "contacts", Strategy: "update", PrimaryKeys: []string{"id"}, Parallelism: 3}
+				want := context.Canceled
+				switch failure {
+				case "source":
+					want = errors.New("source failed")
+					records <- source.RecordBatchResult{Err: want}
+				case "invalid options":
+					opts.Strategy = "merge"
+				}
+				done := make(chan error, 1)
+				go func() {
+					if parallel {
+						done <- d.WriteParallel(ctx, records, opts)
+					} else {
+						done <- d.Write(ctx, records, opts)
+					}
+				}()
+				if failure == "canceled" {
+					cancel()
+				}
+				select {
+				case err := <-done:
+					if failure == "invalid options" {
+						require.ErrorContains(t, err, "needs a match property")
+					} else {
+						require.ErrorIs(t, err, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("write waited for the source to close before returning its error")
+				}
+			})
+		}
+	}
+}
+
+func TestWriteStalledRequestReturnsWithOpenSource(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		for _, partialBody := range []bool{false, true} {
+			t.Run(fmt.Sprintf("parallel=%t/partialBody=%t", parallel, partialBody), func(t *testing.T) {
+				var calls atomic.Int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = io.Copy(io.Discard, r.Body)
+					calls.Add(1)
+					if partialBody {
+						_, _ = io.WriteString(w, `{"status":`)
+						w.(http.Flusher).Flush()
+					}
+					<-r.Context().Done()
+				}))
+				t.Cleanup(srv.Close)
+				d := connectTest(t, srv.URL)
+				d.client.Resty().SetTimeout(50 * time.Millisecond).
+					SetRetryCount(1).SetRetryWaitTime(time.Millisecond).SetRetryMaxWaitTime(time.Millisecond)
+				records := make(chan source.RecordBatchResult, 1)
+				defer close(records)
+				records <- source.RecordBatchResult{Batch: stringBatch(map[string][]string{"id": {"123"}, "name": {"Ada"}}, []string{"id", "name"})}
+				opts := destination.WriteOptions{Table: "contacts", Strategy: "update", PrimaryKeys: []string{"id"}, Parallelism: 3, RejectMode: "skip"}
+				done := make(chan error, 1)
+				go func() {
+					if parallel {
+						done <- d.WriteParallel(context.Background(), records, opts)
+					} else {
+						done <- d.Write(context.Background(), records, opts)
+					}
+				}()
+				select {
+				case err := <-done:
+					require.ErrorIs(t, err, context.DeadlineExceeded)
+					require.ErrorContains(t, err, "hubspot update request failed")
+					require.EqualValues(t, 2, calls.Load())
+				case <-time.After(2 * time.Second):
+					t.Fatal("HTTP timeout did not propagate while the source remained open")
+				}
+			})
+		}
+	}
 }
 
 func TestWriteUpsertPostsBatch(t *testing.T) {
@@ -2599,6 +2690,49 @@ func TestWriteNullsIsFlagOnly(t *testing.T) {
 
 // TestPropertyValueDecimal256: high-precision decimals (precision >38) map to
 // Decimal256 per repo convention; without the case they serialized as a Go struct.
+func TestNonFiniteFloatsFollowWriteNulls(t *testing.T) {
+	sch := arrow.NewSchema([]arrow.Field{
+		{Name: "email", Type: arrow.BinaryTypes.String},
+		{Name: "score", Type: arrow.PrimitiveTypes.Float64},
+	}, nil)
+	b := array.NewRecordBuilder(memory.DefaultAllocator, sch)
+	defer b.Release()
+	b.Field(0).(*array.StringBuilder).AppendValues([]string{"a@x.com", "b@x.com", "c@x.com"}, nil)
+	b.Field(1).(*array.Float64Builder).AppendValues([]float64{math.NaN(), math.Inf(1), 1.5}, nil)
+	rec := b.NewRecordBatch()
+	defer rec.Release()
+
+	for _, writeNulls := range []bool{false, true} {
+		sh, err := parseShaper("contacts?id_property=email", "merge", []string{"email"}, "", writeNulls)
+		require.NoError(t, err)
+		for row := 0; row < 2; row++ {
+			in, _, ok := sh.shapeRow(rec, colIndexOf(rec), row)
+			require.True(t, ok)
+			if writeNulls {
+				require.Contains(t, in.Properties, "score")
+				assert.Equal(t, "", in.Properties["score"])
+			} else {
+				assert.NotContains(t, in.Properties, "score")
+			}
+		}
+		in, _, _ := sh.shapeRow(rec, colIndexOf(rec), 2)
+		assert.Equal(t, "1.5", in.Properties["score"])
+	}
+}
+
+func TestNonFiniteFloatsInListsBecomeNull(t *testing.T) {
+	b := array.NewListBuilder(memory.DefaultAllocator, arrow.PrimitiveTypes.Float64)
+	defer b.Release()
+	b.Append(true)
+	b.ValueBuilder().(*array.Float64Builder).AppendValues([]float64{1.5, math.NaN(), math.Inf(1)}, nil)
+	arr := b.NewArray()
+	defer arr.Release()
+
+	val, ok := propertyValue(arr, 0)
+	require.True(t, ok)
+	assert.Equal(t, "[1.5,null,null]", val)
+}
+
 func TestPropertyValueDecimal256(t *testing.T) {
 	dt := &arrow.Decimal256Type{Precision: 50, Scale: 4}
 	bld := array.NewDecimal256Builder(memory.DefaultAllocator, dt)

@@ -31,17 +31,27 @@ func TestDeleteInsertTransactional(t *testing.T) {
 		incrementalKeyType schema.DataType
 		intervalStart      interface{}
 		intervalEnd        interface{}
-		wantDeleteContains []string
+		primaryKeys        []string
+		wantDelete         string
+		wantSelect         string
 	}{
 		{name: "commit"},
 		{name: "rollback after insert failure", failInsert: true},
 		{name: "rollback after cancellation", cancelInsert: true},
 		{
+			name: "without primary keys", primaryKeys: []string{},
+			wantSelect: `SELECT "id", "updated_at", "value" FROM "hive"."stage"."events"`,
+		},
+		{
+			name: "composite primary keys", primaryKeys: []string{"id", "value"},
+			wantSelect: `SELECT "id", "updated_at", "value" FROM (SELECT "id", "updated_at", "value", ROW_NUMBER() OVER (PARTITION BY "id", "value" ORDER BY "updated_at" DESC) AS __bruin_dedup_rn FROM "hive"."stage"."events") AS _numbered WHERE __bruin_dedup_rn = 1`,
+		},
+		{
 			name:               "date incremental key casts bounds",
 			incrementalKeyType: schema.TypeDate,
 			intervalStart:      "2024-01-01",
 			intervalEnd:        "2024-01-02",
-			wantDeleteContains: []string{`"updated_at" >= CAST(? AS DATE)`, `"updated_at" <= CAST(? AS DATE)`, "USING '2024-01-01', '2024-01-02'"},
+			wantDelete:         `EXECUTE IMMEDIATE 'DELETE FROM "hive"."prod"."events" WHERE "updated_at" >= CAST(? AS DATE) AND "updated_at" <= CAST(? AS DATE)' USING '2024-01-01', '2024-01-02'`,
 		},
 	}
 
@@ -125,6 +135,10 @@ func TestDeleteInsertTransactional(t *testing.T) {
 			if tt.intervalStart != nil {
 				intervalStart, intervalEnd = tt.intervalStart, tt.intervalEnd
 			}
+			primaryKeys := tt.primaryKeys
+			if primaryKeys == nil {
+				primaryKeys = []string{"id"}
+			}
 			err = dest.DeleteInsertTable(callCtx, destination.DeleteInsertOptions{
 				StagingTable:       "stage.events",
 				TargetTable:        "prod.events",
@@ -133,7 +147,7 @@ func TestDeleteInsertTransactional(t *testing.T) {
 				IntervalStart:      intervalStart,
 				IntervalEnd:        intervalEnd,
 				Columns:            []string{"id", "updated_at", "value"},
-				PrimaryKeys:        []string{"id"},
+				PrimaryKeys:        primaryKeys,
 			})
 			if tt.cancelInsert {
 				if err == nil || !errors.Is(err, context.Canceled) {
@@ -172,19 +186,20 @@ func TestDeleteInsertTransactional(t *testing.T) {
 			if got[1].method != http.MethodGet || got[1].path != "/start/1" {
 				t.Errorf("start follow-up request = %+v", got[1])
 			}
-			wantDeleteContains := tt.wantDeleteContains
-			if wantDeleteContains == nil {
-				wantDeleteContains = []string{`"updated_at" >= ?`, "USING 10, 20"}
+			wantDelete := tt.wantDelete
+			if wantDelete == "" {
+				wantDelete = `EXECUTE IMMEDIATE 'DELETE FROM "hive"."prod"."events" WHERE "updated_at" >= ? AND "updated_at" <= ?' USING 10, 20`
 			}
-			wantDeleteContains = append(wantDeleteContains, `DELETE FROM "hive"."prod"."events"`)
-			for _, want := range wantDeleteContains {
-				if !strings.Contains(got[2].body, want) {
-					t.Errorf("delete request body = %q, want substring %q", got[2].body, want)
-				}
+			if got[2].body != wantDelete {
+				t.Errorf("delete request body = %q, want %q", got[2].body, wantDelete)
 			}
-			if !strings.Contains(got[3].body, `INSERT INTO "hive"."prod"."events"`) ||
-				!strings.Contains(got[3].body, `PARTITION BY "id" ORDER BY "updated_at" DESC`) {
-				t.Errorf("insert request body = %q", got[3].body)
+			wantSelect := tt.wantSelect
+			if wantSelect == "" {
+				wantSelect = `SELECT "id", "updated_at", "value" FROM (SELECT "id", "updated_at", "value", ROW_NUMBER() OVER (PARTITION BY "id" ORDER BY "updated_at" DESC) AS __bruin_dedup_rn FROM "hive"."stage"."events") AS _numbered WHERE __bruin_dedup_rn = 1`
+			}
+			wantInsert := `INSERT INTO "hive"."prod"."events" ("id", "updated_at", "value") ` + wantSelect
+			if got[3].body != wantInsert {
+				t.Errorf("insert request body = %q, want %q", got[3].body, wantInsert)
 			}
 			wantFinish := "COMMIT"
 			if tt.failInsert || tt.cancelInsert {

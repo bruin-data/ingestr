@@ -1,13 +1,17 @@
 package strategy
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 )
 
@@ -20,7 +24,7 @@ const maxStagingTableNameLen = 60
 
 const encodedStagingIdentifierPrefix = "_ingestr_hex_"
 
-func GenerateStagingTableName(targetTable, suffix, stagingDataset, runID string) string {
+func GenerateStagingTableName(targetTable, suffix, stagingDataset, runID string, maxLen int) string {
 	catalog, originSchema, tableName := splitCatalogSchemaTable(targetTable)
 	catalogRef, _, _ := splitCatalogSchemaTableRaw(targetTable)
 
@@ -38,14 +42,15 @@ func GenerateStagingTableName(targetTable, suffix, stagingDataset, runID string)
 	if catalogRef != "" {
 		catalog = catalogRef
 	}
-	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix, runID))
+	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix, runID, maxLen))
 }
 
 func managedStagingTableName(dest destination.Destination, targetTable, suffix, stagingDataset, runID string) string {
+	maxLen := destination.IdentifierLimit(dest)
 	if provider, ok := dest.(destination.ManagedStagingPolicyProvider); ok {
-		return GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset, provider.ManagedStagingPolicy(), runID)
+		return GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset, provider.ManagedStagingPolicy(), runID, maxLen)
 	}
-	return GenerateStagingTableName(targetTable, suffix, stagingDataset, runID)
+	return GenerateStagingTableName(targetTable, suffix, stagingDataset, runID, maxLen)
 }
 
 func managedCDCStateTableName(dest destination.Destination, stateTable, _ string) string {
@@ -72,7 +77,7 @@ func managedCDCStateTableName(dest destination.Destination, stateTable, _ string
 	return qualifyCatalog(catalog, fmt.Sprintf("%s.%s", stateSchema, stateTable))
 }
 
-func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy, runID string) string {
+func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string, policy destination.ReplaceStagingPolicy, runID string, maxLen int) string {
 	policy = normaliseReplaceStagingPolicy(policy)
 	catalog, targetSchema, tableName := splitCatalogSchemaTable(targetTable)
 	catalogRef, targetSchemaRef, _ := splitCatalogSchemaTableRaw(targetTable)
@@ -109,7 +114,7 @@ func GenerateReplaceStagingTableName(targetTable, suffix, stagingDataset string,
 	}
 	embeddedName := syntheticStagingIdentifier(embeddedParts...)
 
-	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix, runID))
+	return qualifyCatalog(catalog, buildStagingTableName(stagingSchema, embeddedName, suffix, runID, maxLen))
 }
 
 func defaultReplaceStagingPolicy() destination.ReplaceStagingPolicy {
@@ -210,8 +215,14 @@ func stagingUniqueToken(runID string) string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
-func buildStagingTableName(stagingSchema, embeddedName, suffix, runID string) string {
+// buildStagingTableName caps names at maxStagingTableNameLen, or at maxLen when
+// the destination allows less, such as Oracle before 12.2 with 30 bytes.
+func buildStagingTableName(stagingSchema, embeddedName, suffix, runID string, maxLen int) string {
 	tail := fmt.Sprintf("_%s_%s", suffix, stagingUniqueToken(runID))
+	if maxLen > 0 && maxLen < maxStagingTableNameLen {
+		name := embeddedName + tail
+		return stagingSchema + "." + destination.ShortenIdentifier(name, name, maxLen)
+	}
 	// If the name would exceed the per-engine identifier limit, hash the
 	// embedded portion so the suffix and unique timestamp still fit. We keep a
 	// readable prefix plus an 8-char hash of the original embedded name.
@@ -233,11 +244,56 @@ func buildStagingTableName(stagingSchema, embeddedName, suffix, runID string) st
 
 // GenerateNormalisedStagingTableName returns a transient table name in the
 // TARGET table's own catalog/schema (not the staging schema).
-func GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID string) string {
-	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset, runID)
+func GenerateNormalisedStagingTableName(targetTable, stagingDataset, runID string, maxLen int) string {
+	staged := GenerateStagingTableName(targetTable, "staging_normalised", stagingDataset, runID, maxLen)
 	stagedParts := tablename.Split(staged)
 	bare := stagedParts[len(stagedParts)-1]
 	// Re-qualify the transient table in the target's own catalog/schema.
 	catalog, schema, _ := splitCatalogSchemaTableRaw(targetTable)
 	return tablename.TableName{Catalog: catalog, Schema: schema, Table: bare}.String()
+}
+
+var stagingRunToken = regexp.MustCompile(`^([0-9a-f]{32}|[0-9]+)$`)
+
+// dropStaleStagingTables drops staging tables that earlier runs, killed before
+// cleanup, left for the same target and suffix. It runs only under a connector
+// lease, which excludes a concurrent run of the same connector, and only for
+// qualified targets: an unqualified staging name does not identify the
+// namespace it resolves to, so connectors writing the same table name
+// elsewhere would share the prefix.
+func dropStaleStagingTables(ctx context.Context, dest destination.Destination, targetTable, stagingTable string) {
+	lister, ok := dest.(destination.StagingTableLister)
+	if !ok || source.ConnectorLeaseGuardFromContext(ctx) == nil || len(tablename.SplitRaw(targetTable)) < 2 {
+		return
+	}
+	parts := tablename.SplitRaw(stagingTable)
+	if len(parts) < 2 {
+		return
+	}
+	name := parts[len(parts)-1]
+	cut := strings.LastIndex(name, "_")
+	if cut <= 0 {
+		return
+	}
+	prefix := name[:cut+1]
+	schema := strings.Join(parts[:len(parts)-1], ".")
+	tables, err := lister.ListStagingTables(ctx, schema, prefix)
+	if err != nil {
+		config.Debug("[STAGING] Could not list stale staging tables for %s: %v", stagingTable, err)
+		return
+	}
+	for _, table := range tables {
+		if table == name || !strings.HasPrefix(table, prefix) || !stagingRunToken.MatchString(table[len(prefix):]) {
+			continue
+		}
+		if source.ConnectorLeaseLoss(ctx) != nil {
+			return
+		}
+		stale := schema + "." + table
+		if err := dest.DropTable(ctx, stale); err != nil {
+			config.Debug("[STAGING] Could not drop stale staging table %s: %v", stale, err)
+			continue
+		}
+		config.Debug("[STAGING] Dropped stale staging table %s", stale)
+	}
 }

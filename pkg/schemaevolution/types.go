@@ -60,6 +60,9 @@ type SchemaChange struct {
 	ColumnName string
 	OldColumn  *schema.Column // nil for ADD
 	NewColumn  schema.Column
+	// LengthFromOverride marks an override that set the length explicitly,
+	// so destinations must not size the column themselves.
+	LengthFromOverride bool
 }
 
 // SchemaComparison contains the result of comparing two schemas.

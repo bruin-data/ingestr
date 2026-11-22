@@ -58,6 +58,7 @@ func TestMSSQLCDC_PrimaryKeyUpdate_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	if pgDest.uri == "" {
 		t.Skip("shared postgres dest container not available")
 	}
@@ -100,6 +101,7 @@ func TestMSSQLCDC_ResumeMidTransaction_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	if pgDest.uri == "" {
 		t.Skip("shared postgres dest container not available")
 	}
@@ -179,6 +181,7 @@ func TestMSSQLCDC_ResnapshotCleansDestination_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	if pgDest.uri == "" {
 		t.Skip("shared postgres dest container not available")
 	}
@@ -242,6 +245,7 @@ func TestMSSQLCDC_SnapshotConcurrentWriter_Postgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 	if pgDest.uri == "" {
 		t.Skip("shared postgres dest container not available")
 	}

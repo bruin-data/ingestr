@@ -22,6 +22,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -89,6 +92,7 @@ type BlobstoreSource struct {
 	athenaClient athenaAPI
 	gcsClient    *storage.Client
 	adlsClient   *azureDatalakeSourceClient
+	azureClient  *azblob.Client
 	sftpClient   *sftp.Client
 	sshClient    *ssh.Client
 	parsedURI    *parsedBlobstoreURI
@@ -172,7 +176,12 @@ func (s *BlobstoreSource) Connect(ctx context.Context, uri string) error {
 		config.Debug("[BLOBSTORE-SRC] Connected to Azure Data Lake Storage Gen2")
 
 	case ProviderAzure:
-		return fmt.Errorf("azure Blob Storage source is not yet implemented")
+		client, err := adlsutil.NewBlobClient(parsed.accountName, parsed.accountKey, parsed.sasToken, parsed.connectionString, parsed.clientCredentials)
+		if err != nil {
+			return fmt.Errorf("failed to create Azure Blob Storage client: %w", err)
+		}
+		s.azureClient = client
+		config.Debug("[BLOBSTORE-SRC] Connected to Azure Blob Storage")
 	}
 
 	return nil
@@ -300,6 +309,7 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 	if parsed.sftpPassword != "" && parsed.sftpKeyFile == "" {
 		sshConfig.Auth = []ssh.AuthMethod{
 			ssh.Password(parsed.sftpPassword),
+			ssh.KeyboardInteractive(sftpPasswordChallenge(parsed.sftpPassword)),
 		}
 	}
 
@@ -331,6 +341,20 @@ func createSFTPClient(parsed *parsedBlobstoreURI) (*ssh.Client, *sftp.Client, er
 	}
 
 	return sshConn, sftpConn, nil
+}
+
+// Servers that disable "password" auth often expose the same password via keyboard-interactive.
+func sftpPasswordChallenge(password string) ssh.KeyboardInteractiveChallenge {
+	return func(_, _ string, questions []string, echos []bool) ([]string, error) {
+		answers := make([]string, len(questions))
+		for i, question := range questions {
+			hidden := i < len(echos) && !echos[i]
+			if hidden || strings.Contains(strings.ToLower(question), "password") {
+				answers[i] = password
+			}
+		}
+		return answers, nil
+	}
 }
 
 func parseSFTPPrivateKey(key []byte, password string) (ssh.Signer, error) {
@@ -517,8 +541,8 @@ func (s *BlobstoreSource) read(ctx context.Context, table string, opts source.Re
 	// Close results channel when all goroutines done
 	go func() {
 		wg.Wait()
-		close(results)
 		config.Debug("[BLOBSTORE-SRC] Completed in %v", time.Since(startTotal))
+		close(results)
 	}()
 
 	return results, nil
@@ -735,6 +759,13 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 			}
 		}
 
+	case ProviderAzure:
+		azureCount, err := s.listMatchingAzureBlobs(ctx, bucket, pattern, prefix, opts, fileChan)
+		count += azureCount
+		if err != nil {
+			return count, err
+		}
+
 	case ProviderAzureDatalake:
 		if s.adlsClient == nil {
 			return count, fmt.Errorf("azure Data Lake Storage Gen2 client is not initialized")
@@ -810,6 +841,68 @@ func (s *BlobstoreSource) listMatchingFiles(ctx context.Context, bucket, pattern
 	}
 
 	return count, nil
+}
+
+func (s *BlobstoreSource) listMatchingAzureBlobs(ctx context.Context, containerName, pattern, prefix string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
+	count, archived := 0, 0
+	listOpts := &azblob.ListBlobsFlatOptions{Include: azblob.ListBlobsInclude{Metadata: true}}
+	if prefix != "" {
+		listOpts.Prefix = &prefix
+	}
+	pager := s.azureClient.NewListBlobsFlatPager(containerName, listOpts)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return count, fmt.Errorf("failed to list Azure blobs: %w", err)
+		}
+
+		for _, item := range page.Segment.BlobItems {
+			if item == nil || item.Name == nil || isAzureDirectoryMarker(item) {
+				continue
+			}
+			key := *item.Name
+			if !matchesGlobPattern(key, pattern) {
+				continue
+			}
+			var modifiedAt, createdAt *time.Time
+			if item.Properties != nil {
+				modifiedAt, createdAt = item.Properties.LastModified, item.Properties.CreationTime
+			}
+			if !objectMatchesIncrementalOptions(s.provider, modifiedAt, createdAt, opts) {
+				continue
+			}
+			if item.Properties != nil && item.Properties.AccessTier != nil && *item.Properties.AccessTier == blob.AccessTierArchive {
+				archived++
+				config.Debug("[BLOBSTORE-SRC] Skipping archived Azure blob %s/%s", containerName, key)
+				continue
+			}
+			select {
+			case fileChan <- blobstoreFile{key: key, modifiedAt: copyTimePtr(modifiedAt), createdAt: copyTimePtr(createdAt)}:
+				count++
+			case <-ctx.Done():
+				return count, ctx.Err()
+			}
+		}
+	}
+
+	if archived > 0 {
+		output.Warnf("Warning: skipped %d archived Azure blob(s) in container %s; rehydrate them to an online tier to read them, or run with --debug to list them\n", archived, containerName)
+	}
+	return count, nil
+}
+
+// On accounts with a hierarchical namespace, List Blobs returns directories as
+// zero-length blobs marked with hdi_isfolder metadata.
+func isAzureDirectoryMarker(item *container.BlobItem) bool {
+	if item.Properties != nil && item.Properties.ResourceType != nil && strings.EqualFold(*item.Properties.ResourceType, "directory") {
+		return true
+	}
+	for k, v := range item.Metadata {
+		if strings.EqualFold(k, "hdi_isfolder") && v != nil && strings.EqualFold(*v, "true") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *BlobstoreSource) listMatchingS3Objects(ctx context.Context, bucket, pattern, prefix string, opts source.ReadOptions, fileChan chan<- blobstoreFile) (int, error) {
@@ -998,7 +1091,7 @@ func (s *BlobstoreSource) fileMetadata(opts source.ReadOptions, bucket, key stri
 }
 
 func handlesBlobstoreTimestampIncrementality(provider Provider) bool {
-	return provider == ProviderS3 || provider == ProviderGCS
+	return provider == ProviderS3 || provider == ProviderGCS || provider == ProviderAzure
 }
 
 func usesBlobstoreModifiedIncrementality(opts source.ReadOptions) bool {
@@ -1084,8 +1177,11 @@ func (s *BlobstoreSource) filepath(bucket, key string) string {
 	}
 
 	scheme := string(s.provider)
-	if s.provider == ProviderGCS {
+	switch s.provider {
+	case ProviderGCS:
 		scheme = "gs"
+	case ProviderAzure:
+		scheme = "az"
 	}
 	return scheme + "://" + strings.TrimRight(bucket, "/") + "/" + strings.TrimLeft(key, "/")
 }
@@ -1275,6 +1371,13 @@ func (s *BlobstoreSource) openFile(ctx context.Context, bucket, key string) (io.
 			return nil, err
 		}
 		return reader, nil
+
+	case ProviderAzure:
+		resp, err := s.azureClient.DownloadStream(ctx, bucket, key, nil)
+		if err != nil {
+			return nil, err
+		}
+		return resp.Body, nil
 
 	case ProviderAzureDatalake:
 		if s.adlsClient == nil {
@@ -1660,6 +1763,7 @@ type parsedBlobstoreURI struct {
 	accountName                   string
 	accountKey                    string
 	sasToken                      string
+	connectionString              string
 	clientCredentials             adlsutil.ClientCredentials
 	sftpHost                      string
 	sftpPort                      string
@@ -1694,6 +1798,7 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.connectionString = u.Query().Get("connection_string")
 		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
 		parsed.provider = ProviderAzureDatalake

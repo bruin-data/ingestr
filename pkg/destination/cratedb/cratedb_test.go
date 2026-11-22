@@ -5,10 +5,35 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestExtractTypedList(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	b := array.NewListBuilder(mem, arrow.PrimitiveTypes.Int64)
+	defer b.Release()
+	values := b.ValueBuilder().(*array.Int64Builder)
+	b.Append(true)
+	values.Append(999)
+	b.Append(true)
+	values.Append(7)
+	values.AppendNull()
+	values.Append(-2)
+	b.AppendNull()
+	b.Append(true)
+	full := b.NewArray()
+	defer full.Release()
+	sliced := array.NewSlice(full, 1, 4)
+	defer sliced.Release()
+	assert.Equal(t, []any{int64(7), nil, int64(-2)}, extractValue(sliced, 0))
+	assert.Nil(t, extractValue(sliced, 1))
+	assert.Equal(t, []any{}, extractValue(sliced, 2))
+}
 
 func TestSchemes(t *testing.T) {
 	t.Parallel()

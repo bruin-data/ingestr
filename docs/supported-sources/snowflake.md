@@ -17,6 +17,8 @@ URI parameters:
 - `dbname`: the name of the database to connect to
 - `warehouse`: optional, the name of the warehouse to use
 - `role`: optional, the name of the role to use
+- `host`: optional, a hostname or IP address to connect to instead of the one derived from `account`, e.g. `snowflake.example.com`. Do not include a scheme or port.
+- `port`: optional, the port to connect to, defaults to `443`. Connections always use HTTPS.
 
 The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's Snowflake dialect [here](https://docs.snowflake.com/en/developer-guide/python-connector/sqlalchemy#connection-parameters).
 
@@ -89,11 +91,13 @@ These tables live in the connected Snowflake database (the catalog from the URI)
 
 ## Tuning the write path
 
-When Snowflake is the destination, ingestr coalesces record batches into larger Parquet files, uploads them to the table's implicit stage, and loads them with `COPY INTO`. Two environment variables tune that path; neither is normally needed.
+When Snowflake is the destination, ingestr coalesces record batches into larger Parquet files, uploads them to the table's implicit stage, and loads them with `COPY INTO`. Columns typed `json` (for example Postgres `jsonb`, or a column pinned with `--columns name:json`) are created as `VARIANT` and parsed with `PARSE_JSON` during the load, so `TYPEOF(col)` reports `OBJECT` or `ARRAY` and `col:key` paths work directly. A SQL `NULL` stays `NULL`; in a `--columns name:json` column the text `null` loads as SQL `NULL` (it is how a source that stores JSON as strings marks an absent value), and a value that is not valid JSON is stored as a JSON string rather than failing the load. Two environment variables tune that path; neither is normally needed.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `INGESTR_SNOWFLAKE_FILE_SIZE_MB` | `32` | Compressed size at which a worker closes the current file and uploads it. Larger files amortize the per-upload overhead; smaller ones lower memory use. `0` uploads one file per record batch. Values above `1024` are clamped. |
 | `INGESTR_SNOWFLAKE_PARQUET_CODEC` | `zstd` | Parquet compression codec. `snappy` and `gzip` are also accepted; anything else falls back to `zstd`. |
 
-Each worker buffers up to one file in memory, so peak usage scales with `--extract-parallelism` and, for multi-table ingestions, with the number of tables. ingestr tracks the combined buffer across all concurrent workers and closes files early once it exceeds roughly 256 MiB. That is a soft limit checked between record batches, not a hard cap, and it does not cover the extra copy the Snowflake driver makes while a file is uploading, so plan for roughly twice that figure. Lower `INGESTR_SNOWFLAKE_FILE_SIZE_MB` if memory is tight.
+Use `--destination-parallelism` to set the number of Parquet encoding and upload workers independently of extraction. When omitted, an explicitly set `--extract-parallelism` also sets the destination worker count.
+
+Each worker buffers up to one file in memory, so peak usage scales with destination parallelism and, for multi-table ingestions, with the number of tables. ingestr tracks the combined buffer across all concurrent workers and closes files early once it exceeds roughly 256 MiB. That is a soft limit checked between record batches, not a hard cap, and it does not cover the extra copy the Snowflake driver makes while a file is uploading, so plan for roughly twice that figure. Lower `INGESTR_SNOWFLAKE_FILE_SIZE_MB` if memory is tight.

@@ -121,7 +121,7 @@ You can read the result of an arbitrary SQL query instead of a table. See [Custo
 ## Using StarRocks as a destination
 StarRocks can also be a destination. ingestr creates the table (a duplicate-key table, or a primary-key table when a primary key is given) and loads rows through StarRocks' [Stream Load](https://docs.starrocks.io/docs/loading/StreamLoad/) HTTP API.
 
-Stream Load uses the FE HTTP port (default `8030`), which is separate from the query port (`9030`). Set it with the `http_port` query parameter if it differs:
+Stream Load uses HTTP by default on the FE HTTP port (`8030`), which is separate from the query port (`9030`). Set the port with the `http_port` query parameter if it differs:
 
 ```bash
 ingestr ingest \
@@ -132,13 +132,108 @@ ingestr ingest \
 ```
 
 Destination URI parameters:
-- `http_port` (optional): the FE HTTP port used for Stream Load. Defaults to `8030`.
+
+- `http_port` (optional): the FE HTTP or HTTPS port used for Stream Load. Defaults to `8030` for either scheme.
+- `http_scheme` (optional): `http` (default) or `https` for Stream Load. HTTPS verifies the server certificate using the system trust store and prevents plaintext requests to redirect or error-log targets.
 - `replication_num` (optional): the replica count for created tables. If omitted, the cluster default is used; set it to `1` for single-backend clusters.
-- `ssl` (optional): same TLS handling as the source (applies to the query-port connection).
+- `ssl` (optional): same TLS handling as the source. Applies only to the query-port connection; it does not change the Stream Load scheme or certificate verification.
+
+`--destination-parallelism` controls concurrent Stream Loads, including JSON encoding, when writing to managed staging tables, as used by replace, merge, and CDC. When omitted, an explicitly set `--extract-parallelism` also sets the destination worker count. Direct writes, including append, load batches in order so an older batch cannot overwrite a newer value for the same primary key. Start with 2–4 workers for staged writes and tune against backend load limits and memory. `--page-size` bounds the rows encoded per batch; a failed load cancels the other workers and prevents the flush checkpoint from advancing.
+
+For an HTTPS-only CelerData Stream Load endpoint on port `443`, use:
+
+```text
+starrocks://user:pass@<celerdata-host>:9030/analytics?ssl=true&http_scheme=https&http_port=443
+```
 
 ### Supported write dispositions
-- `replace` — atomically replaces the target's data. A failed load leaves the existing data intact.
-- `append` — loads rows into the existing table.
-- `merge` — upserts by primary key (the table is created as a StarRocks primary-key table). Requires `--primary-key`.
+- `replace` — atomically replaces the target table, including its schema and keys. A failed load leaves the existing table intact.
+- `append` — loads rows into the existing table. If the source has a primary key (detected automatically or given with `--primary-key`), the table is created as a StarRocks primary-key table, so appended rows with an existing key replace the stored row instead of adding a duplicate.
+- `merge` — upserts by primary key (the table is created as a StarRocks primary-key table). ingestr detects source primary keys automatically; use `--primary-key` to specify them explicitly. An existing target must be a primary-key table with the same key columns; otherwise the run fails before merging into it and you need `--full-refresh` to rebuild it.
 
 `delete+insert` and `scd2` are not currently supported for StarRocks destinations.
+
+### Schema evolution
+ingestr adds new columns, relaxes nullability, and applies the type changes StarRocks can make in place: wider integers, integer or `FLOAT` to `DOUBLE`, longer `VARCHAR`, `DECIMAL` with at least as many integer digits and as much scale, `DATE` to `DATETIME` and back, `VARCHAR` to a number, `DATE`, or `JSON`, and numbers or `JSON` to a `VARCHAR` long enough for any value. Other changes fail before any DDL runs, for example `DATE` to `VARCHAR`, `ARRAY` element changes, changes to primary-key or hash-distribution columns, `FLOAT`/`DOUBLE` on a sort-key column, type or nullability changes in Unique or Aggregate key tables, and type or nullability changes to columns of types ingestr does not create (such as `LARGEINT`, `CHAR`, `MAP`, `STRUCT`); rerun with `--full-refresh` to rebuild the table. ingestr waits for asynchronous StarRocks schema changes to finish before loading rows.
+
+### PostgreSQL CDC
+
+StarRocks supports PostgreSQL CDC snapshots, incremental catch-up, continuous streaming, restart from durable checkpoints, and full refresh. Keyed tables use StarRocks Primary Key tables, including composite keys. Changes are ordered by `_cdc_lsn`; replaying an older change cannot overwrite a newer row or resurrect a deleted row. Unchanged PostgreSQL TOAST values are preserved across updates, including multiple updates in one flush and explicit changes to `NULL`.
+
+Enable PostgreSQL logical replication (`wal_level=logical`) and give the source user the `REPLICATION` privilege and access to the replicated tables. A custom publication must include inserts, updates, deletes, and truncates. See [PostgreSQL CDC](/supported-sources/postgres.md#change-data-capture-postgrescdc) for publication setup, replica identity, and key changes involving TOAST values.
+
+Replicate one table:
+
+```bash
+ingestr ingest \
+    --source-uri 'postgres+cdc://user:pass@localhost:5432/sourcedb?publication=analytics_pub' \
+    --source-table 'public.events' \
+    --dest-uri 'starrocks://root:pass@localhost:9030/analytics?http_port=8030&replication_num=1' \
+    --dest-table 'analytics.events' \
+    --incremental-strategy merge
+```
+
+The first run takes a snapshot; subsequent runs resume and catch up before exiting. Add `--stream --flush-interval 5s --flush-records 10000` for continuous ingestion; `--flush-interval` bounds how long a change waits before it is loaded, even under a steady stream of changes. Use `--full-refresh` to replace the mirror from a fresh snapshot.
+
+Normal PostgreSQL snapshots using the keyed merge strategy can load complete rows directly into the target through conditional Stream Load. Source pages are combined into JSON requests targeting 64 MiB, with a 90 MiB request limit. Several requests share a transaction, committed at a 512 MiB limit, a 10-second checkpoint, or the end of the snapshot write. A range boundary or one second of inactivity flushes the buffered request without requiring a transaction commit. This separates `--page-size` from the number of tablet versions produced by the load.
+
+These loads use up to eight workers from `--destination-parallelism`. The replay and request buffers share a maximum 4 GiB budget per table; Arrow pages and the encoder's temporary row buffers use additional memory. The memory budget can commit a transaction before its byte limit. A rejected transaction reporting too many tablet versions is rolled back and replayed with exponential backoff from 5 to 60 seconds, bounded by five minutes, while the table's load concurrency is reduced. An uncertain commit is reconciled before any replay.
+
+Progress is saved only after all preceding loads are committed and visible. Finite runs can also resume saved ranges while the original replication slot retains the WAL needed to repair changes behind their cursors. Restart may replay committed rows whose progress was not yet saved; conditional updates make that replay idempotent. Rows missing from a replacement snapshot are retired before completion is recorded. Streaming flush boundaries may commit sooner than the snapshot writer's limits.
+
+StarRocks does not accept the VARCHAR `_cdc_lsn` as a conditional-load column. ingestr adds an internal generated LARGEINT column, `__ingestr_cdc_order`, derived from the full position, including the transaction-local sequence, and uses it as `merge_condition`. Equal positions can be replayed; older snapshot rows cannot replace newer WAL changes, including changes at the same base LSN. The generated value stays synchronized across loads, WAL merges, and retirement. Adding it to an existing target requires a one-time schema change and backfill before direct loads start. [Generated columns](https://docs.starrocks.io/docs/sql-reference/sql-statements/generated_columns/) require StarRocks 3.1 or later for shared-nothing clusters and 3.5 or later for shared-data clusters.
+
+Older servers, targets with retained destination-only columns, masks, column overrides, and incremental predicates retain the staged path. Snapshot-only staged data uses the smaller snapshot merge query. Non-streaming `--full-refresh` retains the replace strategy. WAL changes continue through the CDC merge so partial TOAST updates and deletes keep their existing behavior.
+
+Before downgrading to an ingestr version without this feature, stop affected CDC jobs, drop `__ingestr_cdc_order` from their targets, and wait for those schema changes to finish. Older versions do not exclude the generated column from their writes.
+
+To replicate all tables in a publication, omit `--source-table` and `--dest-table`. Tables are created in the database from the destination URI; add `dest_schema=<database>` to the source URI to use a different one. Use `--cdc-table-naming table` to retain source table names, or leave the default to prefix names with their source schema. A comma-separated `--source-table` selects a subset. See [Multi-table CDC](/getting-started/cdc.md#multi-table-cdc).
+
+Deletes remain in keyed tables as tombstones. Query the current mirror with:
+
+```sql
+SELECT * FROM analytics.events WHERE NOT _cdc_deleted;
+```
+
+Source `TRUNCATE` clears the affected target before subsequent changes are applied. When a streaming run re-snapshots a keyed table after source DDL (for example `DROP COLUMN`), the target is not emptied: snapshot rows overwrite the existing rows in place, and once the snapshot completes, rows it did not contain are marked `_cdc_deleted` at the snapshot position. Readers filtering on `NOT _cdc_deleted` keep seeing the full table throughout, and earlier tombstones are preserved. Keyless tables, and targets holding positions at or beyond the new snapshot, are still truncated first. Source key changes require a full refresh.
+
+An in-place re-snapshot that is interrupted resumes after its last durable key on the next run rather than starting over; see [PostgreSQL schema changes while streaming](/getting-started/cdc.md#postgresql-schema-changes-while-streaming). General WAL merges can scan the target table; larger `--flush-records` values spread that cost over more changes on large, busy tables.
+
+With [chunked PostgreSQL snapshots](/supported-sources/postgres.md#large-initial-snapshots), ingestr merges snapshot rows separately before captured WAL. Snapshot merges rank complete rows once per key and omit per-column TOAST reconstruction. When every source and destination key is a signed integer and no masks or column overrides are configured, the target scan is restricted to the chunk's key range, including lexicographic composite-key ranges. Other cases use the same simpler snapshot merge without range pruning. CDC merges enable statement-local spilling with `SET_VAR(enable_spill=true)`; the cluster must have [spill storage configured](https://docs.starrocks.io/docs/administration/management/resource_management/spill_to_disk/).
+
+With `--cdc-delete-behavior hard`, deleted rows are removed instead of kept as tombstones. Each flush first publishes its upserts and tombstones in one load, then deletes the tombstones it wrote with a `DELETE ... USING` on the staging table, and waits for that delete to become query-visible before the flush advances the CDC position. Readers filtering on `NOT _cdc_deleted` never see a deleted row; other readers may briefly see the tombstone between the two statements, and a run killed between them leaves tombstones that the replayed flush removes. A streaming re-snapshot deletes the rows the snapshot did not contain instead of marking them. See [Deletes](/getting-started/cdc.md#deletes).
+
+CDC state is stored in `_bruin_staging.cdc_state`, with ownership metadata in `_bruin_staging.cdc_targets` and one `cdc_claim_*` view per target. The append-only state log uses a Duplicate Key table so long connector/event identifiers do not exceed StarRocks' primary-key size limit. Claim views prevent two different connectors from owning the same target. The connector identity includes the source, the destination host, port, and database, and the table selection; changing `http_port`, `http_scheme`, `replication_num`, or `ssl` keeps the same connector. The destination user needs permissions to create databases, tables, and views, inspect table metadata and load transactions, and select, insert, alter, delete, truncate, and drop the managed tables. Preserve the state tables and claim views across runs. Staging tables left in `_bruin_staging` by a run that was killed are dropped by the next run of the same connector.
+
+Stream Load rejects filtered or unselected rows. JSON is encoded incrementally into bodies capped at 90 MiB, below StarRocks' default 100 MB limit. A batch can produce multiple loads without encoding the whole batch or re-encoding smaller batches; a single row that exceeds the body limit fails. Stream Loads, CDC merges, and cross-database replacement copies wait for committed loads to become query-visible before advancing. Configure `http_port` for the FE HTTP endpoint, normally `8030`; snapshot transactions use it to coordinate their requests. The client must also be able to reach the backend HTTP or HTTPS address returned by the FE redirect. For Docker deployments, expose the FE and BE endpoints at reachable addresses, or use a proxy that rewrites redirected backend addresses to their mapped ports. SQL uses the FE's `9030` port.
+
+StarRocks versions with older load metadata, including 3.3.5 and earlier, use `SHOW PROC` to find INSERT transactions. This requires the system `OPERATE` privilege. These servers expose a limited history of recent transactions; ingestion stops if the transaction cannot be found or its visibility cannot be verified. StarRocks 3.3.6 and newer provide the load metadata used for direct transaction lookup.
+
+Limits and operational requirements:
+
+- Tested with PostgreSQL 16.15, MySQL 8.0, and StarRocks 3.3.22. Destination tables are in StarRocks' internal catalog.
+- StarRocks Primary Key restrictions apply, including the cluster's encoded primary-key size limit (128 bytes by default). Bounded source strings map to `VARCHAR` sized in bytes (4 bytes per source character) and unbounded strings to `VARCHAR(1048576)`; tables created by earlier ingestr versions keep their `VARCHAR(65533)` columns until a full refresh. Decimals map to at most 38 digits of precision; unsupported values fail the load. Floating-point `NaN` and infinities load as `NULL`.
+- Keyless PostgreSQL tables with `REPLICA IDENTITY FULL` become append-only change logs. They retain duplicate source rows and may contain replayed events after recovery. Filtering `_cdc_deleted` does not turn these logs into a current-state mirror.
+- PostgreSQL serializes runs through its replication slot and source lock; MySQL through the destination lease. Keep one writer per target and avoid external drop/recreate or schema changes while ingestion is running. Physical table identities are checked before and after writes; those checks do not atomically lock out external DDL. Multi-table ingestion does not provide an atomic transaction across destination tables.
+
+### MySQL CDC
+
+StarRocks supports MySQL CDC (`mysql+cdc://`) snapshots, binlog catch-up, restart from durable checkpoints, and full refresh, single-table and multi-table. See [MySQL change data capture](/supported-sources/mysql.md#change-data-capture) for source setup (row-based binlog with full row images and GTIDs). By default each run snapshots or catches up to the binlog position captured at start and exits; add `--stream --flush-interval 5s` to keep reading the binlog continuously.
+
+```bash
+ingestr ingest \
+    --source-uri 'mysql+cdc://user:pass@localhost:3306/shop?server_id=23001' \
+    --dest-uri 'starrocks://root:pass@localhost:9030/analytics?http_port=8030' \
+    --incremental-strategy merge
+```
+
+Runs of the same connector are serialized by a lease table in `_bruin_staging` (`cdc_lease_*`), renewed every few seconds. A run that finds the lease held waits up to about 45 seconds before failing, which lets a restart succeed after a crashed run's lease expires. Target identities are checked immediately before and after each merge, truncate, and full-refresh swap; StarRocks cannot lock out external DDL during those statements, so keep one writer per target. Multi-table runs merge tables one after another rather than in one transaction: readers can briefly see tables at different binlog positions, and after a crash the next run replays the uncommitted batch, which converges because merges are ordered by `_cdc_lsn`.
+
+The MySQL CDC source stops on any DDL against a captured table (for example `ALTER TABLE ... ADD COLUMN`) and asks for `--full-refresh`, which re-snapshots the connector's tables and swaps them in atomically per table.
+
+The Docker regression suite covers merge ordering, tombstones, TOAST, ownership claims, checkpoint replay/pruning, schema evolution, multi-table snapshots, catch-up, restart, truncation, streaming, in-place re-snapshots, and full refresh:
+
+```bash
+INTEGRATION_BACKENDS=starrocks \
+go test -tags integration -count=1 -v -run '^TestStarRocksCDC$' ./tests/integration
+```

@@ -420,7 +420,7 @@ If a source column's name differs from the Salesforce field, rename it with `--c
 ```
 
 - Only renaming is allowed. Field types are set in Salesforce, so an entry with a type is rejected.
-- `--primary-key` takes the **new** name. With `--columns 'Ext_Id__c::customer_ref'`, pass `--primary-key Ext_Id__c`.
+- `--primary-key` can name either the source column or its new name. With `--columns 'Ext_Id__c::customer_ref'`, both `--primary-key Ext_Id__c` and `--primary-key customer_ref` work.
 - [Link columns](#linking-records) can be mapped the same way, including lookups that can point to more than one object: `--columns 'Account.Ext_Id__c::account_code,Who.Contact.Ext_Id__c::contact_key'`.
 - Names are sent exactly as written. `--schema-naming` is ignored, since changing `FirstName` to `first_name` would no longer match the field.
 

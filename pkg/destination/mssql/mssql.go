@@ -3,6 +3,7 @@ package mssql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -119,6 +120,7 @@ func uriToConnString(uri string) (string, string, error) {
 
 	query := u.Query()
 	query.Del("driver")
+	normalizeTrustServerCertificate(query)
 	if !query.Has("packet size") {
 		query.Set("packet size", defaultMSSQLPacketSize)
 	}
@@ -128,6 +130,23 @@ func uriToConnString(uri string) (string, string, error) {
 	connURL.RawQuery = query.Encode()
 
 	return connURL.String(), database, nil
+}
+
+// go-mssqldb parses TrustServerCertificate with strconv.ParseBool, which rejects the ODBC "yes"/"no" spelling.
+func normalizeTrustServerCertificate(query url.Values) {
+	for key, values := range query {
+		if !strings.EqualFold(key, "TrustServerCertificate") {
+			continue
+		}
+		for i, value := range values {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "yes":
+				values[i] = "true"
+			case "no":
+				values[i] = "false"
+			}
+		}
+	}
 }
 
 func (d *MSSQLDestination) Close(ctx context.Context) error {
@@ -351,7 +370,8 @@ func (d *MSSQLDestination) TruncateTable(ctx context.Context, table string) erro
 	return nil
 }
 
-func (d *MSSQLDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) error {
+func (d *MSSQLDestination) InsertFromStaging(ctx context.Context, opts destination.InsertFromStagingOptions) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	columns := destination.DestinationColumns(opts.Columns)
 	if len(columns) == 0 {
 		return errors.New("insert from staging requires at least one column")
@@ -561,13 +581,13 @@ func (d *MSSQLDestination) writeRecordBatch(ctx context.Context, record arrow.Re
 		}
 
 		if _, err := stmt.ExecContext(ctx, values...); err != nil {
-			return rowIdx, fmt.Errorf("failed to bulk copy row %d: %w", rowIdx, err)
+			return rowIdx, fmt.Errorf("failed to bulk copy row %d: %w", rowIdx, explainWriteError(err, colNames))
 		}
 	}
 
 	result, err := stmt.ExecContext(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to flush bulk copy: %w", err)
+		return 0, fmt.Errorf("failed to flush bulk copy: %w", explainWriteError(err, colNames))
 	}
 
 	rowsAffected, err := result.RowsAffected()
@@ -636,6 +656,21 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if opts.CDCExpectedIncarnation != "" || opts.CDCExpectedStagingIncarnation != "" || opts.CDCExpectedResultIncarnation != "" {
+		if opts.CDCExpectedIncarnation == "" || opts.CDCExpectedStagingIncarnation == "" || opts.CDCExpectedResultIncarnation == "" {
+			return errors.New("SQL Server CDC conditional swap requires target, staging, and result incarnations")
+		}
+		if opts.CDCExpectedResultIncarnation != opts.CDCExpectedStagingIncarnation {
+			return fmt.Errorf("SQL Server CDC swap result incarnation %q cannot match the staging table %q", opts.CDCExpectedResultIncarnation, opts.CDCExpectedStagingIncarnation)
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, targetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, staging.qualifiedTable(d.server), opts.CDCExpectedStagingIncarnation); err != nil {
+			return err
+		}
+	}
+
 	if err := addPrimaryKeyIfMissing(ctx, tx, staging.qualifiedTable(d.server), opts.PrimaryKeys); err != nil {
 		return err
 	}
@@ -644,7 +679,7 @@ func (d *MSSQLDestination) SwapTable(ctx context.Context, opts destination.SwapO
 		transferSQL, err := d.databaseScopedSQL(target, fmt.Sprintf(
 			"ALTER SCHEMA %s TRANSFER %s",
 			quoteColumn(target.schema),
-			quoteTable(staging.schema+"."+staging.table),
+			staging.schemaQualifiedTable(),
 		))
 		if err != nil {
 			return err
@@ -752,15 +787,36 @@ func (d *MSSQLDestination) databaseScopedSQL(identity mssqlTargetIdentity, state
 
 func (d *MSSQLDestination) renameTableSQL(identity mssqlTargetIdentity, newName string) (string, error) {
 	statement := fmt.Sprintf(
-		"EXEC sys.sp_rename '%s', '%s'",
-		escapeTableNameForRename(identity.schema+"."+identity.table),
+		"EXEC sys.sp_rename N'%s', N'%s', N'OBJECT'",
+		escapeTableNameForRename(identity.schemaQualifiedTable()),
 		strings.ReplaceAll(newName, "'", "''"),
 	)
 	return d.databaseScopedSQL(identity, statement)
 }
 
-func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) error {
+func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.MergeOptions) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	startMerge := time.Now()
+
+	if opts.CDCExpectedIncarnation != "" {
+		tx, err := d.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := d.lockAndValidateCDCIncarnation(ctx, tx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
+			return err
+		}
+		if err := d.mergeTableInTx(ctx, tx, opts); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit merge transaction: %w", err)
+		}
+		config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+		return nil
+	}
 
 	if len(opts.PrimaryKeys) > 0 && !destination.HasCDCDeletedColumn(opts.Columns) {
 		directInsertSQL := buildInsertDirectSQL(opts.TargetTable, opts.StagingTable, opts.Columns)
@@ -775,7 +831,7 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 		}
 	}
 
-	mergeSQL := buildMergeSQLWithPredicate(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, opts.IncrementalPredicate)
+	mergeSQL := d.mergeSQL(opts)
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
 	if _, err := d.db.ExecContext(ctx, mergeSQL); err != nil {
@@ -785,6 +841,28 @@ func (d *MSSQLDestination) MergeTable(ctx context.Context, opts destination.Merg
 
 	config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
 	return nil
+}
+
+func (d *MSSQLDestination) mergeTableInTx(ctx context.Context, tx *sql.Tx, opts destination.MergeOptions) error {
+	mergeSQL := d.mergeSQL(opts)
+	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
+	if _, err := tx.ExecContext(ctx, mergeSQL); err != nil {
+		config.LogFailedQuery(mergeSQL, err)
+		return fmt.Errorf("failed to execute merge: %w", err)
+	}
+	return nil
+}
+
+func (d *MSSQLDestination) supportsOpenJSON() bool {
+	return d.compatibilityLevel == 0 || d.compatibilityLevel >= 130
+}
+
+func (d *MSSQLDestination) mergeSQL(opts destination.MergeOptions) string {
+	useOpenJSON := d.supportsOpenJSON()
+	if opts.CDCHardDelete && destination.HasCDCDeletedColumn(opts.Columns) {
+		return buildCDCHardDeleteMergeSQL(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalPredicate, useOpenJSON)
+	}
+	return buildMergeSQLWithOptions(opts.TargetTable, opts.StagingTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, opts.IncrementalPredicate, useOpenJSON)
 }
 
 func tableIsEmptyForUpdate(ctx context.Context, tx *sql.Tx, table string) (bool, error) {
@@ -1056,6 +1134,10 @@ func buildMergeSQL(targetTable, stagingTable string, primaryKeys, columns []stri
 }
 
 func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey, incrementalPredicate string) string {
+	return buildMergeSQLWithOptions(targetTable, stagingTable, primaryKeys, columns, incrementalKey, incrementalPredicate, true)
+}
+
+func buildMergeSQLWithOptions(targetTable, stagingTable string, primaryKeys, columns []string, incrementalKey, incrementalPredicate string, useOpenJSON bool) string {
 	quotedColumns := quoteColumns(columns)
 	targetColumns := destination.DestinationColumns(columns)
 	quotedTargetColumns := quoteColumns(targetColumns)
@@ -1083,7 +1165,7 @@ func buildMergeSQLWithPredicate(targetTable, stagingTable string, primaryKeys, c
 	if isCDC {
 		hasActiveColumn := quoteColumn(uniqueInternalName("__ingestr_has_active"))
 		activeLSNColumn := quoteColumn(uniqueInternalName("__ingestr_active_lsn"))
-		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn)
+		return buildCDCMergeSQL(targetTable, stagingTable, primaryKeys, columns, nonPKColumns, primaryKeyOnClause, incrementalPredicate, stagingCols, insertCols, sourceCols, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn, useOpenJSON)
 	}
 
 	onClause := destination.MergeJoinCondition(primaryKeyOnClause, incrementalPredicate)
@@ -1138,7 +1220,25 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 // T-SQL allows only one UPDATE among WHEN MATCHED clauses, so the "delete-only
 // window keeps existing row data" rule is expressed with CASE instead of a
 // second clause.
-func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn string) string {
+func buildCDCUnchangedPredicate(col string, useOpenJSON bool) string {
+	if useOpenJSON {
+		return fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
+			quoteColumn(destination.CDCUnchangedColsColumn),
+			strings.ReplaceAll(col, "'", "''"),
+		)
+	}
+	member, _ := json.Marshal(col)
+	first := strings.ReplaceAll("["+string(member), "'", "''")
+	second := strings.ReplaceAll(","+string(member), "'", "''")
+	unchangedColExpr := fmt.Sprintf("COALESCE(source.%s, N'[]') COLLATE Latin1_General_100_BIN2", quoteColumn(destination.CDCUnchangedColsColumn))
+	return fmt.Sprintf(
+		"(CHARINDEX(N'%s' COLLATE Latin1_General_100_BIN2, %s) > 0 OR CHARINDEX(N'%s' COLLATE Latin1_General_100_BIN2, %s) > 0)",
+		first, unchangedColExpr, second, unchangedColExpr,
+	)
+}
+
+func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, nonPKColumns []string, onClause, incrementalPredicate, stagingCols, insertCols string, sourceCols []string, pkPartition, dedupRowNumber, hasActiveColumn, activeLSNColumn string, useOpenJSON bool) string {
 	pkMap := matchedMSSQLIdentifiers(columns, primaryKeys)
 
 	laActJoin := make([]string, len(primaryKeys))
@@ -1191,11 +1291,7 @@ func buildCDCMergeSQL(targetTable, stagingTable string, primaryKeys, columns, no
 		}
 		condition := hasFreshRowData
 		if hasUnchangedCols {
-			unchanged := fmt.Sprintf(
-				"EXISTS (SELECT 1 FROM OPENJSON(COALESCE(source.%s, N'[]')) WHERE [value] COLLATE Latin1_General_100_BIN2 = N'%s' COLLATE Latin1_General_100_BIN2)",
-				quoteColumn(destination.CDCUnchangedColsColumn),
-				strings.ReplaceAll(col, "'", "''"),
-			)
+			unchanged := buildCDCUnchangedPredicate(col, useOpenJSON)
 			condition = fmt.Sprintf("%s AND NOT %s", hasFreshRowData, unchanged)
 		}
 		updates[i] = fmt.Sprintf("target.%s = CASE WHEN %s THEN source.%s ELSE target.%s END", quoted, condition, quoted, quoted)
@@ -1217,7 +1313,72 @@ WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);`,
 	)
 }
 
-func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) error {
+// buildCDCHardDeleteMergeSQL builds a CDC MERGE that applies the latest change
+// per PK: a live change upserts the row, a delete removes it. Neither touches a
+// target row that already carries a newer position.
+func buildCDCHardDeleteMergeSQL(targetTable, stagingTable string, primaryKeys, columns []string, incrementalPredicate string, useOpenJSON bool) string {
+	quotedColumns := quoteColumns(columns)
+	targetColumns := destination.DestinationColumns(columns)
+	quotedTargetColumns := quoteColumns(targetColumns)
+	nonPKColumns := filterColumns(targetColumns, primaryKeys)
+	stagingCols := strings.Join(quotedColumns, ", ")
+	dedupRowNumber := quoteColumn(newMSSQLInternalNameAllocator(columns)("__bruin_dedup_rn"))
+
+	onConditions := make([]string, len(primaryKeys))
+	for i, pk := range primaryKeys {
+		onConditions[i] = fmt.Sprintf("target.%s = source.%s", quoteColumn(pk), quoteColumn(pk))
+	}
+	latest := fmt.Sprintf(
+		`(SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1)`,
+		stagingCols, stagingCols, strings.Join(quoteColumns(primaryKeys), ", "), destination.CDCLatestOverallOrderBy(quoteColumn), dedupRowNumber, quoteTable(stagingTable), dedupRowNumber,
+	)
+
+	predicate := ""
+	if strings.TrimSpace(incrementalPredicate) != "" {
+		predicate = "(" + incrementalPredicate + ") AND "
+	}
+	hasUnchangedCols := destination.HasCDCUnchangedColsColumn(columns)
+	updates := make([]string, len(nonPKColumns))
+	for i, col := range nonPKColumns {
+		quoted := quoteColumn(col)
+		if !hasUnchangedCols || destination.IsCDCColumn(col) {
+			updates[i] = fmt.Sprintf("target.%s = source.%s", quoted, quoted)
+			continue
+		}
+		unchanged := buildCDCUnchangedPredicate(col, useOpenJSON)
+		updates[i] = fmt.Sprintf("target.%s = CASE WHEN NOT %s THEN source.%s ELSE target.%s END", quoted, unchanged, quoted, quoted)
+	}
+	updateClause := ""
+	if len(updates) > 0 {
+		updateClause = fmt.Sprintf(
+			"WHEN MATCHED AND %ssource.[_cdc_deleted] = 0 AND (target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] > target.[_cdc_lsn]) THEN UPDATE SET %s\n",
+			predicate,
+			strings.Join(updates, ", "),
+		)
+	}
+	sourceCols := make([]string, len(quotedTargetColumns))
+	for i, col := range quotedTargetColumns {
+		sourceCols[i] = "source." + col
+	}
+
+	return fmt.Sprintf(
+		`MERGE %s AS target
+USING %s AS source
+ON %s
+WHEN MATCHED AND %ssource.[_cdc_deleted] = 1 AND (target.[_cdc_lsn] IS NULL OR source.[_cdc_lsn] >= target.[_cdc_lsn]) THEN DELETE
+%sWHEN NOT MATCHED AND source.[_cdc_deleted] = 0 THEN INSERT (%s) VALUES (%s);`,
+		quoteTable(targetTable),
+		latest,
+		strings.Join(onConditions, " AND "),
+		predicate,
+		updateClause,
+		strings.Join(quotedTargetColumns, ", "),
+		strings.Join(sourceCols, ", "),
+	)
+}
+
+func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destination.DeleteInsertOptions) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	startOp := time.Now()
 
 	quotedColumns := quoteColumns(opts.Columns)
@@ -1228,7 +1389,7 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey, opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1254,15 +1415,18 @@ func (d *MSSQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	return nil
 }
 
-func buildDeleteInsertDeleteSQL(targetTable, incrementalKey string) string {
-	return fmt.Sprintf(
-		"DELETE FROM %s WITH (TABLOCKX, HOLDLOCK) WHERE %s >= @p1 AND %s <= @p2",
-		quoteTable(targetTable), quoteColumn(incrementalKey), quoteColumn(incrementalKey),
-	)
+func buildDeleteInsertDeleteSQL(targetTable, incrementalKey, predicate string) string {
+	key := quoteColumn(incrementalKey)
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WITH (TABLOCKX, HOLDLOCK) WHERE %s >= @p1 AND %s <= @p2", quoteTable(targetTable), key, key)
+	}
+	return fmt.Sprintf("DELETE target FROM %s AS target WITH (TABLOCKX, HOLDLOCK) WHERE %s", quoteTable(targetTable),
+		destination.IntervalDeleteCondition("target", key, "@p1", "@p2", predicate))
 }
 
 // SCD2Table performs SCD2 (Slowly Changing Dimensions Type 2) merge logic.
-func (d *MSSQLDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) error {
+func (d *MSSQLDestination) SCD2Table(ctx context.Context, opts destination.SCD2Options) (err error) {
+	defer func() { err = explainWriteError(err, nil) }()
 	startOp := time.Now()
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -1395,12 +1559,14 @@ func (d *MSSQLDestination) SupportsReplaceStrategy() bool          { return true
 func (d *MSSQLDestination) SupportsAppendStrategy() bool           { return true }
 func (d *MSSQLDestination) SupportsMergeStrategy() bool            { return true }
 func (d *MSSQLDestination) SupportsIncrementalPredicate() bool     { return true }
+func (d *MSSQLDestination) SupportsDeleteInsertPredicate() bool    { return true }
 func (d *MSSQLDestination) SupportsDeleteInsertStrategy() bool     { return true }
 func (d *MSSQLDestination) SupportsSCD2Strategy() bool             { return true }
 func (d *MSSQLDestination) SupportsAtomicSwap() bool               { return true }
 func (d *MSSQLDestination) DeferReplaceStagingPrimaryKey() bool    { return true }
 func (d *MSSQLDestination) DeferredReplaceStagingParallelism() int { return 12 }
 func (d *MSSQLDestination) SupportsCDCMerge() bool                 { return true }
+func (d *MSSQLDestination) SupportsCDCHardDelete() bool            { return true }
 func (d *MSSQLDestination) SupportsCDCUnchangedCols() bool         { return true }
 
 func (d *MSSQLDestination) ValidateManagedCDCState() error {
@@ -1429,8 +1595,8 @@ func (d *MSSQLDestination) ValidateManagedCDCTarget(ctx context.Context, table s
 }
 
 func validateMSSQLCompatibilityLevel(database string, compatibilityLevel int) error {
-	if compatibilityLevel < 130 {
-		return fmt.Errorf("SQL Server database %q has compatibility level %d; managed CDC requires level 130 or newer for OPENJSON", database, compatibilityLevel)
+	if compatibilityLevel > 0 && compatibilityLevel < 100 {
+		return fmt.Errorf("SQL Server database %q has compatibility level %d; managed CDC requires level 100 or newer", database, compatibilityLevel)
 	}
 	return nil
 }
@@ -1478,7 +1644,7 @@ func (d *MSSQLDestination) EnsureCDCStatePositionColumn(ctx context.Context, tab
 	var maxLength int64
 	err := d.db.QueryRowContext(ctx,
 		`SELECT c.max_length FROM sys.columns AS c WHERE c.object_id = OBJECT_ID(@p1) AND c.name = '_cdc_lsn'`,
-		table).Scan(&maxLength)
+		quoteTable(table)).Scan(&maxLength)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -1527,8 +1693,16 @@ func (d *MSSQLDestination) ClaimCDCTarget(ctx context.Context, claimTable string
 	return tx.Commit()
 }
 
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table string) (string, bool, error) {
-	identity, err := d.resolveTargetIdentity(ctx, table)
+	return d.cdcTargetIncarnationWith(ctx, d.db, table)
+}
+
+func (d *MSSQLDestination) cdcTargetIncarnationWith(ctx context.Context, q queryRower, table string) (string, bool, error) {
+	identity, err := d.resolveTargetIdentityWith(ctx, q, table)
 	if err != nil {
 		return "", false, err
 	}
@@ -1542,7 +1716,7 @@ func (d *MSSQLDestination) CDCTargetIncarnation(ctx context.Context, table strin
 		WHERE s.name = @p1 AND t.name = @p2`, prefix, prefix)
 	var objectID int64
 	var createdAt string
-	err = d.db.QueryRowContext(ctx, query, identity.schema, identity.table).Scan(&objectID, &createdAt)
+	err = q.QueryRowContext(ctx, query, identity.schema, identity.table).Scan(&objectID, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -1559,13 +1733,17 @@ type mssqlTargetIdentity struct {
 func (i mssqlTargetIdentity) qualifiedTable(defaultServer string) string {
 	parts := make([]string, 0, 4)
 	if i.server != "" && !strings.EqualFold(i.server, defaultServer) {
-		parts = append(parts, i.server)
+		parts = append(parts, quoteColumn(i.server))
 	}
 	if i.database != "" {
-		parts = append(parts, i.database)
+		parts = append(parts, quoteColumn(i.database))
 	}
-	parts = append(parts, i.schema, i.table)
+	parts = append(parts, quoteColumn(i.schema), quoteColumn(i.table))
 	return strings.Join(parts, ".")
+}
+
+func (i mssqlTargetIdentity) schemaQualifiedTable() string {
+	return quoteColumn(i.schema) + "." + quoteColumn(i.table)
 }
 
 func (i mssqlTargetIdentity) catalogPrefix(defaultServer string) string {
@@ -1580,6 +1758,10 @@ func (i mssqlTargetIdentity) catalogPrefix(defaultServer string) string {
 }
 
 func (d *MSSQLDestination) resolveTargetIdentity(ctx context.Context, target string) (mssqlTargetIdentity, error) {
+	return d.resolveTargetIdentityWith(ctx, d.db, target)
+}
+
+func (d *MSSQLDestination) resolveTargetIdentityWith(ctx context.Context, q queryRower, target string) (mssqlTargetIdentity, error) {
 	parts := tablename.Split(target)
 	if len(parts) == 0 || len(parts) > 4 {
 		return mssqlTargetIdentity{}, fmt.Errorf("SQL Server table name must contain between one and four components, %q given", target)
@@ -1591,7 +1773,7 @@ func (d *MSSQLDestination) resolveTargetIdentity(ctx context.Context, target str
 	}
 	defaultSchema := "dbo"
 	if len(parts) == 1 {
-		if err := d.db.QueryRowContext(ctx, "SELECT COALESCE(SCHEMA_NAME(), 'dbo')").Scan(&defaultSchema); err != nil {
+		if err := q.QueryRowContext(ctx, "SELECT COALESCE(SCHEMA_NAME(), 'dbo')").Scan(&defaultSchema); err != nil {
 			return mssqlTargetIdentity{}, fmt.Errorf("failed to resolve SQL Server default schema: %w", err)
 		}
 	}
@@ -1615,24 +1797,28 @@ func resolveMSSQLTargetIdentity(defaultServer, defaultDatabase, defaultSchema, t
 }
 
 func (d *MSSQLDestination) canonicalCDCTarget(ctx context.Context, target string) (string, error) {
-	identity, err := d.resolveTargetIdentity(ctx, target)
+	return d.canonicalCDCTargetWith(ctx, d.db, target)
+}
+
+func (d *MSSQLDestination) canonicalCDCTargetWith(ctx context.Context, q queryRower, target string) (string, error) {
+	identity, err := d.resolveTargetIdentityWith(ctx, q, target)
 	if err != nil {
 		return "", err
 	}
 	var actualDatabase, collation string
 	if strings.EqualFold(identity.server, d.server) {
 		query := "SELECT [name], [collation_name] FROM [master].[sys].[databases] WHERE [name] = @p1"
-		if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
+		if err := q.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
 			return "", fmt.Errorf("failed to resolve SQL Server database collation for %q: %w", identity.database, err)
 		}
 	} else {
 		var actualServer string
-		if err := d.db.QueryRowContext(ctx, "SELECT [name] FROM [sys].[servers] WHERE [name] = @p1", identity.server).Scan(&actualServer); err != nil {
+		if err := q.QueryRowContext(ctx, "SELECT [name] FROM [sys].[servers] WHERE [name] = @p1", identity.server).Scan(&actualServer); err != nil {
 			return "", fmt.Errorf("failed to resolve linked SQL Server name %q: %w", identity.server, err)
 		}
 		identity.server = actualServer
 		query := fmt.Sprintf("SELECT [name], [collation_name] FROM %s.[master].[sys].[databases] WHERE [name] = @p1", quoteColumn(identity.server))
-		if err := d.db.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
+		if err := q.QueryRowContext(ctx, query, identity.database).Scan(&actualDatabase, &collation); err != nil {
 			return "", fmt.Errorf("failed to resolve linked SQL Server database collation for %q: %w", identity.database, err)
 		}
 	}
@@ -1682,15 +1868,36 @@ func (d *MSSQLDestination) DeleteCDCStateEvents(ctx context.Context, table, conn
 	if len(eventIDs) == 0 {
 		return nil
 	}
-	args := make([]any, 0, len(eventIDs)+1)
-	args = append(args, connectorID)
-	placeholders := make([]string, len(eventIDs))
-	for i, eventID := range eventIDs {
-		placeholders[i] = fmt.Sprintf("@p%d", i+2)
-		args = append(args, eventID)
+	const maxBatch = 1000
+	execDelete := func(execCtx context.Context, execer interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}, batch []string,
+	) error {
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, connectorID)
+		placeholders := make([]string, len(batch))
+		for i, eventID := range batch {
+			placeholders[i] = fmt.Sprintf("@p%d", i+2)
+			args = append(args, eventID)
+		}
+		_, err := execer.ExecContext(execCtx, fmt.Sprintf("DELETE FROM %s WHERE [connector_id] = @p1 AND [event_id] IN (%s)", quoteTable(table), strings.Join(placeholders, ", ")), args...)
+		return err
 	}
-	_, err := d.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE [connector_id] = @p1 AND [event_id] IN (%s)", quoteTable(table), strings.Join(placeholders, ", ")), args...)
-	return err
+	if len(eventIDs) <= maxBatch {
+		return execDelete(ctx, d.db, eventIDs)
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for start := 0; start < len(eventIDs); start += maxBatch {
+		end := min(start+maxBatch, len(eventIDs))
+		if err := execDelete(ctx, tx, eventIDs[start:end]); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (d *MSSQLDestination) GetScheme() string { return "mssql" }
@@ -1707,11 +1914,23 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 
 	query := fmt.Sprintf(`
 		SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE,
-		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH
+		       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH,
+		       CASE WHEN EXISTS (
+		           SELECT 1 FROM %sINFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+		           JOIN %sINFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+		             ON tc.CONSTRAINT_CATALOG = kcu.CONSTRAINT_CATALOG
+		            AND tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+		            AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+		           WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+		             AND kcu.TABLE_CATALOG = c.TABLE_CATALOG
+		             AND kcu.TABLE_SCHEMA = c.TABLE_SCHEMA
+		             AND kcu.TABLE_NAME = c.TABLE_NAME
+		             AND kcu.COLUMN_NAME = c.COLUMN_NAME
+		       ) THEN 1 ELSE 0 END AS IS_PRIMARY_KEY
 		FROM %sINFORMATION_SCHEMA.COLUMNS c
 		JOIN %sINFORMATION_SCHEMA.TABLES t ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
 		WHERE c.TABLE_SCHEMA = @p1 AND c.TABLE_NAME = @p2
-		ORDER BY c.ORDINAL_POSITION`, prefix, prefix)
+		ORDER BY c.ORDINAL_POSITION`, prefix, prefix, prefix, prefix)
 
 	rows, err := d.db.QueryContext(ctx, query, identity.schema, identity.table)
 	if err != nil {
@@ -1721,18 +1940,24 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	var primaryKeys []string
 	for rows.Next() {
 		var colName, dataType, isNullable string
 		var numPrecision, numScale, charMaxLen *int
+		var isPrimaryKey bool
 
-		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen); err != nil {
+		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &isPrimaryKey); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
 		col := schema.Column{
-			Name:     colName,
-			DataType: mapMSSQLTypeToSchema(dataType),
-			Nullable: isNullable == "YES",
+			Name:         colName,
+			DataType:     mapMSSQLTypeToSchema(dataType),
+			Nullable:     isNullable == "YES",
+			IsPrimaryKey: isPrimaryKey,
+		}
+		if isPrimaryKey {
+			primaryKeys = append(primaryKeys, colName)
 		}
 
 		if numPrecision != nil {
@@ -1757,9 +1982,10 @@ func (d *MSSQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 	}
 
 	return &schema.TableSchema{
-		Name:    identity.table,
-		Schema:  identity.schema,
-		Columns: columns,
+		Name:        identity.table,
+		Schema:      identity.schema,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 
@@ -1916,6 +2142,12 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 }
 
 func buildCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.Column, primaryKeys, deferredPrimaryKeys []string) string {
+	createPart := buildExclusiveCreateTableSQLWithDeferredPrimaryKeys(table, columns, primaryKeys, deferredPrimaryKeys)
+	return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s",
+		escapeTableNameForObjectID(table), createPart)
+}
+
+func buildExclusiveCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.Column, primaryKeys, deferredPrimaryKeys []string) string {
 	columnNames := make([]string, len(columns))
 	for i := range columns {
 		columnNames[i] = columns[i].Name
@@ -1943,11 +2175,7 @@ func buildCreateTableSQLWithDeferredPrimaryKeys(table string, columns []schema.C
 		createPart += fmt.Sprintf(",\n  PRIMARY KEY (%s)", strings.Join(quotedKeys, ", "))
 	}
 
-	createPart += "\n)"
-
-	sql := fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL %s",
-		escapeTableNameForObjectID(table), createPart)
-	return sql
+	return createPart + "\n)"
 }
 
 func mapColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
@@ -1959,10 +2187,10 @@ func mapColumnTypeForCreate(col schema.Column, isPrimaryKey bool) string {
 	case schema.TypeString, schema.TypeJSON, schema.TypeArray:
 		// SQL Server cannot index NVARCHAR(MAX); clustered primary keys are
 		// limited to 900 bytes, which is 450 UTF-16 code units.
-		if col.MaxLength > 0 && col.MaxLength <= 450 {
+		if col.MaxLength > 0 && col.MaxLength <= maxPrimaryKeyStringLength {
 			return fmt.Sprintf("NVARCHAR(%d)", col.MaxLength)
 		}
-		return "NVARCHAR(450)"
+		return fmt.Sprintf("NVARCHAR(%d)", maxPrimaryKeyStringLength)
 	case schema.TypeBinary:
 		if col.MaxLength > 0 && col.MaxLength <= 900 {
 			return fmt.Sprintf("VARBINARY(%d)", col.MaxLength)

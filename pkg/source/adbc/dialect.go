@@ -128,6 +128,13 @@ type SchemaProvider interface {
 	GetSchema(ctx context.Context, table string) (*schema.TableSchema, error)
 }
 
+// ColumnExpressionProvider is an optional interface for dialects that read some
+// native types through a SQL expression because the driver conversion is lossy.
+// An empty result selects the column as-is.
+type ColumnExpressionProvider interface {
+	ColumnExpression(nativeType, quotedColumn string) string
+}
+
 // PrimaryKeyEnforcementProvider identifies dialects whose detected primary-key
 // constraints enforce uniqueness.
 type PrimaryKeyEnforcementProvider interface {
@@ -152,6 +159,12 @@ type ConnectionAware interface {
 	// SetConnection provides the dialect with access to the database connection.
 	// This is called after successful connection in ADBCSource.Connect().
 	SetConnection(db *sql.DB)
+}
+
+// ConnectionInitializer is an optional interface for dialects that must run
+// setup statements after Connect; an error fails the connection.
+type ConnectionInitializer interface {
+	InitConnection(ctx context.Context, db *sql.DB) error
 }
 
 // URIAware is an optional interface for dialects that need access to the

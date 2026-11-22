@@ -5,9 +5,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
 )
 
 // Mirrors the driver's own call in connection.go queryContextInternal.
@@ -18,7 +19,7 @@ func TestConfigureDriverLoggingSilencesQueryErrors(t *testing.T) {
 
 	ConfigureDriverLogging()
 
-	if level := sf.GetLogger().GetLogLevel(); level != "fatal" {
+	if level := sf.GetLogger().GetLogLevel(); !strings.EqualFold(level, "fatal") {
 		t.Fatalf("expected driver log level fatal, got %q", level)
 	}
 

@@ -3,7 +3,9 @@ package clevertap
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -382,6 +384,42 @@ func TestWriteNullsClearsField(t *testing.T) {
 	})
 }
 
+func TestNonFiniteFloatsFollowWriteNulls(t *testing.T) {
+	profiles := func() arrow.RecordBatch {
+		s := arrow.NewSchema([]arrow.Field{
+			{Name: "email", Type: arrow.BinaryTypes.String},
+			{Name: "score", Type: arrow.PrimitiveTypes.Float64},
+		}, nil)
+		b := array.NewRecordBuilder(memory.DefaultAllocator, s)
+		defer b.Release()
+		b.Field(0).(*array.StringBuilder).AppendValues([]string{"a@x.com", "b@x.com", "c@x.com"}, nil)
+		b.Field(1).(*array.Float64Builder).AppendValues([]float64{math.NaN(), math.Inf(-1), 1.5}, nil)
+		return b.NewRecordBatch()
+	}
+
+	for _, writeNulls := range []bool{false, true} {
+		server, bodies := newUploadServer(t)
+		d := connectTestDestination(t, server.URL)
+		records := make(chan source.RecordBatchResult, 1)
+		records <- source.RecordBatchResult{Batch: profiles()}
+		close(records)
+		require.NoError(t, d.Write(context.Background(), records, destination.WriteOptions{
+			Table:       "profiles",
+			PrimaryKeys: []string{"email"},
+			WriteNulls:  writeNulls,
+		}))
+		items := (*bodies)[0].D
+		require.Len(t, items, 3)
+		cleared := map[string]interface{}{}
+		if writeNulls {
+			cleared = map[string]interface{}{"score": map[string]interface{}{"$delete": true}}
+		}
+		assert.Equal(t, cleared, items[0]["profileData"])
+		assert.Equal(t, cleared, items[1]["profileData"])
+		assert.Equal(t, map[string]interface{}{"score": 1.5}, items[2]["profileData"])
+	}
+}
+
 func TestFailFastParallelAborts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"partial","processed":1,"unprocessed":[{"status":"fail","code":513,"error":"Invalid identity","record":{"identity":"ali@x.com"}}]}`)
@@ -422,6 +460,37 @@ func TestWriteParallelCallerCancelReturnsError(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestWriteParallelReturnsWithOpenSource(t *testing.T) {
+	for _, failure := range []string{"canceled", "source"} {
+		t.Run(failure, func(t *testing.T) {
+			server, _ := newUploadServer(t)
+			d := connectTestDestination(t, server.URL)
+			records := make(chan source.RecordBatchResult, 1)
+			defer close(records)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			want := context.Canceled
+			if failure == "source" {
+				want = errors.New("source failed")
+				records <- source.RecordBatchResult{Err: want}
+			}
+			done := make(chan error, 1)
+			go func() {
+				done <- d.WriteParallel(ctx, records, destination.WriteOptions{Table: "profiles", PrimaryKeys: []string{"email"}, Parallelism: 3})
+			}()
+			if failure == "canceled" {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, want)
+			case <-time.After(time.Second):
+				t.Fatal("write waited for the source to close before returning its error")
+			}
+		})
+	}
+}
+
 func TestWriteNullsEventsOmit(t *testing.T) {
 	s := arrow.NewSchema([]arrow.Field{
 		{Name: "user_id", Type: arrow.BinaryTypes.String},
@@ -452,11 +521,43 @@ func TestIsReverseETL(t *testing.T) {
 func TestStrategySupport(t *testing.T) {
 	d := NewCleverTapDestination()
 	assert.True(t, d.SupportsAppendStrategy())
-	assert.True(t, d.SupportsReplaceStrategy())
-	assert.False(t, d.SupportsMergeStrategy())
+	assert.False(t, d.SupportsReplaceStrategy())
+	assert.True(t, d.SupportsMergeStrategy())
 	assert.False(t, d.SupportsDeleteInsertStrategy())
 	assert.False(t, d.SupportsSCD2Strategy())
 	assert.False(t, d.SupportsAtomicSwap())
+}
+
+func TestEachTableAcceptsOnlyItsStrategy(t *testing.T) {
+	d := NewCleverTapDestination()
+	tests := []struct {
+		table, strategy, wantErr string
+	}{
+		{"profiles", "merge", ""},
+		{"clevertap.profiles?id_type=objectId", "merge", ""},
+		{"events?event_name=Signup", "append", ""},
+		{"profiles", "", ""},
+		{"profiles", "append", "profiles are upserted by identity"},
+		{"profiles", "replace", "use merge"},
+		{"profiles", "delete", "use merge"},
+		{"events?event_name=Signup", "merge", "events are append-only"},
+		{"events?event_name=Signup", "update", "use append"},
+	}
+	for _, tt := range tests {
+		err := d.PrepareTable(context.Background(), destination.PrepareOptions{Table: tt.table, Strategy: tt.strategy})
+		if tt.wantErr == "" {
+			require.NoError(t, err, "%s/%s", tt.table, tt.strategy)
+			continue
+		}
+		require.ErrorContains(t, err, tt.wantErr, "%s/%s", tt.table, tt.strategy)
+	}
+}
+
+func TestFixedStrategy(t *testing.T) {
+	d := NewCleverTapDestination()
+	assert.Equal(t, "merge", d.FixedStrategy("profiles?id_type=identity"))
+	assert.Equal(t, "append", d.FixedStrategy("events?event_name=Signup"))
+	assert.Empty(t, d.FixedStrategy("nope"))
 }
 
 func TestInvalidURI(t *testing.T) {

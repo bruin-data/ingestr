@@ -89,7 +89,7 @@ func (d *Dialect) TypeName(col schema.Column) string {
 	case schema.TypeUUID:
 		return "UUID"
 	case schema.TypeArray:
-		elemCol := schema.Column{DataType: col.ArrayType}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
 		return d.TypeName(elemCol) + "[]"
 	default:
 		return "TEXT"

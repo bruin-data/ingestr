@@ -41,7 +41,7 @@ ingestr ingest \
     --dest-table "dbo.users"
 ```
 
-The destination table stores the Change Tracking cursor in `_cdc_lsn`, so later runs resume automatically from the latest loaded version. Change Tracking loads use the `merge` strategy by default and require a primary key on the source table.
+By default, the destination table stores the Change Tracking cursor in `_cdc_lsn`, so later runs resume automatically from the latest loaded version. Change Tracking loads use the `merge` strategy by default and require a primary key on the source table.
 
 SQL Server setup example:
 
@@ -79,7 +79,9 @@ Change Tracking URI parameters:
 
 - `poll_interval`: how long to wait between polls in streaming mode. Any Go duration (`500ms`, `2s`, `1m`); defaults to `1s`. Ignored outside `--stream`.
 
-While a stream sits idle, ingestr periodically restamps the resume cursor so the recorded version stays inside the database's `CHANGE_RETENTION` window and a restart can resume instead of re-snapshotting. The interval is derived from that retention setting — a quarter of it, capped at 5 minutes and floored at 5 seconds — so a database that expires versions in minutes is restamped more often than one retaining them for days. Streaming is single-table: name one table with `--source-table`.
+While a stream using row-based cursors sits idle, ingestr periodically restamps the resume cursor so the recorded version stays inside the database's `CHANGE_RETENTION` window and a restart can resume instead of re-snapshotting. The interval is derived from that retention setting — a quarter of it, capped at 5 minutes and floored at 5 seconds — so a database that expires versions in minutes is restamped more often than one retaining them for days. Streaming is single-table: name one table with `--source-table`.
+
+Use `--stream --full-refresh --refresh-id <unique-request-id>` to rebuild the table and continue polling in the same process. This requires a destination supporting managed CDC state. Persist the ID and reuse it on retries. In this mode, ingestr stores checkpoints in destination metadata, including for empty tables and idle polls. Once managed checkpoints exist for the connector, subsequent batch and streaming runs keep using them even without the refresh flags; they do not fall back to an older cursor in the destination rows. Keep that metadata alongside the destination data.
 
 Into BigQuery or Snowflake, run this connector serially: neither destination enforces primary-key uniqueness, so two overlapping runs can leave permanent duplicate rows. See [Overlapping runs on BigQuery and Snowflake](/getting-started/cdc.md#overlapping-runs-on-bigquery-and-snowflake).
 

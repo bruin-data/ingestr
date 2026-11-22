@@ -6,21 +6,21 @@ Search results, Today tab, "Suggested" list, and product pages — billed per
 tap or per install. Ads are rendered from the advertiser's App Store Connect
 listing; there is no separate creative upload.
 
-This source uses the [Apple Ads Campaign Management API v5](https://developer.apple.com/documentation/apple_ads)
-to ingest the structural data behind those ads — campaigns, ad groups, ads,
-and creatives.
+This source uses the [Apple Ads Platform API](https://developer.apple.com/documentation/apple-ads-platform-api)
+(`api.ads.apple.com/v1`) to ingest the structural data behind those ads —
+campaigns, ad groups, ads, and creatives — and their performance reports.
 
 
 ## URI format
 
 ```
-appleads://?client_id=<client_id>&team_id=<team_id>&key_id=<key_id>&org_id=<org_id>&key_path=<path>
+appleads://?client_id=<client_id>&team_id=<team_id>&key_id=<key_id>&ad_account_id=<ad_account_id>&key_path=<path>
 ```
 
 Or with a base64-encoded key:
 
 ```
-appleads://?client_id=<client_id>&team_id=<team_id>&key_id=<key_id>&org_id=<org_id>&key_base64=<base64>
+appleads://?client_id=<client_id>&team_id=<team_id>&key_id=<key_id>&ad_account_id=<ad_account_id>&key_base64=<base64>
 ```
 
 ## URI parameters
@@ -28,7 +28,8 @@ appleads://?client_id=<client_id>&team_id=<team_id>&key_id=<key_id>&org_id=<org_
 - **`client_id`** *(required)* — Apple-issued API client identifier, format `SEARCHADS.<uuid>`.
 - **`team_id`** *(required)* — Apple-issued team identifier, format `SEARCHADS.<uuid>`. Usually the same value as `client_id`.
 - **`key_id`** *(required)* — Apple-issued key identifier for your uploaded public key (short UUID).
-- **`org_id`** *(required)* — Numeric organization/account ID. Comma-separated for multi-account ingestion (e.g. `org_id=111,222,333`).
+- **`ad_account_id`** *(required)* — Numeric ad account ID. Comma-separated for multi-account ingestion (e.g. `ad_account_id=111,222,333`).
+- **`org_id`** — Accepted as an alias for `ad_account_id`, so URIs written for the v5 API keep working. For accounts migrated from v5 the ad account ID is the same number as the old organization ID.
 - **`key_path`** *(one of)* — Absolute filesystem path to the EC private key PEM file (P-256).
 - **`key_base64`** *(one of)* — Base64-encoded contents of the EC private key PEM file. Use when no file system access is available.
 
@@ -61,9 +62,9 @@ openssl ec -in private-key.pem -pubout -out public-key.pem
 
 Copy these three values.
 
-### 3. Find your Organization ID
+### 3. Find your Ad Account ID
 
-Organization IDs are numeric and visible in:
+Ad account IDs are numeric and visible in:
 
 - Apple Ads UI → **Settings → Overview**.
 - The Apple Ads UI URL when browsing your account.
@@ -75,14 +76,14 @@ Organization IDs are numeric and visible in:
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 |---|---|---|---|---|
-| `campaigns` | `[orgId, id]` | `modificationTime` | merge | All ad campaigns in the organization, including budget, status, countries/regions, and timeframe. |
+| `campaigns` | `[orgId, id]` | `modificationTime` | merge | All ad campaigns in the ad account, including budget, status, targeting, and timeframe. Deleted campaigns are included. |
 | `ad_groups` | `[orgId, id]` | `modificationTime` | merge | Targeting groups inside each campaign — bids, audience/device/geo targeting, and keyword-matching settings. |
 | `ads` | `[orgId, id]` | `modificationTime` | merge | Individual ads within each ad group, linking a creative to its ad group and serving status. |
-| `creatives` | `[orgId, id]` | `modificationTime` | merge | Creative assets registered to the organization (custom product pages, text, media) that ads reference. |
+| `creatives` | `[orgId, id]` | `modificationTime` | merge | Creative assets registered to the ad account (custom product pages, text, media) that ads reference. |
 
 ### Report tables
 
-Report tables return performance metrics (impressions, taps, installs, spend, etc.) from the [Apple Search Ads Reporting API](https://developer.apple.com/documentation/apple_ads/apple-search-ads-campaign-management-api-5).
+Report tables return performance metrics (impressions, taps, installs, spend, etc.) from the Platform API's [App Store reports](https://developer.apple.com/documentation/apple-ads-platform-api/apps-reports-endpoints). Dates are UTC.
 
 | Table | PK | Inc Key | Inc Strategy | Details |
 |---|---|---|---|---|
@@ -93,10 +94,10 @@ Report tables return performance metrics (impressions, taps, installs, spend, et
 Report table names support an optional `:granularity:groupBy` suffix to control time breakdown and dimensional grouping:
 
 - Granularity — hourly, daily, weekly, or monthly. When set, date is added to the primary key.
-- GroupBy — one or more dimensions separated by commas. Each dimension is added to the primary key. `campaign_reports` and `ad_group_reports` accept any of `countryOrRegion`, `ageRange`, `gender`, `deviceClass`, `adminArea`, `locality`, `countryCode`. `ad_reports` is restricted to `countryOrRegion` only.
+- GroupBy — one or more dimensions separated by commas. Each dimension is added to the primary key. `campaign_reports` and `ad_group_reports` accept any of `countryOrRegion`, `ageRange`, `gender`, `deviceClass`, `adminArea`, `locality`, `countryCode`. `ad_reports` is restricted to `countryOrRegion` only and does not support `hourly`.
 
 
-**Granularity constraints** (from [Apple docs](https://developer.apple.com/documentation/apple_ads/reportingrequest)):
+**Granularity constraints** (from [Apple docs](https://developer.apple.com/documentation/apple-ads-platform-api/appsreportingrequest)). Longer ranges are split into windows the API accepts:
 
 | Granularity | Min date range | Max lookback |
 |---|---|---|
@@ -111,7 +112,7 @@ Report table names support an optional `:granularity:groupBy` suffix to control 
 
 ```bash
 ingestr ingest \
-  --source-uri="appleads://?client_id=SEARCHADS.xxxx&team_id=SEARCHADS.xxxx&key_id=xxxx&org_id=11111111&key_path=/path/to/private-key.pem" \
+  --source-uri="appleads://?client_id=SEARCHADS.xxxx&team_id=SEARCHADS.xxxx&key_id=xxxx&ad_account_id=11111111&key_path=/path/to/private-key.pem" \
   --source-table=campaigns \
   --dest-uri="duckdb:///tmp/apple_ads.duckdb" \
   --dest-table=main.campaigns
@@ -121,7 +122,7 @@ ingestr ingest \
 
 ```bash
 ingestr ingest \
-  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&org_id=...&key_path=..." \
+  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&ad_account_id=...&key_path=..." \
   --source-table=ad_groups \
   --dest-uri="duckdb:///tmp/apple_ads.duckdb" \
   --dest-table=main.ad_groups \
@@ -132,24 +133,25 @@ ingestr ingest \
 ingestr will load ad groups whose `modificationTime` falls within the
 `[interval-start, interval-end)` window.
 
-### Multi-organization
+### Multiple ad accounts
 
 ```bash
 ingestr ingest \
-  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&org_id=11111111,98765432,11223344&key_path=..." \
+  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&ad_account_id=11111111,98765432,11223344&key_path=..." \
   --source-table=campaigns \
   --dest-uri="duckdb:///tmp/apple_ads.duckdb" \
   --dest-table=main.campaigns
 ```
 
-All campaigns from all three organizations land in a single table, distinguished
-by the `orgId` column.
+All campaigns from all three ad accounts land in a single table, distinguished
+by the `orgId` column (which holds the ad account ID; the name is kept so
+existing tables keep merging).
 
 ### Aggregated campaign report (no granularity, no groupBy)
 
 ```bash
 ingestr ingest \
-  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&org_id=...&key_path=..." \
+  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&ad_account_id=...&key_path=..." \
   --source-table=campaign_reports \
   --dest-uri="duckdb:///tmp/apple_ads.duckdb" \
   --dest-table=main.campaign_reports
@@ -159,7 +161,7 @@ ingestr ingest \
 
 ```bash
 ingestr ingest \
-  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&org_id=...&key_path=..." \
+  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&ad_account_id=...&key_path=..." \
   --source-table='campaign_reports:daily:countryOrRegion' \
   --dest-uri="duckdb:///tmp/apple_ads.duckdb" \
   --dest-table=main.campaign_reports_daily_country
@@ -169,7 +171,7 @@ ingestr ingest \
 
 ```bash
 ingestr ingest \
-  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&org_id=...&key_path=..." \
+  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&ad_account_id=...&key_path=..." \
   --source-table='campaign_reports::gender' \
   --dest-uri="duckdb:///tmp/apple_ads.duckdb" \
   --dest-table=main.campaign_reports_gender
@@ -179,7 +181,7 @@ ingestr ingest \
 
 ```bash
 ingestr ingest \
-  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&org_id=...&key_path=..." \
+  --source-uri="appleads://?client_id=...&team_id=...&key_id=...&ad_account_id=...&key_path=..." \
   --source-table='campaign_reports:monthly:countryOrRegion,gender' \
   --dest-uri="duckdb:///tmp/apple_ads.duckdb" \
   --dest-table=main.campaign_reports_monthly_country_gender
@@ -187,10 +189,15 @@ ingestr ingest \
 
 ## Notes
 
-- **The [current API](https://developer.apple.com/documentation/apple_ads/apple-search-ads-campaign-management-api-5) will be sunset on January 26, 2027.**
-  Apple has announced the [Apple Ads Platform API](https://developer.apple.com/documentation/apple_ads)
-  as the replacement. A separate `apple_ads_platform` source may be added to
-  cover that API when it becomes generally available.
+- **Moving from the v5 version of this source.** Apple turns off the Campaign
+  Management API v5 on January 26, 2027. Table names, primary keys and the
+  `orgId` column are unchanged, and `org_id` in the URI still works. What
+  changes is the shape of the rows, because the Platform API returns different
+  fields: for example campaigns carry `promotedObjectId`, `dailyBudget.value`
+  and `targeting` instead of `adamId`, `dailyBudgetAmount` and
+  `countriesOrRegions`, and report metrics use `cpt` and `cpm`
+  instead of `avgCPT` and `avgCPM`. Downstream models
+  that read those columns need updating.
 - **Apple's `id` is not globally unique.** It is only unique within an
-  organization. Always join on the composite `[orgId, id]` when querying across
-  orgs.
+  ad account. Always join on the composite `[orgId, id]` when querying across
+  accounts.

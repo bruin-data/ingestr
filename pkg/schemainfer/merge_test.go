@@ -442,6 +442,13 @@ func TestArrowFieldToColumn_List(t *testing.T) {
 	}
 }
 
+func TestArrowFieldToColumn_DecimalList(t *testing.T) {
+	col := ArrowFieldToColumn("amounts", arrow.ListOf(&arrow.Decimal128Type{Precision: 10, Scale: 2}), true)
+	if col.DataType != schema.TypeArray || col.ArrayType != schema.TypeDecimal || col.Precision != 10 || col.Scale != 2 {
+		t.Errorf("expected array of decimal(10,2), got %+v", col)
+	}
+}
+
 func TestArrowFieldToColumn_NestedTypesUseJSON(t *testing.T) {
 	tests := []struct {
 		name  string

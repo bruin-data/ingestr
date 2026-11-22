@@ -39,6 +39,50 @@ func TestOracleExadataConnectorMetadata(t *testing.T) {
 	}
 }
 
+func TestD1ConnectorMetadata(t *testing.T) {
+	connector := GetConnectorByID("d1")
+	if connector == nil {
+		t.Fatal("expected Cloudflare D1 connector to be registered")
+	}
+	if connector.IsSource || !connector.IsDestination {
+		t.Fatal("Cloudflare D1 connector should only support destinations")
+	}
+	if got := strings.Join(connector.Schemes, ","); got != "d1,cloudflare-d1" {
+		t.Fatalf("schemes = %q, want d1,cloudflare-d1", got)
+	}
+	for _, field := range connector.Fields {
+		if field.Name == "api_token" {
+			if field.Type != "password" || !field.Required {
+				t.Fatal("API token should be a required password field")
+			}
+			return
+		}
+	}
+	t.Fatal("Cloudflare D1 connector is missing its API token field")
+}
+
+func TestBuildD1URI(t *testing.T) {
+	token := "token+with/reserved?chars=&%"
+	uri := BuildURI("d1", map[string]string{
+		"account_id":  "0123456789abcdef0123456789abcdef",
+		"database_id": "12345678-1234-1234-1234-123456789abc",
+		"api_token":   token,
+	})
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("invalid URI: %v", err)
+	}
+	if parsed.Scheme != "d1" || parsed.Host != "0123456789abcdef0123456789abcdef" || parsed.Path != "/12345678-1234-1234-1234-123456789abc" {
+		t.Fatalf("unexpected D1 URI: %s", uri)
+	}
+	if got := parsed.Query().Get("api_token"); got != token {
+		t.Fatalf("API token = %q, want %q", got, token)
+	}
+	if len(parsed.Query()) != 1 || parsed.Fragment != "" {
+		t.Fatalf("reserved token characters altered URI structure: %s", uri)
+	}
+}
+
 func TestBuildAzureSQLURI(t *testing.T) {
 	uri := BuildURI("azuresql", map[string]string{
 		"host":      "myserver.database.windows.net",

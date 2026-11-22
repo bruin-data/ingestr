@@ -815,6 +815,87 @@ func TestPrepareTableRejectsIncompatibleConcurrentCreateWinner(t *testing.T) {
 	}
 }
 
+func TestPrepareTableDropFirstRecreatesIncompatibleTable(t *testing.T) {
+	tests := []struct {
+		name         string
+		existingType string
+		deleteStatus int
+		wantRecreate bool
+		wantErr      string
+	}{
+		{name: "compatible table is reused", existingType: "INTEGER"},
+		{name: "incompatible table is recreated", existingType: "STRING", deleteStatus: http.StatusNoContent, wantRecreate: true},
+		{name: "delete error reaches writer", existingType: "STRING", deleteStatus: http.StatusForbidden, wantErr: "failed to drop table"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deleteCalls, createCalls atomic.Int32
+			var jobID, sql string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/jobs"):
+					var req struct {
+						JobReference  struct{ JobID string } `json:"jobReference"`
+						Configuration struct {
+							Query struct{ Query string } `json:"query"`
+						} `json:"configuration"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					jobID, sql = req.JobReference.JobID, req.Configuration.Query.Query
+					writeBigQueryTestJob(w, jobID, sql)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/queries/"):
+					writeBigQueryTestQueryResults(w, jobID)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/jobs/"):
+					writeBigQueryTestJob(w, jobID, sql)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/"):
+					writeBigQueryTableMetadata(w, tt.existingType)
+				case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/tables/"):
+					deleteCalls.Add(1)
+					w.WriteHeader(tt.deleteStatus)
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/tables"):
+					createCalls.Add(1)
+					writeBigQueryTableMetadata(w, "INTEGER")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client, err := bigquery.NewClient(t.Context(), "test-project", option.WithEndpoint(server.URL), option.WithoutAuthentication())
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+			dest := &BigQueryDestination{client: client, projectID: "test-project", location: "US", knownDatasets: map[string]bool{"test-project.test-dataset": true}}
+
+			require.NoError(t, dest.PrepareTable(t.Context(), destination.PrepareOptions{
+				Table:     "test-dataset.events",
+				Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64}}},
+				DropFirst: true,
+			}))
+			_, _, _, tableKey, err := dest.resolveTable("test-dataset.events")
+			require.NoError(t, err)
+			errCh := dest.takePendingTableErr(tableKey)
+			require.NotNil(t, errCh)
+			err = <-errCh
+
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				require.Zero(t, createCalls.Load())
+				return
+			}
+			require.NoError(t, err)
+			require.Contains(t, sql, "TRUNCATE TABLE")
+			want := int32(0)
+			if tt.wantRecreate {
+				want = 1
+			}
+			require.Equal(t, want, deleteCalls.Load())
+			require.Equal(t, want, createCalls.Load())
+		})
+	}
+}
+
 func TestValidateBigQuerySchemaCompatibilityParameterizedTypes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -3160,63 +3241,58 @@ func TestBuildAlterColumnTypeRewriteSQL_DatePartitionNotWrapped(t *testing.T) {
 	}
 }
 
-func TestIsDatePartitionColumn(t *testing.T) {
-	s := &schema.TableSchema{
-		Columns: []schema.Column{
-			{Name: "day", DataType: schema.TypeDate},
-			{Name: "created_at", DataType: schema.TypeTimestamp},
+func TestBuildAlterColumnTypeRewriteSQL_KeepsGranularityAndRange(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+	cols := bigquery.Schema{
+		{Name: "ts", Type: bigquery.TimestampFieldType},
+		{Name: "n", Type: bigquery.IntegerFieldType},
+		{Name: "age", Type: bigquery.IntegerFieldType},
+	}
+
+	tests := map[string]*bigquery.TableMetadata{
+		"PARTITION BY TIMESTAMP_TRUNC(`ts`, HOUR)": {
+			Schema: cols, TimePartitioning: &bigquery.TimePartitioning{Field: "ts", Type: bigquery.HourPartitioningType},
+		},
+		"PARTITION BY RANGE_BUCKET(`n`, GENERATE_ARRAY(0, 100, 10))": {
+			Schema: cols, RangePartitioning: &bigquery.RangePartitioning{Field: "n", Range: &bigquery.RangePartitioningRange{Start: 0, End: 100, Interval: 10}},
 		},
 	}
-
-	if !isDatePartitionColumn(s, "day") {
-		t.Fatal("expected day to be detected as a DATE column")
-	}
-	if isDatePartitionColumn(s, "created_at") {
-		t.Fatal("expected created_at not to be detected as a DATE column")
-	}
-	if isDatePartitionColumn(s, "missing") {
-		t.Fatal("expected missing column to default to false")
-	}
-	if isDatePartitionColumn(nil, "day") {
-		t.Fatal("expected nil schema to default to false")
-	}
-	if isDatePartitionColumn(s, "") {
-		t.Fatal("expected empty column to default to false")
-	}
-	if !isDatePartitionColumn(s, "Day") {
-		t.Fatal("expected case-insensitive match for BigQuery identifiers")
-	}
-}
-
-func TestPartitionFieldIsDate(t *testing.T) {
-	s := bigquery.Schema{
-		{Name: "day", Type: bigquery.DateFieldType},
-		{Name: "created_at", Type: bigquery.TimestampFieldType},
-	}
-
-	if !partitionFieldIsDate(s, "day") {
-		t.Fatal("expected day to be detected as a DATE column")
-	}
-	if partitionFieldIsDate(s, "created_at") {
-		t.Fatal("expected created_at not to be detected as a DATE column")
-	}
-	if partitionFieldIsDate(s, "missing") {
-		t.Fatal("expected missing column to default to false")
-	}
-	if partitionFieldIsDate(nil, "day") {
-		t.Fatal("expected nil schema to default to false")
-	}
-	if !partitionFieldIsDate(s, "Day") {
-		t.Fatal("expected case-insensitive match for BigQuery identifiers")
+	for want, meta := range tests {
+		sql, err := dest.buildAlterColumnTypeRewriteSQL("my-project", "my_dataset", "my_table", "age", "STRING", meta)
+		if err != nil {
+			t.Fatalf("buildAlterColumnTypeRewriteSQL returned error: %v", err)
+		}
+		if !contains(sql, want) {
+			t.Fatalf("rewrite SQL missing %q:\n%s", want, sql)
+		}
 	}
 }
 
 func TestPartitionByClause(t *testing.T) {
-	if got := partitionByClause("day", true); got != "PARTITION BY `day`\n" {
-		t.Fatalf("DATE column clause = %q", got)
+	tests := []struct {
+		partitionBy string
+		fieldType   bigquery.FieldType
+		want        string
+	}{
+		{"day", bigquery.DateFieldType, "PARTITION BY `day`\n"},
+		{"created_at", bigquery.TimestampFieldType, "PARTITION BY DATE(`created_at`)\n"},
+		{"created_at", "", "PARTITION BY DATE(`created_at`)\n"},
+		{"DATE(created_at)", bigquery.DateTimeFieldType, "PARTITION BY DATE(`created_at`)\n"},
+		{"TIMESTAMP_TRUNC(ts, DAY)", bigquery.DateFieldType, "PARTITION BY `ts`\n"},
+		{"TIMESTAMP_TRUNC(ts, HOUR)", bigquery.TimestampFieldType, "PARTITION BY TIMESTAMP_TRUNC(`ts`, HOUR)\n"},
+		{"TIMESTAMP_TRUNC(ts, MONTH)", bigquery.DateTimeFieldType, "PARTITION BY DATETIME_TRUNC(`ts`, MONTH)\n"},
+		{"DATE_TRUNC(day, YEAR)", bigquery.DateFieldType, "PARTITION BY DATE_TRUNC(`day`, YEAR)\n"},
+		{"RANGE_BUCKET(id, GENERATE_ARRAY(0, 1000, 10))", bigquery.IntegerFieldType, "PARTITION BY RANGE_BUCKET(`id`, GENERATE_ARRAY(0, 1000, 10))\n"},
 	}
-	if got := partitionByClause("created_at", false); got != "PARTITION BY DATE(`created_at`)\n" {
-		t.Fatalf("timestamp column clause = %q", got)
+	for _, tt := range tests {
+		tp, rp, err := bigQueryPartitioning(tt.partitionBy)
+		if err != nil {
+			t.Fatalf("bigQueryPartitioning(%q): %v", tt.partitionBy, err)
+		}
+		if got := partitionByClause(tp, rp, tt.fieldType); got != tt.want {
+			t.Errorf("partitionByClause(%q, %s) = %q, want %q", tt.partitionBy, tt.fieldType, got, tt.want)
+		}
 	}
 }
 
@@ -3389,7 +3465,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		sql := dest.buildMergeSQLWithPredicate(
 			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, []string{"id", "event_date", "name"}, nil, "",
-			map[string]bool{"id": true}, nil, "t.`event_date` >= DATE '2026-07-01'",
+			map[string]bool{"id": true}, nil, "t.`event_date` >= DATE '2026-07-01'", false,
 		)
 
 		if !contains(sql, "ON t.`id` = s.`id` AND (t.`event_date` >= DATE '2026-07-01')\n") {
@@ -3522,7 +3598,7 @@ func TestBuildMergeSQL(t *testing.T) {
 		sql := dest.buildMergeSQLWithPredicate(
 			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
 			[]string{"id"}, []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "",
-			map[string]bool{"id": true}, nil, predicate,
+			map[string]bool{"id": true}, nil, predicate, false,
 		)
 
 		if !contains(sql, "ON t.`id` = s.`id`\n") {
@@ -3533,6 +3609,66 @@ func TestBuildMergeSQL(t *testing.T) {
 		}
 		if !contains(sql, "WHEN MATCHED AND ("+predicate+") AND (t.`_cdc_lsn` IS NULL") {
 			t.Fatalf("CDC matched update does not apply the incremental predicate:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_hard_delete_mode", func(t *testing.T) {
+		columns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at", "_cdc_unchanged_cols"}
+		sql := dest.buildMergeSQLWithPredicate(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, columns, nil, "", map[string]bool{"id": true}, nil, "", true,
+		)
+
+		want := "MERGE `my-project`.`target_ds`.`target_tbl` AS t\n" +
+			"USING (SELECT * FROM `my-project`.`staging_ds`.`staging_tbl` QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `_cdc_lsn` DESC, `_cdc_deleted` DESC) = 1) AS s\n" +
+			"ON t.`id` = s.`id`\n" +
+			"WHEN MATCHED AND s.`_cdc_deleted` = true AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` >= t.`_cdc_lsn`) THEN\n" +
+			"  DELETE\n" +
+			"WHEN MATCHED AND s.`_cdc_deleted` = false AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) THEN\n" +
+			"  UPDATE SET t.`name` = IF('name' IN UNNEST(IFNULL(JSON_EXTRACT_STRING_ARRAY(LOWER(s.`_cdc_unchanged_cols`)), [])), t.`name`, s.`name`), t.`_cdc_lsn` = s.`_cdc_lsn`, t.`_cdc_deleted` = s.`_cdc_deleted`, t.`_cdc_synced_at` = s.`_cdc_synced_at`\n" +
+			"WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN\n" +
+			"  INSERT (`id`, `name`, `_cdc_lsn`, `_cdc_deleted`, `_cdc_synced_at`)\n" +
+			"  VALUES (s.`id`, s.`name`, s.`_cdc_lsn`, s.`_cdc_deleted`, s.`_cdc_synced_at`)"
+		if sql != want {
+			t.Fatalf("unexpected hard-delete merge SQL:\ngot:\n%s\n\nwant:\n%s", sql, want)
+		}
+	})
+
+	t.Run("cdc_hard_delete_mode_applies_predicate_and_pruning", func(t *testing.T) {
+		predicate := "t.`id` > 100"
+		sql := dest.buildMergeSQLWithPredicate(
+			"my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id", "day"}, []string{"id", "day", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}, nil, "",
+			map[string]bool{"id": true, "day": true}, &mergePartitionPruning{Column: "day", IsDate: true}, predicate, true,
+		)
+
+		if !contains(sql, "ON t.`id` = s.`id` AND t.`day` = s.`day` AND (t.`day` BETWEEN _ingestr_merge_partition_min AND _ingestr_merge_partition_max OR (_ingestr_merge_partition_has_null AND t.`day` IS NULL))\n") {
+			t.Fatalf("hard-delete merge must keep PK match plus partition pruning, without the predicate:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND ("+predicate+") AND s.`_cdc_deleted` = true AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` >= t.`_cdc_lsn`) THEN\n  DELETE\n") {
+			t.Fatalf("hard delete does not apply the incremental predicate:\n%s", sql)
+		}
+		if !contains(sql, "WHEN MATCHED AND ("+predicate+") AND s.`_cdc_deleted` = false AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`) THEN\n  UPDATE SET") {
+			t.Fatalf("hard-delete upsert does not apply the incremental predicate:\n%s", sql)
+		}
+		if contains(sql, "__ingestr_has_active") || contains(sql, "AS act") {
+			t.Fatalf("hard-delete merge should not compose the latest active image:\n%s", sql)
+		}
+	})
+
+	t.Run("cdc_hard_delete_flag_leaves_soft_and_non_cdc_sql_unchanged", func(t *testing.T) {
+		cdcColumns := []string{"id", "name", "_cdc_lsn", "_cdc_deleted", "_cdc_synced_at"}
+		soft := dest.buildMergeSQLWithPredicate("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, cdcColumns, nil, "", nil, nil, "", false)
+		if soft != dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, cdcColumns, nil, "") {
+			t.Fatalf("soft CDC merge SQL changed")
+		}
+
+		plainColumns := []string{"id", "name"}
+		plainHard := dest.buildMergeSQLWithPredicate("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl",
+			[]string{"id"}, plainColumns, nil, "", nil, nil, "", true)
+		if plainHard != dest.buildMergeSQL("my-project", "target_ds", "target_tbl", "staging_ds", "staging_tbl", []string{"id"}, plainColumns, nil, "") {
+			t.Fatalf("hard-delete flag must not affect non-CDC merges:\n%s", plainHard)
 		}
 	})
 
@@ -3897,6 +4033,44 @@ func TestPartitionOrClusterMismatch(t *testing.T) {
 			want: true,
 		},
 
+		// --- partition: expressions carry the granularity or integer range ---
+		{
+			name:        "HOUR expression matches HOUR table",
+			partitionBy: "TIMESTAMP_TRUNC(ts, HOUR)",
+			meta:        &bigquery.TableMetadata{TimePartitioning: &bigquery.TimePartitioning{Field: "ts", Type: bigquery.HourPartitioningType}},
+			want:        false,
+		},
+		{
+			name:        "HOUR expression mismatches DAY table",
+			partitionBy: "TIMESTAMP_TRUNC(ts, HOUR)",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("ts")},
+			want:        true,
+		},
+		{
+			name:        "DATE() expression matches unset-type table",
+			partitionBy: "DATE(ts)",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("ts")},
+			want:        false,
+		},
+		{
+			name:        "range expression matches same range",
+			partitionBy: "RANGE_BUCKET(n, GENERATE_ARRAY(0, 100, 10))",
+			meta:        &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n", Range: &bigquery.RangePartitioningRange{Start: 0, End: 100, Interval: 10}}},
+			want:        false,
+		},
+		{
+			name:        "range expression mismatches different interval",
+			partitionBy: "RANGE_BUCKET(n, GENERATE_ARRAY(0, 100, 5))",
+			meta:        &bigquery.TableMetadata{RangePartitioning: &bigquery.RangePartitioning{Field: "n", Range: &bigquery.RangePartitioningRange{Start: 0, End: 100, Interval: 10}}},
+			want:        true,
+		},
+		{
+			name:        "range expression mismatches time-partitioned table",
+			partitionBy: "RANGE_BUCKET(n, GENERATE_ARRAY(0, 100, 10))",
+			meta:        &bigquery.TableMetadata{TimePartitioning: tp("n")},
+			want:        true,
+		},
+
 		// --- clustering only (partition matched on both sides as none) ---
 		{
 			name:      "cluster: neither side clustered",
@@ -4244,5 +4418,26 @@ func TestRenameAsideSwapRestoresOnSwapFailure(t *testing.T) {
 	}
 	if !strings.Contains(joined, "SET OPTIONS(expiration_timestamp = NULL)") {
 		t.Fatalf("restore must clear the expiration, queries = %v", queries)
+	}
+}
+
+func TestBuildDeleteInsertStatementsWithIncrementalPredicate(t *testing.T) {
+	dest := NewBigQueryDestination()
+	dest.projectID = "my-project"
+
+	deleteSQL, _ := dest.buildDeleteInsertStatements("my-project", "staging_ds", "staging_tbl", "target_ds", "target_tbl", destination.DeleteInsertOptions{
+		StagingTable:         "staging_ds.staging_tbl",
+		TargetTable:          "target_ds.target_tbl",
+		IncrementalKey:       "ts",
+		IncrementalKeyType:   schema.TypeInt64,
+		IntervalStart:        int64(1),
+		IntervalEnd:          int64(10),
+		Columns:              []string{"id", "ts"},
+		IncrementalPredicate: "t.event_date >= DATE '2026-01-01'",
+	})
+
+	want := "DELETE FROM `my-project`.`target_ds`.`target_tbl` AS t WHERE t.`ts` >= 1 AND t.`ts` <= 10 AND (t.event_date >= DATE '2026-01-01')"
+	if deleteSQL != want {
+		t.Fatalf("deleteSQL = %q, want %q", deleteSQL, want)
 	}
 }

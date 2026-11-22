@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pglogrepl"
@@ -27,6 +28,8 @@ import (
 const keepaliveInterval = 5 * time.Second
 
 const finalizeConfirmationTimeout = 5 * time.Second
+
+const defaultCDCQueryPoolMaxConns = 32
 
 // defaultPublicationName is the publication ingestr creates and manages when the
 // URI does not specify one.
@@ -68,11 +71,20 @@ type PostgresCDCSource struct {
 	// selection restricts the capture set to the tables the user named. It is
 	// set once before any discovery runs and read-only afterwards, so the
 	// discovery timer and the stream-rebuild path can both consult it.
-	selection *source.TableSelection
-	cdcConfig CDCConfig
+	selection     *source.TableSelection
+	cdcConfig     CDCConfig
+	neverSnapshot bool
 	// serverVersion is the source's server_version_num, used to gate pgoutput
 	// options added in newer PostgreSQL releases.
-	serverVersion    int
+	serverVersion int
+	// standby is true when the source is a hot standby. It cannot write WAL or
+	// run DDL, so batch runs stop at its replay position instead of an emitted
+	// barrier and the managed publication must already exist on the primary.
+	standby bool
+	// standbyGapWarned is the last list of tables reported as missing from the
+	// managed publication on a standby, so each gap is reported once.
+	standbyGapWarned string
+	standbySlotHint  sync.Once
 	generatedColumns sync.Map
 	// pos holds the LSN the pipeline has confirmed durable in streaming mode.
 	// It is shared between the pipeline goroutine (CommitStream) and the
@@ -85,6 +97,10 @@ type PostgresCDCSource struct {
 
 	// lag tracks the server's WAL head for replication-lag reporting.
 	lag *lagState
+
+	walRetentionMu     sync.RWMutex
+	walRetentionSlot   string
+	walRetentionConfig *pgx.ConnConfig
 
 	// keepalive coordinates a goroutine that periodically pings the
 	// walsender with a WALWritePosition-only standby update during the
@@ -128,6 +144,7 @@ func NewPostgresCDCSource() *PostgresCDCSource {
 
 var (
 	_ source.LagReporter                    = (*PostgresCDCSource)(nil)
+	_ source.WALRetentionReporter           = (*PostgresCDCSource)(nil)
 	_ source.CDCStateProvider               = (*PostgresCDCSource)(nil)
 	_ source.ConnectorLeaser                = (*PostgresCDCSource)(nil)
 	_ source.ConnectorIdentityProvider      = (*PostgresCDCSource)(nil)
@@ -224,6 +241,7 @@ func (s *PostgresCDCSource) Schemes() []string {
 }
 
 func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
+	s.resetWALRetention()
 	cdcConfig, normalizedURI, err := parseURIConfig(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse CDC config: %w", err)
@@ -241,6 +259,12 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
 		return fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	// pgx defaults to max(4, NumCPU) connections, which silently caps snapshot
+	// readers below --extract-parallelism. Connections open lazily, so a higher
+	// ceiling costs nothing until readers ask for them.
+	if !strings.Contains(normalizedURI, "pool_max_conns") {
+		pgConfig.MaxConns = max(pgConfig.MaxConns, defaultCDCQueryPoolMaxConns)
 	}
 
 	queryPool, err := pgxpool.NewWithConfig(ctx, pgConfig)
@@ -262,9 +286,14 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	// (protocol v2 streaming, binary tuple format).
 	var serverVersion int
 	var database string
-	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int, current_database()").Scan(&serverVersion, &database); err != nil {
+	var standby bool
+	if err := queryPool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int, current_database(), pg_is_in_recovery()").Scan(&serverVersion, &database, &standby); err != nil {
 		queryPool.Close()
 		return fmt.Errorf("failed to determine PostgreSQL server identity: %w", err)
+	}
+	if standby && serverVersion < 160000 {
+		queryPool.Close()
+		return fmt.Errorf("reading CDC from a PostgreSQL standby requires PostgreSQL 16 or newer (server reports %d); connect to the primary or upgrade", serverVersion)
 	}
 	if cdcConfig.Binary && serverVersion < 140000 {
 		queryPool.Close()
@@ -292,8 +321,12 @@ func (s *PostgresCDCSource) Connect(ctx context.Context, uri string) error {
 	s.managedPublication = managedPublication
 	s.cdcConfig = cdcConfig
 	s.serverVersion = serverVersion
+	s.standby = standby
 	s.generatedColumns.Clear()
 	s.connectorIdentity = resolvedConnectorIdentity(system.SystemID, database, cdcConfig)
+	s.walRetentionMu.Lock()
+	s.walRetentionConfig = pgConfig.ConnConfig.Copy()
+	s.walRetentionMu.Unlock()
 
 	return nil
 }
@@ -309,9 +342,13 @@ func (s *PostgresCDCSource) TableIncarnation(ctx context.Context, table string) 
 	if s.queryPool == nil {
 		return "", fmt.Errorf("postgres CDC source is not connected")
 	}
+	return tableIncarnation(ctx, s.queryPool, table)
+}
+
+func tableIncarnation(ctx context.Context, query tableMetadataQuerier, table string) (string, error) {
 	schemaName, tableName := parseTableName(table)
 	var oid string
-	err := s.queryPool.QueryRow(ctx, `
+	err := query.QueryRow(ctx, `
 		SELECT c.oid::text
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -348,6 +385,9 @@ func (s *PostgresCDCSource) PrepareConnector(ctx context.Context) error {
 }
 
 func (s *PostgresCDCSource) reconcileManagedPublication(ctx context.Context) error {
+	if s.standby {
+		return s.checkManagedPublicationOnStandby(ctx)
+	}
 	lockConn, err := pgx.ConnectConfig(ctx, s.queryPool.Config().ConnConfig.Copy())
 	if err != nil {
 		return fmt.Errorf("failed to open PostgreSQL session for publication preparation: %w", err)
@@ -404,6 +444,7 @@ func (s *PostgresCDCSource) reconnectReplication(ctx context.Context) error {
 }
 
 func (s *PostgresCDCSource) Close(ctx context.Context) error {
+	s.resetWALRetention()
 	var errs []error
 
 	// Stop the keepalive goroutine first so it does not race the connection
@@ -559,6 +600,37 @@ func (s *PostgresCDCSource) CommitStream(ctx context.Context, token any) error {
 		if token == nil {
 			return nil
 		}
+	}
+	if _, ok := token.(snapshotSpoolBatchCommit); ok {
+		return s.FinalizeBatch(ctx)
+	}
+	if commit, ok := token.(*snapshotSpoolCommit); ok {
+		if s.pos == nil {
+			return fmt.Errorf("postgres cdc: stream position not initialized")
+		}
+		if err := commit.persist(ctx); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		s.pos.Commit(commit.state.Applied)
+		commit.ack.Do(func() { close(commit.done) })
+		return nil
+	}
+	if commit, ok := token.(*chunkedCommit); ok {
+		if s.pos == nil {
+			return fmt.Errorf("postgres cdc: stream position not initialized")
+		}
+		if err := commit.persist(ctx); err != nil {
+			return err
+		}
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
+		s.pos.Commit(commit.state.Applied)
+		commit.ack.Do(func() { close(commit.done) })
+		return nil
 	}
 	lsn, ok := token.(pglogrepl.LSN)
 	if !ok {
@@ -1406,7 +1478,7 @@ func (s *PostgresCDCSource) warnKeylessTable(name string) {
 		return
 	}
 	s.keylessWarned[name] = true
-	fmt.Printf("Warning: table %s has no primary key or replica identity index; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
+	output.Warnf("Warning: table %s has no primary key or replica identity index; ingesting it as an append-only change log (_cdc_deleted marks deletes, updates arrive as delete+insert pairs)\n", name)
 }
 
 // publicationTableFullName renders a table name the way GetTables and the WAL
@@ -1466,7 +1538,9 @@ func (s *PostgresCDCSource) listEligibleTableIncarnations(ctx context.Context) (
 func (s *PostgresCDCSource) listAllEligibleTableIncarnations(ctx context.Context) (map[string]string, error) {
 	names := make(map[string]string)
 
-	if s.managedPublication {
+	// A standby cannot add tables to the managed publication, so only its
+	// current membership can be streamed.
+	if s.managedPublication && !s.standby {
 		rows, err := s.queryPool.Query(ctx, `
 			SELECT n.nspname, c.relname, c.oid::text
 			FROM pg_class c
@@ -1599,12 +1673,20 @@ func (s *PostgresCDCSource) ReadAll(ctx context.Context, opts source.MultiTableR
 			continue
 		}
 		if resumeMetadataChanged(opts.CDCResumeIncarnations[table.Name], opts.CDCResumeSchemaFingerprints[table.Name], table.Incarnation, table.SchemaFingerprint) {
+			if s.neverSnapshot {
+				return nil, fmt.Errorf("CDC snapshot mode never: source metadata changed for %s; a new external baseline is required", table.Name)
+			}
 			delete(resumeLSNs, table.Name)
 			invalidations = append(invalidations, source.CDCSnapshotInvalidation{TableName: table.Name, Incarnation: table.Incarnation})
 		}
 	}
 	reader := NewMultiTableCDCReader(s, tables, s.cdcConfig, resumeLSNs, opts.CDCSlotSuffix)
 	reader.initialInvalidations = invalidations
+	if opts.Streaming || opts.CDCSnapshotProgress {
+		if err := reader.setSnapshotResumes(ctx, opts.CDCSnapshotResumes); err != nil {
+			return nil, err
+		}
+	}
 	if opts.Streaming {
 		reader.initialAnnouncements = newlyObservedTables(tables, opts.KnownTables)
 	}
@@ -1644,7 +1726,10 @@ func newlyObservedTables(tables []source.SourceTableInfo, knownNames []string) [
 
 const (
 	pgErrAlreadyExists = "42710"
-	pgErrDuplicate     = "23505"
+	// pgErrObjectNotInPrerequisiteState is raised when replicating from an
+	// invalidated slot.
+	pgErrObjectNotInPrerequisiteState = "55000"
+	pgErrDuplicate                    = "23505"
 )
 
 var (

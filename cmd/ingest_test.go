@@ -259,3 +259,397 @@ func TestReverseETLFlagHelpShowsDefaults(t *testing.T) {
 		}
 	}
 }
+
+func parseIngestConfig(t *testing.T, args ...string) (*config.IngestConfig, error) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cmd := IngestCommand()
+	cmd.Writer, cmd.ErrWriter = io.Discard, io.Discard
+	cmd.Action = func(_ context.Context, c *cli.Command) error {
+		return configureIngest(c, cfg)
+	}
+	err := cmd.Run(context.Background(), append([]string{
+		"ingest", "--source-uri", "csv://input.csv", "--dest-uri", "postgres://localhost/db",
+		"--source-table", "input", "--dest-table", "output",
+	}, args...))
+	return cfg, err
+}
+
+func clearIngestMappingEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"EXTRACT_PARALLELISM", "DESTINATION_PARALLELISM", "BATCH_SIZE", "INCREMENTAL_STRATEGY", "INTERVAL_START", "INTERVAL_END"} {
+		for _, prefix := range []string{"", "INGESTR_"} {
+			name := prefix + key
+			t.Setenv(name, "")
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, name := range []string{"INGESTR_STREAM", "INGESTR_FLUSH_INTERVAL", "INGESTR_FLUSH_RECORDS", "INGESTR_METRICS_ADDR"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIngestConfigParallelism(t *testing.T) {
+	clearIngestMappingEnv(t)
+	for _, tt := range []struct {
+		name                            string
+		args                            []string
+		env                             map[string]string
+		extract, destination, effective int
+	}{
+		{name: "implicit default", extract: 5, effective: 8},
+		{name: "explicit default", args: []string{"--extract-parallelism=5"}, extract: 5, destination: 5, effective: 5},
+		{name: "override", args: []string{"--extract-parallelism=3"}, extract: 3, destination: 3, effective: 3},
+		{name: "environment default", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "5"}, extract: 5, destination: 5, effective: 5},
+		{name: "flag beats environment", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "9"}, args: []string{"--extract-parallelism=2"}, extract: 2, destination: 2, effective: 2},
+		{name: "destination only", args: []string{"--destination-parallelism=3"}, extract: 5, destination: 3, effective: 3},
+		{name: "independent parallelism", args: []string{"--extract-parallelism=2", "--destination-parallelism=8"}, extract: 2, destination: 8, effective: 8},
+		{name: "independent parallelism reversed flags", args: []string{"--destination-parallelism=2", "--extract-parallelism=8"}, extract: 8, destination: 2, effective: 2},
+		{name: "destination environment", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "3"}, extract: 5, destination: 3, effective: 3},
+		{name: "destination environment alias", env: map[string]string{"DESTINATION_PARALLELISM": "3"}, extract: 5, destination: 3, effective: 3},
+		{name: "destination environment overrides extract flag", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "8"}, args: []string{"--extract-parallelism=2"}, extract: 2, destination: 8, effective: 8},
+		{name: "destination flag overrides extract environment", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "2"}, args: []string{"--destination-parallelism=8"}, extract: 2, destination: 8, effective: 8},
+		{name: "destination flag beats environment", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "9"}, args: []string{"--destination-parallelism=3"}, extract: 5, destination: 3, effective: 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+			cfg, err := parseIngestConfig(t, tt.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExtractParallelism != tt.extract || cfg.DestinationParallelism != tt.destination || cfg.EffectiveDestinationParallelism() != tt.effective {
+				t.Fatalf("parallelism = (%d, %d, %d), want (%d, %d, %d)", cfg.ExtractParallelism, cfg.DestinationParallelism, cfg.EffectiveDestinationParallelism(), tt.extract, tt.destination, tt.effective)
+			}
+		})
+	}
+}
+
+func TestIngestConfigDestinationParallelismRejectsNonPositive(t *testing.T) {
+	clearIngestMappingEnv(t)
+	for _, input := range []string{"flag", "INGESTR_DESTINATION_PARALLELISM", "DESTINATION_PARALLELISM"} {
+		for _, value := range []string{"0", "-1"} {
+			t.Run(input+"="+value, func(t *testing.T) {
+				args := []string{"--extract-parallelism=2"}
+				if input == "flag" {
+					args = append(args, "--destination-parallelism="+value)
+				} else {
+					t.Setenv(input, value)
+				}
+				_, err := parseIngestConfig(t, args...)
+				if err == nil || !strings.Contains(err.Error(), "destination-parallelism must be positive") {
+					t.Fatalf("error = %v, want destination-parallelism must be positive", err)
+				}
+			})
+		}
+	}
+}
+
+func TestIngestConfigBatchSize(t *testing.T) {
+	clearIngestMappingEnv(t)
+	for _, tt := range []struct {
+		value string
+		bytes int64
+		err   string
+	}{
+		{bytes: 536870912},
+		{value: "1", bytes: 1048576},
+		{value: "3", bytes: 3145728},
+		{value: "8796093022207", bytes: 9223372036853727232},
+		{value: "8796093022208", err: "--batch-size is too large"},
+		{value: "0", err: "--batch-size must be a positive number"},
+		{value: "-1", err: "--batch-size must be a positive number"},
+	} {
+		t.Run("MiB="+tt.value, func(t *testing.T) {
+			var args []string
+			if tt.value != "" {
+				args = []string{"--batch-size=" + tt.value}
+			}
+			cfg, err := parseIngestConfig(t, args...)
+			if tt.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Fatalf("error = %v, want %q", err, tt.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.MaxBatchBytes != tt.bytes {
+				t.Fatalf("bytes = %d, want %d", cfg.MaxBatchBytes, tt.bytes)
+			}
+		})
+	}
+}
+
+func TestIngestConfigStream(t *testing.T) {
+	clearIngestMappingEnv(t)
+	for _, tt := range []struct {
+		name             string
+		args             []string
+		envStrategy      string
+		stream, explicit bool
+		strategy         config.IncrementalStrategy
+		interval         time.Duration
+		records          int
+		err              string
+	}{
+		{name: "batch", strategy: config.StrategyReplace, interval: 30 * time.Second, records: 50000},
+		{name: "source chooses strategy", args: []string{"--stream"}, stream: true, interval: 30 * time.Second, records: 50000},
+		{name: "explicit append", args: []string{"--stream", "--incremental-strategy=append", "--flush-interval=1250ms", "--flush-records=17"}, stream: true, explicit: true, strategy: config.StrategyAppend, interval: 1250 * time.Millisecond, records: 17},
+		{name: "environment merge", args: []string{"--stream"}, envStrategy: "merge", stream: true, explicit: true, strategy: config.StrategyMerge, interval: 30 * time.Second, records: 50000},
+		{name: "explicit replace is not default", args: []string{"--stream", "--incremental-strategy=replace"}, err: "not supported with --stream"},
+		{name: "explicit default interval requires stream", args: []string{"--flush-interval=30s"}, err: "only valid together with --stream"},
+		{name: "explicit default records requires stream", args: []string{"--flush-records=50000"}, err: "only valid together with --stream"},
+		{name: "batch metrics", args: []string{"--metrics-addr=:9090"}, strategy: config.StrategyReplace, interval: 30 * time.Second, records: 50000},
+		{name: "zero interval", args: []string{"--stream", "--flush-interval=0s"}, err: "flush-interval"},
+		{name: "zero records", args: []string{"--stream", "--flush-records=0"}, err: "flush-records"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envStrategy != "" {
+				t.Setenv("INGESTR_INCREMENTAL_STRATEGY", tt.envStrategy)
+			}
+			cfg, err := parseIngestConfig(t, tt.args...)
+			if tt.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Fatalf("error = %v, want %q", err, tt.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Stream != tt.stream || cfg.IncrementalStrategy != tt.strategy || cfg.IncrementalStrategyExplicit != tt.explicit || cfg.FlushInterval != tt.interval || cfg.FlushRecords != tt.records {
+				t.Fatalf("stream config = (%v, %q, %v, %v, %d), want (%v, %q, %v, %v, %d)", cfg.Stream, cfg.IncrementalStrategy, cfg.IncrementalStrategyExplicit, cfg.FlushInterval, cfg.FlushRecords, tt.stream, tt.strategy, tt.explicit, tt.interval, tt.records)
+			}
+		})
+	}
+}
+
+func clearCDCChunkedSnapshotEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"INGESTR_CDC_SNAPSHOT_CHUNKED", "INGESTR_CDC_SNAPSHOT_CHUNK_SIZE",
+		"INGESTR_CDC_SNAPSHOT_SPOOL", "INGESTR_CDC_WAL_SPOOL_DIR",
+		"INGESTR_CDC_SNAPSHOT_EXECUTION",
+		"INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "INGESTR_CDC_WAL_STAGING",
+		"INGESTR_CDC_WAL_BUFFER_BYTES", "INGESTR_CDC_SNAPSHOT_MODE", "INGESTR_CDC_START_LSN",
+	} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "disabled"},
+		{name: "enabled", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}},
+		{name: "wrong source", args: []string{"--cdc-snapshot-chunked"}, wantErr: "only supported for postgres+cdc"},
+		{name: "unknown staging", args: []string{"--cdc-wal-staging=invalid"}, wantErr: "must be memory, inmemory, destination, or disk"},
+		{name: "zero size", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-size=0"}, wantErr: "cdc-snapshot-chunk-size"},
+		{name: "zero timeout", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-timeout=0s"}, wantErr: "cdc-snapshot-chunk-timeout"},
+		{name: "zero buffer", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-wal-buffer-bytes=0"}, wantErr: "cdc-wal-buffer-bytes"},
+		{name: "zero streaming interval", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--stream", "--flush-interval=0s"}, wantErr: "flush-interval"},
+		{name: "zero streaming records", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--stream", "--flush-records=0"}, wantErr: "flush-records"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseIngestConfig(t, tt.args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CDCChunkedSnapshot != (tt.name == "enabled") ||
+				cfg.CDCSnapshotExecution != "serial" ||
+				cfg.CDCSnapshotChunkSize != config.DefaultCDCSnapshotChunkSize ||
+				cfg.CDCSnapshotChunkTimeout != config.DefaultCDCSnapshotChunkTimeout ||
+				cfg.CDCWALBufferBytes != config.DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
+				t.Fatalf("chunked snapshot config = (%v, %d, %s, %d, %q)", cfg.CDCChunkedSnapshot, cfg.CDCSnapshotChunkSize, cfg.CDCSnapshotChunkTimeout, cfg.CDCWALBufferBytes, cfg.CDCWALStaging)
+			}
+		})
+	}
+}
+
+func TestIngestConfigCDCChunkedSnapshotOptions(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, env := range []bool{false, true} {
+		t.Run(map[bool]string{false: "flags", true: "environment"}[env], func(t *testing.T) {
+			args := []string{"--source-uri=postgresql+cdc://localhost/db"}
+			if env {
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNKED", "true")
+				t.Setenv("INGESTR_CDC_SNAPSHOT_EXECUTION", "parallel")
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_SIZE", "123")
+				t.Setenv("INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "1250ms")
+				t.Setenv("INGESTR_CDC_WAL_STAGING", "destination")
+				t.Setenv("INGESTR_CDC_WAL_BUFFER_BYTES", "4294967296")
+			} else {
+				args = append(args, "--cdc-snapshot-chunked", "--cdc-snapshot-execution=parallel", "--cdc-snapshot-chunk-size=123", "--cdc-snapshot-chunk-timeout=1250ms", "--cdc-wal-staging=destination", "--cdc-wal-buffer-bytes=4294967296")
+			}
+			cfg, err := parseIngestConfig(t, args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotChunkSize != 123 || cfg.CDCSnapshotChunkTimeout != 1250*time.Millisecond || cfg.CDCWALStaging != "destination" || cfg.CDCWALBufferBytes != 1<<32 {
+				t.Fatalf("chunked snapshot config = (%v, %d, %s, %q, %d)", cfg.CDCChunkedSnapshot, cfg.CDCSnapshotChunkSize, cfg.CDCSnapshotChunkTimeout, cfg.CDCWALStaging, cfg.CDCWALBufferBytes)
+			}
+		})
+	}
+}
+
+func TestIngestConfigCDCChunkedSnapshotExecution(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		env     string
+		want    string
+		wantErr string
+	}{
+		{name: "parallel flag", args: []string{"--cdc-snapshot-execution=parallel"}, want: "parallel"},
+		{name: "serial flag", args: []string{"--cdc-snapshot-execution=serial"}, want: "serial"},
+		{name: "parallel environment", env: "parallel", want: "parallel"},
+		{name: "flag overrides environment", args: []string{"--cdc-snapshot-execution=parallel"}, env: "serial", want: "parallel"},
+		{name: "unknown flag", args: []string{"--cdc-snapshot-execution=concurrent"}, wantErr: "must be parallel or serial"},
+		{name: "unknown environment", env: "concurrent", wantErr: "must be parallel or serial"},
+		{name: "serial destination", args: []string{"--cdc-snapshot-execution=serial", "--cdc-wal-staging=destination"}, wantErr: "destination staging requires --cdc-snapshot-execution parallel"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("INGESTR_CDC_SNAPSHOT_EXECUTION", tt.env)
+			}
+			args := append([]string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}, tt.args...)
+			cfg, err := parseIngestConfig(t, args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.CDCChunkedSnapshot || cfg.CDCSnapshotExecution != tt.want {
+				t.Fatalf("chunked snapshot execution = %q, want %q (enabled = %v)", cfg.CDCSnapshotExecution, tt.want, cfg.CDCChunkedSnapshot)
+			}
+		})
+	}
+}
+
+func TestParseDateTime(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		want  time.Time
+	}{
+		{"2024-02-29", time.Date(2024, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{"2024-02-29T12:34:56", time.Date(2024, 2, 29, 12, 34, 56, 0, time.UTC)},
+		{"2024-02-29 12:34:56", time.Date(2024, 2, 29, 12, 34, 56, 0, time.UTC)},
+		{"2024-02-29T12:34:56Z", time.Date(2024, 2, 29, 12, 34, 56, 0, time.UTC)},
+		{"2024-02-29T01:02:03+03:30", time.Date(2024, 2, 28, 21, 32, 3, 0, time.UTC)},
+		{"2024-02-29T23:34:56.123-0430", time.Date(2024, 3, 1, 4, 4, 56, 123000000, time.UTC)},
+		{"2024-02-29T12:34:56.123456", time.Date(2024, 2, 29, 12, 34, 56, 123456000, time.UTC)},
+		{"2024-02-29T12:34:56.123456+02:00", time.Date(2024, 2, 29, 10, 34, 56, 123456000, time.UTC)},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseDateTime(tt.input)
+			if err != nil || !got.Equal(tt.want) {
+				t.Fatalf("parseDateTime = %v, %v; want %v", got, err, tt.want)
+			}
+		})
+	}
+	for _, input := range []string{"", "2023-02-29", "2024-13-01", "2024-02-29T24:00:00", "2024-02-29junk"} {
+		t.Run(input, func(t *testing.T) {
+			got, err := parseDateTime(input)
+			if err == nil || !got.IsZero() {
+				t.Fatalf("parseDateTime = %v, %v; want zero and error", got, err)
+			}
+		})
+	}
+}
+
+func TestIngestConfigIntervals(t *testing.T) {
+	clearIngestMappingEnv(t)
+	cfg, err := parseIngestConfig(t, "--interval-start=2024-02-29T01:02:03.123456+03:30", "--interval-end=2024-03-02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2024, 2, 28, 21, 32, 3, 123456000, time.UTC)
+	end := time.Date(2024, 3, 2, 0, 0, 0, 0, time.UTC)
+	if cfg.IntervalStart == nil || !cfg.IntervalStart.Equal(start) || cfg.IntervalEnd == nil || !cfg.IntervalEnd.Equal(end) {
+		t.Fatalf("interval = %v to %v", cfg.IntervalStart, cfg.IntervalEnd)
+	}
+	for _, flag := range []string{"interval-start", "interval-end"} {
+		_, err := parseIngestConfig(t, "--"+flag+"=2023-02-29")
+		if err == nil || !strings.Contains(err.Error(), "invalid "+flag+": could not parse date") {
+			t.Fatalf("%s error = %v", flag, err)
+		}
+	}
+}
+
+func TestIngestConfigCDCSnapshotSpool(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		staging string
+		wantErr string
+	}{
+		{name: "default destination", staging: "destination"},
+		{name: "memory alias", args: []string{"--cdc-wal-staging=memory"}, staging: "inmemory"},
+		{name: "inmemory", args: []string{"--cdc-wal-staging=inmemory"}, staging: "inmemory"},
+		{name: "disk", args: []string{"--cdc-wal-staging=disk", "--cdc-wal-spool-dir=/spool"}, staging: "disk"},
+		{name: "disk missing directory", args: []string{"--cdc-wal-staging=disk"}, wantErr: "cdc-wal-spool-dir"},
+		{name: "chunked", args: []string{"--cdc-snapshot-chunked"}, wantErr: "cannot be combined"},
+		{name: "zero buffer", args: []string{"--cdc-wal-buffer-bytes=0"}, wantErr: "must be positive"},
+		{name: "zero interval", args: []string{"--stream", "--flush-interval=0s"}, wantErr: "must be positive"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-spool"}, tt.args...)
+			cfg, err := parseIngestConfig(t, args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.CDCSnapshotSpool || cfg.CDCWALStaging != tt.staging {
+				t.Fatalf("spool config = (%v, %q)", cfg.CDCSnapshotSpool, cfg.CDCWALStaging)
+			}
+		})
+	}
+	t.Run("environment", func(t *testing.T) {
+		t.Setenv("INGESTR_CDC_SNAPSHOT_SPOOL", "true")
+		t.Setenv("INGESTR_CDC_WAL_STAGING", "disk")
+		t.Setenv("INGESTR_CDC_WAL_SPOOL_DIR", "/persistent/spool")
+		cfg, err := parseIngestConfig(t, "--source-uri=postgres+cdc://localhost/db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.CDCSnapshotSpool || cfg.CDCWALStaging != "disk" || cfg.CDCWALSpoolDir != "/persistent/spool" {
+			t.Fatalf("spool config = %+v", cfg)
+		}
+	})
+}

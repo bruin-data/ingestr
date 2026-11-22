@@ -254,6 +254,97 @@ func TestCompare_DecimalPrecisionWidening(t *testing.T) {
 	assert.GreaterOrEqual(t, change.NewColumn.Scale, 4)
 }
 
+func TestCompare_DecimalWideningRespectsMaxPrecision(t *testing.T) {
+	tests := []struct {
+		name          string
+		source, dest  schema.Column
+		max           int
+		wantChange    bool
+		wantPrecision int
+		wantScale     int
+		wantErr       bool
+	}{
+		{
+			name:   "extra scale dropped to fit",
+			source: schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:   schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+			max:    38,
+		},
+		{
+			name:          "scale kept when it fits",
+			source:        schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:          schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 18, Scale: 2},
+			max:           38,
+			wantChange:    true,
+			wantPrecision: 28,
+			wantScale:     12,
+		},
+		{
+			name:          "scale trimmed to remaining digits",
+			source:        schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 30, Scale: 15},
+			dest:          schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 30, Scale: 2},
+			max:           38,
+			wantChange:    true,
+			wantPrecision: 38,
+			wantScale:     10,
+		},
+		{
+			name:   "array element",
+			source: schema.Column{Name: "v", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:   schema.Column{Name: "v", DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: 38, Scale: 9},
+			max:    38,
+		},
+		{
+			name:    "integer digits and existing scale cannot fit",
+			source:  schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 36, Scale: 12},
+			dest:    schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 30, Scale: 16},
+			max:     38,
+			wantErr: true,
+		},
+		{
+			name:          "no limit widens",
+			source:        schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12},
+			dest:          schema.Column{Name: "v", DataType: schema.TypeDecimal, Precision: 38, Scale: 9},
+			wantChange:    true,
+			wantPrecision: 41,
+			wantScale:     12,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := Compare(
+				&schema.TableSchema{Columns: []schema.Column{tt.source}},
+				&schema.TableSchema{Columns: []schema.Column{tt.dest}},
+				&CompareOptions{MaxDecimalPrecision: tt.max},
+			)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "destination maximum is 38")
+				return
+			}
+			require.NoError(t, err)
+			if !tt.wantChange {
+				assert.False(t, result.HasChanges)
+				return
+			}
+			require.Len(t, result.Changes, 1)
+			assert.Equal(t, tt.wantPrecision, result.Changes[0].NewColumn.Precision)
+			assert.Equal(t, tt.wantScale, result.Changes[0].NewColumn.Scale)
+		})
+	}
+}
+
+func TestCompare_DecimalOverrideRespectsMaxPrecision(t *testing.T) {
+	overrides, err := ParseColumnOverrides("v:decimal(20,12)")
+	require.NoError(t, err)
+	result, err := Compare(
+		&schema.TableSchema{Columns: []schema.Column{{Name: "v", DataType: schema.TypeDecimal, Precision: 20, Scale: 12}}},
+		&schema.TableSchema{Columns: []schema.Column{{Name: "v", DataType: schema.TypeDecimal, Precision: 38, Scale: 9}}},
+		&CompareOptions{Overrides: overrides, MaxDecimalPrecision: 38},
+	)
+	require.NoError(t, err)
+	assert.False(t, result.HasChanges)
+}
+
 func TestCompare_CaseInsensitiveColumnNames(t *testing.T) {
 	source := &schema.TableSchema{
 		Name: "test",
@@ -756,4 +847,50 @@ func TestCompare_NormalizationDoesNotChangeAddedColumnDDLType(t *testing.T) {
 	assert.Equal(t, ChangeAddColumn, result.Changes[0].Type)
 	assert.Equal(t, schema.TypeJSON, result.Changes[0].NewColumn.DataType)
 	assert.Equal(t, 64, result.Changes[0].NewColumn.MaxLength)
+}
+
+func TestCompare_LengthFromOverride(t *testing.T) {
+	dest := &schema.TableSchema{Columns: []schema.Column{
+		{Name: "k", DataType: schema.TypeString, MaxLength: 100},
+		{Name: "id", DataType: schema.TypeInt64},
+	}}
+	keyWidth := func(source, _ schema.Column) schema.Column {
+		if source.DataType == schema.TypeString && source.MaxLength <= 0 {
+			source.MaxLength = 768
+		}
+		return source
+	}
+	for _, tc := range []struct {
+		name      string
+		source    schema.Column
+		overrides string
+		wantType  ChangeType
+		want      bool
+	}{
+		{"override with a length", schema.Column{Name: "k", DataType: schema.TypeString}, "k:varchar(768)", ChangeOverrideType, true},
+		{"override without a length", schema.Column{Name: "k", DataType: schema.TypeString}, "k:string", ChangeOverrideType, false},
+		{"type override with a length", schema.Column{Name: "id", DataType: schema.TypeInt64}, "id:varchar(50)", ChangeOverrideType, true},
+		{"type override without a length", schema.Column{Name: "id", DataType: schema.TypeInt64}, "id:string", ChangeOverrideType, false},
+		{"source widening", schema.Column{Name: "k", DataType: schema.TypeString, MaxLength: 768}, "", ChangeWidenType, false},
+		{"new column with a length", schema.Column{Name: "extra", DataType: schema.TypeString}, "extra:varchar(50)", ChangeAddColumn, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			overrides, err := ParseColumnOverrides(tc.overrides)
+			require.NoError(t, err)
+			comparison, err := Compare(&schema.TableSchema{Columns: []schema.Column{tc.source}}, dest, &CompareOptions{
+				Overrides:             overrides,
+				NormalizeSourceColumn: keyWidth,
+			})
+			require.NoError(t, err)
+			var change *SchemaChange
+			for i := range comparison.Changes {
+				if comparison.Changes[i].ColumnName == tc.source.Name {
+					change = &comparison.Changes[i]
+				}
+			}
+			require.NotNil(t, change)
+			assert.Equal(t, tc.wantType, change.Type)
+			assert.Equal(t, tc.want, change.LengthFromOverride)
+		})
+	}
 }

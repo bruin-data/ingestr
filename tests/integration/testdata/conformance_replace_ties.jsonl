@@ -1,0 +1,6 @@
+{"id":1,"name":"tie-a","active":true,"score":5.0}
+{"id":2,"name":"null-a","active":false,"score":null}
+{"id":1,"name":"older","active":true,"score":3.0}
+{"id":3,"name":null,"active":false,"score":-2.0}
+{"id":1,"name":"tie-b","active":false,"score":5.0}
+{"id":2,"name":"null-b","active":true,"score":null}

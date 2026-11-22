@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -323,4 +324,56 @@ func assertMSSQLCDCRow(t *testing.T, ctx context.Context, db *sql.DB, table, wan
 	require.Equal(t, wantPayload, payload)
 	require.Equal(t, wantLSN, lsn)
 	require.Equal(t, wantDeleted, deleted)
+}
+
+func TestMSSQLDestinationCDCMergeHardDelete(t *testing.T) {
+	if mssqlDest.uri == "" {
+		t.Skip("shared SQL Server destination container not available")
+	}
+
+	ctx := t.Context()
+	targetTable := "dbo.cdc_hard_target_" + uniqueSuffix()
+	stagingTable := "dbo.cdc_hard_staging_" + uniqueSuffix()
+	dest := mssqldest.NewMSSQLDestination()
+	require.NoError(t, dest.Connect(ctx, mssqlDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db := openMSSQLTestDB(t, mssqlDest.uri)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTableMSSQL(stagingTable)))
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteTableMSSQL(targetTable)))
+	})
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s ([id] BIGINT PRIMARY KEY, [payload] NVARCHAR(255), [_cdc_lsn] NVARCHAR(128), [_cdc_deleted] BIT, [_cdc_synced_at] DATETIME2(6))`, quoteTableMSSQL(targetTable))))
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s ([id] BIGINT, [payload] NVARCHAR(255), [_cdc_lsn] NVARCHAR(128), [_cdc_deleted] BIT, [_cdc_synced_at] DATETIME2(6), [_cdc_unchanged_cols] NVARCHAR(MAX))`, quoteTableMSSQL(stagingTable))))
+
+	runCDCHardDeleteScenario(t, ctx, cdcHardDeleteHarness{
+		dest:         dest,
+		targetTable:  targetTable,
+		stagingTable: stagingTable,
+		dialect: cdcHardDeleteDialect{
+			boolean: func(v bool) string {
+				if v {
+					return "1"
+				}
+				return "0"
+			},
+			timestamp: func(v string) string { return "'" + v + "'" },
+			unchanged: func(cols []string) string {
+				if len(cols) == 0 {
+					return "N'[]'"
+				}
+				return `N'["` + strings.Join(cols, `","`) + `"]'`
+			},
+		},
+		insert: func(t *testing.T, table, values string) {
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", quoteTableMSSQL(table), values)))
+		},
+		truncate: func(t *testing.T, table string) {
+			require.NoError(t, dest.Exec(ctx, "TRUNCATE TABLE "+quoteTableMSSQL(table)))
+		},
+		readRows: func(t *testing.T) map[int64]cdcHardDeleteRow {
+			return readCDCHardDeleteRows(t, db, fmt.Sprintf(`SELECT [id], COALESCE([payload], N''), COALESCE([_cdc_lsn], N''), [_cdc_deleted] FROM %s`, quoteTableMSSQL(targetTable)))
+		},
+		predicate: "target.[id] > 100",
+	})
 }

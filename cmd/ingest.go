@@ -57,7 +57,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "incremental-predicate",
-				Usage:   "Additional destination-specific SQL predicate appended to the merge join condition",
+				Usage:   "Additional destination-specific SQL predicate that limits which destination rows merge matches or delete+insert deletes",
 				Sources: cli.EnvVars("INCREMENTAL_PREDICATE", "INGESTR_INCREMENTAL_PREDICATE"),
 			},
 			&cli.StringFlag{
@@ -83,7 +83,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "partition-by",
-				Usage:   "The partition key to be used for partitioning the destination table",
+				Usage:   "The partition key to be used for partitioning the destination table; see https://bruin-data.github.io/ingestr/commands/ingest.html#partitioning for supported expressions",
 				Sources: cli.EnvVars("PARTITION_BY", "INGESTR_PARTITION_BY"),
 			},
 			&cli.StringFlag{
@@ -102,6 +102,11 @@ func IngestCommand() *cli.Command {
 				Sources: cli.EnvVars("FULL_REFRESH", "INGESTR_FULL_REFRESH"),
 			},
 			&cli.StringFlag{
+				Name:    "refresh-id",
+				Usage:   "Durable operation ID for --full-refresh --stream; reuse across restarts",
+				Sources: cli.EnvVars("INGESTR_REFRESH_ID"),
+			},
+			&cli.StringFlag{
 				Name:    "schema-contract",
 				Usage:   "Schema contract mode: evolve (auto-apply changes), freeze (reject changes), discard_row (drop non-conforming rows), discard_value (NULL non-conforming values)",
 				Value:   "evolve",
@@ -118,6 +123,67 @@ func IngestCommand() *cli.Command {
 				Usage:   "Multi-table destination naming when dest_schema is set: schema_table (flatten the source schema into the table name, foo.A -> dest.foo_A), table (keep only the table name, foo.A -> dest.A)",
 				Value:   string(config.TableNamingSchemaTable),
 				Sources: cli.EnvVars("CDC_TABLE_NAMING", "INGESTR_CDC_TABLE_NAMING"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-snapshot-mode",
+				Usage:   "PostgreSQL CDC snapshot policy: auto (default, allows snapshots and backfills as needed) or never; omitted inherits the saved policy",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_MODE"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-start-lsn",
+				Usage:   "Bootstrap preloaded PostgreSQL CDC targets at this LSN; repeating the same boundary resumes managed checkpoints (requires --cdc-snapshot-mode never)",
+				Sources: cli.EnvVars("INGESTR_CDC_START_LSN"),
+			},
+			&cli.BoolFlag{
+				Name:    "cdc-snapshot-spool",
+				Usage:   "Capture changes while a normal PostgreSQL CDC snapshot runs and apply them after copying",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_SPOOL"),
+			},
+			&cli.BoolFlag{
+				Name:    "cdc-snapshot-chunked",
+				Usage:   "Read PostgreSQL CDC snapshots in resumable chunks using short transactions",
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNKED"),
+			},
+			&cli.IntFlag{
+				Name:    "cdc-snapshot-chunk-size",
+				Usage:   "Maximum rows per PostgreSQL CDC snapshot chunk",
+				Value:   config.DefaultCDCSnapshotChunkSize,
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNK_SIZE"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-snapshot-execution",
+				Usage:   "Chunked PostgreSQL CDC snapshots: serial (copy all tables before decoding changes) or parallel (decode changes while copying)",
+				Value:   config.DefaultCDCSnapshotExecution,
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_EXECUTION"),
+			},
+			&cli.DurationFlag{
+				Name:    "cdc-snapshot-chunk-timeout",
+				Usage:   "Maximum duration of each PostgreSQL CDC snapshot chunk read",
+				Value:   config.DefaultCDCSnapshotChunkTimeout,
+				Sources: cli.EnvVars("INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-wal-staging",
+				Usage:   "Snapshot change storage: memory/inmemory (retain source WAL), destination (managed staging), or disk (normal snapshot spool only); defaults to destination with --cdc-snapshot-spool, inmemory otherwise",
+				Value:   "inmemory",
+				Sources: cli.EnvVars("INGESTR_CDC_WAL_STAGING"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-wal-spool-dir",
+				Usage:   "Persistent directory for normal snapshot changes with --cdc-wal-staging disk; reuse it after a restart",
+				Sources: cli.EnvVars("INGESTR_CDC_WAL_SPOOL_DIR"),
+			},
+			&cli.IntFlag{
+				Name:    "cdc-wal-buffer-bytes",
+				Usage:   "Memory budget in bytes for pending changes during CDC snapshots",
+				Value:   config.DefaultCDCWALBufferBytes,
+				Sources: cli.EnvVars("INGESTR_CDC_WAL_BUFFER_BYTES"),
+			},
+			&cli.StringFlag{
+				Name:    "cdc-delete-behavior",
+				Usage:   "How CDC merges apply source deletes: soft (keep the row with _cdc_deleted=true), hard (delete the row from the destination)",
+				Value:   string(config.CDCDeleteSoft),
+				Sources: cli.EnvVars("CDC_DELETE_BEHAVIOR", "INGESTR_CDC_DELETE_BEHAVIOR"),
 			},
 			&cli.StringFlag{
 				Name:    "progress",
@@ -154,6 +220,12 @@ func IngestCommand() *cli.Command {
 				Usage:   "The number of parallel jobs to run for extracting data from the source",
 				Value:   config.DefaultExtractParallelism,
 				Sources: cli.EnvVars("EXTRACT_PARALLELISM", "INGESTR_EXTRACT_PARALLELISM"),
+			},
+			&cli.IntFlag{
+				Name:        "destination-parallelism",
+				Usage:       "The number of parallel jobs to run for writing data to the destination; overrides extract-parallelism for writes",
+				DefaultText: "destination-specific",
+				Sources:     cli.EnvVars("DESTINATION_PARALLELISM", "INGESTR_DESTINATION_PARALLELISM"),
 			},
 			&cli.StringFlag{
 				Name:    "extract-partition-by",
@@ -268,7 +340,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "metrics-addr",
-				Usage:   "Serve streaming metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060. Only valid together with --stream",
+				Usage:   "Serve ingestion metrics (Prometheus at /metrics) on this address, e.g. 127.0.0.1:6060",
 				Sources: cli.EnvVars("INGESTR_METRICS_ADDR"),
 			},
 			&cli.StringFlag{
@@ -299,7 +371,49 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	}
 	output.Init(os.Stdout, os.Stderr, outputMode)
 	cfg = config.DefaultConfig()
+	if err := configureIngest(c, cfg); err != nil {
+		return err
+	}
 
+	if metricsAddr := c.String("metrics-addr"); metricsAddr != "" {
+		boundAddr, stop, err := metrics.Serve(metricsAddr)
+		if err != nil {
+			return fmt.Errorf("failed to start metrics server: %w", err)
+		}
+		defer stop()
+		if !output.IsJSON() {
+			color.Green("Serving metrics on http://%s/metrics", boundAddr)
+		}
+	}
+
+	p := pipeline.New(cfg)
+	if err := p.Run(ctx); err != nil {
+		return err
+	}
+
+	if ctx.Err() != nil {
+		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
+		// stop; the pipeline has already flushed pending data.
+		if cfg.Stream {
+			if !output.IsJSON() {
+				color.Green("Streaming ingestion stopped.")
+				output.FlushDeferred()
+			}
+			return nil
+		}
+		return ctx.Err()
+	}
+
+	if !output.IsJSON() {
+		color.Green("Ingestion completed successfully!")
+		// End-of-run warnings (e.g. --reject-mode=skip rejects) print last, after
+		// the progress summary, so they are not buried mid-run.
+		output.FlushDeferred()
+	}
+	return nil
+}
+
+func configureIngest(c *cli.Command, cfg *config.IngestConfig) error {
 	cfg.SourceURI = c.String("source-uri")
 	cfg.DestURI = c.String("dest-uri")
 	if err := applySourceTable(cfg, c.String("source-table")); err != nil {
@@ -314,9 +428,37 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.PartitionBy = c.String("partition-by")
 	cfg.Yes = c.Bool("yes")
 	cfg.FullRefresh = c.Bool("full-refresh")
+	cfg.RefreshID = c.String("refresh-id")
 	cfg.SchemaContract = c.String("schema-contract")
 	cfg.SchemaNaming = c.String("schema-naming")
 	cfg.CDCTableNaming = config.TableNaming(c.String("cdc-table-naming"))
+	cfg.CDCSnapshotMode = c.String("cdc-snapshot-mode")
+	cfg.CDCStartLSN = c.String("cdc-start-lsn")
+	cfg.CDCChunkedSnapshot = c.Bool("cdc-snapshot-chunked")
+	cfg.CDCSnapshotSpool = c.Bool("cdc-snapshot-spool")
+	cfg.CDCSnapshotExecution = c.String("cdc-snapshot-execution")
+	cfg.CDCSnapshotChunkSize = int(c.Int("cdc-snapshot-chunk-size"))
+	cfg.CDCSnapshotChunkTimeout = c.Duration("cdc-snapshot-chunk-timeout")
+	cfg.CDCWALStaging = c.String("cdc-wal-staging")
+	if cfg.CDCSnapshotSpool && !c.IsSet("cdc-wal-staging") {
+		cfg.CDCWALStaging = "destination"
+	}
+	cfg.CDCWALSpoolDir = c.String("cdc-wal-spool-dir")
+	cfg.CDCWALBufferBytes = c.Int("cdc-wal-buffer-bytes")
+	if cfg.CDCChunkedSnapshot {
+		if cfg.CDCSnapshotChunkSize <= 0 {
+			return &config.ValidationError{Field: "cdc-snapshot-chunk-size", Message: "must be positive"}
+		}
+		if cfg.CDCSnapshotChunkTimeout <= 0 {
+			return &config.ValidationError{Field: "cdc-snapshot-chunk-timeout", Message: "must be positive"}
+		}
+	}
+	if cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool {
+		if cfg.CDCWALBufferBytes <= 0 {
+			return &config.ValidationError{Field: "cdc-wal-buffer-bytes", Message: "must be positive"}
+		}
+	}
+	cfg.CDCDeleteBehavior = config.CDCDeleteBehavior(c.String("cdc-delete-behavior"))
 	cfg.Progress = config.ProgressMode(c.String("progress"))
 	cfg.PageSize = int(c.Int("page-size"))
 	switch mb := int64(c.Int("batch-size")); {
@@ -330,7 +472,12 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.LoaderFileSize = int(c.Int("loader-file-size"))
 	cfg.LoaderFileFormat = c.String("loader-file-format")
 	cfg.ExtractParallelism = int(c.Int("extract-parallelism"))
-	if c.IsSet("extract-parallelism") {
+	cfg.DestinationParallelism = int(c.Int("destination-parallelism"))
+	if c.IsSet("destination-parallelism") {
+		if cfg.DestinationParallelism <= 0 {
+			return &config.ValidationError{Field: "destination-parallelism", Message: "must be positive"}
+		}
+	} else if c.IsSet("extract-parallelism") {
 		cfg.DestinationParallelism = cfg.ExtractParallelism
 	}
 	cfg.ExtractPartitionBy = c.String("extract-partition-by")
@@ -353,13 +500,17 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 	cfg.Stream = c.Bool("stream")
 	cfg.FlushInterval = c.Duration("flush-interval")
 	cfg.FlushRecords = int(c.Int("flush-records"))
+	if (cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool) && cfg.Stream {
+		if cfg.FlushInterval <= 0 {
+			return &config.ValidationError{Field: "flush-interval", Message: "must be positive"}
+		}
+		if cfg.FlushRecords <= 0 {
+			return &config.ValidationError{Field: "flush-records", Message: "must be positive"}
+		}
+	}
 
 	if !cfg.Stream && (c.IsSet("flush-interval") || c.IsSet("flush-records")) {
 		return fmt.Errorf("--flush-interval and --flush-records are only valid together with --stream")
-	}
-	metricsAddr := c.String("metrics-addr")
-	if !cfg.Stream && metricsAddr != "" {
-		return fmt.Errorf("--metrics-addr is only valid together with --stream")
 	}
 	// In streaming mode the source decides the default strategy (merge for CDC,
 	// append for brokers); only treat the strategy as a user override when the
@@ -408,42 +559,6 @@ func runIngest(ctx context.Context, c *cli.Command) (err error) {
 		if _, err := strategy.Get(cfg.IncrementalStrategy); err != nil {
 			return err
 		}
-	}
-
-	if metricsAddr != "" {
-		boundAddr, stop, err := metrics.Serve(metricsAddr)
-		if err != nil {
-			return fmt.Errorf("failed to start metrics server: %w", err)
-		}
-		defer stop()
-		if !output.IsJSON() {
-			color.Green("Serving metrics on http://%s/metrics", boundAddr)
-		}
-	}
-
-	p := pipeline.New(cfg)
-	if err := p.Run(ctx); err != nil {
-		return err
-	}
-
-	if ctx.Err() != nil {
-		// In streaming mode, cancellation (SIGINT/SIGTERM) is the normal way to
-		// stop; the pipeline has already flushed pending data.
-		if cfg.Stream {
-			if !output.IsJSON() {
-				color.Green("Streaming ingestion stopped.")
-				output.FlushDeferred()
-			}
-			return nil
-		}
-		return ctx.Err()
-	}
-
-	if !output.IsJSON() {
-		color.Green("Ingestion completed successfully!")
-		// End-of-run warnings (e.g. --reject-mode=skip rejects) print last, after
-		// the progress summary, so they are not buried mid-run.
-		output.FlushDeferred()
 	}
 	return nil
 }

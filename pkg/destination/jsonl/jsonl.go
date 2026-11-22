@@ -316,7 +316,7 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		}
 		return extractValue(storage, idx)
 	default:
-		return fmt.Sprintf("%v", arr)
+		return arr.GetOneForMarshal(idx)
 	}
 }
 

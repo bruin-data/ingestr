@@ -8,7 +8,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
-var decimalRe = regexp.MustCompile(`^decimal\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
+var (
+	decimalRe       = regexp.MustCompile(`^decimal\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
+	timePrecisionRe = regexp.MustCompile(`^(timestamp|time)\s*\(\s*\d+\s*\)`)
+)
 
 func MapAthenaToDataType(athenaType string) (dt schema.DataType, precision, scale int, arrayType schema.DataType) {
 	t := strings.ToLower(strings.TrimSpace(athenaType))
@@ -23,6 +26,8 @@ func MapAthenaToDataType(athenaType string) (dt schema.DataType, precision, scal
 		elemType, p, s, _ := MapAthenaToDataType(inner)
 		return schema.TypeArray, p, s, elemType
 	}
+
+	t = timePrecisionRe.ReplaceAllString(t, "$1")
 
 	switch t {
 	case "boolean":

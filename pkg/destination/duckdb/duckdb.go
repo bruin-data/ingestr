@@ -38,6 +38,9 @@ type DuckDBDestination struct {
 	catalog  string
 	mu       sync.Mutex
 
+	// quack is set when the URI points at a remote DuckDB (Quack) server.
+	quack *attachedCatalog
+
 	memoryLeaseMu   sync.Mutex
 	memoryLeaseHeld bool
 
@@ -76,6 +79,9 @@ func NewDuckDBDestination() *DuckDBDestination {
 func (d *DuckDBDestination) AcquireManagedCDCRunLease(_ context.Context, connectorID string) (source.ConnectorLease, error) {
 	if connectorID == "" {
 		return nil, fmt.Errorf("managed CDC connector ID is empty")
+	}
+	if d.quack != nil {
+		return nil, fmt.Errorf("quack does not support local managed CDC run leases")
 	}
 	if strings.HasPrefix(d.filePath, "md:") {
 		return nil, fmt.Errorf("MotherDuck does not support local managed CDC run leases")
@@ -158,6 +164,15 @@ func (d *DuckDBDestination) ReplaceStagingPolicy() destination.ReplaceStagingPol
 }
 
 func (d *DuckDBDestination) Connect(ctx context.Context, uri string) error {
+	quack, err := srcduckdb.ParseQuackURI(uri)
+	if err != nil {
+		return err
+	}
+	if quack != nil {
+		d.quack = &attachedCatalog{name: "quack", alias: srcduckdb.QuackAlias}
+		return d.connectAttached(ctx, "quack", quack.AttachStatements(), quack.AttachError)
+	}
+
 	path, err := parseDuckDBPath(uri)
 	if err != nil {
 		return fmt.Errorf("failed to parse DuckDB URI: %w", err)
@@ -265,8 +280,13 @@ func (d *DuckDBDestination) PrepareTable(ctx context.Context, opts destination.P
 		config.Debug("[DUCKDB] DROP TABLE took %v", time.Since(startDrop))
 	}
 
+	// DuckDB can't declare an unenforced key, so append tables get none and keep every row.
+	primaryKeys := opts.PrimaryKeys
+	if opts.Strategy == string(config.StrategyAppend) {
+		primaryKeys = nil
+	}
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(destination.QuoteTableName(opts.Table), opts.Schema.Columns, primaryKeys)
 	config.Debug("[DUCKDB] CREATE SQL: %s", createSQL)
 	if err := d.exec(ctx, createSQL); err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
@@ -341,10 +361,16 @@ func (d *DuckDBDestination) ensureSchemaExistsLocked(ctx context.Context, tn tab
 }
 
 func (d *DuckDBDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if d.quack != nil {
+		return d.quack.writeViaMemoryStage(ctx, d, records, opts)
+	}
 	return d.writeViaADBCIngest(ctx, records, opts)
 }
 
 func (d *DuckDBDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if d.quack != nil {
+		return d.quack.writeViaMemoryStage(ctx, d, records, opts)
+	}
 	return d.writeViaADBCIngest(ctx, records, opts)
 }
 
@@ -402,8 +428,11 @@ func (d *DuckDBDestination) writeViaADBCIngest(ctx context.Context, records <-ch
 			continue
 		}
 
-		// Use standard Arrow RecordReader for each batch
-		reader, readerErr := array.NewRecordReader(res.Batch.Schema(), []arrow.RecordBatch{res.Batch})
+		slices := vectorSizedSlices(res.Batch)
+		reader, readerErr := array.NewRecordReader(res.Batch.Schema(), slices)
+		for _, slice := range slices {
+			slice.Release()
+		}
 		if readerErr != nil {
 			res.Batch.Release()
 			return fmt.Errorf("failed to create record reader: %w", readerErr)
@@ -579,12 +608,27 @@ func nextNonEmptyRecord(ctx context.Context, records <-chan source.RecordBatchRe
 	}
 }
 
+// duckDBVectorSize is DuckDB's STANDARD_VECTOR_SIZE. Appending a larger Arrow
+// batch into a column that needs a cast fails ("Vector::SetSize out of range").
+const duckDBVectorSize = 2048
+
+func vectorSizedSlices(batch arrow.RecordBatch) []arrow.RecordBatch {
+	n := batch.NumRows()
+	slices := make([]arrow.RecordBatch, 0, (n+duckDBVectorSize-1)/duckDBVectorSize)
+	for off := int64(0); off < n; off += duckDBVectorSize {
+		slices = append(slices, batch.NewSlice(off, min(off+duckDBVectorSize, n)))
+	}
+	return slices
+}
+
 type channelRecordReader struct {
 	refCount atomic.Int64
 	ctx      context.Context
 	records  <-chan source.RecordBatchResult
 	schema   *arrow.Schema
 	first    arrow.RecordBatch
+	pending  arrow.RecordBatch
+	offset   int64
 	current  arrow.RecordBatch
 	err      error
 	rows     atomic.Int64
@@ -613,6 +657,10 @@ func (r *channelRecordReader) Release() {
 		r.current.Release()
 		r.current = nil
 	}
+	if r.pending != nil {
+		r.pending.Release()
+		r.pending = nil
+	}
 	if r.first != nil {
 		r.first.Release()
 		r.first = nil
@@ -628,13 +676,30 @@ func (r *channelRecordReader) Next() bool {
 		r.current.Release()
 		r.current = nil
 	}
+	if r.pending == nil || r.offset >= r.pending.NumRows() {
+		if r.pending != nil {
+			r.pending.Release()
+			r.pending = nil
+		}
+		if !r.fetch() {
+			return false
+		}
+	}
+	end := min(r.offset+duckDBVectorSize, r.pending.NumRows())
+	r.current = r.pending.NewSlice(r.offset, end)
+	r.offset = end
+	r.rows.Add(r.current.NumRows())
+	return true
+}
+
+func (r *channelRecordReader) fetch() bool {
 	if r.err != nil {
 		return false
 	}
+	r.offset = 0
 	if r.first != nil {
-		r.current = r.first
+		r.pending = r.first
 		r.first = nil
-		r.rows.Add(r.current.NumRows())
 		return true
 	}
 
@@ -672,8 +737,7 @@ func (r *channelRecordReader) Next() bool {
 				res.Batch.Release()
 				batch = rewrapped
 			}
-			r.current = batch
-			r.rows.Add(r.current.NumRows())
+			r.pending = batch
 			return true
 		}
 	}
@@ -1089,6 +1153,12 @@ func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destinati
 			destination.QuoteTableName(opts.StagingTable),
 			imageRowNumber,
 		)
+		if opts.CDCHardDelete {
+			// Rows whose latest change is a delete are removed below, so only
+			// rows whose latest change is live need their image upserted.
+			updateSource = fmt.Sprintf(`(SELECT latest.*, false AS %s FROM %s WHERE latest."_cdc_deleted" = false) AS source`, equalDeleteMarker, latestSource)
+			insertSource = fmt.Sprintf(`(SELECT latest.* FROM %s WHERE latest."_cdc_deleted" = false) AS source`, latestSource)
+		}
 	}
 	insertCondition := onCondition
 	if isCDC {
@@ -1157,8 +1227,10 @@ func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destinati
 	}
 
 	runInsert := func() error {
+		// An anti-join keeps both aliases in one scope; in a correlated NOT EXISTS,
+		// DuckDB binds source."col" to a target column named "source" (field access).
 		insertSQL := fmt.Sprintf(
-			`INSERT INTO %s (%s) SELECT %s FROM %s WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
+			`INSERT INTO %s (%s) SELECT %s FROM %s ANTI JOIN %s AS target ON %s`,
 			quotedTargetTable,
 			strings.Join(destQuoted, ", "),
 			strings.Join(destQuoted, ", "),
@@ -1188,7 +1260,19 @@ func (d *DuckDBDestination) mergeTableLocked(ctx context.Context, opts destinati
 		}
 	}
 
-	if isCDC {
+	if isCDC && opts.CDCHardDelete {
+		deleteSQL := fmt.Sprintf(
+			`DELETE FROM %s AS target USING %s WHERE %s AND source."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR source."_cdc_lsn" >= target."_cdc_lsn")`,
+			quotedTargetTable,
+			dedupSource(""),
+			onCondition,
+		)
+		config.Debug("[DUCKDB MERGE] Executing CDC hard delete: %s", deleteSQL)
+
+		if err := d.exec(ctx, deleteSQL); err != nil {
+			return fmt.Errorf("failed to delete CDC-deleted records: %w", err)
+		}
+	} else if isCDC {
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
@@ -1356,10 +1440,7 @@ func (d *DuckDBDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
-		quotedTargetTable, quoteIdentifier(opts.IncrementalKey), quoteIdentifier(opts.IncrementalKey),
-	)
+	deleteSQL := destination.IntervalDeleteSQL(quotedTargetTable, "target", quoteIdentifier(opts.IncrementalKey), "?", "?", opts.IncrementalPredicate)
 	config.Debug("[DUCKDB DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if err := d.exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1433,16 +1514,18 @@ func (d *DuckDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 
 	// Step 2: Soft-delete missing records (only if no incremental_key)
 	if opts.IncrementalKey == "" {
+		// The correlated subquery binds target."col" to a staging column named
+		// "target" first, so the outer table needs an alias no column uses.
 		softDeleteSQL := fmt.Sprintf(
 			`
-			UPDATE %s AS target SET
+			UPDATE %s AS __ingestr_target SET
 				"_scd_valid_to" = $1,
 				"_scd_is_current" = false
-			WHERE target."_scd_is_current" = true
+			WHERE __ingestr_target."_scd_is_current" = true
 			  AND NOT EXISTS (SELECT 1 FROM %s AS source WHERE %s)`,
 			quotedTargetTable,
 			quotedStagingTable,
-			onCondition,
+			buildJoinCondition(opts.PrimaryKeys, "__ingestr_target", "source"),
 		)
 		config.Debug("[DUCKDB SCD2] Step 2 - Soft-delete missing: %s", softDeleteSQL)
 
@@ -1462,11 +1545,9 @@ func (d *DuckDBDestination) SCD2Table(ctx context.Context, opts destination.SCD2
 		`
 		INSERT INTO %s (%s)
 		SELECT %s FROM %s AS source
-		WHERE NOT EXISTS (
-			SELECT 1 FROM %s AS target
-			WHERE %s
-			  AND target."_scd_is_current" = true
-		)`,
+		ANTI JOIN %s AS target
+			ON %s
+			AND target."_scd_is_current" = true`,
 		quotedTargetTable,
 		strings.Join(quotedColumns, ", "),
 		strings.Join(quotedColumns, ", "),
@@ -1611,10 +1692,14 @@ func (d *DuckDBDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *DuckDBDestination) SupportsAppendStrategy() bool       { return true }
 func (d *DuckDBDestination) SupportsMergeStrategy() bool        { return true }
 func (d *DuckDBDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *DuckDBDestination) SupportsDeleteInsertPredicate() bool { return true }
+
 func (d *DuckDBDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DuckDBDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *DuckDBDestination) SupportsAtomicSwap() bool           { return true }
 func (d *DuckDBDestination) SupportsCDCMerge() bool             { return true }
+func (d *DuckDBDestination) SupportsCDCHardDelete() bool        { return true }
 func (d *DuckDBDestination) SupportsCDCUnchangedCols() bool     { return true }
 func (d *DuckDBDestination) SupportsCDCConditionalMerge() bool  { return true }
 
@@ -2203,14 +2288,18 @@ func (d *DuckDBDestination) getTableSchemaLocked(ctx context.Context, table stri
 				primaryKeys = append(primaryKeys, strings.Clone(colName))
 			}
 
-			dataType := mapDuckDBTypeToSchema(colType)
+			dataType, arrayType, valueType := mapDuckDBTypeToSchema(colType), schema.TypeUnknown, colType
+			if elem, ok := strings.CutSuffix(colType, "[]"); ok {
+				dataType, arrayType, valueType = schema.TypeArray, mapDuckDBTypeToSchema(elem), elem
+			}
 			precision, scale := 0, 0
-			if dataType == schema.TypeDecimal {
-				precision, scale = duckDBDecimalPrecisionScale(colType)
+			if dataType == schema.TypeDecimal || arrayType == schema.TypeDecimal {
+				precision, scale = duckDBDecimalPrecisionScale(valueType)
 			}
 			columns = append(columns, schema.Column{
 				Name:         strings.Clone(colName),
 				DataType:     dataType,
+				ArrayType:    arrayType,
 				Nullable:     nullable,
 				IsPrimaryKey: isPrimaryKey,
 				Precision:    precision,
@@ -2490,6 +2579,13 @@ func (d *DuckDBDestination) exec(ctx context.Context, sql string, args ...interf
 	if d.conn == nil {
 		return fmt.Errorf("DuckDB destination not connected")
 	}
+	if d.quack != nil && len(args) > 0 {
+		inlined, err := inlineQuackArgs(sql, args)
+		if err != nil {
+			return err
+		}
+		sql, args = inlined, nil
+	}
 
 	stmt, err := d.conn.NewStatement()
 	if err != nil {
@@ -2541,24 +2637,13 @@ func (d *DuckDBDestination) exec(ctx context.Context, sql string, args ...interf
 		return qerr
 	}
 
-	_, uerr := stmt.ExecuteUpdate(ctx)
-	if uerr == nil {
-		return nil
+	// Don't retry: the first execution consumes the bound parameters, and DuckDB 1.4/1.5
+	// drivers answer a parameterless retry with a broken stream that segfaults on import.
+	if _, err := stmt.ExecuteUpdate(ctx); err != nil {
+		config.LogFailedQuery(sql, err)
+		return err
 	}
-	rdr, _, qerr := stmt.ExecuteQuery(ctx)
-	if qerr == nil {
-		defer rdr.Release()
-		for rdr.Next() {
-			// drain
-		}
-		if err := rdr.Err(); err != nil {
-			config.LogFailedQuery(sql, err)
-			return err
-		}
-		return nil
-	}
-	config.LogFailedQuery(sql, uerr)
-	return uerr
+	return nil
 }
 
 func buildParameterRecord(args []interface{}) (arrow.RecordBatch, error) {

@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math"
 	"math/big"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -110,6 +112,12 @@ func extractPartitionColumn(tableSchema *schema.TableSchema, columnName string) 
 				return col, ExtractPartitionKindTime, nil
 			case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
 				return col, ExtractPartitionKindNumeric, nil
+			case schema.TypeDecimal:
+				// Integer columns in Snowflake/Oracle are NUMBER(p,0).
+				if col.Scale == 0 {
+					return col, ExtractPartitionKindNumeric, nil
+				}
+				return schema.Column{}, ExtractPartitionKindUnknown, fmt.Errorf("extract partition column %q must be date, timestamp_ntz, timestamp, or integer; got %s with scale %d", columnName, col.DataType, col.Scale)
 			default:
 				return schema.Column{}, ExtractPartitionKindUnknown, fmt.Errorf("extract partition column %q must be date, timestamp_ntz, timestamp, or integer; got %s", columnName, col.DataType)
 			}
@@ -682,6 +690,18 @@ func SQLIntValue(value any) (int64, error) {
 			return 0, fmt.Errorf("value %v overflows int64", v)
 		}
 		return v.Int64(), nil
+	case decimal128.Num:
+		return SQLIntValue(v.BigInt())
+	case driver.Valuer:
+		// Driver numeric types (e.g. pgtype.Numeric) expose their value this way.
+		inner, err := v.Value()
+		if err != nil {
+			return 0, err
+		}
+		if _, ok := inner.(driver.Valuer); ok {
+			return 0, fmt.Errorf("unsupported value type %T", value)
+		}
+		return SQLIntValue(inner)
 	case string:
 		return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	case []byte:

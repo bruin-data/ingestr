@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	numericPrecisionRegex = regexp.MustCompile(`(?i)(?:numeric|bignumeric|decimal)\((\d+)(?:,\s*(\d+))?\)`)
+	numericPrecisionRegex = regexp.MustCompile(`(?i)(?:numeric|bignumeric|decimal(?:256)?)\((\d+)(?:,\s*(\d+))?\)`)
 	arrayTypeRegex        = regexp.MustCompile(`(?i)^ARRAY<(.+)>$`)
 	structTypeRegex       = regexp.MustCompile(`(?i)^STRUCT<.+>$`)
 )
@@ -19,6 +19,17 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	bqType = strings.TrimSpace(bqType)
 	upperType := strings.ToUpper(bqType)
 
+	// Handle ARRAY<element_type>
+	if matches := arrayTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
+		elemType, precision, scale, _ := MapBigQueryToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
+	}
+
+	// Handle STRUCT<...>
+	if structTypeRegex.MatchString(bqType) {
+		return schema.TypeJSON, 0, 0, schema.TypeUnknown
+	}
+
 	// Handle NUMERIC(p,s), BIGNUMERIC(p,s), DECIMAL(p,s)
 	if matches := numericPrecisionRegex.FindStringSubmatch(bqType); len(matches) >= 2 {
 		precision, _ := strconv.Atoi(matches[1])
@@ -27,17 +38,6 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 			scale, _ = strconv.Atoi(matches[2])
 		}
 		return schema.TypeDecimal, precision, scale, schema.TypeUnknown
-	}
-
-	// Handle ARRAY<element_type>
-	if matches := arrayTypeRegex.FindStringSubmatch(bqType); len(matches) == 2 {
-		elemType, _, _, _ := MapBigQueryToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
-	}
-
-	// Handle STRUCT<...>
-	if structTypeRegex.MatchString(bqType) {
-		return schema.TypeJSON, 0, 0, schema.TypeUnknown
 	}
 
 	// Extract base type
@@ -107,7 +107,24 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	case "GEOGRAPHY":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 
+	// Arrow types (from ADBC driver, used by custom queries)
+	case "UTF8", "LARGE_UTF8":
+		return schema.TypeString, 0, 0, schema.TypeUnknown
+	case "BINARY", "LARGE_BINARY":
+		return schema.TypeBinary, 0, 0, schema.TypeUnknown
+	case "DATE32", "DATE64":
+		return schema.TypeDate, 0, 0, schema.TypeUnknown
+
 	default:
+		if strings.HasPrefix(baseType, "TIMESTAMP[") {
+			if strings.Contains(upperType, "TZ=") {
+				return schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown
+			}
+			return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
+		}
+		if strings.HasPrefix(baseType, "TIME32[") || strings.HasPrefix(baseType, "TIME64[") {
+			return schema.TypeTime, 0, 0, schema.TypeUnknown
+		}
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	}
 }

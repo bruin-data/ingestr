@@ -18,6 +18,8 @@ URI parameters:
 
 You can create an API key in the Paddle dashboard under **Developer tools > Authentication**. See the [Paddle API reference](https://developer.paddle.com/api-reference/overview) for more details.
 
+The key needs read permission for every table you ingest. Incremental `addresses` loads with an `--interval-start` in the last 89 days also need the `notification.read` permission.
+
 Here's a sample command that copies Paddle customers into a DuckDB database:
 
 ```sh
@@ -35,6 +37,7 @@ Paddle source allows ingesting the following resources:
 | Table | PK | Inc Key | Inc Strategy | Details |
 | ----- | -- | ------- | ------------ | ------- |
 | `customers` | id | updated_at | merge | Customer records, including name, email, and locale. |
+| `addresses` | id | updated_at | merge | Customer addresses, including city, region, postal code, and country. Each row carries the `customer_id` it belongs to. |
 | `products` | id | updated_at | merge | Products you sell, including name, description, and tax category. |
 | `prices` | id | updated_at | merge | Prices attached to products, including billing cycle and currency. |
 | `discounts` | id | updated_at | merge | Discounts and coupon codes that can be applied to transactions and subscriptions. |

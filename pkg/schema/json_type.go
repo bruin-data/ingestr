@@ -10,6 +10,11 @@ import (
 
 const JSONExtensionName = "json"
 
+// JSONValidatedMetadataKey marks a JSON field whose values the source already
+// guarantees to be valid JSON text, such as PostgreSQL json and jsonb output,
+// so destinations can skip validating them again.
+const JSONValidatedMetadataKey = "ingestr.json.validated"
+
 // JSONType is an Arrow extension type for JSON data.
 // It stores JSON as strings but is recognized as structured data.
 type JSONType struct {

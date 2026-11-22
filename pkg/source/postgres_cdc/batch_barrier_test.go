@@ -196,7 +196,7 @@ func TestBatchCheckpointStaysAtDecodedBarrierWhenCurrentLSNMovesPastIt(t *testin
 		{hadActivity: true, lsn: currentLSN, barrier: true, barrierLSN: decodedBarrierLSN},
 	}}
 	results := make(chan source.RecordBatchResult, 4)
-	require.NoError(t, streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false))
+	require.NoError(t, streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false, 0))
 	close(results)
 	for res := range results {
 		if res.Batch != nil {

@@ -164,7 +164,7 @@ func drainStreamLoop(t *testing.T, steps []replStep) (batchCount int, totalRows 
 	results := make(chan source.RecordBatchResult, len(steps)+1)
 	accum := testAccumulator(10000)
 
-	err := streamLoop(context.Background(), repl, 10000, accum, results, false)
+	err := streamLoop(context.Background(), repl, 10000, accum, results, false, 0)
 	require.NoError(t, err)
 	close(results)
 
@@ -192,13 +192,107 @@ func TestStreamLoopAccumulatesSingleRowTransactions(t *testing.T) {
 	assert.Less(t, batchCount, numTxns, "batch count must not equal row count")
 }
 
+func TestStreamingQuietTableDoesNotPinCommitDuringBusyWAL(t *testing.T) {
+	tests := []struct {
+		name         string
+		pending      func() (pglogrepl.LSN, bool)
+		wantBefore   pglogrepl.LSN
+		wantAfter    pglogrepl.LSN
+		wantAdvanced bool
+	}{
+		{
+			name:         "quiet table ages out",
+			wantBefore:   99,
+			wantAfter:    299,
+			wantAdvanced: true,
+		},
+		{
+			name:         "in-flight transaction remains the low water",
+			pending:      func() (pglogrepl.LSN, bool) { return 80, true },
+			wantBefore:   79,
+			wantAfter:    79,
+			wantAdvanced: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			accum := testAccumulator(3, "quiet", "busy")
+			results := make(chan source.RecordBatchResult, 8)
+			repl := &fakeReplicator{lsn: 300, pendingLowWater: tt.pending}
+			token := func() any { return checkpointCommitToken(safeCommitLSN(repl, accum)) }
+
+			accum.add("quiet", makeInsertChanges(1, 1, 100), 100)
+			quietBufferedAt := accum.bufferedAt["quiet"]
+			require.False(t, quietBufferedAt.IsZero())
+
+			accum.add("busy", makeInsertChanges(3, 10, 200), 200)
+			require.NoError(t, accum.flushReadyContext(t.Context(), results, token))
+
+			busyResult := <-results
+			require.Equal(t, "busy", busyResult.TableName)
+			require.NotNil(t, busyResult.Batch)
+			busyToken := busyResult.CommitToken.(source.CDCStateCommitToken)
+			require.Equal(t, tt.wantBefore, busyToken.SourceCommitToken)
+			busyResult.Batch.Release()
+
+			// More busy-table WAL arrives, but the new partial page remains below
+			// the row threshold. No idle flush occurs in this test.
+			accum.add("busy", makeInsertChanges(1, 20, 300), 300)
+			require.NoError(t, accum.flushReadyContext(t.Context(), results, token))
+			require.NoError(t, accum.flushStaleContext(
+				t.Context(),
+				results,
+				token,
+				streamingAccumulatorMaxAge,
+				quietBufferedAt.Add(streamingAccumulatorMaxAge-time.Nanosecond),
+			))
+			require.Contains(t, accum.changes, "quiet")
+			require.Empty(t, results)
+			require.Equal(t, tt.wantBefore, safeCommitLSN(repl, accum))
+
+			require.NoError(t, accum.flushStaleContext(
+				t.Context(),
+				results,
+				token,
+				streamingAccumulatorMaxAge,
+				quietBufferedAt.Add(streamingAccumulatorMaxAge),
+			))
+
+			quietResult := <-results
+			require.Equal(t, "quiet", quietResult.TableName)
+			require.NotNil(t, quietResult.Batch)
+			quietToken := quietResult.CommitToken.(source.CDCStateCommitToken)
+			require.Equal(t, tt.wantAfter, quietToken.SourceCommitToken)
+			quietResult.Batch.Release()
+
+			assert.NotContains(t, accum.changes, "quiet")
+			assert.Contains(t, accum.changes, "busy")
+			assert.Equal(t, tt.wantAfter, safeCommitLSN(repl, accum))
+			if tt.wantAdvanced {
+				assert.Greater(t, tt.wantAfter, tt.wantBefore)
+			} else {
+				assert.Less(t, tt.wantAfter, pglogrepl.LSN(80))
+			}
+
+			require.NoError(t, accum.flushAllContext(t.Context(), results, nil))
+			close(results)
+			for result := range results {
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
+			}
+		})
+	}
+}
+
 func TestStreamLoopLeaseLossDiscardsAccumulatorWithoutMaterializing(t *testing.T) {
 	lease := &readerTestLease{done: make(chan struct{}), err: errors.New("lease backend terminated")}
 	ctx := source.WithConnectorLeaseGuard(context.Background(), source.NewConnectorLeaseGuard(lease))
 	accum := testAccumulator(10000)
 	results := make(chan source.RecordBatchResult, 1)
 
-	err := streamLoop(ctx, &leaseLossReplicator{lease: lease}, 10000, accum, results, true)
+	err := streamLoop(ctx, &leaseLossReplicator{lease: lease}, 10000, accum, results, true, 0)
 	require.ErrorIs(t, err, source.ErrConnectorLeaseLost)
 	assert.Empty(t, accum.changes)
 	assert.Empty(t, accum.minLSN)
@@ -247,7 +341,7 @@ func TestStreamLoopEmitsIdleCommitToken(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// Streaming ignores the scripted barrier and runs until cancellation.
-		done <- streamLoop(ctx, repl, 10000, accum, results, true)
+		done <- streamLoop(ctx, repl, 10000, accum, results, true, 0)
 	}()
 
 	var idleToken pglogrepl.LSN
@@ -309,7 +403,7 @@ func TestStreamModeKeepaliveHeadNeverBecomesCommitToken(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		_ = streamLoop(ctx, repl, 10000, accum, results, true)
+		_ = streamLoop(ctx, repl, 10000, accum, results, true, 0)
 		close(results)
 	}()
 
@@ -350,7 +444,7 @@ func TestBatchWaitsForBarrierAfterKeepaliveAndDelayedChanges(t *testing.T) {
 		{hadActivity: true, lsn: 30, barrier: true},
 	}}
 	results := make(chan source.RecordBatchResult, 1)
-	err := streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false)
+	err := streamLoop(context.Background(), repl, 100, testAccumulator(100), results, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, pglogrepl.LSN(30), repl.CurrentLSN())
 	res := <-results

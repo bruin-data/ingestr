@@ -64,7 +64,9 @@ var (
 )
 
 // Dialect implements the adbc.Dialect interface for DuckDB.
-type Dialect struct{}
+type Dialect struct {
+	quack *QuackConfig
+}
 
 // NewDialect creates a new DuckDB dialect.
 func NewDialect() *Dialect {
@@ -100,7 +102,7 @@ func ensureDriverInstalled(ctx context.Context) error {
 
 	config.Debug("[DUCKDB] ADBC driver not found, installing...")
 
-	if err := adbc.InstallDriver(ctx, "duckdb"); err != nil {
+	if err := adbc.InstallDriver(ctx, "duckdb", tryLoadDriver); err != nil {
 		return err
 	}
 
@@ -123,11 +125,27 @@ func tryLoadDriver() bool {
 }
 
 func (d *Dialect) BuildConnectionString(uri string) (string, error) {
+	quack, err := ParseQuackURI(uri)
+	if err != nil {
+		return "", err
+	}
+	if quack != nil {
+		d.quack = quack
+		uri = "duckdb://:memory:"
+	}
 	dbPath, err := parseDBPath(uri)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("driver=duckdb;path=%s", dbPath), nil
+}
+
+func (d *Dialect) InitConnection(ctx context.Context, db *sql.DB) error {
+	if d.quack == nil {
+		return nil
+	}
+	PinSingleConnection(db)
+	return RunAttachStatements(ctx, db, "QUACK", d.quack.AttachStatements(), d.quack.AttachError)
 }
 
 // parseDBPath extracts the database path from a duckdb://, motherduck://, or md:// URI
@@ -258,4 +276,22 @@ func (d *Dialect) ParsePrimaryKeyResult(rawValue interface{}) []string {
 		return result
 	}
 	return nil
+}
+
+// ColumnExpression reads types the ADBC conversion loses through DuckDB itself:
+// INTERVAL and TIMETZ as text, nested values (and lists of them) as JSON.
+func (d *Dialect) ColumnExpression(nativeType, quotedColumn string) string {
+	t := strings.ToUpper(strings.TrimSpace(nativeType))
+	switch {
+	case t == "INTERVAL", t == "TIME WITH TIME ZONE", t == "TIMETZ":
+		return "CAST(" + quotedColumn + " AS VARCHAR)"
+	case isNestedDuckDBType(strings.TrimRight(t, "[]")):
+		return "CAST(to_json(" + quotedColumn + ") AS VARCHAR)"
+	default:
+		return ""
+	}
+}
+
+func isNestedDuckDBType(t string) bool {
+	return strings.HasPrefix(t, "STRUCT(") || strings.HasPrefix(t, "MAP(")
 }

@@ -2,6 +2,7 @@ package postgres_cdc
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"sort"
@@ -32,6 +33,10 @@ type MultiTableCDCReader struct {
 	coverageMissing      map[string]struct{}
 	initialAnnouncements []source.SourceTableInfo
 	initialInvalidations []source.CDCSnapshotInvalidation
+	// snapshotResumes holds interrupted snapshots of tables without resume
+	// state; the startup backfill continues them instead of starting over.
+	snapshotResumes      map[string]source.CDCSnapshotProgress
+	legacySlotCandidates []string
 	mu                   sync.RWMutex // protects processedLSNs and snapshotBoundaries
 	slotSuffix           string
 }
@@ -50,6 +55,30 @@ func NewMultiTableCDCReader(src *PostgresCDCSource, tables []source.SourceTableI
 		coverageMissing:    make(map[string]struct{}),
 		slotSuffix:         slotSuffix,
 	}
+}
+
+func (r *MultiTableCDCReader) setSnapshotResumes(ctx context.Context, resumes map[string]source.CDCSnapshotProgress) error {
+	for _, table := range r.tables {
+		resume, ok := resumes[table.Name]
+		keys := resumableSnapshotKeys(table)
+		if !ok || r.resumeLSNs[table.Name] != "" || keys == nil ||
+			resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
+			continue
+		}
+		supported, err := snapshotRangeKeysSupported(ctx, r.source.queryPool, table.Name, keys)
+		if err != nil {
+			return err
+		}
+		if !supported {
+			config.Debug("[CDC] Snapshot progress for %s uses unsupported range ordering; starting a fresh replacement", table.Name)
+			continue
+		}
+		if r.snapshotResumes == nil {
+			r.snapshotResumes = make(map[string]source.CDCSnapshotProgress)
+		}
+		r.snapshotResumes[table.Name] = resume.Clone()
+	}
+	return nil
 }
 
 // reconcileTableKeys folds each table's effective merge keys into its schema so
@@ -90,6 +119,23 @@ func (r *MultiTableCDCReader) setSnapshotBoundary(tableName string, lsn pglogrep
 
 // Read starts reading CDC changes from all tables in the publication.
 func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
+	if opts.CDCSnapshotSpool != nil {
+		slot := r.cdcConfig.SlotName
+		if slot == "" {
+			slot = generateMultiTableSlotName(r.cdcConfig.Publication, r.slotSuffix)
+		}
+		return r.source.readSnapshotSpool(ctx, r.tables, slot, r.resumeLSNs, opts.ReadOptions, true)
+	}
+	if opts.CDCChunkedSnapshot != nil {
+		slot := r.cdcConfig.SlotName
+		if slot == "" {
+			slot = generateMultiTableSlotName(r.cdcConfig.Publication, r.slotSuffix)
+		}
+		if len(r.initialAnnouncements) > 0 || len(r.initialInvalidations) > 0 {
+			return nil, fmt.Errorf("source table metadata changed before chunked snapshot startup; restart with --full-refresh")
+		}
+		return r.source.readChunked(ctx, r.tables, slot, r.resumeLSNs, opts.ReadOptions, true)
+	}
 	results := make(chan source.RecordBatchResult, 16)
 
 	go func() {
@@ -124,7 +170,7 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 
 		// If resume strategy says no snapshot needed, verify the slot actually exists
 		if !needsSnapshot {
-			var slotCandidates []string
+			slotCandidates := append([]string(nil), r.legacySlotCandidates...)
 			if r.cdcConfig.SlotName == "" && opts.CDCLegacySlotSuffix != "" {
 				candidate := generateLegacyMultiTableSlotName(r.cdcConfig.Publication, opts.CDCLegacySlotSuffix)
 				if legacySlotNameUnambiguous(candidate, opts.CDCLegacySlotSuffix) {
@@ -141,18 +187,37 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 				needsSnapshot = true
 			} else {
 				slotName = resolvedSlot
-				if legacy {
-					r.source.markLegacySlotInUse(slotName)
-				}
+				r.source.setWALRetentionSlot(slotName)
 				if !legacy {
 					waitReplicationSlotReleased(ctx, r.source.queryPool, slotName)
 				}
-				config.Debug("[CDC] Multi-table: resuming from LSN %s with per-table filtering", minResumeLSN)
+				if len(r.snapshotResumes) > 0 {
+					retained, err := snapshotResumeWALAvailable(ctx, r.source.queryPool, slotName, minResumeLSN)
+					if err != nil {
+						_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
+						return
+					}
+					if !retained {
+						config.Debug("[CDC] Slot %s cannot replay snapshot resume boundary %s; replacing snapshots", slotName, minResumeLSN)
+						needsSnapshot = true
+					}
+				}
+				if !needsSnapshot {
+					if legacy {
+						r.source.markLegacySlotInUse(slotName)
+					}
+					config.Debug("[CDC] Multi-table: resuming from LSN %s with per-table filtering", minResumeLSN)
+				}
 			}
 		}
 
 		var startLSN pglogrepl.LSN
 		if needsSnapshot {
+			r.snapshotResumes = nil
+			slotName = r.cdcConfig.SlotName
+			if slotName == "" {
+				slotName = generateMultiTableSlotName(r.cdcConfig.Publication, r.slotSuffix)
+			}
 			config.Debug("[CDC] Multi-table: performing full snapshot (some tables have no existing data)")
 			if err := r.executeSnapshot(ctx, results, opts); err != nil {
 				_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("snapshot failed: %w", err)})
@@ -170,7 +235,9 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 			// their pre-existing rows were never snapshotted (typically tables
 			// created since the previous run). Backfill them before streaming.
 			if newTables := r.tablesWithoutResumeState(); len(newTables) > 0 {
-				if err := r.backfillTables(ctx, slotName, newTables, nil, results, opts); err != nil {
+				resumes := r.snapshotResumes
+				r.snapshotResumes = nil
+				if err := r.backfillTables(ctx, slotName, newTables, nil, resumes, results, opts); err != nil {
 					_ = sendResult(ctx, results, source.RecordBatchResult{Err: fmt.Errorf("backfill failed: %w", err)})
 					return
 				}
@@ -182,18 +249,16 @@ func (r *MultiTableCDCReader) Read(ctx context.Context, opts source.MultiTableRe
 		}
 
 		for {
-			barrierNonce := ""
-			var sqlBarrierLSN pglogrepl.LSN
+			var barrier batchBarrier
 			if !opts.Streaming {
 				var err error
-				barrierNonce, sqlBarrierLSN, err = emitBatchBarrier(ctx, r.source.queryPool)
+				barrier, err = r.source.beginBatchBarrier(ctx)
 				if err != nil {
 					_ = sendResult(ctx, results, source.RecordBatchResult{Err: err})
 					return
 				}
-				config.Debug("[CDC] Batch mode: emitted logical-decoding barrier; SQL returned %s", sqlBarrierLSN)
 			}
-			signal, err := r.streamChanges(ctx, startLSN, barrierNonce, sqlBarrierLSN, slotName, results, opts)
+			signal, err := r.streamChanges(ctx, startLSN, barrier, slotName, results, opts)
 			if err != nil {
 				var schemaErr *SchemaChangedError
 				if !opts.Streaming || !errors.As(err, &schemaErr) {
@@ -247,7 +312,16 @@ func (r *MultiTableCDCReader) tablesWithoutResumeState() []source.SourceTableInf
 // temporary slot vanishes when the connection closes. Backfill batches carry
 // no commit tokens — the temporary slot's consistent point is ahead of the
 // main slot, so confirming it would skip WAL not yet streamed.
-func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName string, tables []source.SourceTableInfo, replacements map[string]struct{}, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+//
+// A table in resumes continues an interrupted snapshot: rows after its last
+// durable key are read at this backfill's consistent point, while the table
+// keeps the original boundary for stream filtering and certification. Stream
+// changes between the two points that the newer rows already reflect are
+// rejected by the merge's position ordering.
+func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName string, tables []source.SourceTableInfo, replacements map[string]struct{}, resumes map[string]source.CDCSnapshotProgress, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+	if err := r.source.requireSnapshotAllowed(); err != nil {
+		return err
+	}
 	conn, err := r.source.openReplicationConn(ctx)
 	if err != nil {
 		return err
@@ -255,17 +329,7 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 	defer func() { _ = conn.Close(ctx) }()
 
 	tempSlot := backfillSlotName(slotName)
-	created, err := pglogrepl.CreateReplicationSlot(
-		ctx,
-		conn,
-		tempSlot,
-		"pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{
-			Temporary:      true,
-			SnapshotAction: "EXPORT_SNAPSHOT",
-			Mode:           pglogrepl.LogicalReplication,
-		},
-	)
+	created, err := r.source.createLogicalSlot(ctx, conn, tempSlot, true)
 	if err != nil {
 		return fmt.Errorf("failed to create backfill slot: %w", err)
 	}
@@ -281,13 +345,29 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 	// The exported snapshot supports concurrent readers: each table imports it
 	// into its own repeatable-read transaction while this replication
 	// connection keeps it alive.
+	boundaries := make(map[string]pglogrepl.LSN, len(tables))
+	for _, table := range tables {
+		boundaries[table.Name] = snapshotLSN
+		if resume, ok := resumes[table.Name]; ok {
+			boundary, err := pglogrepl.ParseLSN(resume.Boundary)
+			if err != nil {
+				return fmt.Errorf("invalid snapshot resume boundary %q for %s: %w", resume.Boundary, table.Name, err)
+			}
+			boundaries[table.Name] = boundary
+		}
+	}
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(snapshotParallelism(opts))
+	budget := newSnapshotReadBudget(r.source.queryPool, snapshotParallelism(opts))
+	g.SetLimit(cap(budget.slots))
 	for i := range tables {
 		table := tables[i]
 		tableInfo := &tables[i]
 		g.Go(func() error {
-			output.Statusf("Backfilling new table %s before streaming its changes\n", table.Name)
+			if _, ok := resumes[table.Name]; ok {
+				output.Statusf("Resuming the interrupted snapshot of %s\n", table.Name)
+			} else {
+				output.Statusf("Backfilling new table %s before streaming its changes\n", table.Name)
+			}
 			if opts.Streaming {
 				if _, replacement := replacements[table.Name]; replacement {
 					if err := sendResult(gctx, results, source.RecordBatchResult{SnapshotInvalidation: &source.CDCSnapshotInvalidation{
@@ -304,11 +384,15 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 					return err
 				}
 			}
-			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, results, opts); err != nil {
+			var resume *source.CDCSnapshotProgress
+			if progress, ok := resumes[table.Name]; ok {
+				resume = &progress
+			}
+			if err := r.snapshotTable(gctx, table, created.SnapshotName, snapshotLSN, resume, results, opts, budget); err != nil {
 				return fmt.Errorf("failed to backfill table %s: %w", table.Name, err)
 			}
-			r.setSnapshotBoundary(table.Name, snapshotLSN)
-			r.source.recordSnapshotState(table.Name, snapshotLSN, table.Incarnation, table.SchemaFingerprint)
+			r.setSnapshotBoundary(table.Name, boundaries[table.Name])
+			r.source.recordSnapshotState(table.Name, boundaries[table.Name], table.Incarnation, table.SchemaFingerprint)
 			return nil
 		})
 	}
@@ -318,7 +402,7 @@ func (r *MultiTableCDCReader) backfillTables(ctx context.Context, slotName strin
 	if opts.Streaming {
 		positions := make(map[string]string, len(tables))
 		for _, table := range tables {
-			positions[table.Name] = FormatLSN(snapshotLSN)
+			positions[table.Name] = FormatLSN(boundaries[table.Name])
 		}
 		if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: source.CDCStateCommitToken{
 			SnapshotPositions: positions, SnapshotIncarnations: tableIncarnations(tables), SnapshotSchemas: tableSchemaFingerprints(tables),
@@ -371,6 +455,9 @@ type streamSignal struct {
 // was never emitted, so the rebuilt stream re-decodes it against the
 // refreshed schema and none of its data is lost.
 func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string, signal *streamSignal, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (pglogrepl.LSN, error) {
+	if err := r.source.requireSnapshotAllowed(); err != nil {
+		return 0, err
+	}
 	if len(signal.newTables) > 0 || len(signal.reincarnatedTables) > 0 {
 		if len(signal.newTables) > 0 {
 			output.Statusf("New table(s) detected on source: %s; adding to CDC stream\n", strings.Join(signal.newTables, ", "))
@@ -426,6 +513,17 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 		}
 	}
 	r.tables = tables
+	for _, table := range tables {
+		if _, changed := changedSet[table.Name]; !changed {
+			continue
+		}
+		for _, column := range replacedColumns(prevSchemas[table.Name], table.Schema) {
+			if r.allowedUnknown[table.Name] == nil {
+				r.allowedUnknown[table.Name] = make(map[string]struct{})
+			}
+			r.allowedUnknown[table.Name][column] = struct{}{}
+		}
+	}
 	for _, schemaErr := range signal.schemaErrors {
 		for _, table := range tables {
 			if table.Name != schemaErr.Table {
@@ -450,7 +548,7 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 		return 0, fmt.Errorf("source table schema or incarnation changed, but the destination cannot atomically replace the affected table snapshot")
 	}
 	if len(toSnapshot) > 0 {
-		if err := r.backfillTables(ctx, slotName, toSnapshot, changedSet, results, opts); err != nil {
+		if err := r.backfillTables(ctx, slotName, toSnapshot, changedSet, nil, results, opts); err != nil {
 			return 0, err
 		}
 	}
@@ -506,6 +604,27 @@ func (r *MultiTableCDCReader) rebuildStream(ctx context.Context, slotName string
 	return r.getSlotLSN(ctx, slotName)
 }
 
+// replacedColumns lists columns of prev that next dropped or retyped. WAL
+// replayed from before a rebuild still carries relation messages describing
+// them, which must decode as historical instead of triggering another rebuild.
+func replacedColumns(prev, next *schema.TableSchema) []string {
+	if prev == nil || next == nil {
+		return nil
+	}
+	current := make(map[string]schema.Column, len(next.Columns))
+	for _, col := range next.Columns {
+		current[col.Name] = col
+	}
+	var out []string
+	for _, col := range prev.Columns {
+		now, ok := current[col.Name]
+		if !ok || now.DataType != col.DataType || now.ArrayType != col.ArrayType || now.MaxLength != col.MaxLength || now.Precision != col.Precision || now.Scale != col.Scale {
+			out = append(out, col.Name)
+		}
+	}
+	return out
+}
+
 // shapeChangedTables returns the indices of refreshed tables whose column
 // shape differs from the schema previously tracked for them. Tables not in
 // prev (newly added) are excluded — the backfill path announces those.
@@ -526,6 +645,11 @@ func shapeChangedTables(prev map[string]*schema.TableSchema, refreshed []source.
 // detectNewTables lists the tables the stream should currently cover and
 // returns those missing from the active table set.
 func (r *MultiTableCDCReader) detectTableChanges(ctx context.Context) ([]string, []string, []string, error) {
+	if r.source.standby && r.source.managedPublication {
+		if err := r.source.checkManagedPublicationOnStandby(ctx); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	eligible, err := r.source.listEligibleTableIncarnations(ctx)
 	if err != nil {
 		return nil, nil, nil, err
@@ -621,13 +745,12 @@ func diffNewTables(current []source.SourceTableInfo, eligible map[string]struct{
 // determineResumeStrategy determines if we need a full snapshot or can resume.
 // Returns (needsSnapshot, minLSN).
 //
-// Only requires that at least one table has a resume LSN. Tables missing from
-// the resume map (created since the previous run, or empty ever since the
-// original snapshot) are backfilled via a temporary-slot snapshot before
-// streaming starts; see tablesWithoutResumeState.
+// A completed table cursor or interrupted snapshot boundary establishes the
+// replay position. Tables without completed cursors are backfilled through a
+// temporary-slot snapshot before replay; see tablesWithoutResumeState.
 func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
-	if len(r.resumeLSNs) == 0 {
-		return true, 0 // No resume LSNs = full snapshot
+	if len(r.resumeLSNs) == 0 && len(r.snapshotResumes) == 0 {
+		return true, 0
 	}
 
 	// Find minimum LSN across tables that have resume data.
@@ -641,6 +764,17 @@ func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
 		}
 		if first || lsn < minLSN {
 			minLSN = lsn
+			first = false
+		}
+	}
+	for tableName, progress := range r.snapshotResumes {
+		boundary, err := pglogrepl.ParseLSN(progress.Boundary)
+		if err != nil || boundary == 0 {
+			config.Debug("[CDC] Invalid snapshot resume boundary %q for %s; replacing snapshots", progress.Boundary, tableName)
+			return true, 0
+		}
+		if first || boundary < minLSN {
+			minLSN = boundary
 			first = false
 		}
 	}
@@ -662,6 +796,9 @@ func (r *MultiTableCDCReader) determineResumeStrategy() (bool, pglogrepl.LSN) {
 
 // executeSnapshot performs a full snapshot for all tables.
 func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+	if err := r.source.requireSnapshotAllowed(); err != nil {
+		return err
+	}
 	slotName := r.cdcConfig.SlotName
 	if slotName == "" {
 		slotName = generateMultiTableSlotName(r.cdcConfig.Publication, r.slotSuffix)
@@ -683,17 +820,7 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	config.Debug("[CDC] Creating persistent replication slot: %s", slotName)
 
 	// Create replication slot with snapshot export
-	result, err := pglogrepl.CreateReplicationSlot(
-		ctx,
-		r.source.replConn,
-		slotName,
-		"pgoutput",
-		pglogrepl.CreateReplicationSlotOptions{
-			Temporary:      false,
-			SnapshotAction: "EXPORT_SNAPSHOT",
-			Mode:           pglogrepl.LogicalReplication,
-		},
-	)
+	result, err := r.source.createLogicalSlot(ctx, r.source.replConn, slotName, false)
 	if err != nil {
 		return fmt.Errorf("failed to create replication slot: %w", err)
 	}
@@ -711,11 +838,12 @@ func (r *MultiTableCDCReader) executeSnapshot(ctx context.Context, results chan<
 	// the identical consistent point while the idle replication connection
 	// keeps the snapshot alive.
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(snapshotParallelism(opts))
+	budget := newSnapshotReadBudget(r.source.queryPool, snapshotParallelism(opts))
+	g.SetLimit(cap(budget.slots))
 	for _, table := range r.tables {
 		g.Go(func() error {
 			config.Debug("[CDC] Snapshotting table: %s", table.Name)
-			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, results, opts); err != nil {
+			if err := r.snapshotTable(gctx, table, result.SnapshotName, snapshotLSN, nil, results, opts, budget); err != nil {
 				return fmt.Errorf("failed to snapshot table %s: %w", table.Name, err)
 			}
 			// Initialize processed LSN for this table
@@ -763,13 +891,35 @@ func tableSchemaFingerprints(tables []source.SourceTableInfo) map[string]string 
 	return fingerprints
 }
 
-// snapshotTable reads all data from a single table using the snapshot.
-func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.SourceTableInfo, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) error {
+// snapshotTable emits a table's ordered lifecycle and cumulative range progress.
+func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.SourceTableInfo, snapshotName string, lsn pglogrepl.LSN, resume *source.CDCSnapshotProgress, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions, budget *snapshotReadBudget) error {
 	snapshot := &Snapshot{
 		source:      r.source,
 		tableName:   table.Name,
 		tableSchema: table.Schema,
 		cdcConfig:   r.cdcConfig,
+		readBudget:  budget,
+	}
+	if (opts.Streaming || opts.CDCSnapshotProgress) && opts.CDCManagedState && opts.CDCSnapshotReplace {
+		snapshot.progressKeys = resumableSnapshotKeys(table)
+	}
+	if len(snapshot.progressKeys) > 0 {
+		snapshot.progress = source.CDCSnapshotProgress{
+			Boundary: FormatLSN(lsn), Incarnation: table.Incarnation,
+			SchemaFingerprint: table.SchemaFingerprint, Attempt: rand.Text(),
+		}
+		if resume != nil {
+			if resume.Incarnation != table.Incarnation || resume.SchemaFingerprint != table.SchemaFingerprint {
+				return fmt.Errorf("snapshot of %s cannot resume: source identity changed", table.Name)
+			}
+			progress, err := resume.NormalizeLegacy()
+			if err != nil {
+				return fmt.Errorf("invalid snapshot resume progress for %s: %w", table.Name, err)
+			}
+			snapshot.progress, snapshot.resuming = progress, true
+		}
+	} else if resume != nil {
+		return fmt.Errorf("snapshot of %s cannot resume: its keys are not resumable", table.Name)
 	}
 
 	// Create a wrapper channel that adds TableName to results
@@ -796,9 +946,26 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 	return nil
 }
 
+// resumableSnapshotKeys returns the keys a snapshot of table can be ordered
+// and resumed by: all of them non-null, or none.
+func resumableSnapshotKeys(table source.SourceTableInfo) []string {
+	if len(table.PrimaryKeys) == 0 || table.Schema == nil {
+		return nil
+	}
+	nullable := make(map[string]bool, len(table.Schema.Columns))
+	for _, col := range table.Schema.Columns {
+		nullable[col.Name] = col.Nullable
+	}
+	for _, key := range table.PrimaryKeys {
+		if isNullable, ok := nullable[key]; !ok || isNullable {
+			return nil
+		}
+	}
+	return table.PrimaryKeys
+}
+
 // streamChanges streams WAL changes, filtering per-table based on resume LSNs.
-// For batch mode, barrierNonce identifies the logical message that ends this
-// replication phase.
+// For batch mode, barrier identifies where this replication phase ends.
 //
 // Small WAL transactions (single-row changes) are accumulated per-table and
 // flushed as larger batches to avoid overwhelming the destination with
@@ -808,14 +975,14 @@ func (r *MultiTableCDCReader) snapshotTable(ctx context.Context, table source.So
 // should cover but doesn't, and watches for mid-stream schema changes surfaced
 // by the decoder. Either way it flushes what it has and returns a signal so
 // the caller can rebuild the stream; a nil signal means normal termination.
-func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrierNonce string, sqlBarrierLSN pglogrepl.LSN, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
+func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogrepl.LSN, barrier batchBarrier, slotName string, results chan<- source.RecordBatchResult, opts source.MultiTableReadOptions) (retSignal *streamSignal, retErr error) {
 	config.Debug("[CDC] Multi-table streaming from LSN: %s", startLSN)
 
 	cdcConfigWithSlot := r.cdcConfig
 	cdcConfigWithSlot.SlotName = slotName
 
 	// Create multi-table replicator
-	repl, err := NewMultiTableReplicator(r.source, r.tables, cdcConfigWithSlot, startLSN, r, opts.Streaming, barrierNonce)
+	repl, err := NewMultiTableReplicator(r.source, r.tables, cdcConfigWithSlot, startLSN, r, opts.Streaming, barrier)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create replicator: %w", err)
 	}
@@ -837,7 +1004,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	}
 
 	// In streaming mode, batches carry a CommitToken (safe LSN) so the pipeline
-	// confirms the slot only after the data is durable. barrierNonce is empty in
+	// confirms the slot only after the data is durable. The barrier is inactive in
 	// streaming mode, so the barrier exit below never triggers.
 	var token tokenFunc
 	if opts.Streaming {
@@ -875,6 +1042,7 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 	// actually advanced (instead of every 100ms idle tick).
 	var lastIdleToken pglogrepl.LSN
 	lastHeartbeat := time.Now()
+	lastBusyToken := time.Now()
 
 	// New-table discovery runs on a timer in streaming mode only: a batch run
 	// picks up new tables at its next start, where Connect has already
@@ -959,8 +1127,17 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 		if err := accum.flushReadyContext(ctx, results, token); err != nil {
 			return nil, err
 		}
+		if opts.Streaming && hadActivity {
+			if err := accum.flushStaleContext(ctx, results, token, streamingMaxAge(opts.ReadOptions), time.Now()); err != nil {
+				return nil, err
+			}
+			lastIdleToken, err = maybeEmitBusyCommitToken(ctx, repl, accum, results, lastIdleToken, &lastBusyToken)
+			if err != nil {
+				return nil, err
+			}
+		}
 
-		if barrierNonce != "" && repl.BarrierReached() {
+		if barrier.active() && repl.BarrierReached() {
 			_, pending := repl.PendingLowWater()
 			if !pending {
 				decodedBarrierLSN := repl.BarrierLSN()
@@ -977,7 +1154,9 @@ func (r *MultiTableCDCReader) streamChanges(ctx context.Context, startLSN pglogr
 				if err := repl.Close(ctx); err != nil {
 					return nil, err
 				}
-				warnIfBarrierLSNsDiverge(sqlBarrierLSN, decodedBarrierLSN)
+				if barrier.nonce != "" {
+					warnIfBarrierLSNsDiverge(barrier.sqlLSN, decodedBarrierLSN)
+				}
 				// The keepalive holds the walsender open until finalization.
 				r.source.checkpointBatchBarrier(ctx, decodedBarrierLSN, startLSN, slotName)
 				return nil, nil

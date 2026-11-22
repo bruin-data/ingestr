@@ -80,14 +80,7 @@ func prepareMergeTables(ctx context.Context, dest destination.Destination, p mer
 	return nil
 }
 
-// mergeStagingInto merges the staging table into the target table by primary
-// key. A non-empty incrementalKey makes the per-PK dedup keep the row with the
-// highest value of that key (latest wins) instead of an arbitrary one.
-func mergeStagingInto(ctx context.Context, dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string) error {
-	return dest.MergeTable(ctx, mergeStagingOptions(dest, stagingTable, targetTable, primaryKeys, tableSchema, incrementalKey, incrementalPredicate, expectedIncarnation))
-}
-
-func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string) destination.MergeOptions {
+func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable string, primaryKeys []string, tableSchema *schema.TableSchema, incrementalKey, incrementalPredicate, expectedIncarnation string, hardDelete bool) destination.MergeOptions {
 	return destination.MergeOptions{
 		StagingTable:           stagingTable,
 		TargetTable:            targetTable,
@@ -97,6 +90,7 @@ func mergeStagingOptions(dest destination.Destination, stagingTable, targetTable
 		IncrementalPredicate:   incrementalPredicate,
 		Schema:                 tableSchema,
 		CDCExpectedIncarnation: expectedIncarnation,
+		CDCHardDelete:          hardDelete && hasCDCColumns(tableSchema),
 	}
 }
 
@@ -187,13 +181,23 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}
 	// Generate staging table name
 	stagingTable := managedStagingTableName(job.Destination, job.Config.DestTable, "merge", job.Config.StagingDataset, job.Config.RunID)
-	output.Statusf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
 	isCDC := hasCDCColumns(job.Schema)
+	directSnapshot := isCDC && len(job.Config.PrimaryKeys) > 0 && directCDCSnapshotBatchEnabled(job.Config, job.Destination)
+	if !directSnapshot {
+		output.Statusf("[MERGE] %s | Using staging table: %s\n", time.Now().Format("15:04:05"), stagingTable)
+	}
+	if job.CDCStateManager != nil {
+		dropStaleStagingTables(ctx, job.Destination, job.Config.DestTable, stagingTable)
+	}
 	if isCDC {
 		warnIfCDCMergeUnsupported(job.Destination)
 	}
 
-	if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
+	prepare := prepareMergeTables
+	if directSnapshot {
+		prepare = prepareMergeTarget
+	}
+	if err := prepare(ctx, job.Destination, mergeTableParams{
 		DestTable:    job.Config.DestTable,
 		StagingTable: stagingTable,
 		Schema:       job.Schema,
@@ -223,7 +227,7 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey:                  job.Config.IncrementalKey,
+		IncrementalKey:                  sourceIncrementalKeyForRead(job),
 		IntervalStart:                   job.Config.IntervalStart,
 		IntervalEnd:                     job.Config.IntervalEnd,
 		ExtractPartitionBy:              job.Config.ExtractPartitionBy,
@@ -242,7 +246,18 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		CDCSlotSuffix:                   job.Config.CDCSlotSuffix, // Destination-aware slot suffix
 		CDCLegacySlotSuffix:             job.Config.CDCLegacySlotSuffix,
 		CDCSnapshotReplace:              isCDC && supportsCDCSnapshotReplace(job.Destination),
+		CDCSnapshotProgress:             directSnapshot,
+		CDCManagedState:                 job.CDCStateManager != nil,
 		FullRefresh:                     job.Config.FullRefresh,
+	}
+	if directSnapshot && job.CDCStateManager != nil && !job.Config.FullRefresh && readOpts.CDCResumeLSN == "" {
+		resume, ok, err := job.CDCStateManager.SnapshotResume(ctx, job.Config.SourceTable)
+		if err != nil {
+			return fmt.Errorf("read snapshot progress for %s: %w", job.Config.SourceTable, err)
+		}
+		if ok {
+			readOpts.CDCSnapshotResume = &resume
+		}
 	}
 
 	// The read context is cancelable so a staging-write failure stops the
@@ -259,6 +274,27 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	// Wrap channel with progress tracker if provided
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
+	}
+	if directSnapshot {
+		if err := job.ApplyEvolution(ctx); err != nil {
+			cancelRead()
+			drainAndReleaseUntil(records, streamAbortDrainTimeout)
+			return fmt.Errorf("failed to apply schema evolution: %w", err)
+		}
+		writer := cdcSnapshotBatchWriter{
+			dest: job.Destination, cfg: job.Config, manager: job.CDCStateManager,
+			sourceTable: job.Config.SourceTable, expectedIncarnation: expectedIncarnation,
+			table: mergeTableParams{
+				DestTable: job.Config.DestTable, StagingTable: stagingTable,
+				Schema: job.Schema, PrimaryKeys: job.Config.PrimaryKeys, PartitionBy: job.Config.PartitionBy,
+				ClusterBy: job.Config.ClusterBy, IsCDC: true,
+			},
+		}
+		return writer.write(ctx, records, cancelRead)
+	}
+	var snapshotContent *cdcSnapshotBatchContent
+	if isCDC && destination.SupportsDirectCDCSnapshot(job.Destination) {
+		records, snapshotContent = trackCDCSnapshotBatchContent(readCtx, records, true)
 	}
 
 	// Write to staging table using parallel writes. Source TRUNCATE controls
@@ -298,6 +334,12 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 		if err := source.ConnectorLeaseLoss(ctx); err != nil {
 			return err
 		}
+		// Never-snapshot sources only emit WAL truncates; retain the checkpoint for replay.
+		if job.CDCStateManager != nil && !job.CDCStateManager.neverSnapshot {
+			if err := job.CDCStateManager.InvalidateBatchSnapshot(ctx, job.Config.SourceTable, job.Config.DestTable); err != nil {
+				return err
+			}
+		}
 		var truncateErr error
 		if expectedIncarnation != "" && destination.SupportsCDCConditionalTruncate(job.Destination) {
 			truncateErr = destination.ApplyCDCTruncateIfIncarnation(ctx, job.Destination, job.Config.DestTable, expectedIncarnation)
@@ -314,7 +356,9 @@ func (s *MergeStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := mergeStagingInto(ctx, job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate, expectedIncarnation); err != nil {
+	mergeOpts := mergeStagingOptions(job.Destination, stagingTable, job.Config.DestTable, job.Config.PrimaryKeys, job.Schema, job.Config.IncrementalKey, job.Config.IncrementalPredicate, expectedIncarnation, job.Config.HardDeletesCDC())
+	mergeOpts.CDCSnapshot = snapshotContent.onlySnapshot("")
+	if err := job.Destination.MergeTable(ctx, mergeOpts); err != nil {
 		return fmt.Errorf("failed to merge data: %w", err)
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -355,6 +399,7 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	if anyTableHasCDC {
 		warnIfCDCMergeUnsupported(job.Destination)
 	}
+	directSnapshot := anyTableHasCDC && directCDCSnapshotBatchEnabled(job.Config, job.Destination)
 
 	stagingTables := make(map[string]string)
 	tableConfigs := make(map[string]destination.TableWriteConfig)
@@ -412,8 +457,15 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			}
 
 			stagingTable := managedStagingTableName(job.Destination, destTable, "merge", job.Config.StagingDataset, job.Config.RunID)
+			if job.CDCStateManager != nil {
+				dropStaleStagingTables(ctx, job.Destination, destTable, stagingTable)
+			}
 
-			if err := prepareMergeTables(ctx, job.Destination, mergeTableParams{
+			prepare := prepareMergeTables
+			if directSnapshot {
+				prepare = prepareMergeTarget
+			}
+			if err := prepare(ctx, job.Destination, mergeTableParams{
 				DestTable:    destTable,
 				StagingTable: stagingTable,
 				Schema:       ti.Schema,
@@ -468,11 +520,14 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 			CDCSlotSuffix:       job.Config.CDCSlotSuffix,
 			CDCLegacySlotSuffix: job.Config.CDCLegacySlotSuffix,
 			CDCSnapshotReplace:  anyTableHasCDC && supportsCDCSnapshotReplace(job.Destination),
+			CDCSnapshotProgress: directSnapshot,
+			CDCManagedState:     job.CDCStateManager != nil,
 			FullRefresh:         job.Config.FullRefresh,
 		},
 		CDCResumeLSNs:               job.CDCResumeLSNs,
 		CDCResumeIncarnations:       resumeIncarnations,
 		CDCResumeSchemaFingerprints: resumeSchemas,
+		CDCSnapshotResumes:          job.CDCSnapshotResumes,
 	})
 	if err != nil {
 		if source.ConnectorLeaseLoss(ctx) == nil {
@@ -488,6 +543,13 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 
 	if job.Tracker != nil {
 		records = job.Tracker.Wrap(records)
+	}
+	if directSnapshot {
+		return writeCDCSnapshotBatchTables(ctx, job, stagingTables, records, cancelRead)
+	}
+	var snapshotContent *cdcSnapshotBatchContent
+	if anyTableHasCDC && destination.SupportsDirectCDCSnapshot(job.Destination) {
+		records, snapshotContent = trackCDCSnapshotBatchContent(readCtx, records, false)
 	}
 
 	writeResult, err := multitable.WriteWithResult(ctx, job.Destination, records, destination.MultiTableWriteOptions{
@@ -512,6 +574,17 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
+	}
+	// In never mode, every truncate is replayable WAL, not a replacement snapshot.
+	if job.CDCStateManager != nil && !job.CDCStateManager.neverSnapshot {
+		for _, tableInfo := range job.Tables {
+			if _, staged := stagingTables[tableInfo.Name]; !staged || !hasCDCColumns(tableInfo.Schema) || !writeResult.TruncatedTables[tableInfo.Name] {
+				continue
+			}
+			if err := job.CDCStateManager.InvalidateBatchSnapshot(ctx, tableInfo.Name, job.GetDestTableName(tableInfo.Name)); err != nil {
+				return err
+			}
+		}
 	}
 	if atomicMerger, ok := job.Destination.(destination.CDCMultiTableAtomicMerger); ok && anyTableHasCDC && len(stagingTables) == len(job.Tables) {
 		dropStagingTables := func() {
@@ -541,8 +614,10 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 					return err
 				}
 			}
+			mergeOpts := mergeStagingOptions(job.Destination, stagingTable, job.GetDestTableName(tableInfo.Name), tableInfo.PrimaryKeys, tableInfo.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC())
+			mergeOpts.CDCSnapshot = snapshotContent.onlySnapshot(tableInfo.Name)
 			merges = append(merges, destination.CDCAtomicTableMerge{
-				Options:  mergeStagingOptions(job.Destination, stagingTable, job.GetDestTableName(tableInfo.Name), tableInfo.PrimaryKeys, tableInfo.Schema, "", "", expectedIncarnation),
+				Options:  mergeOpts,
 				Truncate: writeResult.TruncatedTables[tableInfo.Name],
 			})
 		}
@@ -610,7 +685,9 @@ func (s *MergeStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTableIn
 				mergeErrChan <- err
 				return
 			}
-			if err := mergeStagingInto(ctx, job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", "", expectedIncarnation); err != nil {
+			mergeOpts := mergeStagingOptions(job.Destination, stagingTable, destTable, ti.PrimaryKeys, ti.Schema, "", "", expectedIncarnation, job.Config.HardDeletesCDC())
+			mergeOpts.CDCSnapshot = snapshotContent.onlySnapshot(ti.Name)
+			if err := job.Destination.MergeTable(ctx, mergeOpts); err != nil {
 				mergeErrChan <- fmt.Errorf("failed to merge table %s: %w", ti.Name, err)
 				return
 			}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -157,4 +158,53 @@ func TestPostgresDestinationCDCMergeDoesNotRegressTargetLSN(t *testing.T) {
 	var count int
 	require.NoError(t, db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = 1`, targetTable)).Scan(&count))
 	require.Equal(t, 1, count)
+}
+
+func TestPostgresDestinationCDCMergeHardDelete(t *testing.T) {
+	if pgDest.uri == "" {
+		t.Skip("shared postgres destination container not available")
+	}
+
+	ctx := t.Context()
+	targetTable := "public.cdc_hard_target_" + uniqueSuffix()
+	stagingTable := "public.cdc_hard_staging_" + uniqueSuffix()
+	dest := postgresdest.NewPostgresDestination()
+	require.NoError(t, dest.Connect(ctx, pgDest.uri))
+	t.Cleanup(func() { _ = dest.Close(context.Background()) })
+	db, err := sql.Open("pgx", pgDest.uri)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s, %s", targetTable, stagingTable))
+	})
+	require.NoError(t, dest.Exec(ctx, fmt.Sprintf(`
+		CREATE TABLE %s (id bigint PRIMARY KEY, payload text, _cdc_lsn text, _cdc_deleted boolean, _cdc_synced_at timestamptz);
+		CREATE TABLE %s (id bigint, payload text, _cdc_lsn text, _cdc_deleted boolean, _cdc_synced_at timestamptz, _cdc_unchanged_cols jsonb);
+	`, targetTable, stagingTable)))
+
+	runCDCHardDeleteScenario(t, ctx, cdcHardDeleteHarness{
+		dest:         dest,
+		targetTable:  targetTable,
+		stagingTable: stagingTable,
+		dialect: cdcHardDeleteDialect{
+			boolean:   func(v bool) string { return fmt.Sprint(v) },
+			timestamp: func(v string) string { return "'" + v + "'" },
+			unchanged: func(cols []string) string {
+				if len(cols) == 0 {
+					return "'[]'"
+				}
+				return `'["` + strings.Join(cols, `","`) + `"]'`
+			},
+		},
+		insert: func(t *testing.T, table, values string) {
+			require.NoError(t, dest.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES %s", table, values)))
+		},
+		truncate: func(t *testing.T, table string) {
+			require.NoError(t, dest.Exec(ctx, "TRUNCATE "+table))
+		},
+		readRows: func(t *testing.T) map[int64]cdcHardDeleteRow {
+			return readCDCHardDeleteRows(t, db, fmt.Sprintf(`SELECT id, COALESCE(payload, ''), COALESCE(_cdc_lsn, ''), _cdc_deleted FROM %s`, targetTable))
+		},
+		predicate: `target."id" > 100`,
+	})
 }

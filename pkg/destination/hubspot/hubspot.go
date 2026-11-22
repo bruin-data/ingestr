@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"slices"
 	"strconv"
@@ -665,7 +666,7 @@ func (s *shaper) shapeRow(record arrow.RecordBatch, colIndex map[string]int, row
 		col := record.Column(i)
 		if v, ok := propertyValue(col, row); ok {
 			props[name] = v
-		} else if s.writeNulls && col.IsNull(row) {
+		} else if s.writeNulls && (col.IsNull(row) || nonFinite(col, row)) {
 			// Explicitly clear the field rather than leaving it untouched.
 			props[name] = ""
 		}
@@ -718,16 +719,6 @@ func primaryKeysFor(explicit []string, sch *schema.TableSchema) []string {
 	return nil
 }
 
-// drainRecords releases every remaining batch so a source producer goroutine is
-// never left blocked on a send after the consumer stops early.
-func drainRecords(records <-chan source.RecordBatchResult) {
-	for result := range records {
-		if result.Batch != nil {
-			result.Batch.Release()
-		}
-	}
-}
-
 // reportWithWriteErr surfaces the records rejected before a hard failure alongside
 // that failure, so a 5xx/auth error late in the run doesn't hide the reject list.
 func reportWithWriteErr(sh *shaper, rejects *rejectionLog, writeErr error) error {
@@ -738,73 +729,22 @@ func reportWithWriteErr(sh *shaper, rejects *rejectionLog, writeErr error) error
 }
 
 func (d *HubSpotDestination) Write(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	sh, err := parseShaper(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
-	if err != nil {
-		drainRecords(records)
-		return err
-	}
-	if sh.associate() {
-		if err := d.resolveAssociationType(ctx, sh); err != nil {
-			drainRecords(records)
-			return err
-		}
-	} else if err := d.resolveMatchMode(ctx, sh); err != nil {
-		drainRecords(records)
-		return err
-	}
-
-	var totalRows int64
-	var skipped atomic.Int64
-	var rejects rejectionLog
-	var writeErr error
-	for result := range records {
-		if result.Err != nil {
-			if result.Batch != nil {
-				result.Batch.Release()
-			}
-			writeErr = result.Err
-			break
-		}
-		record := result.Batch
-		if record == nil {
-			continue
-		}
-		if record.NumRows() == 0 {
-			record.Release()
-			continue
-		}
-
-		rows, err := d.writeBatch(ctx, sh, record, &skipped, &rejects)
-		record.Release()
-		if err != nil {
-			writeErr = err
-			break
-		}
-		totalRows += rows
-	}
-	if writeErr != nil {
-		drainRecords(records)
-		return reportWithWriteErr(sh, &rejects, writeErr)
-	}
-
-	warnSkipped(&skipped, sh)
-	config.Debug("[HUBSPOT DEST] Wrote %d %s record(s)", totalRows, sh.objectType)
-	return d.finalizeAndReport(ctx, sh, &rejects)
+	opts.Parallelism = 1
+	return d.WriteParallel(ctx, records, opts)
 }
 
 func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	// Return errors before draining: executeReverseETL must cancel the source
+	// first, then release remaining batches with its bounded drain.
 	sh, err := parseShaper(opts.Table, opts.Strategy, primaryKeysFor(opts.PrimaryKeys, opts.Schema), opts.RejectMode, opts.WriteNulls)
 	if err != nil {
-		drainRecords(records)
 		return err
 	}
 	if sh.associate() {
 		if err := d.resolveAssociationType(ctx, sh); err != nil {
-			drainRecords(records)
 			return err
 		}
 	} else if err := d.resolveMatchMode(ctx, sh); err != nil {
-		drainRecords(records)
 		return err
 	}
 
@@ -833,7 +773,17 @@ func (d *HubSpotDestination) WriteParallel(ctx context.Context, records <-chan s
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for result := range records {
+			for {
+				var result source.RecordBatchResult
+				select {
+				case <-ctx.Done():
+					return
+				case next, ok := <-records:
+					if !ok {
+						return
+					}
+					result = next
+				}
 				// Stop promptly once another worker has failed; executeReverseETL
 				// cancels the source read and drains the rest.
 				if ctx.Err() != nil {
@@ -2745,8 +2695,22 @@ func timestampUnit(a *array.Timestamp) arrow.TimeUnit {
 
 // propertyValue converts a source cell to the string HubSpot property values
 // require, returning ok=false for nulls (which are omitted from the record).
+// nonFinite reports a NaN or ±Inf float; it is written like a null.
+func nonFinite(arr arrow.Array, idx int) bool {
+	var f float64
+	switch a := arr.(type) {
+	case *array.Float32:
+		f = float64(a.Value(idx))
+	case *array.Float64:
+		f = a.Value(idx)
+	default:
+		return false
+	}
+	return !arr.IsNull(idx) && (math.IsNaN(f) || math.IsInf(f, 0))
+}
+
 func propertyValue(arr arrow.Array, idx int) (string, bool) {
-	if arr.IsNull(idx) {
+	if arr.IsNull(idx) || nonFinite(arr, idx) {
 		return "", false
 	}
 
@@ -2832,7 +2796,7 @@ func jsonString(v interface{}) string {
 // arrowToValue decodes nested struct/list values so they can be JSON-encoded
 // into a single HubSpot property string.
 func arrowToValue(arr arrow.Array, idx int) interface{} {
-	if arr.IsNull(idx) {
+	if arr.IsNull(idx) || nonFinite(arr, idx) {
 		return nil
 	}
 	switch a := arr.(type) {

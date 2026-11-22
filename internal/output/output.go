@@ -57,6 +57,22 @@ var (
 	deferred   []string
 )
 
+// QuietEnv names the environment variable that silences ingestr's own status
+// output and other test-log noise. The Makefile test targets set it so that
+// `go test -v` logs keep the per-test PASS/FAIL lines easy to spot; the real
+// CLI re-initializes output in runIngest and is unaffected.
+const QuietEnv = "INGESTR_QUIET_PROGRESS"
+
+// Quiet reports whether QuietEnv is set.
+func Quiet() bool { return os.Getenv(QuietEnv) != "" }
+
+func init() {
+	if Quiet() {
+		stdoutW, stderrW = io.Discard, io.Discard
+		logger = newJSONLogger(io.Discard)
+	}
+}
+
 // newJSONLogger builds a slog logger that writes JSON lines to w, renaming the
 // built-in "time" attribute to "ts". No buffering, so os.Exit cannot drop a line.
 func newJSONLogger(w io.Writer) *slog.Logger {
@@ -154,15 +170,16 @@ func emitLog(level slog.Level, msg string) {
 // StartInfo carries the fields of the start event. Primitive types only, so this
 // package stays a leaf.
 type StartInfo struct {
-	SourceType     string
-	DestType       string
-	SourceTable    string
-	DestTable      string
-	Strategy       string
-	IncrementalKey string
-	PrimaryKey     []string
-	SchemaNaming   string
-	CDCTableNaming string
+	SourceType        string
+	DestType          string
+	SourceTable       string
+	DestTable         string
+	Strategy          string
+	IncrementalKey    string
+	PrimaryKey        []string
+	SchemaNaming      string
+	CDCTableNaming    string
+	CDCDeleteBehavior string
 }
 
 // EventStart emits the start event (JSON mode only).
@@ -189,6 +206,9 @@ func EventStart(i StartInfo) {
 	}
 	if i.CDCTableNaming != "" {
 		attrs = append(attrs, slog.String("cdc_table_naming", i.CDCTableNaming))
+	}
+	if i.CDCDeleteBehavior != "" {
+		attrs = append(attrs, slog.String("cdc_delete_behavior", i.CDCDeleteBehavior))
 	}
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "ingestion started", attrs...)
 }

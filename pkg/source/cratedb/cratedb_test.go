@@ -1,10 +1,12 @@
 package cratedb
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -121,6 +123,7 @@ func TestMapCrateDBToDataType(t *testing.T) {
 		{"boolean_array", schema.TypeArray, 0, 0, schema.TypeBoolean},
 		{"array(bigint)", schema.TypeArray, 0, 0, schema.TypeInt64},
 		{"array(text)", schema.TypeArray, 0, 0, schema.TypeString},
+		{"array(numeric(5,2))", schema.TypeArray, 5, 2, schema.TypeDecimal},
 		{"ip", schema.TypeString, 0, 0, schema.TypeUnknown},
 		{"geo_point", schema.TypeString, 0, 0, schema.TypeUnknown},
 		{"geo_shape", schema.TypeString, 0, 0, schema.TypeUnknown},
@@ -170,3 +173,17 @@ func TestGetTableRequiresName(t *testing.T) {
 }
 
 var _ source.Source = (*CrateDBSource)(nil)
+
+func TestConvertValueKeepsNumericsAndNullElements(t *testing.T) {
+	n := pgtype.Numeric{Int: big.NewInt(125), Exp: -2, Valid: true}
+	if got := convertValue(n); got != "1.25" {
+		t.Fatalf("scalar numeric = %#v, want \"1.25\"", got)
+	}
+	if got := convertValue(pgtype.Numeric{InfinityModifier: pgtype.Infinity, Valid: true}); got != nil {
+		t.Fatalf("infinite numeric = %#v, want nil", got)
+	}
+	got, ok := convertValue([]interface{}{n, nil, int32(3)}).([]interface{})
+	if !ok || len(got) != 3 || got[0] != "1.25" || got[1] != nil || got[2] != int32(3) {
+		t.Fatalf("array = %#v, want [\"1.25\" nil 3]", got)
+	}
+}

@@ -209,6 +209,12 @@ func (d *CrateDBDestination) writeRecordBatch(ctx context.Context, record arrow.
 		return 0, nil
 	}
 
+	for _, field := range record.Schema().Fields() {
+		if field.Type.ID() == arrow.LIST {
+			return d.writeListRecordBatch(ctx, record, table)
+		}
+	}
+
 	colNames := make([]string, numCols)
 	unnestParams := make([]string, numCols)
 	for i := 0; i < numCols; i++ {
@@ -248,6 +254,44 @@ func (d *CrateDBDestination) writeRecordBatch(ctx context.Context, record arrow.
 		written += int64(batchRows)
 	}
 
+	return written, nil
+}
+
+// UNNEST flattens nested arrays in CrateDB. Bind each list as a row value
+// instead so list boundaries, NULL lists, and empty lists survive the write.
+func (d *CrateDBDestination) writeListRecordBatch(ctx context.Context, record arrow.RecordBatch, table string) (int64, error) {
+	numCols := int(record.NumCols())
+	colNames := make([]string, numCols)
+	for i, field := range record.Schema().Fields() {
+		colNames[i] = destination.QuoteIdentifier(field.Name)
+	}
+	prefix := fmt.Sprintf("INSERT INTO %s (%s) VALUES ", destination.QuoteTableName(table), strings.Join(colNames, ", "))
+	// Budget for the default 256 KiB statement_max_length, including identifiers.
+	// Each placeholder needs at most 8 bytes ("$65535, "), plus row delimiters.
+	rowsPerBatch := min(10000/numCols, (262144-len(prefix))/(8*numCols+2))
+	if rowsPerBatch < 1 {
+		return 0, fmt.Errorf("list insert exceeds CrateDB statement or parameter limit for %d columns", numCols)
+	}
+	var written int64
+	for start := int64(0); start < record.NumRows(); start += int64(rowsPerBatch) {
+		end := min(start+int64(rowsPerBatch), record.NumRows())
+		rows := make([]string, 0, end-start)
+		params := make([]any, 0, int(end-start)*numCols)
+		for row := start; row < end; row++ {
+			placeholders := make([]string, numCols)
+			for col := 0; col < numCols; col++ {
+				params = append(params, extractValue(record.Column(col), int(row)))
+				placeholders[col] = fmt.Sprintf("$%d", len(params))
+			}
+			rows = append(rows, "("+strings.Join(placeholders, ", ")+")")
+		}
+		insertSQL := prefix + strings.Join(rows, ", ")
+		if _, err := d.pool.Exec(ctx, insertSQL, params...); err != nil {
+			config.LogFailedQuery(insertSQL, err)
+			return written, fmt.Errorf("failed to insert rows: %w", err)
+		}
+		written += end - start
+	}
 	return written, nil
 }
 
@@ -863,7 +907,12 @@ func extractValue(arr arrow.Array, idx int) any {
 	case *array.Decimal256:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal256Type).Scale))
 	case *array.List:
-		return a.ValueStr(idx)
+		start, end := a.ValueOffsets(idx)
+		values := make([]any, end-start)
+		for i := start; i < end; i++ {
+			values[i-start] = extractValue(a.ListValues(), int(i))
+		}
+		return values
 	case array.ExtensionArray:
 		storage := a.Storage()
 		return extractValue(storage, idx)

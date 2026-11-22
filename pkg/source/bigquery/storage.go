@@ -3,6 +3,7 @@ package bigquery
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -23,6 +24,10 @@ import (
 
 // createStorageClient creates a BigQuery Storage Read API client with appropriate credentials.
 func (d *Dialect) createStorageClient(ctx context.Context) (*storage.BigQueryReadClient, error) {
+	if d.readAPI == ReadAPIREST {
+		return nil, errors.New("BigQuery Storage Read API is disabled by read_api=rest")
+	}
+
 	var opts []option.ClientOption
 
 	// Configure credentials based on what's available

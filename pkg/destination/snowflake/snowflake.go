@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ import (
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
 )
 
 type SnowflakeDestination struct {
@@ -38,6 +39,8 @@ type SnowflakeDestination struct {
 	database  string
 	warehouse string
 	role      string
+
+	clusterByWarning sync.Once
 }
 
 func NewSnowflakeDestination() *SnowflakeDestination {
@@ -120,8 +123,15 @@ func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destinatio
 		config.Debug("[DEST] DROP TABLE took %v", time.Since(startDrop))
 	}
 
+	clusterBy, missing := splitClusterByColumns(opts.Schema.Columns, opts.ClusterBy)
+	if len(missing) > 0 {
+		d.clusterByWarning.Do(func() {
+			output.Warnf("Snowflake: skipped cluster_by columns that are not in the table: %s\n", strings.Join(missing, ", "))
+		})
+	}
+
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(fullTable, opts.Schema.Columns, opts.PrimaryKeys, clusterBy)
 	if _, err := d.db.ExecContext(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
@@ -223,6 +233,10 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 
 	tn := sfTable(opts.Table)
 	fullTable := quoteFQN(tn)
+	copyColumns, err := d.copyColumnsFor(ctx, fullTable, opts.Schema)
+	if err != nil {
+		return err
+	}
 
 	// Use the implicit table stage (@%table_name) which exists automatically
 	// for every table and doesn't require CREATE STAGE privilege. The stage is
@@ -385,7 +399,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 				break drain
 			}
 		}
-		copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending)
+		copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending, copyColumns)
 		if err != nil {
 			fail(err)
 			continue
@@ -408,7 +422,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 			// Unreachable today: the loop above truncates pending after every
 			// COPY and returns on error. Kept so a future change to that loop
 			// cannot silently drop files.
-			copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending)
+			copied, err := d.copyFilesInBatches(writeCtx, fullTable, stageName, loadID, pending, copyColumns)
 			if err != nil {
 				return fmt.Errorf("snowflake parallel write failed: %w", err)
 			}
@@ -417,7 +431,7 @@ func (d *SnowflakeDestination) WriteParallel(ctx context.Context, records <-chan
 			// A FILES clause accepts at most 1,000 names. Once every upload is
 			// complete, the unique load prefix selects the same files without
 			// that limit and keeps direct writes in a single COPY statement.
-			if err := d.copyFiles(ctx, fullTable, stageName, loadID, nil); err != nil {
+			if err := d.copyFiles(ctx, fullTable, stageName, loadID, nil, copyColumns); err != nil {
 				return fmt.Errorf("snowflake parallel write failed: %w", err)
 			}
 			copiedFiles += len(pending)
@@ -567,10 +581,7 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 	// for the worker's entire lifetime. This lets the pool (bounded by
 	// SetMaxOpenConns) be shared safely across all tables in a multi-table
 	// write, regardless of numTables * parallelism.
-	uploadCtx := sf.WithFileStream(w.ctx, w.buf)
-	uploadCtx = sf.WithFileTransferOptions(uploadCtx, &sf.SnowflakeFileTransferOptions{
-		RaisePutGetError: true,
-	})
+	uploadCtx := sf.WithFilePutStream(w.ctx, w.buf) //nolint:staticcheck // the file is already fully buffered in memory, so UploadStream's streaming would not save anything
 
 	// The stage path is a directory prefix; the local file name names the
 	// staged object, which COPY's FILES list references as <loadID>/<fileName>.
@@ -590,9 +601,9 @@ func (w *snowflakeFileUploader) flush() (string, error) {
 	return fileName, nil
 }
 
-func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageName, loadID string, files []string) error {
+func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageName, loadID string, files []string, columns []schema.Column) error {
 	startCopy := time.Now()
-	copySQL := buildCopyIntoSQL(fullTable, stageName, loadID, files)
+	copySQL := buildCopyIntoSQL(fullTable, stageName, loadID, files, columns)
 	if _, err := d.db.ExecContext(ctx, copySQL); err != nil {
 		config.LogFailedQuery(copySQL, err)
 		return fmt.Errorf("failed to COPY INTO: %w", err)
@@ -607,11 +618,11 @@ func (d *SnowflakeDestination) copyFiles(ctx context.Context, fullTable, stageNa
 
 const maxFilesPerCopy = 1000
 
-func (d *SnowflakeDestination) copyFilesInBatches(ctx context.Context, fullTable, stageName, loadID string, files []string) (int, error) {
+func (d *SnowflakeDestination) copyFilesInBatches(ctx context.Context, fullTable, stageName, loadID string, files []string, columns []schema.Column) (int, error) {
 	copied := 0
 	for len(files) > 0 {
 		batchSize := min(len(files), maxFilesPerCopy)
-		if err := d.copyFiles(ctx, fullTable, stageName, loadID, files[:batchSize]); err != nil {
+		if err := d.copyFiles(ctx, fullTable, stageName, loadID, files[:batchSize], columns); err != nil {
 			return copied, err
 		}
 		copied += batchSize
@@ -666,7 +677,7 @@ func snowflakeParquetWriterProperties() (*parquet.WriterProperties, pqarrow.Arro
 	return writerProps, arrowProps
 }
 
-func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string) string {
+func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string, columns []schema.Column) string {
 	var filesClause string
 	if len(files) > 0 {
 		quoted := make([]string, len(files))
@@ -677,8 +688,70 @@ func buildCopyIntoSQL(fullTable, stageName, loadID string, files []string) strin
 	}
 	// The FROM location must end with '/': FILES entries are appended to it
 	// verbatim.
-	return fmt.Sprintf("COPY INTO %s FROM @%s/%s/%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
-		fullTable, stageName, loadID, filesClause)
+	location := fmt.Sprintf("@%s/%s/", stageName, loadID)
+	if !hasJSONColumn(columns) {
+		return fmt.Sprintf("COPY INTO %s FROM %s%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE PURGE = TRUE",
+			fullTable, location, filesClause)
+	}
+	// COPY stores a parquet string in a VARIANT column verbatim, so JSON columns
+	// are parsed on the way in. MATCH_BY_COLUMN_NAME cannot be combined with a
+	// transform: the column list is explicit, GET_IGNORE_CASE keeps the match
+	// case-insensitive (table identifiers are upper-cased, parquet fields are
+	// not), and the other columns are cast because a transform does not coerce
+	// a VARIANT into BINARY, which BINARY_AS_TEXT = FALSE exposes as binary.
+	targets := make([]string, len(columns))
+	exprs := make([]string, len(columns))
+	for i, col := range columns {
+		targets[i] = `"` + strings.ReplaceAll(col.Name, `"`, `""`) + `"`
+		expr := fmt.Sprintf("GET_IGNORE_CASE($1, '%s')", strings.NewReplacer(`\`, `\\`, "'", "''").Replace(col.Name))
+		if col.DataType == schema.TypeJSON {
+			exprs[i] = fmt.Sprintf("PARSE_JSON(%s::STRING)", expr)
+		} else {
+			exprs[i] = expr + "::" + MapDataTypeToSnowflake(col)
+		}
+	}
+	return fmt.Sprintf("COPY INTO %s (%s) FROM (SELECT %s FROM %s)%s FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE BINARY_AS_TEXT = FALSE) PURGE = TRUE",
+		fullTable, strings.Join(targets, ", "), strings.Join(exprs, ", "), location, filesClause)
+}
+
+// copyColumnsFor returns the write schema's columns that exist in the table,
+// named exactly as in the table, when one of them is JSON, and nil otherwise
+// so the COPY keeps matching by name. Naming only existing columns keeps the
+// explicit list of the transform COPY as tolerant of schema/table drift as
+// MATCH_BY_COLUMN_NAME was.
+func (d *SnowflakeDestination) copyColumnsFor(ctx context.Context, fullTable string, s *schema.TableSchema) ([]schema.Column, error) {
+	if s == nil || !hasJSONColumn(s.Columns) {
+		return nil, nil
+	}
+	tableColumns, err := d.describeColumnNames(ctx, fullTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe %s before COPY: %w", fullTable, err)
+	}
+	return columnsInTable(s.Columns, tableColumns), nil
+}
+
+func columnsInTable(columns []schema.Column, tableColumns []string) []schema.Column {
+	present := make(map[string]string, len(tableColumns))
+	for _, name := range tableColumns {
+		present[strings.ToUpper(name)] = name
+	}
+	kept := make([]schema.Column, 0, len(columns))
+	for _, col := range columns {
+		if name, ok := present[strings.ToUpper(col.Name)]; ok {
+			col.Name = name
+			kept = append(kept, col)
+		}
+	}
+	return kept
+}
+
+func hasJSONColumn(columns []schema.Column) bool {
+	for _, col := range columns {
+		if col.DataType == schema.TypeJSON {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *SnowflakeDestination) SwapTable(ctx context.Context, opts destination.SwapOptions) error {
@@ -749,7 +822,7 @@ func (d *SnowflakeDestination) MergeTable(ctx context.Context, opts destination.
 	if err != nil {
 		return fmt.Errorf("failed to build merge cast map: %w", err)
 	}
-	mergeSQL := buildMergeSQLWithPredicate(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap, opts.IncrementalPredicate)
+	mergeSQL := buildMergeSQLWithOptions(opts.StagingTable, opts.TargetTable, opts.PrimaryKeys, opts.Columns, opts.IncrementalKey, castMap, opts.IncrementalPredicate, opts.CDCHardDelete)
 
 	config.Debug("[MERGE] Executing MERGE: %s", mergeSQL)
 
@@ -815,6 +888,10 @@ func buildMergeSQL(stagingTable, targetTable string, primaryKeys, allColumns []s
 }
 
 func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string, incrementalPredicate string) string {
+	return buildMergeSQLWithOptions(stagingTable, targetTable, primaryKeys, allColumns, incrementalKey, castMap, incrementalPredicate, false)
+}
+
+func buildMergeSQLWithOptions(stagingTable, targetTable string, primaryKeys, allColumns []string, incrementalKey string, castMap map[string]string, incrementalPredicate string, cdcHardDelete bool) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	stagingFull := quoteFQN(sfTable(stagingTable))
 	targetFull := quoteFQN(sfTable(targetTable))
@@ -949,6 +1026,27 @@ func buildMergeSQLWithPredicate(stagingTable, targetTable string, primaryKeys, a
 		if strings.TrimSpace(incrementalPredicate) != "" {
 			matchedCondition = fmt.Sprintf("(%s) AND %s", incrementalPredicate, matchedCondition)
 		}
+
+		if cdcHardDelete {
+			deleteCondition := fmt.Sprintf(
+				"source.%s = true AND (target.%s IS NULL OR source.%s >= target.%s)",
+				cdcDeleted, cdcLSN, cdcLSN, cdcLSN,
+			)
+			if strings.TrimSpace(incrementalPredicate) != "" {
+				deleteCondition = fmt.Sprintf("(%s) AND %s", incrementalPredicate, deleteCondition)
+			}
+			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s THEN\n", deleteCondition)
+			mergeSQL.WriteString("  DELETE\n")
+			if len(updateSets) > 0 {
+				fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND source.%s = false THEN\n", matchedCondition, cdcDeleted)
+				fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+			}
+			fmt.Fprintf(&mergeSQL, "WHEN NOT MATCHED AND source.%s = false THEN\n", cdcDeleted)
+			fmt.Fprintf(&mergeSQL, "  INSERT (%s)\n", strings.Join(destQuoted, ", "))
+			fmt.Fprintf(&mergeSQL, "  VALUES (%s)", strings.Join(destSourceCols, ", "))
+			return mergeSQL.String()
+		}
+
 		if len(updateSets) > 0 {
 			fmt.Fprintf(&mergeSQL, "WHEN MATCHED AND %s AND %s THEN\n", matchedCondition, hasRowData)
 			fmt.Fprintf(&mergeSQL, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
@@ -1019,10 +1117,7 @@ func (d *SnowflakeDestination) DeleteInsertTable(ctx context.Context, opts desti
 	startVal := formatSnowflakeValue(opts.IntervalStart, opts.IncrementalKeyType)
 	endVal := formatSnowflakeValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
-		targetFull, quoteIdentifier(opts.IncrementalKey), startVal, quoteIdentifier(opts.IncrementalKey), endVal,
-	)
+	deleteSQL := destination.IntervalDeleteSQL(targetFull, "target", quoteIdentifier(opts.IncrementalKey), startVal, endVal, opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL); err != nil {
@@ -1465,6 +1560,9 @@ func (d *SnowflakeDestination) SupportsReplaceStrategy() bool      { return true
 func (d *SnowflakeDestination) SupportsAppendStrategy() bool       { return true }
 func (d *SnowflakeDestination) SupportsMergeStrategy() bool        { return true }
 func (d *SnowflakeDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *SnowflakeDestination) SupportsDeleteInsertPredicate() bool { return true }
+
 func (d *SnowflakeDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *SnowflakeDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *SnowflakeDestination) SupportsAtomicSwap() bool           { return true }
@@ -1493,6 +1591,8 @@ func (d *SnowflakeDestination) GetMaxCDCLSN(ctx context.Context, table string) (
 }
 
 func (d *SnowflakeDestination) SupportsCDCMerge() bool { return true }
+
+func (d *SnowflakeDestination) SupportsCDCHardDelete() bool { return true }
 
 func (d *SnowflakeDestination) SupportsCDCUnchangedCols() bool { return true }
 
@@ -1741,7 +1841,21 @@ func buildChangeConditionsSnowflake(columns []string, targetAlias, sourceAlias s
 	return strings.Join(conditions, " OR ")
 }
 
-func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string) string {
+// splitClusterByColumns separates cluster_by columns that exist in the table
+// from ones that don't, matching names case-insensitively like Snowflake does.
+func splitClusterByColumns(columns []schema.Column, clusterBy []string) ([]string, []string) {
+	var found, missing []string
+	for _, c := range clusterBy {
+		if slices.ContainsFunc(columns, func(col schema.Column) bool { return strings.EqualFold(col.Name, c) }) {
+			found = append(found, c)
+		} else {
+			missing = append(missing, c)
+		}
+	}
+	return found, missing
+}
+
+func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []string, clusterBy []string) string {
 	var colDefs []string
 	for _, col := range columns {
 		colType := MapDataTypeToSnowflake(col)
@@ -1759,6 +1873,13 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 	}
 
 	sql += "\n)"
+	if len(clusterBy) > 0 {
+		quotedCols := make([]string, len(clusterBy))
+		for i, c := range clusterBy {
+			quotedCols[i] = quoteIdentifier(c)
+		}
+		sql += fmt.Sprintf(" CLUSTER BY (%s)", strings.Join(quotedCols, ", "))
+	}
 	return sql
 }
 

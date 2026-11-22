@@ -403,7 +403,8 @@ func (d *DatabricksDestination) MergeTable(ctx context.Context, opts destination
 	for i, pk := range opts.PrimaryKeys {
 		quotedPKsForPartition[i] = quoteIdentifier(pk)
 	}
-	dedupOrderBy := ""
+	// Spark requires an ORDER BY even when the winning row is arbitrary.
+	dedupOrderBy := " ORDER BY NULL"
 	if opts.IncrementalKey != "" {
 		dedupOrderBy = fmt.Sprintf(" ORDER BY %s DESC", quoteIdentifier(opts.IncrementalKey))
 	}
@@ -467,10 +468,7 @@ func (d *DatabricksDestination) buildDeleteInsertSQL(opts destination.DeleteInse
 	startVal := d.formatValue(opts.IntervalStart)
 	endVal := d.formatValue(opts.IntervalEnd)
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= %s AND %s <= %s",
-		targetFull, quoteIdentifier(opts.IncrementalKey), startVal, quoteIdentifier(opts.IncrementalKey), endVal,
-	)
+	deleteSQL := destination.IntervalDeleteSQL(targetFull, "target", quoteIdentifier(opts.IncrementalKey), startVal, endVal, opts.IncrementalPredicate)
 
 	colList := strings.Join(quoteColumns(opts.Columns), ", ")
 	selectClause := destination.DedupStagingSelect(colList, strings.Join(quoteColumns(opts.PrimaryKeys), ", "), stagingFull, quoteIdentifier(opts.IncrementalKey))
@@ -553,6 +551,9 @@ func (d *DatabricksDestination) SupportsReplaceStrategy() bool      { return tru
 func (d *DatabricksDestination) SupportsAppendStrategy() bool       { return true }
 func (d *DatabricksDestination) SupportsMergeStrategy() bool        { return true }
 func (d *DatabricksDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *DatabricksDestination) SupportsDeleteInsertPredicate() bool { return true }
+
 func (d *DatabricksDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *DatabricksDestination) SupportsSCD2Strategy() bool         { return false }
 func (d *DatabricksDestination) SupportsAtomicSwap() bool           { return true }

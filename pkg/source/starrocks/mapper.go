@@ -31,8 +31,8 @@ func MapStarRocksToDataType(starrocksType string) (schema.DataType, int, int, sc
 	}
 
 	if matches := arrayTypeRegex.FindStringSubmatch(t); len(matches) == 2 {
-		elemType, _, _, _ := MapStarRocksToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapStarRocksToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	baseType := upper

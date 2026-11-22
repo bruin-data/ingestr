@@ -709,10 +709,7 @@ func (d *SQLiteDestination) DeleteInsertTable(ctx context.Context, opts destinat
 	quotedTargetTable := destination.QuoteTableName(opts.TargetTable)
 	quotedStagingTable := destination.QuoteTableName(opts.StagingTable)
 
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= ? AND %s <= ?`,
-		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
-	)
+	deleteSQL := destination.IntervalDeleteSQL(quotedTargetTable, "target", destination.QuoteIdentifier(opts.IncrementalKey), "?", "?", opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -891,6 +888,8 @@ func (d *SQLiteDestination) SupportsAppendStrategy() bool { return true }
 func (d *SQLiteDestination) SupportsMergeStrategy() bool { return true }
 
 func (d *SQLiteDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *SQLiteDestination) SupportsDeleteInsertPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as SQLite supports the delete+insert strategy.
 func (d *SQLiteDestination) SupportsDeleteInsertStrategy() bool { return true }
@@ -1472,6 +1471,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx)
 	case *array.Binary:
 		return a.Value(idx)
+	case *array.List:
+		return a.ValueStr(idx)
 	case *array.Date32:
 		return a.Value(idx).ToTime().Format("2006-01-02")
 	case *array.Date64:
@@ -1485,9 +1486,13 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		frac := (micros % 1000000)
 		return fmt.Sprintf("%02d:%02d:%02d.%06d", hours, mins, secs, frac)
 	case *array.Timestamp:
-		// Arrow's own rendering ("2026-03-30T13:15:43.123456Z") so create-run
-		// inserts and merge-run schema-aligner casts store identical text.
-		return a.ValueStr(idx)
+		// RFC3339 with offset ("2026-03-30T13:15:43.123456Z") so create-run inserts and
+		// merge-run casts store identical text; arrow-go's ValueStr drops Z for naive values.
+		toTime, err := a.DataType().(*arrow.TimestampType).GetToTimeFunc()
+		if err != nil {
+			return a.ValueStr(idx)
+		}
+		return toTime(a.Value(idx)).Format(time.RFC3339Nano)
 	case *array.Decimal128:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
 	case *array.Decimal256:

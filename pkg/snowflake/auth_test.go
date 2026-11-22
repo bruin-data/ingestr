@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"testing"
 
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
 	"github.com/youmark/pkcs8"
 )
 
@@ -494,4 +494,125 @@ func encodeRSAKeyToPEM(t *testing.T, key *rsa.PrivateKey) []byte {
 		Type:  "PRIVATE KEY",
 		Bytes: derBytes,
 	})
+}
+
+// --- Endpoint override tests ---
+
+func TestParseURI_HostAndPort(t *testing.T) {
+	auth, err := ParseURI("snowflake://myuser:mypass@myaccount/mydb?host=snowflake.example.com&port=8443")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if auth.Host != "snowflake.example.com" || auth.Port != 8443 {
+		t.Fatalf("expected host snowflake.example.com:8443, got %q:%d", auth.Host, auth.Port)
+	}
+
+	dsn, err := auth.ToDSN()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg, err := sf.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("unexpected error parsing DSN: %v", err)
+	}
+	if cfg.Host != "snowflake.example.com" || cfg.Port != 8443 || cfg.Protocol != "https" {
+		t.Errorf("expected https://snowflake.example.com:8443, got %s://%s:%d", cfg.Protocol, cfg.Host, cfg.Port)
+	}
+	if cfg.Account != "myaccount" {
+		t.Errorf("expected account 'myaccount', got %q", cfg.Account)
+	}
+}
+
+func TestParseURI_HostWithoutPortDefaultsTo443(t *testing.T) {
+	auth, err := ParseURI("snowflake://myuser:mypass@myaccount/mydb?host=127.0.0.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	dsn, err := auth.ToDSN()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg, err := sf.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("unexpected error parsing DSN: %v", err)
+	}
+	if cfg.Host != "127.0.0.1" || cfg.Port != 443 {
+		t.Errorf("expected 127.0.0.1:443, got %s:%d", cfg.Host, cfg.Port)
+	}
+}
+
+func TestParseURI_NoHostKeepsAccountHost(t *testing.T) {
+	auth, err := ParseURI("snowflake://myuser:mypass@myaccount/mydb")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if auth.Host != "" || auth.Port != 0 {
+		t.Fatalf("expected no endpoint override, got %q:%d", auth.Host, auth.Port)
+	}
+	dsn, err := auth.ToDSN()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg, err := sf.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("unexpected error parsing DSN: %v", err)
+	}
+	if cfg.Host != "myaccount.snowflakecomputing.com" {
+		t.Errorf("expected default account host, got %q", cfg.Host)
+	}
+}
+
+func TestToDSN_DisablesOCSPOnlyForLocalStackHosts(t *testing.T) {
+	t.Setenv("SF_DISABLE_OCSP_CHECKS", "")
+	for _, tt := range []struct {
+		query string
+		want  bool
+	}{
+		{"host=snowflake.localhost.localstack.cloud", true},
+		{"host=SNOWFLAKE.LocalHost.LocalStack.Cloud&port=4566", true},
+		{"host=localhost.localstack.cloud", true},
+		{"", false},
+		{"host=myaccount.privatelink.snowflakecomputing.com", false},
+		{"host=snowflake.example.com", false},
+		{"host=127.0.0.1", false},
+		{"host=mylocalhost.localstack.cloud", false},
+		{"host=localhost.localstack.cloud.example.com", false},
+	} {
+		auth, err := ParseURI("snowflake://myuser:mypass@myaccount/mydb?" + tt.query)
+		if err != nil {
+			t.Fatalf("%q: unexpected error: %v", tt.query, err)
+		}
+		dsn, err := auth.ToDSN()
+		if err != nil {
+			t.Fatalf("%q: unexpected error: %v", tt.query, err)
+		}
+		cfg, err := sf.ParseDSN(dsn)
+		if err != nil {
+			t.Fatalf("%q: unexpected error parsing DSN: %v", tt.query, err)
+		}
+		if cfg.DisableOCSPChecks != tt.want {
+			t.Errorf("%q: expected DisableOCSPChecks=%v, got %v (DSN %s)", tt.query, tt.want, cfg.DisableOCSPChecks, dsn)
+		}
+		if cfg.Transporter != nil || cfg.CertRevocationCheckMode != sf.CertRevocationCheckDisabled {
+			t.Errorf("%q: expected default TLS transport and no CRL mode", tt.query)
+		}
+	}
+}
+
+func TestParseURI_InvalidEndpoint(t *testing.T) {
+	for _, query := range []string{
+		"host=https://snowflake.example.com",
+		"host=snowflake.example.com:8443",
+		"host=snowflake.example.com/path",
+		"host=user@snowflake.example.com",
+		"host=a%3Badbc.snowflake.sql.role%3Dx",
+		"host=::1",
+		"port=0",
+		"port=65536",
+		"port=abc",
+	} {
+		if _, err := ParseURI("snowflake://myuser:mypass@myaccount/mydb?" + query); err == nil {
+			t.Errorf("expected error for %q", query)
+		}
+	}
 }

@@ -53,6 +53,7 @@ func (s *Db2Source) Connect(ctx context.Context, uri string) error {
 	if s.defaultSchema == "" {
 		s.defaultSchema = strings.ToUpper(cfg.User)
 	}
+	config.Debug("[DB2] connected, platform=%s", client.Platform())
 	return nil
 }
 
@@ -105,18 +106,9 @@ func (s *Db2Source) GetTable(ctx context.Context, req source.TableRequest) (sour
 
 func (s *Db2Source) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := s.parseTableName(table)
+	platform := s.client.Platform()
 
-	query := fmt.Sprintf(`
-		SELECT
-			COLNAME,
-			TYPENAME,
-			NULLS,
-			LENGTH,
-			SCALE
-		FROM SYSCAT.COLUMNS
-		WHERE TABSCHEMA = %s AND TABNAME = %s
-		ORDER BY COLNO
-	`, quoteLiteral(schemaName), quoteLiteral(tableName))
+	query := db2ColumnsQuery(platform, schemaName, tableName)
 
 	rows, err := s.client.Query(ctx, query)
 	if err != nil {
@@ -175,18 +167,7 @@ func (s *Db2Source) getSchema(ctx context.Context, table string) (*schema.TableS
 		return nil, fmt.Errorf("table %s not found or has no columns", table)
 	}
 
-	pkQuery := fmt.Sprintf(`
-		SELECT k.COLNAME
-		FROM SYSCAT.KEYCOLUSE k
-		JOIN SYSCAT.TABCONST c
-			ON c.CONSTNAME = k.CONSTNAME
-			AND c.TABSCHEMA = k.TABSCHEMA
-			AND c.TABNAME = k.TABNAME
-		WHERE c.TYPE = 'P'
-			AND k.TABSCHEMA = %s
-			AND k.TABNAME = %s
-		ORDER BY k.COLSEQ
-	`, quoteLiteral(schemaName), quoteLiteral(tableName))
+	pkQuery := db2PrimaryKeysQuery(platform, schemaName, tableName)
 
 	pkRows, err := s.client.Query(ctx, pkQuery)
 	var primaryKeys []string
@@ -318,14 +299,18 @@ func (s *Db2Source) parseTableName(table string) (string, string) {
 }
 
 type db2ConnConfig struct {
-	Address  string
-	Host     string
-	Database string
-	User     string
-	Password string
-	Schema   string
-	SSL      bool
-	Timeout  time.Duration
+	Address    string
+	Host       string
+	Database   string
+	RDBName    string
+	User       string
+	Password   string
+	Schema     string
+	SSL        bool
+	Timeout    time.Duration
+	Platform   db2Platform
+	SignonHost string
+	SignonPort int
 }
 
 func parseDb2URI(raw string) (db2ConnConfig, error) {
@@ -378,15 +363,43 @@ func parseDb2URI(raw string) (db2ConnConfig, error) {
 		sslEnabled = strings.EqualFold(v, "true") || v == "1"
 	}
 
+	platform, err := parseDb2PlatformOverride(query.Get("platform"))
+	if err != nil {
+		return db2ConnConfig{}, err
+	}
+
+	// signon_host/signon_port let IBM i users override where the Sign-on
+	// Server attribute exchange connects (see signon.go) - needed for
+	// SECMEC 8 password-substitute auth. Normally that's just this URI's
+	// own host on the well-known port, but a setup that only forwards
+	// port 446 through a proxy (reported on issue #3) has no way to reach
+	// the real Sign-on Server at the default host/port otherwise.
+	signonPort := 0
+	if v := query.Get("signon_port"); v != "" {
+		signonPort, err = strconv.Atoi(v)
+		if err != nil {
+			return db2ConnConfig{}, fmt.Errorf("invalid signon_port: %w", err)
+		}
+	}
+
 	return db2ConnConfig{
 		Address:  net.JoinHostPort(host, port),
 		Host:     host,
 		Database: database,
-		User:     user,
-		Password: password,
-		Schema:   query.Get("schema"),
-		SSL:      sslEnabled,
-		Timeout:  timeout,
+		// RDBName lets IBM i users override the real RDB directory name
+		// when auto-detecting it from ACCRDBRM doesn't work. PKGNAMCSN
+		// needs the real name (e.g. "RDBNAME2") - the database value is
+		// commonly a symbolic alias like *LOCAL, which only ACCRDB/ACCSEC
+		// resolve, not package lookups.
+		RDBName:    query.Get("rdb_name"),
+		User:       user,
+		Password:   password,
+		Schema:     query.Get("schema"),
+		SSL:        sslEnabled,
+		Timeout:    timeout,
+		Platform:   platform,
+		SignonHost: query.Get("signon_host"),
+		SignonPort: signonPort,
 	}, nil
 }
 

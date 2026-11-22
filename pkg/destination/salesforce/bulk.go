@@ -323,6 +323,9 @@ func (d *SalesforceDestination) waitBulkJob(ctx context.Context, jobID string) (
 	for attempt := 0; ; attempt++ {
 		var job bulkJobInfo
 		if err := d.bulkRequest(ctx, "GET", jobID, nil, &job); err != nil {
+			if ctx.Err() != nil {
+				d.abortBulkJob(ctx, jobID)
+			}
 			return job, fmt.Errorf("failed to read job status: %w", err)
 		}
 		switch job.State {

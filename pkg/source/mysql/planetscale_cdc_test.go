@@ -7,12 +7,14 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	psdbconnect "github.com/bruin-data/ingestr/pkg/source/mysql/internal/psdbconnect"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"vitess.io/vitess/go/sqltypes"
 	querypb "vitess.io/vitess/go/vt/proto/query"
@@ -81,6 +83,85 @@ func TestPlanetScaleCDCAdvertisesStreaming(t *testing.T) {
 	}
 	if got := streaming.DefaultStreamingStrategy(); got != config.StrategyMerge {
 		t.Fatalf("DefaultStreamingStrategy() = %q, want %q", got, config.StrategyMerge)
+	}
+}
+
+func TestPlanetScaleCDCColumnSupport(t *testing.T) {
+	for _, discovery := range []string{"single table", "multiple tables"} {
+		for _, spatial := range []bool{false, true} {
+			name := discovery + "/enum set bit"
+			if spatial {
+				name = discovery + "/spatial rejected"
+			}
+			t.Run(name, func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				defer func() { _ = db.Close() }()
+
+				if discovery == "multiple tables" {
+					mock.ExpectQuery("INFORMATION_SCHEMA\\.TABLES").
+						WithArgs("app").
+						WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("items"))
+				}
+				columns := sqlmock.NewRows([]string{
+					"COLUMN_NAME", "COLUMN_TYPE", "IS_NULLABLE", "NUMERIC_PRECISION", "NUMERIC_SCALE", "CHARACTER_MAXIMUM_LENGTH",
+				}).
+					AddRow("id", "bigint", "NO", nil, nil, nil).
+					AddRow("status", "enum('', 'active', 'paused')", "YES", nil, nil, nil).
+					AddRow("labels", "set('red', 'blue')", "YES", nil, nil, nil).
+					AddRow("enabled", "bit(1)", "YES", nil, nil, nil).
+					AddRow("flags", "bit(9)", "YES", nil, nil, nil).
+					AddRow("wide_flags", "bit(64)", "YES", nil, nil, nil)
+				support := sqlmock.NewRows([]string{"COLUMN_NAME", "DATA_TYPE"}).
+					AddRow("status", "enum").AddRow("labels", "SET").
+					AddRow("enabled", "bit").AddRow("flags", "bit").AddRow("wide_flags", "bit")
+				if spatial {
+					columns.AddRow("location", "point", "YES", nil, nil, nil)
+					support.AddRow("location", "point")
+				}
+				mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+COLUMN_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
+					WithArgs("app", "items").WillReturnRows(columns)
+				mock.ExpectQuery("INFORMATION_SCHEMA\\.KEY_COLUMN_USAGE").
+					WithArgs("app", "items").
+					WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).AddRow("id"))
+				mock.ExpectQuery("(?s)SELECT\\s+COLUMN_NAME,\\s+DATA_TYPE.*INFORMATION_SCHEMA\\.COLUMNS").
+					WithArgs("app", "items").WillReturnRows(support)
+
+				src := &PlanetScaleCDCSource{db: db, keyspace: "app"}
+				var tableSchema *schema.TableSchema
+				if discovery == "single table" {
+					var table source.SourceTable
+					table, err = src.GetTable(t.Context(), source.TableRequest{Name: "items"})
+					if err == nil {
+						tableSchema, err = table.GetSchema(t.Context())
+					}
+				} else {
+					var tables []source.SourceTableInfo
+					tables, err = src.GetTables(t.Context())
+					if err == nil {
+						require.Len(t, tables, 1)
+						tableSchema = tables[0].Schema
+					}
+				}
+				require.NoError(t, mock.ExpectationsWereMet())
+				if spatial {
+					require.ErrorContains(t, err, "PlanetScale CDC does not support spatial (GEOMETRY)")
+					require.ErrorContains(t, err, "location POINT")
+					require.NotContains(t, err.Error(), "status ENUM")
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, []string{"id"}, tableSchema.PrimaryKeys)
+				var types []schema.DataType
+				for _, col := range removeMySQLCDCColumns(tableSchema).Columns {
+					types = append(types, col.DataType)
+				}
+				require.Equal(t, []schema.DataType{
+					schema.TypeInt64, schema.TypeString, schema.TypeString,
+					schema.TypeBinary, schema.TypeBinary, schema.TypeBinary,
+				}, types)
+			})
+		}
 	}
 }
 
@@ -540,4 +621,91 @@ func TestDecodePsdbChanges(t *testing.T) {
 			t.Errorf("change %d values: got %#v want %#v", i, changes[i].values, w.values)
 		}
 	}
+}
+
+func TestDecodePsdbChangesEnumSetBit(t *testing.T) {
+	sourceCols := []schema.Column{
+		{Name: "id", DataType: schema.TypeInt64},
+		{Name: "status", DataType: schema.TypeString},
+		{Name: "labels", DataType: schema.TypeString},
+		{Name: "enabled", DataType: schema.TypeBinary},
+		{Name: "flags", DataType: schema.TypeBinary},
+		{Name: "wide_flags", DataType: schema.TypeBinary},
+	}
+	fields := []*querypb.Field{
+		{Name: "id", Type: querypb.Type_INT64},
+		{Name: "status", Type: querypb.Type_ENUM},
+		{Name: "labels", Type: querypb.Type_SET},
+		{Name: "enabled", Type: querypb.Type_BIT},
+		{Name: "flags", Type: querypb.Type_BIT},
+		{Name: "wide_flags", Type: querypb.Type_BIT},
+	}
+	row := func(id int64, status, labels string, enabled, flags, wideFlags []byte) *querypb.Row {
+		return sqltypes.RowToProto3([]sqltypes.Value{
+			sqltypes.NewInt64(id),
+			sqltypes.MakeTrusted(querypb.Type_ENUM, []byte(status)),
+			sqltypes.MakeTrusted(querypb.Type_SET, []byte(labels)),
+			sqltypes.MakeTrusted(querypb.Type_BIT, enabled),
+			sqltypes.MakeTrusted(querypb.Type_BIT, flags),
+			sqltypes.MakeTrusted(querypb.Type_BIT, wideFlags),
+		})
+	}
+	maxBits := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	zeroBits := make([]byte, 8)
+	initial := row(1, "active", "red,blue", []byte{1}, []byte{1, 0xff}, maxBits)
+	updated := row(4, "paused", "blue", []byte{0}, []byte{0, 1}, zeroBits)
+	resp := &psdbconnect.SyncResponse{
+		Result: []*querypb.QueryResult{{
+			Fields: fields,
+			Rows: []*querypb.Row{
+				initial,
+				row(2, "", "", []byte{0}, []byte{0, 0}, zeroBits),
+				sqltypes.RowToProto3([]sqltypes.Value{
+					sqltypes.NewInt64(3), sqltypes.NULL, sqltypes.NULL, sqltypes.NULL, sqltypes.NULL, sqltypes.NULL,
+				}),
+			},
+		}},
+		Updates: []*psdbconnect.UpdatedRow{{
+			Before: &querypb.QueryResult{Fields: fields, Rows: []*querypb.Row{initial}},
+			After:  &querypb.QueryResult{Fields: fields, Rows: []*querypb.Row{updated}},
+		}},
+		Deletes: []*psdbconnect.DeletedRow{{Result: &querypb.QueryResult{
+			Fields: fields[:1],
+			Rows:   []*querypb.Row{sqltypes.RowToProto3([]sqltypes.Value{sqltypes.NewInt64(2)})},
+		}}},
+	}
+
+	changes, err := decodePsdbChanges(resp, sourceCols, []int{0})
+	require.NoError(t, err)
+	require.Equal(t, []mysqlCDCChange{
+		{values: []interface{}{"1", "active", "red,blue", []byte{1}, []byte{1, 0xff}, maxBits}},
+		{values: []interface{}{"2", "", "", []byte{0}, []byte{0, 0}, zeroBits}},
+		{values: []interface{}{"3", nil, nil, nil, nil, nil}},
+		{values: []interface{}{"1", "active", "red,blue", []byte{1}, []byte{1, 0xff}, maxBits}, deleted: true},
+		{values: []interface{}{"4", "paused", "blue", []byte{0}, []byte{0, 1}, zeroBits}},
+		{values: []interface{}{"2", nil, nil, nil, nil, nil}, deleted: true},
+	}, changes)
+}
+
+func TestPsdbResultRowsCopiesBitValues(t *testing.T) {
+	qr := &querypb.QueryResult{
+		Fields: []*querypb.Field{
+			{Name: "enabled", Type: querypb.Type_BIT},
+			{Name: "flags", Type: querypb.Type_BIT},
+			{Name: "wide_flags", Type: querypb.Type_BIT},
+		},
+		Rows: []*querypb.Row{sqltypes.RowToProto3([]sqltypes.Value{
+			sqltypes.MakeTrusted(querypb.Type_BIT, []byte{1}),
+			sqltypes.MakeTrusted(querypb.Type_BIT, []byte{1, 0xff}),
+			sqltypes.MakeTrusted(querypb.Type_BIT, []byte{0x80, 0, 0, 0, 0, 0, 0, 1}),
+		})},
+	}
+	rows, err := psdbResultRows(qr, []schema.Column{
+		{Name: "enabled", DataType: schema.TypeBinary},
+		{Name: "flags", DataType: schema.TypeBinary},
+		{Name: "wide_flags", DataType: schema.TypeBinary},
+	})
+	require.NoError(t, err)
+	clear(qr.Rows[0].Values)
+	require.Equal(t, [][]interface{}{{[]byte{1}, []byte{1, 0xff}, []byte{0x80, 0, 0, 0, 0, 0, 0, 1}}}, rows)
 }

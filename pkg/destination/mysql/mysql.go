@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1233,6 +1234,12 @@ func (d *MySQLDestination) mergeTableInTx(ctx context.Context, tx *sql.Tx, opts 
 			buildJoinCondition(opts.PrimaryKeys, "active", "latest"),
 		)
 		insertSource = dedupSource(" WHERE `_cdc_deleted` = 0")
+		if opts.CDCHardDelete {
+			// Rows whose latest change is a delete are removed below, so only
+			// rows whose latest change is live need their image upserted.
+			upsertSource = fmt.Sprintf("(SELECT latest.*, 0 AS %s FROM %s WHERE latest.`_cdc_deleted` = 0) AS source", equalDeleteMarker, latestSource)
+			insertSource = fmt.Sprintf("(SELECT latest.* FROM %s WHERE latest.`_cdc_deleted` = 0) AS source", latestSource)
+		}
 	}
 	primaryKeyMatchCondition := buildJoinCondition(opts.PrimaryKeys, "target", "source")
 	matchCondition := destination.MergeJoinCondition(
@@ -1306,7 +1313,20 @@ func (d *MySQLDestination) mergeTableInTx(ctx context.Context, tx *sql.Tx, opts 
 		}
 	}
 
-	if isCDC {
+	if isCDC && opts.CDCHardDelete {
+		deleteSQL := fmt.Sprintf(
+			"DELETE target FROM %s AS target INNER JOIN %s ON %s WHERE source.`_cdc_deleted` = 1 AND (target.`_cdc_lsn` IS NULL OR source.`_cdc_lsn` >= target.`_cdc_lsn`)",
+			quoteTable(opts.TargetTable),
+			dedupSource(""),
+			matchCondition,
+		)
+		config.Debug("[MERGE] Executing CDC hard delete: %s", deleteSQL)
+
+		if _, err := tx.ExecContext(ctx, deleteSQL); err != nil {
+			config.LogFailedQuery(deleteSQL, err)
+			return fmt.Errorf("failed to delete CDC-deleted records: %w", err)
+		}
+	} else if isCDC {
 		// Mark rows deleted only when the latest change for the PK is a delete,
 		// carrying the delete's LSN so resume picks up after it.
 		markDeletedSQL := fmt.Sprintf(
@@ -1399,10 +1419,7 @@ func (d *MySQLDestination) DeleteInsertTable(ctx context.Context, opts destinati
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s WHERE %s >= ? AND %s <= ?",
-		quoteTable(opts.TargetTable), quoteColumn(opts.IncrementalKey), quoteColumn(opts.IncrementalKey),
-	)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, opts.IncrementalKey, opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.ExecContext(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1614,10 +1631,25 @@ func (d *MySQLDestination) SupportsReplaceStrategy() bool      { return true }
 func (d *MySQLDestination) SupportsAppendStrategy() bool       { return true }
 func (d *MySQLDestination) SupportsMergeStrategy() bool        { return true }
 func (d *MySQLDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *MySQLDestination) SupportsDeleteInsertPredicate() bool { return true }
+
+// buildDeleteInsertDeleteSQL aliases the target with the multi-table DELETE
+// form, which unlike `DELETE FROM t AS alias` predates MySQL 8.0.16 and works
+// on MariaDB and Vitess.
+func buildDeleteInsertDeleteSQL(targetTable, incrementalKey, predicate string) string {
+	key := quoteColumn(incrementalKey)
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s >= ? AND %s <= ?", quoteTable(targetTable), key, key)
+	}
+	return fmt.Sprintf("DELETE target FROM %s AS target WHERE %s", quoteTable(targetTable),
+		destination.IntervalDeleteCondition("target", key, "?", "?", predicate))
+}
 func (d *MySQLDestination) SupportsDeleteInsertStrategy() bool { return true }
 func (d *MySQLDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *MySQLDestination) SupportsAtomicSwap() bool           { return true }
 func (d *MySQLDestination) SupportsCDCMerge() bool             { return true }
+func (d *MySQLDestination) SupportsCDCHardDelete() bool        { return true }
 func (d *MySQLDestination) SupportsCDCUnchangedCols() bool     { return true }
 
 // GetMaxCDCLSN returns the maximum _cdc_lsn value from the table for CDC resume.
@@ -2058,10 +2090,20 @@ func (d *MySQLDestination) GetTableSchema(ctx context.Context, table string) (*s
 		return nil, nil
 	}
 
+	// COLUMN_KEY reports a UNIQUE NOT NULL index as PRI when no primary key exists.
+	primaryKeys, err := d.primaryKeyColumns(ctx, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query table primary key: %w", err)
+	}
+	for i := range columns {
+		columns[i].IsPrimaryKey = slices.ContainsFunc(primaryKeys, func(key string) bool { return strings.EqualFold(key, columns[i].Name) })
+	}
+
 	return &schema.TableSchema{
-		Name:    tableName,
-		Schema:  database,
-		Columns: columns,
+		Name:        tableName,
+		Schema:      database,
+		Columns:     columns,
+		PrimaryKeys: primaryKeys,
 	}, nil
 }
 
@@ -2234,6 +2276,9 @@ func buildCreateTableSQL(table string, columns []schema.Column, primaryKeys []st
 func buildCreateTableSQLForReference(tableReference string, columns []schema.Column, primaryKeys []string) string {
 	var colDefs []string
 	binaryClaimKey := isCDCTargetClaimTable(columns, primaryKeys)
+	if !binaryClaimKey {
+		columns = boundKeyColumns(columns, primaryKeys)
+	}
 	for _, col := range columns {
 		colType := MapDataTypeToMySQL(col)
 		if binaryClaimKey && col.Name == "destination_table" {
@@ -2318,6 +2363,8 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal128Type).Scale))
 	case *array.Decimal256:
 		return a.Value(idx).ToString(int32(a.DataType().(*arrow.Decimal256Type).Scale))
+	case *array.List, *array.LargeList:
+		return a.ValueStr(idx)
 	case array.ExtensionArray:
 		storage := a.Storage()
 		return extractValue(storage, idx)

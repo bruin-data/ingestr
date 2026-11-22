@@ -10,7 +10,7 @@ import (
 	"time"
 
 	sfauth "github.com/bruin-data/ingestr/pkg/snowflake"
-	_ "github.com/snowflakedb/gosnowflake"
+	_ "github.com/snowflakedb/gosnowflake/v2"
 )
 
 func main() {

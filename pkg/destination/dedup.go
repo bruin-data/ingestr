@@ -1,6 +1,9 @@
 package destination
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // DedupStagingSelect builds a SELECT over the staging table that keeps a single
 // row per primary key. When quotedOrderByCol is non-empty, ROW_NUMBER orders by
@@ -19,8 +22,15 @@ func DedupStagingSelect(quotedColumns, quotedPrimaryKeys, stagingExpr, quotedOrd
 		orderBy = quotedOrderByCol + " DESC"
 	}
 
+	// Avoid shadowing a source column, including on case-insensitive engines.
+	rankAlias := "__bruin_dedup_rn"
+	lowerColumns := strings.ToLower(quotedColumns)
+	for suffix := 1; strings.Contains(lowerColumns, rankAlias); suffix++ {
+		rankAlias = fmt.Sprintf("__bruin_dedup_rn_%d", suffix)
+	}
+
 	return fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __bruin_dedup_rn FROM %s) AS _numbered WHERE __bruin_dedup_rn = 1",
-		quotedColumns, quotedColumns, quotedPrimaryKeys, orderBy, stagingExpr,
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS %s FROM %s) AS _numbered WHERE %s = 1",
+		quotedColumns, quotedColumns, quotedPrimaryKeys, orderBy, rankAlias, stagingExpr, rankAlias,
 	)
 }

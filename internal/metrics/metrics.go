@@ -1,4 +1,4 @@
-// Package metrics exposes streaming ingestion metrics over HTTP in the
+// Package metrics exposes ingestion metrics over HTTP in the
 // Prometheus text exposition format.
 //
 // It is opt-in: nothing is served unless the caller invokes Serve. Metrics are
@@ -79,6 +79,7 @@ func init() {
 		tableLastFlushBytes,
 		tableLastSyncedTS,
 		replicationCollector{},
+		walRetentionCollector{},
 	)
 }
 
@@ -154,7 +155,7 @@ func boolToFloat(b bool) float64 {
 	return 0
 }
 
-// Gatherer returns the registry backing the streaming metrics so embedders and
+// Gatherer returns the registry backing the ingestion metrics so embedders and
 // tests can gather ingestr's own metrics without going through HTTP.
 func Gatherer() prometheus.Gatherer { return registry }
 

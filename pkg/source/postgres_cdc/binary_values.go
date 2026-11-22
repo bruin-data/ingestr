@@ -130,6 +130,11 @@ func convertBinaryValue(data []byte, col schema.Column, oid uint32, m *pgtype.Ma
 		if err != nil {
 			return nil, fmt.Errorf("binary numeric: %w", err)
 		}
+		if text, ok := v.(string); ok {
+			if err := checkDecimalRange(text, col); err != nil {
+				return nil, err
+			}
+		}
 		// Matches the text path, which keeps decimals as strings.
 		return v, nil
 

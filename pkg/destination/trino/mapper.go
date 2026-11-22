@@ -56,7 +56,7 @@ func mapDataTypeToTrino(col schema.Column, jsonType jsonTypeMode) string {
 	case schema.TypeUUID:
 		return "UUID"
 	case schema.TypeArray:
-		elemCol := schema.Column{DataType: col.ArrayType}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
 		return fmt.Sprintf("ARRAY(%s)", mapDataTypeToTrino(elemCol, jsonType))
 	default:
 		return "VARCHAR"

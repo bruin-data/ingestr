@@ -2,8 +2,10 @@ package arrowconv
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/araddon/dateparse"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -158,6 +161,23 @@ func TestUnixToMicroseconds(t *testing.T) {
 			input:    0,
 			wantUsec: 0,
 		},
+		{name: "pre-2001 seconds (9 digits)", input: 999999999, wantUsec: 999999999_000_000},
+		{name: "largest seconds", input: 99999999999, wantUsec: 99999999999_000_000},
+		{name: "smallest milliseconds", input: 100000000000, wantUsec: 100000000000_000},
+		{name: "pre-2001 milliseconds (12 digits)", input: 946684800000, wantUsec: 946684800000_000},
+		{name: "largest milliseconds", input: 99999999999999, wantUsec: 99999999999999_000},
+		{name: "smallest microseconds", input: 100000000000000, wantUsec: 100000000000000},
+		{name: "pre-2001 microseconds (15 digits)", input: 946684800000000, wantUsec: 946684800000000},
+		{name: "largest microseconds", input: 99999999999999999, wantUsec: 99999999999999999},
+		{name: "smallest nanoseconds", input: 100000000000000000, wantUsec: 100000000000000},
+		{name: "pre-2001 nanoseconds (18 digits)", input: 946684800000000000, wantUsec: 946684800000000},
+		{name: "max int64", input: math.MaxInt64, wantUsec: math.MaxInt64 / 1000},
+		{name: "negative seconds", input: -86400, wantUsec: -86400_000_000},
+		{name: "negative milliseconds", input: -946684800000, wantUsec: -946684800000_000},
+		{name: "negative microseconds", input: -946684800000000, wantUsec: -946684800000000},
+		{name: "negative nanoseconds", input: -946684800000000000, wantUsec: -946684800000000},
+		{name: "negative nanoseconds with remainder", input: -946684800000000001, wantUsec: -946684800000001},
+		{name: "min int64", input: math.MinInt64, wantUsec: time.Unix(0, math.MinInt64).UnixMicro()},
 	}
 
 	for _, tt := range tests {
@@ -242,6 +262,36 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 			wantUsec: expectedUsec,
 		},
 		{
+			name:     "string 9-digit unix seconds",
+			val:      "999999999",
+			wantUsec: time.Unix(999999999, 0).UnixMicro(),
+		},
+		{
+			name:     "string 12-digit unix milliseconds",
+			val:      "946684800000",
+			wantUsec: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string 15-digit unix microseconds",
+			val:      "946684800000000",
+			wantUsec: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string 18-digit unix nanoseconds",
+			val:      "946684800000000000",
+			wantUsec: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string negative unix seconds",
+			val:      "-86400",
+			wantUsec: time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
+			name:     "string yyyyMMdd keeps date parsing",
+			val:      "20200101",
+			wantUsec: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMicro(),
+		},
+		{
 			name:     "string ISO timestamp",
 			val:      "2026-03-02T06:12:41.778Z",
 			wantUsec: expectedUsec,
@@ -283,6 +333,180 @@ func TestAppendValue_TimestampBuilder(t *testing.T) {
 					time.UnixMicro(got).UTC().Format(time.RFC3339Nano),
 					time.UnixMicro(tt.wantUsec).UTC().Format(time.RFC3339Nano))
 			}
+		})
+	}
+}
+
+func TestUnixFloatToMicroseconds(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float64
+		want int64
+	}{
+		{name: "fractional seconds", in: 1700000000.5, want: 1700000000_500_000},
+		{name: "fractional seconds with float noise", in: 1700000000.123, want: 1700000000_123_000},
+		{name: "pre-2001 fractional seconds", in: 946684800.75, want: 946684800_750_000},
+		{name: "fractional milliseconds", in: 1700000000000.5, want: 1700000000000_500},
+		{name: "pre-2001 fractional milliseconds", in: 946684800000.25, want: 946684800000_250},
+		{name: "far-future fractional milliseconds", in: 80000000000001.0625, want: 80000000000001_063},
+		{name: "sub-microsecond fraction dropped", in: 946684800000000.4, want: 946684800000000},
+		{name: "below one second", in: 0.5, want: 500_000},
+		{name: "negative below one second", in: -0.25, want: -250_000},
+		{name: "negative fractional seconds", in: -1.5, want: -1_500_000},
+		{name: "whole seconds", in: 1700000000, want: UnixToMicroseconds(1700000000)},
+		{name: "whole milliseconds", in: 946684800000, want: UnixToMicroseconds(946684800000)},
+		{name: "whole nanoseconds", in: 1.7e18, want: UnixToMicroseconds(int64(1.7e18))},
+		{name: "zero", in: 0, want: 0},
+		{name: "positive infinity keeps integer path", in: math.Inf(1), want: UnixToMicroseconds(int64(math.Inf(1)))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, unixFloatToMicroseconds(tt.in))
+		})
+	}
+}
+
+func TestEpochStringToMicroseconds(t *testing.T) {
+	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name   string
+		in     string
+		want   int64
+		wantOK bool
+	}{
+		{name: "zero", in: "0", want: 0, wantOK: true},
+		{name: "one second", in: "1", want: 1_000_000, wantOK: true},
+		{name: "one day seconds", in: "86400", want: 86400 * 1_000_000, wantOK: true},
+		{name: "9-digit seconds", in: "999999999", want: time.Unix(999999999, 0).UnixMicro(), wantOK: true},
+		{name: "y2k seconds", in: "946684800", want: y2k.UnixMicro(), wantOK: true},
+		{name: "10-digit seconds", in: "1700000000", want: 1700000000 * 1_000_000, wantOK: true},
+		{name: "largest seconds", in: "99999999999", want: 99999999999 * 1_000_000, wantOK: true},
+		{name: "smallest milliseconds", in: "100000000000", want: 100000000000 * 1000, wantOK: true},
+		{name: "12-digit milliseconds", in: "946684800000", want: y2k.UnixMicro(), wantOK: true},
+		{name: "13-digit milliseconds", in: "1700000000000", want: 1700000000000 * 1000, wantOK: true},
+		{name: "largest milliseconds", in: "99999999999999", want: 99999999999999 * 1000, wantOK: true},
+		{name: "smallest microseconds", in: "100000000000000", want: 100000000000000, wantOK: true},
+		{name: "15-digit microseconds", in: "946684800000000", want: y2k.UnixMicro(), wantOK: true},
+		{name: "largest microseconds", in: "99999999999999999", want: 99999999999999999, wantOK: true},
+		{name: "smallest nanoseconds", in: "100000000000000000", want: 100000000000000, wantOK: true},
+		{name: "18-digit nanoseconds", in: "946684800000000000", want: y2k.UnixMicro(), wantOK: true},
+		{name: "19-digit nanoseconds", in: "1700000000000000000", want: 1700000000000000, wantOK: true},
+		{name: "max int64", in: "9223372036854775807", want: math.MaxInt64 / 1000, wantOK: true},
+		{name: "leading zeros", in: "000946684800", want: y2k.UnixMicro(), wantOK: true},
+		{name: "negative seconds", in: "-86400", want: -86400 * 1_000_000, wantOK: true},
+		{name: "negative milliseconds", in: "-946684800000", want: -y2k.UnixMicro(), wantOK: true},
+		{name: "negative microseconds", in: "-946684800000000", want: -y2k.UnixMicro(), wantOK: true},
+		{name: "negative nanoseconds", in: "-946684800000000000", want: -y2k.UnixMicro(), wantOK: true},
+		{name: "positive nanoseconds with remainder", in: "946684800000000999", want: y2k.UnixMicro(), wantOK: true},
+		{name: "negative nanoseconds with remainder", in: "-946684800000000001", want: time.Unix(0, -946684800000000001).UnixMicro(), wantOK: true},
+		{name: "min int64", in: "-9223372036854775808"},
+		{name: "overflows int64", in: "99999999999999999999"},
+		{name: "explicit plus sign", in: "+123"},
+		{name: "surrounding spaces", in: " 123 "},
+		{name: "empty", in: ""},
+		{name: "minus only", in: "-"},
+		{name: "decimal", in: "1.5"},
+		{name: "scientific", in: "1e9"},
+		{name: "trailing letters", in: "123abc"},
+		{name: "text", in: "not-a-date"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := epochStringToMicroseconds(tt.in)
+			require.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, tt.want, got,
+					"got %s, want %s",
+					time.UnixMicro(got).UTC().Format(time.RFC3339Nano),
+					time.UnixMicro(tt.want).UTC().Format(time.RFC3339Nano))
+			}
+		})
+	}
+}
+
+// Values dateparse already understood must convert exactly as before the epoch fallback existed.
+func TestAppendValue_TimestampBuilder_DateparseResultsUnchanged(t *testing.T) {
+	inputs := []string{
+		"1700000000", "1772431961", "9999999999",
+		"1700000000000", "1772431961778",
+		"1700000000000000", "1772431961778123",
+		"1700000000000000000", "1772431961778123456",
+		"19700101", "20200101", "20260302",
+		"20200101123045", "19991231235959",
+		"2026-03-02", "2026-03-02T06:12:41Z", "2026-03-02 06:12:41.778",
+		"2026/03/02", "03/02/2026", "Mon, 02 Mar 2026 06:12:41 +0000",
+	}
+
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			parsed, err := dateparse.ParseAny(in)
+			require.NoError(t, err, "input must be one dateparse accepts")
+
+			builder := array.NewTimestampBuilder(memory.DefaultAllocator, tsType)
+			defer builder.Release()
+			AppendValue(builder, in)
+			arr := builder.NewArray().(*array.Timestamp)
+			defer arr.Release()
+
+			require.False(t, arr.IsNull(0))
+			assert.Equal(t, parsed.UnixMicro(), int64(arr.Value(0)))
+		})
+	}
+}
+
+func TestAppendValue_TimestampBuilder_NonEpochStringsStayNull(t *testing.T) {
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	for _, in := range []string{"", " ", "not-a-date", "1e9", "+123", " 123 ", "123abc", "-", "99999999999999999999"} {
+		t.Run(in, func(t *testing.T) {
+			builder := array.NewTimestampBuilder(memory.DefaultAllocator, tsType)
+			defer builder.Release()
+			AppendValue(builder, in)
+			arr := builder.NewArray().(*array.Timestamp)
+			defer arr.Release()
+
+			assert.True(t, arr.IsNull(0))
+		})
+	}
+}
+
+func TestAppendValue_TimestampBuilder_PreY2KNumbers(t *testing.T) {
+	y2k := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	tsType := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+
+	tests := []struct {
+		name string
+		val  interface{}
+		want time.Time
+	}{
+		{name: "json.Number seconds", val: json.Number("946684800"), want: y2k},
+		{name: "json.Number milliseconds", val: json.Number("946684800000"), want: y2k},
+		{name: "json.Number microseconds", val: json.Number("946684800000000"), want: y2k},
+		{name: "json.Number nanoseconds", val: json.Number("946684800000000000"), want: y2k},
+		{name: "json.Number float milliseconds", val: json.Number("946684800000.0"), want: y2k},
+		{name: "int64 milliseconds", val: int64(946684800000), want: y2k},
+		{name: "int milliseconds", val: 946684800000, want: y2k},
+		{name: "float64 milliseconds", val: float64(946684800000), want: y2k},
+		{name: "int64 negative seconds", val: int64(-86400), want: time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC)},
+		{name: "float64 fractional seconds", val: 946684800.5, want: y2k.Add(500 * time.Millisecond)},
+		{name: "float64 fractional milliseconds", val: 946684800000.5, want: y2k.Add(500 * time.Microsecond)},
+		{name: "json.Number fractional seconds", val: json.Number("946684800.25"), want: y2k.Add(250 * time.Millisecond)},
+		{name: "json.Number exponent seconds", val: json.Number("9.466848e8"), want: y2k},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := array.NewTimestampBuilder(memory.DefaultAllocator, tsType)
+			defer builder.Release()
+			AppendValue(builder, tt.val)
+			arr := builder.NewArray().(*array.Timestamp)
+			defer arr.Release()
+
+			require.False(t, arr.IsNull(0))
+			assert.Equal(t, tt.want, time.UnixMicro(int64(arr.Value(0))).UTC())
 		})
 	}
 }
@@ -576,5 +800,49 @@ func TestValueBytes(t *testing.T) {
 	// RowBytes of a single-column row equals key length + ValueBytes(value)
 	if got, want := RowBytes(map[string]interface{}{"k": "value"}), int64(len("k"))+ValueBytes("value"); got != want {
 		t.Errorf("RowBytes/ValueBytes disagree: got %d, want %d", got, want)
+	}
+}
+
+func TestAppendDecimal128OverflowIsNull(t *testing.T) {
+	b := array.NewDecimal128Builder(memory.NewGoAllocator(), &arrow.Decimal128Type{Precision: 38, Scale: 9})
+	defer b.Release()
+	huge, _ := new(big.Int).SetString("1"+strings.Repeat("0", 45), 10)
+	AppendValue(b, "1e35")
+	AppendValue(b, huge)
+	AppendValue(b, "1.5")
+	arr := b.NewDecimal128Array()
+	defer arr.Release()
+	require.True(t, arr.IsNull(0))
+	require.True(t, arr.IsNull(1))
+	require.False(t, arr.IsNull(2))
+}
+
+func TestScaledDecimalRoundsHalfAwayFromZero(t *testing.T) {
+	for in, want := range map[string]string{"1.0000000005": "1000000001", "-1.0000000025": "-1000000003", "1.00000000049": "1000000000", "1e2": "100000000000"} {
+		got, ok := ScaledDecimal(in, 9)
+		require.True(t, ok, in)
+		require.Equal(t, want, got.String(), in)
+	}
+	for in, want := range map[string]string{"12300": "123", "12350": "124", "-12350": "-124", "12349": "123"} {
+		got, ok := ScaledDecimal(in, -2)
+		require.True(t, ok, in)
+		require.Equal(t, want, got.String(), in)
+	}
+	_, ok := ScaledDecimal("abc", 9)
+	require.False(t, ok)
+}
+
+func TestAppendDecimalRoundsExactHalvesAwayFromZero(t *testing.T) {
+	b := array.NewDecimal128Builder(memory.NewGoAllocator(), &arrow.Decimal128Type{Precision: 38, Scale: 9})
+	defer b.Release()
+	inputs := []string{"7.0000000005", "0.0000000015", "-123456.1234567895", "123456.1234567895"}
+	for _, in := range inputs {
+		AppendValue(b, in)
+	}
+	arr := b.NewDecimal128Array()
+	defer arr.Release()
+	want := []string{"7.000000001", "0.000000002", "-123456.123456790", "123456.123456790"}
+	for i := range inputs {
+		require.Equal(t, want[i], arr.Value(i).ToString(9), inputs[i])
 	}
 }

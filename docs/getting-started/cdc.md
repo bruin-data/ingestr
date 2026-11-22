@@ -35,7 +35,7 @@ Every row a CDC merge writes carries three metadata columns in the destination:
 | Column | Meaning |
 | --- | --- |
 | `_cdc_lsn` | The source log position (LSN, GTID, resume token, or version) for the change. Used to order changes and to resume on the next run. |
-| `_cdc_deleted` | `true` when the source row was deleted. Deletes are **soft**: the row is kept in the destination and flagged rather than physically removed. |
+| `_cdc_deleted` | `true` when the source row was deleted. Deletes are **soft** by default: the row is kept in the destination and flagged rather than physically removed. See [Deletes](#deletes) for hard deletes. |
 | `_cdc_synced_at` | When ingestr applied the change to the destination. |
 
 Merging needs a key: to keep a one-row-per-key mirror of a table, ingestr needs a primary key or an equivalent replica-identity index. What happens without one depends on the connector — most connectors simply **skip keyless tables with a warning**. PostgreSQL is the exception: a keyless table with `REPLICA IDENTITY FULL` is still ingested — just as an append-only change log rather than a mirror: a delete is appended as a new row with `_cdc_deleted = true`, and an update shows up as a delete followed by an insert. Because nothing gets merged, a retry can replay events into these tables, and they keep the internal `_cdc_unchanged_cols` column. When ingestr manages the publication, it leaves out PostgreSQL tables that have no usable replica identity at all; if you manage the publication yourself, give such tables a usable replica identity before they start publishing updates or deletes.
@@ -44,9 +44,27 @@ Merging needs a key: to keep a one-row-per-key mirror of a table, ingestr needs 
 
 For tables with a merge key, deletes are captured as soft deletes: the destination keeps the row and sets `_cdc_deleted = true`. For most databases the deleted row's other columns are preserved as they were, so you retain the last known values. Some sources (SQL Server Change Tracking, PlanetScale) only emit the primary key of a deleted row, so ingestr marks the row deleted without disturbing its other columns. In a keyless append-only table there is no single destination row to flag, so a delete simply lands as one more event in the log.
 
+To remove deleted rows instead, pass `--cdc-delete-behavior=hard`. The merge then deletes the destination row when a key's latest change is a delete, in the same statement or transaction as the rest of the batch (on StarRocks, which has no multi-statement transactions, the batch's tombstones are published first and deleted right after). `_cdc_deleted` stays in the table but is always `false` for rows written in this mode. Hard deletes are supported on PostgreSQL, MySQL/MariaDB, SQL Server, Snowflake, BigQuery, DuckDB, and StarRocks destinations, for sources that keep CDC state in the destination: PostgreSQL, MySQL/MariaDB, and SQL Server CDC, and SQL Server Change Tracking started with `--stream --full-refresh`. Other sources resume from the newest `_cdc_lsn` stored in the destination table, which hard deletes would remove, so ingestr rejects the combination. Keyless append-only tables keep every event either way.
+
+Switching an existing connector from `soft` to `hard` leaves tombstones it already wrote in place until that key changes again; delete them with `DELETE ... WHERE _cdc_deleted` or rebuild the table with `--full-refresh`.
+
+A non-streaming full refresh supports `hard` even though it uses the replace strategy. It rebuilds the table from a fresh snapshot, applies any CDC deletes received during snapshot catch-up, and replaces the destination with the live rows. With `--stream --full-refresh`, keyed tables continue using merge after the snapshot.
+
+```bash
+ingestr ingest \
+  --source-uri 'postgres+cdc://user:pass@localhost:5432/shop' \
+  --source-table 'public.customers' \
+  --dest-uri 'duckdb:///shop.duckdb' \
+  --cdc-delete-behavior hard
+```
+
 ### Resuming and full refresh
 
-On every run after the first, a CDC connector resumes from the last durable position rather than re-snapshotting. If that saved position is no longer available in the source's log (for example, the log was truncated or retention expired), the run **fails instead of silently taking a partial snapshot**. To rebuild the destination from a fresh snapshot, run with `--full-refresh`.
+On every run after the first, a CDC connector resumes from the last durable position rather than re-snapshotting. If that saved position is no longer available in the source's log (for example, the log was truncated or retention expired), the run **fails instead of silently taking a partial snapshot**. To rebuild the destination from a fresh snapshot, run with `--full-refresh`. For a continuous PostgreSQL CDC, MySQL CDC, or SQL Server CDC/Change Tracking stream, use `--full-refresh --stream --refresh-id <unique-request-id>` to reset and continue streaming in one process. Persist the ID and reuse it on retries so completed snapshots are resumed instead of reset again. This requires destination-managed CDC state; see [Refreshing a stream](/commands/ingest.md#refreshing-a-stream).
+
+For externally loaded destinations, PostgreSQL supports [CDC without snapshots](/supported-sources/postgres#cdc-without-snapshots) using `--cdc-snapshot-mode never` and `--cdc-start-lsn`. This requires a consistent external baseline and a replication slot retaining changes from that boundary. The saved `never` policy prohibits full refresh and all automatic snapshot fallbacks, including the schema-change rebuilds described below.
+
+The [PostgreSQL snapshot-to-CDC walkthrough](/tutorials/cdc-postgres-snapshot.md) shows how to obtain the snapshot and LSN together, load the snapshot with ingestr, and start CDC without pausing ordinary source writes.
 
 ### One-shot vs. streaming
 
@@ -63,6 +81,8 @@ You can add, alter, or drop columns on a replicated PostgreSQL table without res
 5. Resume logical replication, taking care not to skip past the transaction that revealed the change.
 
 Keep in mind that the replacement snapshot in step 2 is a full copy of the table, not a delta — on a large table every detected schema change costs a re-snapshot. If you're running a DDL-heavy migration, it can be cheaper to batch the changes together, or pause the stream and let the next run pick them up at once.
+
+If ingestr stops partway through such a snapshot — or through backfilling a table added mid-stream — the next streaming run continues it instead of starting over. Snapshots of tables whose key columns are all `NOT NULL` read in key order and record, after every flush, the last key the destination has durably applied; the restarted run takes a fresh consistent snapshot and copies only the rows after that key, while the rows already copied stay in place. A snapshot starts over instead when the table's schema or identity changed again, the destination table was replaced, or no other table in the stream has resume state (for example, the very first snapshot of a connector).
 
 New columns are added to the destination when it supports schema evolution, and compatible type or nullability changes are applied where the destination allows them. Dropped columns are never deleted from the destination — they stay behind as nullable columns — and a rename looks like a drop plus an add, so you end up with both the old column and the new one. If the destination can't replace the table safely, the run fails rather than pressing on with a wrong schema; a `freeze` schema contract rejects the change too, which is exactly what freezing is for.
 
@@ -145,7 +165,7 @@ Each platform has requirements and knobs specific to its change mechanism — fo
 
 ### Platform notes at a glance
 
-- **PostgreSQL** reads logical replication from a publication and slot. It can manage its own `ingestr_publication` or use one you supply, and tracks progress in shared destination state tables rather than the maximum `_cdc_lsn` in a user table. A running stream absorbs column-level schema changes without restarting; picking up a newly added table takes a restart, since the stream exits and lets its supervisor bring it back up. `TRUNCATE` — or dropping and recreating a source table — is captured as a table replacement.
+- **PostgreSQL** reads logical replication from a publication and slot. It can manage its own `ingestr_publication` or use one you supply, and tracks progress in shared destination state tables rather than the maximum `_cdc_lsn` in a user table. A running stream absorbs column-level schema changes without restarting; picking up a newly added table takes a restart, since the stream exits and lets its supervisor bring it back up. `TRUNCATE` — or dropping and recreating a source table — is captured as a table replacement. On PostgreSQL 16+ it can also read from a hot standby; see [Reading from a standby](/supported-sources/postgres.md#reading-from-a-standby).
 - **MySQL / MariaDB** stream the binary log after a consistent snapshot, resuming from durable CDC state recorded in the destination. Pin a unique `server_id` for scheduled or overlapping runs.
 - **SQL Server** offers two paths: lightweight **Change Tracking** (net changes since the last version, primary key required) and **log-based CDC** (full row-level change history). Both resume from `_cdc_lsn` and both support `--stream`, though Change Tracking streams a single table at a time.
 - **MongoDB** tails change streams from a replica set / Atlas cluster. Being schema-less, it uses schema inference, so the destination schema is derived from sampled documents.
@@ -160,7 +180,7 @@ PostgreSQL CDC is immune, because its replication slot is exclusive: a second ru
 
 MySQL and MariaDB CDC are a separate case: they require a destination-side run lease that neither BigQuery nor Snowflake implements, so `mysql+cdc`, `mysql+pymysql+cdc` and `mariadb+cdc` are still rejected against those two destinations and a serial schedule does not change that. Use a destination that enforces primary keys.
 
-The mitigation is operational: keep one run of a connector in flight at a time, with a non-overlapping schedule, a scheduler-level lock, or a single long-lived `--stream` process. A strictly serial schedule is safe, and `--full-refresh` runs are unaffected since they do not merge into existing data. [Issue #1190](https://github.com/bruin-data/ingestr/issues/1190) tracks removing the hazard.
+The mitigation is operational: keep one run of a connector in flight at a time, with a non-overlapping schedule, a scheduler-level lock, or a single long-lived `--stream` process. A strictly serial schedule is safe, and batch `--full-refresh` runs are unaffected since they do not merge into existing data. Streaming full refresh continues merging after the snapshot and requires the same serialization. [Issue #1190](https://github.com/bruin-data/ingestr/issues/1190) tracks removing the hazard.
 
 ## CDC vs. regular incremental loading
 
@@ -194,10 +214,12 @@ The first run snapshots `public.users` and records the WAL position; each later 
 
 ## Hands-on tutorials
 
-Step-by-step walkthroughs that set up a source, take the initial snapshot, and capture live inserts, updates, and deletes into DuckDB:
+Walkthroughs that set up a source, take the initial snapshot, and capture live inserts, updates, and deletes:
 
 - [Replicate PostgreSQL to DuckDB with CDC](/tutorials/cdc-postgres-duckdb.md)
+- [Replicate PostgreSQL to StarRocks with CDC](/supported-sources/starrocks.md#postgresql-cdc)
 - [Replicate MySQL to DuckDB with CDC](/tutorials/cdc-mysql-duckdb.md)
+- [Replicate MySQL to StarRocks with CDC](/supported-sources/starrocks.md#mysql-cdc)
 - [Replicate SQL Server to DuckDB with CDC](/tutorials/cdc-sqlserver-duckdb.md)
 - [Replicate MongoDB to DuckDB with CDC](/tutorials/cdc-mongodb-duckdb.md)
 

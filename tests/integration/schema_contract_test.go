@@ -23,6 +23,7 @@ const (
 // - Second load: try to add a new column (email) with freeze mode
 // - Expected: pipeline should fail with contract violation error
 func TestDestinations_SchemaContract_Freeze(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -33,7 +34,7 @@ func TestDestinations_SchemaContract_Freeze(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_freeze_new_column", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -80,6 +81,7 @@ func TestDestinations_SchemaContract_Freeze(t *testing.T) {
 
 // TestDestinations_SchemaContract_Freeze_TypeChange validates freeze mode rejects type changes.
 func TestDestinations_SchemaContract_Freeze_TypeChange(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -131,6 +133,7 @@ func TestDestinations_SchemaContract_Freeze_TypeChange(t *testing.T) {
 
 // TestDestinations_SchemaContract_Evolve validates that evolve mode (default) allows schema changes.
 func TestDestinations_SchemaContract_Evolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -141,7 +144,7 @@ func TestDestinations_SchemaContract_Evolve(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_evolve", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -187,6 +190,7 @@ func TestDestinations_SchemaContract_Evolve(t *testing.T) {
 // - Allows new columns to be added
 // - Type widening changes are not applied (but pipeline succeeds with warning)
 func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -197,7 +201,7 @@ func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_discard_value", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -241,6 +245,7 @@ func TestDestinations_SchemaContract_DiscardValue(t *testing.T) {
 // discard_value mode allows ingestion by NULLing out incompatible values.
 // The destination schema should NOT be widened, but new rows are added with NULLs for incompatible columns.
 func TestDestinations_SchemaContract_DiscardValue_TypeChange(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -305,6 +310,7 @@ func TestDestinations_SchemaContract_DiscardValue_TypeChange(t *testing.T) {
 // - Schema evolution still applies new columns, but rows with those values are discarded
 // - Pipeline succeeds and older rows are preserved
 func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -315,7 +321,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_discard_row", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -369,6 +375,7 @@ func TestDestinations_SchemaContract_DiscardRow(t *testing.T) {
 
 // TestDestinations_SchemaContract_DefaultIsEvolve validates that empty/default contract is evolve.
 func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -379,7 +386,7 @@ func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
 
 	for _, tc := range destinationCases() {
 		tc := tc
-		if tc.sqlBackend == nil || !tc.mergeCapable || !tc.schemaEvolutionCapable {
+		if tc.sqlBackend == nil || !tc.mergeCapable || (!tc.addColumnCapable && !tc.schemaEvolutionCapable) {
 			t.Run(tc.name+"_default", func(t *testing.T) {
 				t.Skip("destination does not support merge/schema evolution")
 			})
@@ -423,10 +430,7 @@ func TestDestinations_SchemaContract_DefaultIsEvolve(t *testing.T) {
 func validateContractInitialSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var count int
@@ -437,10 +441,7 @@ func validateContractInitialSQL(t *testing.T, backend *sqlBackend, uri, table st
 func validateContractRowCountSQL(t *testing.T, backend *sqlBackend, uri, table string, expected int) {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var count int
@@ -458,17 +459,11 @@ func validateContractEmailColumnExists(t *testing.T, backend *sqlBackend, uri, t
 func getColumnTypes(t *testing.T, backend *sqlBackend, uri, table string) map[string]string {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return nil
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	types, err := backend.schemaTypes(db, table)
-	if err != nil {
-		t.Skipf("Could not read schema types: %v", err)
-		return nil
-	}
+	require.NoError(t, err)
 	return types
 }
 
@@ -477,6 +472,7 @@ func getColumnTypes(t *testing.T, backend *sqlBackend, uri, table string) map[st
 // - Second load: source loses email column (Fivetran-style soft removal)
 // - Expected: email column stays in destination, new rows have NULL for email
 func TestDestinations_SchemaContract_ColumnRemoval_Evolve(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -538,6 +534,7 @@ func TestDestinations_SchemaContract_ColumnRemoval_Evolve(t *testing.T) {
 
 // TestDestinations_SchemaContract_ColumnRemoval_Freeze validates that freeze mode rejects column removal.
 func TestDestinations_SchemaContract_ColumnRemoval_Freeze(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

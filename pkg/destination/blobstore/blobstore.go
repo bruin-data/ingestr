@@ -16,6 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/datalakeerror"
 	datalakedirectory "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/directory"
 	datalakefile "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
+	datalakefilesystem "github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/filesystem"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -27,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bruin-data/ingestr/internal/adlsutil"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -51,10 +53,13 @@ type BlobstoreDestination struct {
 	adlsClient  *azureDatalakeClient
 	bucketName  string
 	basePath    string
+	uriBucket   string
+	uriPrefix   string
 	layout      string
 	arrowSchema *arrow.Schema
 	schema      *schema.TableSchema
 	tableName   string
+	replaces    map[string]*replaceState
 	mu          sync.Mutex
 }
 
@@ -73,6 +78,8 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 	}
 
 	d.provider = parsed.provider
+	d.uriBucket = parsed.bucket
+	d.uriPrefix = parsed.prefix
 	d.layout = parsed.layout
 	if d.layout == "" {
 		d.layout = "{load_id}.{file_id}.{ext}"
@@ -96,7 +103,7 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 		config.Debug("[BLOBSTORE] Connected to GCS with layout %s", d.layout)
 
 	case ProviderAzure:
-		client, err := createAzureClient(ctx, parsed)
+		client, err := adlsutil.NewBlobClient(parsed.accountName, parsed.accountKey, parsed.sasToken, parsed.connectionString, parsed.clientCredentials)
 		if err != nil {
 			return fmt.Errorf("failed to create Azure client: %w", err)
 		}
@@ -156,36 +163,11 @@ func createGCSClient(ctx context.Context, parsed *parsedBlobstoreURI) (*storage.
 	return storage.NewClient(ctx, opts...)
 }
 
-func createAzureClient(ctx context.Context, parsed *parsedBlobstoreURI) (*azblob.Client, error) {
-	if parsed.accountName == "" {
-		return nil, fmt.Errorf("account_name is required for Azure Blob Storage")
-	}
-
-	serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", parsed.accountName)
-
-	if parsed.accountKey != "" {
-		cred, err := azblob.NewSharedKeyCredential(parsed.accountName, parsed.accountKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create shared key credential: %w", err)
-		}
-		return azblob.NewClientWithSharedKeyCredential(serviceURL, cred, nil)
-	}
-
-	if parsed.sasToken != "" {
-		return azblob.NewClientWithNoCredential(serviceURL+"?"+parsed.sasToken, nil)
-	}
-
-	cred, err := parsed.clientCredentials.NewTokenCredential()
-	if err != nil {
-		return nil, err
-	}
-	return azblob.NewClient(serviceURL, cred, nil)
-}
-
 type azureDatalakeClient struct {
-	accountName        string
-	newFileClient      func(string) (*datalakefile.Client, error)
-	newDirectoryClient func(string) (*datalakedirectory.Client, error)
+	accountName         string
+	newFileClient       func(string) (*datalakefile.Client, error)
+	newDirectoryClient  func(string) (*datalakedirectory.Client, error)
+	newFileSystemClient func(string) (*datalakefilesystem.Client, error)
 }
 
 func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient, error) {
@@ -208,6 +190,9 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 		client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
 			return datalakedirectory.NewClientWithSharedKeyCredential(pathURL, cred, nil)
 		}
+		client.newFileSystemClient = func(fsURL string) (*datalakefilesystem.Client, error) {
+			return datalakefilesystem.NewClientWithSharedKeyCredential(fsURL, cred, nil)
+		}
 		return client, nil
 	}
 
@@ -218,6 +203,9 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 		}
 		client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
 			return datalakedirectory.NewClientWithNoCredential(adlsutil.AppendSASToken(pathURL, sasToken), nil)
+		}
+		client.newFileSystemClient = func(fsURL string) (*datalakefilesystem.Client, error) {
+			return datalakefilesystem.NewClientWithNoCredential(adlsutil.AppendSASToken(fsURL, sasToken), nil)
 		}
 		return client, nil
 	}
@@ -232,6 +220,9 @@ func createAzureDatalakeClient(parsed *parsedBlobstoreURI) (*azureDatalakeClient
 	client.newDirectoryClient = func(pathURL string) (*datalakedirectory.Client, error) {
 		return datalakedirectory.NewClient(pathURL, cred, nil)
 	}
+	client.newFileSystemClient = func(fsURL string) (*datalakefilesystem.Client, error) {
+		return datalakefilesystem.NewClient(fsURL, cred, nil)
+	}
 	return client, nil
 }
 
@@ -244,11 +235,12 @@ func (d *BlobstoreDestination) Close(ctx context.Context) error {
 
 func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	d.schema = opts.Schema
 
-	bucketName, basePath := parseBucketAndPath(opts.Table)
+	bucketName, basePath, uriIgnored := d.resolveLocation(opts.Table)
+	if uriIgnored {
+		output.Warnf("[BLOBSTORE] table %s is written to %s/%s; the URI's bucket and path are only used for table names without a \"/\"\n", opts.Table, bucketName, basePath)
+	}
 	d.bucketName = bucketName
 	d.basePath = basePath
 	d.tableName = opts.Table
@@ -258,7 +250,37 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 	}
 
 	config.Debug("[BLOBSTORE] Prepared table: bucket=%s, basePath=%s", d.bucketName, d.basePath)
+	d.mu.Unlock()
+
+	if opts.DropFirst {
+		return d.prepareReplace(ctx, opts.Table)
+	}
 	return nil
+}
+
+// resolveLocation returns the bucket and base path for table. A table with a "/", or one
+// named after the URI's bucket, is <bucket>/<path> as before; only other table names are
+// written under the URI's bucket and prefix. uriIgnored reports a URI bucket that went unused.
+func (d *BlobstoreDestination) resolveLocation(table string) (bucket, basePath string, uriIgnored bool) {
+	tableBucket, tablePath := parseBucketAndPath(table)
+	switch {
+	case d.uriBucket == "":
+		return tableBucket, tablePath, false
+	case strings.Contains(table, "/") || tableBucket == d.uriBucket:
+		return tableBucket, tablePath, tableBucket != d.uriBucket || d.uriPrefix != ""
+	default:
+		return d.uriBucket, joinPath(d.uriPrefix, table), false
+	}
+}
+
+func joinPath(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p = strings.Trim(p, "/"); p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "/")
 }
 
 func parseBucketAndPath(table string) (bucket, path string) {
@@ -280,7 +302,18 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 	loadID := uuid.New().String()[:8]
 	fileID := 0
 
-	config.Debug("[BLOBSTORE] Starting write to bucket=%s, basePath=%s with layout=%s", d.bucketName, d.basePath, d.layout)
+	d.mu.Lock()
+	bucket, basePath, tableName, arrowSchema := d.bucketName, d.basePath, d.tableName, d.arrowSchema
+	d.mu.Unlock()
+	if opts.Schema != nil {
+		arrowSchema = opts.Schema.ToArrowSchema()
+	}
+	if opts.Table != "" {
+		bucket, basePath, _ = d.resolveLocation(opts.Table)
+		tableName = opts.Table
+	}
+
+	config.Debug("[BLOBSTORE] Starting write to bucket=%s, basePath=%s with layout=%s", bucket, basePath, d.layout)
 
 	var buffer bytes.Buffer
 	var writer *pqarrow.FileWriter
@@ -296,10 +329,12 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		}
 		writer = nil
 
-		path := d.renderLayout(loadID, fileID)
-		if err := d.writeBlob(ctx, path, buffer.Bytes()); err != nil {
+		path := d.renderLayout(tableName, loadID, fmt.Sprintf("%d", fileID))
+		key := blobKey(basePath, path)
+		if err := d.writeBlob(ctx, bucket, key, buffer.Bytes()); err != nil {
 			return fmt.Errorf("failed to write to blob %s: %w", path, err)
 		}
+		d.markWritten(opts.Table, key)
 
 		config.Debug("[BLOBSTORE] Wrote %d rows to %s (%d bytes)", rowsInCurrentFile, path, buffer.Len())
 		fileID++
@@ -325,11 +360,9 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		startBatch := time.Now()
 
 		if writer == nil {
-			d.mu.Lock()
-			if d.arrowSchema == nil {
-				d.arrowSchema = stripSchemaMetadata(record.Schema())
+			if arrowSchema == nil {
+				arrowSchema = stripSchemaMetadata(record.Schema())
 			}
-			d.mu.Unlock()
 
 			writerProps := parquet.NewWriterProperties(
 				parquet.WithCompression(compress.Codecs.Snappy),
@@ -341,7 +374,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 			)
 
 			var err error
-			writer, err = pqarrow.NewFileWriter(d.arrowSchema, &buffer, writerProps, arrowProps)
+			writer, err = pqarrow.NewFileWriter(arrowSchema, &buffer, writerProps, arrowProps)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to create parquet writer: %w", err)
@@ -350,8 +383,8 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 
 		recordToWrite := record
 		shouldRelease := false
-		if !record.Schema().Equal(d.arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), d.arrowSchema) {
-			normalized, err := normalizeRecordToSchema(record, d.arrowSchema)
+		if !record.Schema().Equal(arrowSchema) && schemaEqualIgnoringMetadata(record.Schema(), arrowSchema) {
+			normalized, err := normalizeRecordToSchema(record, arrowSchema)
 			if err != nil {
 				record.Release()
 				return fmt.Errorf("failed to normalize record schema: %w", err)
@@ -387,16 +420,18 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 	return nil
 }
 
-func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data []byte) error {
-	fullPath := path
-	if d.basePath != "" {
-		fullPath = strings.TrimSuffix(d.basePath, "/") + "/" + path
+func blobKey(basePath, path string) string {
+	if basePath == "" {
+		return path
 	}
+	return strings.TrimSuffix(basePath, "/") + "/" + path
+}
 
+func (d *BlobstoreDestination) writeBlob(ctx context.Context, bucket, fullPath string, data []byte) error {
 	switch d.provider {
 	case ProviderS3:
 		_, err := d.s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(d.bucketName),
+			Bucket:      aws.String(bucket),
 			Key:         aws.String(fullPath),
 			Body:        bytes.NewReader(data),
 			ContentType: aws.String("application/octet-stream"),
@@ -404,7 +439,7 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 		return err
 
 	case ProviderGCS:
-		obj := d.gcsClient.Bucket(d.bucketName).Object(fullPath)
+		obj := d.gcsClient.Bucket(bucket).Object(fullPath)
 		w := obj.NewWriter(ctx)
 		w.ContentType = "application/octet-stream"
 		if _, err := io.Copy(w, bytes.NewReader(data)); err != nil {
@@ -414,14 +449,14 @@ func (d *BlobstoreDestination) writeBlob(ctx context.Context, path string, data 
 		return w.Close()
 
 	case ProviderAzure:
-		_, err := d.azureClient.UploadBuffer(ctx, d.bucketName, fullPath, data, nil)
+		_, err := d.azureClient.UploadBuffer(ctx, bucket, fullPath, data, nil)
 		return err
 
 	case ProviderAzureDatalake:
 		if d.adlsClient == nil {
 			return fmt.Errorf("azure Data Lake Storage Gen2 client is not initialized")
 		}
-		return d.adlsClient.uploadBuffer(ctx, d.bucketName, fullPath, data)
+		return d.adlsClient.uploadBuffer(ctx, bucket, fullPath, data)
 	}
 
 	return fmt.Errorf("unsupported provider: %s", d.provider)
@@ -523,8 +558,7 @@ func isAzureDatalakeAlreadyExists(err error) bool {
 	)
 }
 
-func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
-	tableName := d.tableName
+func (d *BlobstoreDestination) renderLayout(tableName, loadID, fileID string) string {
 	if idx := strings.LastIndex(tableName, "/"); idx != -1 {
 		tableName = tableName[idx+1:]
 	}
@@ -538,7 +572,7 @@ func (d *BlobstoreDestination) renderLayout(loadID string, fileID int) string {
 	result := d.layout
 	result = strings.ReplaceAll(result, "{table_name}", tableName)
 	result = strings.ReplaceAll(result, "{load_id}", loadID)
-	result = strings.ReplaceAll(result, "{file_id}", fmt.Sprintf("%d", fileID))
+	result = strings.ReplaceAll(result, "{file_id}", fileID)
 	result = strings.ReplaceAll(result, "{ext}", "parquet")
 
 	return result
@@ -607,6 +641,8 @@ func (d *BlobstoreDestination) GetTableSchema(ctx context.Context, table string)
 
 type parsedBlobstoreURI struct {
 	provider          Provider
+	bucket            string
+	prefix            string
 	accessKeyID       string
 	secretAccessKey   string
 	region            string
@@ -615,6 +651,7 @@ type parsedBlobstoreURI struct {
 	accountName       string
 	accountKey        string
 	sasToken          string
+	connectionString  string
 	clientCredentials adlsutil.ClientCredentials
 	layout            string
 }
@@ -630,18 +667,25 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 	switch u.Scheme {
 	case "s3":
 		parsed.provider = ProviderS3
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.accessKeyID = u.Query().Get("access_key_id")
 		parsed.secretAccessKey = u.Query().Get("secret_access_key")
 		parsed.region = u.Query().Get("region")
 		parsed.endpointURL = u.Query().Get("endpoint_url")
 	case "gs", "gcs":
 		parsed.provider = ProviderGCS
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.credentialsFile = u.Query().Get("credentials_file")
 	case "az", "azure":
 		parsed.provider = ProviderAzure
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.connectionString = u.Query().Get("connection_string")
 		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
 		parsed.provider = ProviderAzureDatalake

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 	_ "github.com/microsoft/go-mssqldb/azuread" // registers the "azuresql" driver for Fabric
 	_ "github.com/sijms/go-ora/v2"
-	_ "github.com/snowflakedb/gosnowflake"
+	_ "github.com/snowflakedb/gosnowflake/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,6 +71,8 @@ type destCase struct {
 	deleteInsertCapable    bool
 	scd2Capable            bool
 	schemaEvolutionCapable bool
+	addColumnCapable       bool
+	optionalPKConstraint   bool // Some warehouses may discard informational PK hints on replace.
 	// replaceDedupCapable marks destinations that deduplicate by primary key on
 	// replace, so the dedup conformance tests run against them. Most swap+merge
 	// destinations do this via the strategy's pre-swap normalised table; Postgres
@@ -145,6 +148,7 @@ func destinationCases() []destCase {
 			deleteInsertCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false, // SQLite doesn't support ALTER COLUMN TYPE
+			addColumnCapable:       true,
 			replaceDedupCapable:    true,
 		},
 		{
@@ -185,12 +189,27 @@ func destinationCases() []destCase {
 			validateAppendNonSQL: validateParquetAppend,
 		},
 		{
-			name: "discard",
+			name: "jsonl",
 			setup: func(t *testing.T, _ context.Context) (string, string, func()) {
-				return "discard://", "conformance", func() {}
+				return "jsonl://" + filepath.Join(t.TempDir(), "out.jsonl"), "conformance", func() {}
 			},
-			validateNonSQL:       func(t *testing.T, _, _ string) { assert.True(t, true) },
-			validateAppendNonSQL: func(t *testing.T, _, _ string) { assert.True(t, true) },
+			validateNonSQL:       validateJSONLReplace,
+			validateAppendNonSQL: validateJSONLAppend,
+		},
+		{
+			name:                 "mongodb",
+			setup:                setupMongoDBConformance,
+			validateNonSQL:       validateMongoDBReplace,
+			validateAppendNonSQL: validateMongoDBAppend,
+		},
+		{
+			name:                   "starrocks",
+			setup:                  setupStarRocksConformance,
+			sqlBackend:             starRocksConformanceBackend(),
+			mergeCapable:           true,
+			replaceDedupCapable:    true,
+			schemaEvolutionCapable: true,
+			addColumnCapable:       true,
 		},
 		{
 			name: "bigquery",
@@ -224,11 +243,11 @@ func destinationCases() []destCase {
 			scd2Capable:            true,
 			schemaEvolutionCapable: true,
 			replaceDedupCapable:    true,
+			optionalPKConstraint:   true,
 		},
 		{
 			name: "clickhouse",
 			setup: func(t *testing.T, ctx context.Context) (string, string, func()) {
-				t.Skip("clickhouse tests temporarily disabled")
 				if chDest.uri == "" {
 					t.Skip("shared clickhouse destination container not available")
 				}
@@ -296,6 +315,7 @@ func destinationCases() []destCase {
 			replaceDedupCapable:    true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false, // Oracle needs a data-preserving rewrite path for type changes like NUMBER -> CLOB.
+			addColumnCapable:       true,
 		},
 		{
 			name: "maxcompute",
@@ -304,8 +324,10 @@ func destinationCases() []destCase {
 					t.Skip("shared MaxCompute emulator container not available")
 				}
 
+				maxcomputeEmulatorMu.Lock()
 				table := fmt.Sprintf("conformance_%s", uniqueSuffix())
 				cleanup := func() {
+					defer maxcomputeEmulatorMu.Unlock()
 					dest, err := uri.DefaultRegistry.GetDestination(maxcomputeDest.uri)
 					if err != nil {
 						return
@@ -328,15 +350,19 @@ func destinationCases() []destCase {
 					t.Skip("shared mssql destination container not available")
 				}
 
-				table := fmt.Sprintf("dbo.conformance_%s", uniqueSuffix())
+				// Each test gets its own database: catalog reads and DDL from
+				// parallel tests in one database deadlock on its system tables.
+				dbName := fmt.Sprintf("conformance_%s", uniqueSuffix())
+				admin, err := sql.Open("sqlserver", mssqlConnString(mssqlDest.uri))
+				require.NoError(t, err)
+				_, err = admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE [%s]", dbName))
+				require.NoError(t, err)
 				cleanup := func() {
-					db, err := sql.Open("sqlserver", mssqlConnString(mssqlDest.uri))
-					if err == nil {
-						_, _ = db.ExecContext(ctx, fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s", table, quoteTableMSSQL(table)))
-						_ = db.Close()
-					}
+					_, _ = admin.ExecContext(ctx, fmt.Sprintf("ALTER DATABASE [%s] SET SINGLE_USER WITH ROLLBACK IMMEDIATE", dbName))
+					_, _ = admin.ExecContext(ctx, fmt.Sprintf("DROP DATABASE [%s]", dbName))
+					_ = admin.Close()
 				}
-				return mssqlDest.uri, table, cleanup
+				return mssqlURIForDatabase(t, mssqlDest.uri, "mssql", dbName, nil), fmt.Sprintf("dbo.conformance_%s", uniqueSuffix()), cleanup
 			},
 			sqlBackend:             mssqlBackend(),
 			mergeCapable:           true,
@@ -367,6 +393,7 @@ func destinationCases() []destCase {
 			mergeCapable:        true,
 			deleteInsertCapable: true,
 			scd2Capable:         true,
+			addColumnCapable:    true,
 		},
 		{
 			name: "cratedb",
@@ -389,6 +416,7 @@ func destinationCases() []destCase {
 			mergeCapable:           true,
 			scd2Capable:            true,
 			schemaEvolutionCapable: false,
+			addColumnCapable:       true,
 		},
 		{
 			name: "snowflake",
@@ -474,6 +502,7 @@ func validateIcebergAppend(t *testing.T, destURI, destTable string) {
 // - replace strategy correctness (existing data overwritten)
 // - destination type mapping correctness (SQL backends)
 func TestDestinations_Replace(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -507,6 +536,7 @@ func TestDestinations_Replace(t *testing.T) {
 }
 
 func TestDestinations_OracleExadataAlias(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -622,6 +652,7 @@ func countRowsViaAthenaRead(t *testing.T, ctx context.Context, athenaURI, athena
 // - merge strategy upsert behavior (update existing rows by PK, insert new)
 // Only destinations that implement MergeTable are tested.
 func TestDestinations_Merge(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -669,6 +700,7 @@ func TestDestinations_Merge(t *testing.T) {
 // - destination supports append
 // - second run adds rows without overwriting
 func TestDestinations_Append(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -721,6 +753,7 @@ func TestDestinations_Append(t *testing.T) {
 // - verify rows in the interval are replaced
 // - verify net-new rows within the interval are inserted (count increases)
 func TestDestinations_DeleteInsert(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -777,6 +810,7 @@ func TestDestinations_DeleteInsert(t *testing.T) {
 //     [3,4] must replace id=3 in place, insert net-new id=4, and leave id=1
 //     and id=2 (outside the interval) untouched — ending at 4 rows.
 func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -855,6 +889,7 @@ func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
 //
 // - Final state: 8 total rows, 4 current, 5 historical
 func TestDestinations_SCD2(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -908,7 +943,7 @@ func validateSCD2SQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
 	if err != nil {
-		t.Skipf("Could not open SQL backend for SCD2 validation: %v", err)
+		t.Fatalf("Could not open SQL backend for SCD2 validation: %v", err)
 		return
 	}
 	defer func() { _ = db.Close() }()
@@ -1191,6 +1226,12 @@ func splitSchemaTable(table string, defaultSchema string) (string, string) {
 
 var uniqueCounter atomic.Uint64
 
+// maxcomputeEmulatorMu runs one test at a time against the shared MaxCompute
+// emulator. v0.0.7 keeps storage read sessions in an unsynchronized HashMap and
+// answers a failed read with an empty 200 response, which the source reports
+// as an Arrow EOF.
+var maxcomputeEmulatorMu sync.Mutex
+
 func uniqueSuffix() string {
 	// Collision-safe even when parallel tests race on the same nanosecond. Digits
 	// only (no separator): this feeds SQL identifiers and S3 bucket names, which
@@ -1440,7 +1481,7 @@ func validateReplaceSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
 	if err != nil {
-		t.Skipf("Could not open SQL backend for replace validation: %v", err)
+		t.Fatalf("Could not open SQL backend for replace validation: %v", err)
 		return
 	}
 	defer func() { _ = db.Close() }()
@@ -1451,7 +1492,7 @@ func validateReplaceSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 
 	actualTypes, err := backend.schemaTypes(db, table)
 	if err != nil {
-		t.Skipf("Could not read schema types: %v", err)
+		t.Fatalf("Could not read schema types: %v", err)
 		return
 	}
 	requireLoadTimestampColumn(t, actualTypes)
@@ -1462,7 +1503,7 @@ func validateMergeSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
 	if err != nil {
-		t.Skipf("Could not open SQL backend for merge validation: %v", err)
+		t.Fatalf("Could not open SQL backend for merge validation: %v", err)
 		return
 	}
 	defer func() { _ = db.Close() }()
@@ -1484,7 +1525,7 @@ func validateAppendSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
 	if err != nil {
-		t.Skipf("Could not open SQL backend for append validation: %v", err)
+		t.Fatalf("Could not open SQL backend for append validation: %v", err)
 		return
 	}
 	defer func() { _ = db.Close() }()
@@ -1502,7 +1543,7 @@ func validateDeleteInsertSQL(t *testing.T, backend *sqlBackend, uri, table strin
 	t.Helper()
 	db, err := backend.openDB(uri)
 	if err != nil {
-		t.Skipf("Could not open SQL backend for delete+insert validation: %v", err)
+		t.Fatalf("Could not open SQL backend for delete+insert validation: %v", err)
 		return
 	}
 	defer func() { _ = db.Close() }()
@@ -2247,6 +2288,7 @@ func normalizeFabricType(fabricType string) string {
 // TestChessSource_ToDestinations tests Chess.com source against all destinations
 // This test fetches 1 month of games data from Chess.com and ingests it into each destination
 func TestChessSource_ToDestinations(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2293,7 +2335,7 @@ func validateChessGamesSQL(t *testing.T, backend *sqlBackend, uri, table string)
 	t.Helper()
 	db, err := backend.openDB(uri)
 	if err != nil {
-		t.Skipf("Could not open SQL backend for chess validation: %v", err)
+		t.Fatalf("Could not open SQL backend for chess validation: %v", err)
 		return
 	}
 	defer func() { _ = db.Close() }()
@@ -2316,6 +2358,7 @@ const (
 // - Second load: schema evolves to age(string) with values like "UNKNOWN"
 // - Destination table should widen the age column from int to string
 func TestDestinations_SchemaEvolution(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2370,10 +2413,7 @@ func TestDestinations_SchemaEvolution(t *testing.T) {
 func validateSchemaEvolutionInitialSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend for schema evolution validation: %v", err)
-		return
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var count int
@@ -2384,10 +2424,7 @@ func validateSchemaEvolutionInitialSQL(t *testing.T, backend *sqlBackend, uri, t
 func validateSchemaEvolutionFinalSQL(t *testing.T, backend *sqlBackend, uri, table string) {
 	t.Helper()
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend for schema evolution validation: %v", err)
-		return
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	// Validate row count (initial + evolved rows merged by id)
@@ -2397,10 +2434,7 @@ func validateSchemaEvolutionFinalSQL(t *testing.T, backend *sqlBackend, uri, tab
 
 	// Validate evolved types
 	actualTypes, err := backend.schemaTypes(db, table)
-	if err != nil {
-		t.Skipf("Could not read schema types: %v", err)
-		return
-	}
+	require.NoError(t, err)
 
 	// Get expected evolved types for this backend
 	expectedTypes := getSchemaEvolutionExpectedTypes(backend)
@@ -2530,6 +2564,7 @@ func getSchemaEvolutionExpectedTypes(backend *sqlBackend) map[string]string {
 // of "main.users") would leave orphaned _old_ tables because the DROP statement
 // was malformed (e.g., "DROP TABLE IF EXISTS .users_old_123").
 func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2545,7 +2580,9 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 			continue
 		}
 		// Include backends that use SwapTable in replace strategy.
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "hana" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
+		dest, err := uri.DefaultRegistry.GetDestination(tc.name + "://")
+		require.NoError(t, err)
+		if dest.SupportsAtomicSwap() {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}
@@ -2573,6 +2610,10 @@ func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
 			assert.Equal(t, 0, oldTables, "No _old_ tables should exist after first replace")
 
 			// Second run: triggers swap (rename existing -> _old_, rename staging -> target, drop _old_)
+			if tc.name == "bigquery" {
+				// BigQuery only creates an aside table when the layout changes.
+				cfg.ClusterBy = []string{"id"}
+			}
 			p2 := pipeline.New(cfg)
 			require.NoError(t, p2.Run(ctx), "Second replace should succeed")
 
@@ -2601,10 +2642,7 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 	t.Helper()
 
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return 0
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	var count int
@@ -2614,6 +2652,14 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 	schemaName, tableName := splitSchemaTable(table, "")
 
 	switch {
+	case strings.HasPrefix(uri, "mysql:") || strings.HasPrefix(uri, "starrocks:"):
+		query = fmt.Sprintf(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE '%s_old_%%'`, tableName)
+	case strings.HasPrefix(uri, "clickhouse:"):
+		query = fmt.Sprintf(`SELECT COUNT(*) FROM system.tables WHERE database = '%s' AND name LIKE '%s_old_%%'`, schemaName, tableName)
+	case strings.HasPrefix(uri, "bigquery:"):
+		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s.INFORMATION_SCHEMA.TABLES` WHERE STARTS_WITH(table_name, '%s__ingestr_repartition_')", schemaName, tableName)
+	case strings.HasPrefix(uri, "snowflake:"):
+		query = fmt.Sprintf(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '%s' AND table_name LIKE '%s_OLD_%%'`, strings.ToUpper(schemaName), strings.ToUpper(tableName))
 	case strings.Contains(uri, "duckdb"):
 		// DuckDB: query information_schema
 		if schemaName == "" {
@@ -2654,10 +2700,7 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 	case strings.Contains(uri, "oracle"):
 		if schemaName == "" {
 			currentUser, err := oracleCurrentUser(db)
-			if err != nil {
-				t.Logf("Warning: failed to get Oracle current user: %v", err)
-				return 0
-			}
+			require.NoError(t, err)
 			schemaName = currentUser
 		}
 		query = `
@@ -2666,10 +2709,7 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 			WHERE OWNER = :1 AND TABLE_NAME LIKE :2
 		`
 		err = db.QueryRow(query, strings.ToUpper(schemaName), strings.ToUpper(tableName)+"_OLD_%").Scan(&count)
-		if err != nil {
-			t.Logf("Warning: failed to count Oracle _old_ tables: %v", err)
-			return 0
-		}
+		require.NoError(t, err)
 		return count
 	case strings.Contains(uri, "sqlite"):
 		// SQLite: query sqlite_master
@@ -2678,15 +2718,12 @@ func countOldTables(t *testing.T, backend *sqlBackend, uri, table string) int {
 			WHERE type = 'table' AND name LIKE '%s_old_%%'
 		`, tableName)
 	default:
-		t.Skipf("countOldTables not implemented for this backend")
+		t.Fatalf("countOldTables not implemented for this backend")
 		return 0
 	}
 
 	err = db.QueryRow(query).Scan(&count)
-	if err != nil {
-		t.Logf("Warning: failed to count _old_ tables: %v", err)
-		return 0
-	}
+	require.NoError(t, err)
 	return count
 }
 
@@ -2697,16 +2734,28 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 	t.Helper()
 
 	db, err := backend.openDB(uri)
-	if err != nil {
-		t.Skipf("Could not open SQL backend: %v", err)
-		return false
-	}
+	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
 	schemaName, tableName := splitSchemaTable(table, "")
 	var query string
 
 	switch {
+	case strings.HasPrefix(uri, "starrocks:"):
+		var name, ddl string
+		require.NoError(t, db.QueryRow("SHOW CREATE TABLE "+table).Scan(&name, &ddl))
+		compact := strings.NewReplacer(" ", "", "\n", "", "\t", "", "`", "").Replace(strings.ToUpper(ddl))
+		return strings.Contains(compact, "PRIMARYKEY("+strings.ToUpper(column)+")")
+	case strings.HasPrefix(uri, "mysql:"):
+		query = fmt.Sprintf(`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '%s' AND column_name = '%s' AND column_key = 'PRI'`, tableName, column)
+	case strings.HasPrefix(uri, "clickhouse:"):
+		query = fmt.Sprintf(`SELECT COUNT(*) FROM system.columns WHERE database = '%s' AND table = '%s' AND name = '%s' AND is_in_primary_key = 1`, schemaName, tableName, column)
+	case strings.HasPrefix(uri, "bigquery:"):
+		query = fmt.Sprintf("SELECT COUNT(*) FROM `%s.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` WHERE table_name = '%s' AND column_name = '%s'", schemaName, tableName, column)
+	case strings.HasPrefix(uri, "snowflake:"):
+		var ddl string
+		require.NoError(t, db.QueryRow("SELECT GET_DDL('TABLE', ?)", table).Scan(&ddl))
+		return strings.Contains(strings.ToUpper(ddl), "PRIMARY KEY ("+strings.ToUpper(column)+")")
 	case strings.Contains(uri, "duckdb"):
 		if schemaName == "" {
 			schemaName = "main"
@@ -2759,10 +2808,7 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 	case strings.Contains(uri, "oracle"):
 		if schemaName == "" {
 			currentUser, err := oracleCurrentUser(db)
-			if err != nil {
-				t.Logf("Warning: failed to get Oracle current user: %v", err)
-				return false
-			}
+			require.NoError(t, err)
 			schemaName = currentUser
 		}
 		query = `
@@ -2777,24 +2823,18 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 			  AND cc.COLUMN_NAME = :3
 		`
 		var count int
-		if err := db.QueryRow(query, strings.ToUpper(schemaName), strings.ToUpper(tableName), strings.ToUpper(column)).Scan(&count); err != nil {
-			t.Logf("Warning: failed to query Oracle primary key: %v", err)
-			return false
-		}
+		require.NoError(t, db.QueryRow(query, strings.ToUpper(schemaName), strings.ToUpper(tableName), strings.ToUpper(column)).Scan(&count))
 		return count > 0
 	case strings.Contains(uri, "sqlite"):
 		// SQLite: PRAGMA table_info reports pk > 0 for primary-key columns.
 		query = fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE pk > 0 AND name = '%s'`, tableName, column)
 	default:
-		t.Skipf("hasPrimaryKey not implemented for this backend")
+		t.Fatalf("hasPrimaryKey not implemented for this backend")
 		return false
 	}
 
 	var count int
-	if err := db.QueryRow(query).Scan(&count); err != nil {
-		t.Logf("Warning: failed to query primary key: %v", err)
-		return false
-	}
+	require.NoError(t, db.QueryRow(query).Scan(&count))
 	return count > 0
 }
 
@@ -2804,6 +2844,7 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 // constraints; the per-table-schema-map fix recreates the target with full constraints.
 // This test locks that fix in place.
 func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2816,7 +2857,15 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 		if tc.sqlBackend == nil {
 			continue
 		}
-		if tc.name == "duckdb" || tc.name == "postgres" || tc.name == "hana" || tc.name == "sqlite" || tc.name == "mssql" || tc.name == "oracle" {
+		if tc.optionalPKConstraint {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Skip("replace may discard informational primary-key hints (BigQuery CTAS)")
+			})
+			continue
+		}
+		dest, err := uri.DefaultRegistry.GetDestination(tc.name + "://")
+		require.NoError(t, err)
+		if dest.SupportsAtomicSwap() {
 			swapCapableCases = append(swapCapableCases, tc)
 		}
 	}
@@ -2857,6 +2906,7 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 // distinct ids ({1,1,2,3,3}); incremental key = score, so the higher-score row
 // wins.
 func TestDestinations_Replace_DedupesByPK(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2891,10 +2941,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 			}
 
 			db, err := tc.sqlBackend.openDB(destURI)
-			if err != nil {
-				t.Skipf("Could not open SQL backend for dedup validation: %v", err)
-				return
-			}
+			require.NoError(t, err)
 			defer func() { _ = db.Close() }()
 
 			var count int
@@ -2920,6 +2967,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 // asserts only the collapse and that each survivor is a real source row — not
 // which duplicate wins. Uses the same fixture (5 rows over 3 distinct ids).
 func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2961,10 +3009,7 @@ func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
 			}
 
 			db, err := tc.sqlBackend.openDB(destURI)
-			if err != nil {
-				t.Skipf("Could not open SQL backend for dedup validation: %v", err)
-				return
-			}
+			require.NoError(t, err)
 			defer func() { _ = db.Close() }()
 
 			var count int
@@ -2986,6 +3031,7 @@ func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
 // exceeding the database identifier length limit (e.g., PostgreSQL's 63-byte limit).
 // Two columns that differ only after byte 63 must not collide.
 func TestDestinations_LongColumnNames(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -3073,4 +3119,50 @@ func TestDestinations_LongColumnNames(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestDestinations_Replace_DedupTiesAndNulls(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	for _, tc := range destinationCases() {
+		if !tc.replaceDedupCapable || tc.sqlBackend == nil {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			destURI, table, cleanup := tc.setup(t, ctx)
+			defer cleanup()
+			cfg := &config.IngestConfig{
+				SourceURI:   jsonlURI(t, "testdata/conformance_replace_ties.jsonl"),
+				SourceTable: "ties", DestURI: destURI, DestTable: table,
+				PrimaryKeys: []string{"id"}, IncrementalKey: "score",
+				IncrementalStrategy: config.StrategyReplace,
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			db, err := tc.sqlBackend.openDB(destURI)
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			var count int
+			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(table)).Scan(&count))
+			assert.Equal(t, 3, count)
+			// SQL ROW_NUMBER does not promise arrival order for equal keys. Either
+			// tied latest row is valid, but the lower-score row must never win.
+			for id, names := range map[int][]string{1: {"tie-a", "tie-b"}, 2: {"null-a", "null-b"}} {
+				var name string
+				require.NoError(t, db.QueryRow(tc.sqlBackend.nameByIDQuery(table, id)).Scan(&name))
+				assert.Contains(t, names, name)
+				query := tc.sqlBackend.nameByIDQuery(table, id)
+				query = strings.Replace(query, "name", "active", 1)
+				query = strings.Replace(query, "NAME", "ACTIVE", 1)
+				var active bool
+				require.NoError(t, db.QueryRow(query).Scan(&active))
+				assert.Equal(t, name == "tie-a" || name == "null-b", active, "dedup must preserve a whole input row")
+			}
+			var name sql.NullString
+			require.NoError(t, db.QueryRow(tc.sqlBackend.nameByIDQuery(table, 3)).Scan(&name))
+			assert.False(t, name.Valid, "NULL payload must survive dedup")
+		})
+	}
 }

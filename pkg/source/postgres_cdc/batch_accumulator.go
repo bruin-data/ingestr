@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
+	"time"
 	"unsafe"
 
 	"github.com/bruin-data/ingestr/internal/config"
@@ -35,6 +37,7 @@ type batchAccumulator struct {
 	// buffered for a table after a flush carries that table's minimum. Used to
 	// compute a safe commit position for streaming mode.
 	minLSN     map[string]pglogrepl.LSN
+	bufferedAt map[string]time.Time
 	bytes      map[string]int64
 	totalBytes int64
 	threshold  int
@@ -43,13 +46,14 @@ type batchAccumulator struct {
 
 func newBatchAccumulator(threshold int, schemas map[string]*schema.TableSchema) *batchAccumulator {
 	return &batchAccumulator{
-		schemas:   schemas,
-		toast:     newToastState(),
-		changes:   make(map[string][]Change),
-		minLSN:    make(map[string]pglogrepl.LSN),
-		bytes:     make(map[string]int64),
-		threshold: threshold,
-		byteLimit: defaultDecoderMemoryBytes,
+		schemas:    schemas,
+		toast:      newToastState(),
+		changes:    make(map[string][]Change),
+		minLSN:     make(map[string]pglogrepl.LSN),
+		bufferedAt: make(map[string]time.Time),
+		bytes:      make(map[string]int64),
+		threshold:  threshold,
+		byteLimit:  defaultDecoderMemoryBytes,
 	}
 }
 
@@ -119,14 +123,15 @@ func (a *batchAccumulator) add(tableName string, changes []Change, lsn pglogrepl
 	previousBytes := a.bytes[tableName]
 	if _, ok := a.minLSN[tableName]; !ok {
 		a.minLSN[tableName] = lsn
+		a.bufferedAt[tableName] = time.Now()
 	}
 	previousCapacity := cap(existing)
 	buffered := append(existing, changes...)
 	a.changes[tableName] = buffered
 	if !tableExists {
-		// changes, minLSN, and bytes each retain a map entry and table-name
-		// header. A fixed conservative charge covers their buckets and keys.
-		a.bytes[tableName] += accumulatorTableOverhead + int64(len(tableName))*3
+		// changes, minLSN, bufferedAt, and bytes each retain a map entry and
+		// table-name header. A fixed conservative charge covers their buckets.
+		a.bytes[tableName] += accumulatorTableOverhead + int64(len(tableName))*4
 	}
 	if capacityGrowth := cap(buffered) - previousCapacity; capacityGrowth > 0 {
 		a.bytes[tableName] += int64(capacityGrowth) * changeStructBytes
@@ -155,6 +160,7 @@ func (a *batchAccumulator) minPendingLSN() (pglogrepl.LSN, bool) {
 func (a *batchAccumulator) discard() {
 	a.changes = make(map[string][]Change)
 	a.minLSN = make(map[string]pglogrepl.LSN)
+	a.bufferedAt = make(map[string]time.Time)
 	a.bytes = make(map[string]int64)
 	a.totalBytes = 0
 }
@@ -210,6 +216,24 @@ func (a *batchAccumulator) flushAll(results chan<- source.RecordBatchResult, tok
 
 func (a *batchAccumulator) flushAllContext(ctx context.Context, results chan<- source.RecordBatchResult, token tokenFunc) error {
 	for tableName := range a.changes {
+		if err := a.flushTableContext(ctx, tableName, results, token); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *batchAccumulator) flushStaleContext(ctx context.Context, results chan<- source.RecordBatchResult, token tokenFunc, maxAge time.Duration, now time.Time) error {
+	tables := make([]string, 0, len(a.bufferedAt))
+	for tableName, bufferedAt := range a.bufferedAt {
+		if now.Sub(bufferedAt) >= maxAge {
+			tables = append(tables, tableName)
+		}
+	}
+	sort.Slice(tables, func(i, j int) bool {
+		return a.minLSN[tables[i]] < a.minLSN[tables[j]]
+	})
+	for _, tableName := range tables {
 		if err := a.flushTableContext(ctx, tableName, results, token); err != nil {
 			return err
 		}
@@ -290,6 +314,7 @@ func (a *batchAccumulator) flushTableContext(ctx context.Context, tableName stri
 
 	delete(a.changes, tableName)
 	delete(a.minLSN, tableName)
+	delete(a.bufferedAt, tableName)
 	a.totalBytes -= a.bytes[tableName]
 	if a.totalBytes < 0 {
 		a.totalBytes = 0

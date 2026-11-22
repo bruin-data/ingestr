@@ -32,8 +32,8 @@ func MapTrinoToDataType(trinoType string) (schema.DataType, int, int, schema.Dat
 	}
 
 	if matches := arrayTypeRegex.FindStringSubmatch(t); len(matches) >= 2 {
-		elemType, _, _, _ := MapTrinoToDataType(matches[1])
-		return schema.TypeArray, 0, 0, elemType
+		elemType, precision, scale, _ := MapTrinoToDataType(matches[1])
+		return schema.TypeArray, precision, scale, elemType
 	}
 
 	if varcharRegex.MatchString(t) {

@@ -23,6 +23,7 @@ import (
 	_ "github.com/apache/iceberg-go/catalog/hadoop"
 	_ "github.com/apache/iceberg-go/catalog/hive"
 	_ "github.com/apache/iceberg-go/catalog/rest"
+	_ "github.com/apache/iceberg-go/catalog/rest/sigv4"
 	_ "github.com/apache/iceberg-go/catalog/sql"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	icebergtable "github.com/apache/iceberg-go/table"
@@ -80,6 +81,16 @@ func (d *Destination) Connect(ctx context.Context, rawURI string) error {
 	d.orphanCleanupLastAttempt = make(map[string]time.Time)
 	config.Debug("[ICEBERG] Connected catalog type=%s name=%s", cat.CatalogType(), cfg.CatalogName)
 	return nil
+}
+
+// ManagedStagingPolicy keeps the default _bruin_staging namespace, except on S3
+// Tables, which rejects namespaces starting with an underscore.
+func (d *Destination) ManagedStagingPolicy() destination.ReplaceStagingPolicy {
+	policy := destination.ReplaceStagingPolicy{DefaultPlacement: destination.ReplaceStagingManagedSchema}
+	if isS3TablesCatalog(d.cfg.Properties) {
+		policy.DefaultManagedSchema = "bruin_staging"
+	}
+	return policy
 }
 
 func (d *Destination) Close(ctx context.Context) error {
@@ -325,11 +336,9 @@ func (d *Destination) createTable(ctx context.Context, ident icebergtable.Identi
 		createOpts = append(createOpts, icebergcatalog.WithLocation(renderTableLocation(d.cfg.TableLocation, ident)))
 	}
 	if opts.PartitionBy != "" {
-		spec, err := iceberggo.NewPartitionSpecOpts(
-			iceberggo.AddPartitionFieldByName(opts.PartitionBy, opts.PartitionBy, iceberggo.IdentityTransform{}, iceSchema, nil),
-		)
+		spec, err := newPartitionSpec(iceSchema, opts.PartitionBy)
 		if err != nil {
-			return fmt.Errorf("iceberg: invalid partition column %q: %w", opts.PartitionBy, err)
+			return err
 		}
 		createOpts = append(createOpts, icebergcatalog.WithPartitionSpec(&spec))
 	}
@@ -418,6 +427,16 @@ func (d *Destination) cleanupOldOrphans(ctx context.Context, tbl *icebergtable.T
 	}
 }
 
+// sameIcebergType compares types ignoring list element IDs, which each table assigns itself.
+func sameIcebergType(a, b iceberggo.Type) bool {
+	al, aIsList := a.(*iceberggo.ListType)
+	bl, bIsList := b.(*iceberggo.ListType)
+	if aIsList && bIsList {
+		return al.ElementRequired == bl.ElementRequired && sameIcebergType(al.Element, bl.Element)
+	}
+	return a.Equals(b)
+}
+
 func (d *Destination) stageTableSchemaUpdate(txn *icebergtable.Transaction, tbl *icebergtable.Table, desired *schema.TableSchema, reset bool) (bool, error) {
 	if err := validateIdentifierFieldsForEvolution(tbl.Schema(), desired, reset); err != nil {
 		return false, err
@@ -451,14 +470,20 @@ func (d *Destination) stageTableSchemaUpdate(txn *icebergtable.Transaction, tbl 
 			continue
 		}
 
-		if !field.Type.Equals(targetType) {
+		if !sameIcebergType(field.Type, targetType) {
+			path, from, to := []string{col.Name}, field.Type, targetType
+			oldList, oldIsList := field.Type.(*iceberggo.ListType)
+			newList, newIsList := targetType.(*iceberggo.ListType)
+			if oldIsList && newIsList {
+				path, from, to = []string{col.Name, "element"}, oldList.Element, newList.Element
+			}
 			if !reset {
-				if _, err := iceberggo.PromoteType(field.Type, targetType); err != nil {
+				if _, err := iceberggo.PromoteType(from, to); err != nil {
 					return false, fmt.Errorf("iceberg: column %q type change from %s to %s is not supported: %w", col.Name, field.Type, targetType, err)
 				}
 			}
-			update.UpdateColumn([]string{col.Name}, icebergtable.ColumnUpdate{
-				FieldType: iceberggo.Optional[iceberggo.Type]{Valid: true, Val: targetType},
+			update.UpdateColumn(path, icebergtable.ColumnUpdate{
+				FieldType: iceberggo.Optional[iceberggo.Type]{Valid: true, Val: to},
 			})
 			changed = true
 		}
@@ -503,7 +528,11 @@ func (d *Destination) stagePartitionSpecUpdate(txn *icebergtable.Transaction, tb
 		update.RemoveField(field.Name)
 	}
 	if partitionBy != "" {
-		update.AddIdentity(partitionBy)
+		column, transform, err := partitionTransform(tbl.Schema(), partitionBy)
+		if err != nil {
+			return false, err
+		}
+		update.AddField(column, transform, "")
 	}
 	if err := update.Commit(); err != nil {
 		return false, fmt.Errorf("iceberg: failed to update partition spec: %w", err)
@@ -754,10 +783,63 @@ func partitionSpecMatches(tbl *icebergtable.Table, partitionBy string) bool {
 	if len(fields) != 1 {
 		return false
 	}
-	sourceField, ok := tbl.Schema().FindFieldByName(partitionBy)
+	column, transform, err := partitionTransform(tbl.Schema(), partitionBy)
+	if err != nil {
+		return false
+	}
+	sourceField, ok := tbl.Schema().FindFieldByName(column)
 	if !ok {
 		return false
 	}
 	field := fields[0]
-	return field.SourceID() == sourceField.ID && field.Transform.Equals(iceberggo.IdentityTransform{})
+	return field.SourceID() == sourceField.ID && field.Transform.Equals(transform)
+}
+
+// partitionTransform maps a partition_by value to its source column and Iceberg transform.
+// A value naming an existing field is a column even if it looks like a transform.
+func partitionTransform(iceSchema *iceberggo.Schema, partitionBy string) (string, iceberggo.Transform, error) {
+	if _, ok := iceSchema.FindFieldByName(partitionBy); ok {
+		return partitionBy, iceberggo.IdentityTransform{}, nil
+	}
+	spec, err := schema.ParseIcebergPartitionBy(partitionBy)
+	if err != nil {
+		return "", nil, fmt.Errorf("iceberg: %w", err)
+	}
+	switch {
+	case spec.Bucket > 0:
+		return spec.Column, iceberggo.BucketTransform{NumBuckets: spec.Bucket}, nil
+	case spec.Truncate > 0:
+		return spec.Column, iceberggo.TruncateTransform{Width: spec.Truncate}, nil
+	}
+	switch spec.Granularity {
+	case "HOUR":
+		return spec.Column, iceberggo.HourTransform{}, nil
+	case "DAY":
+		return spec.Column, iceberggo.DayTransform{}, nil
+	case "MONTH":
+		return spec.Column, iceberggo.MonthTransform{}, nil
+	case "YEAR":
+		return spec.Column, iceberggo.YearTransform{}, nil
+	default:
+		return spec.Column, iceberggo.IdentityTransform{}, nil
+	}
+}
+
+func newPartitionSpec(iceSchema *iceberggo.Schema, partitionBy string) (iceberggo.PartitionSpec, error) {
+	column, transform, err := partitionTransform(iceSchema, partitionBy)
+	if err != nil {
+		return iceberggo.PartitionSpec{}, err
+	}
+	field, ok := iceSchema.FindFieldByName(column)
+	if !ok {
+		return iceberggo.PartitionSpec{}, fmt.Errorf("iceberg: invalid partition column %q: not found in schema", column)
+	}
+	if !transform.CanTransform(field.Type) {
+		return iceberggo.PartitionSpec{}, fmt.Errorf("iceberg: partition_by %q: %s cannot transform %s column %q", partitionBy, transform, field.Type, column)
+	}
+	name, err := iceberggo.GeneratePartitionFieldName(iceSchema, iceberggo.PartitionField{SourceIDs: []int{field.ID}, Transform: transform})
+	if err != nil {
+		return iceberggo.PartitionSpec{}, fmt.Errorf("iceberg: invalid partition column %q: %w", column, err)
+	}
+	return iceberggo.NewPartitionSpecOpts(iceberggo.AddPartitionFieldByName(column, name, transform, iceSchema, nil))
 }

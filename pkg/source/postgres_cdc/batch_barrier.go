@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,6 +18,44 @@ const (
 
 	maxExpectedBarrierLSNDifference = pglogrepl.LSN(16 * 1024 * 1024)
 )
+
+// batchBarrier marks where a batch run stops. On a primary it is a logical
+// decoding message the run emits and then waits to decode. A standby cannot
+// write WAL, so there the run stops once decoding passes the replay position
+// observed at start (target).
+type batchBarrier struct {
+	nonce  string
+	sqlLSN pglogrepl.LSN
+	target pglogrepl.LSN
+}
+
+func (b batchBarrier) active() bool {
+	return b.nonce != "" || b.target != 0
+}
+
+func (s *PostgresCDCSource) beginBatchBarrier(ctx context.Context) (batchBarrier, error) {
+	if !s.standby {
+		nonce, sqlLSN, err := emitBatchBarrier(ctx, s.queryPool)
+		if err != nil {
+			return batchBarrier{}, err
+		}
+		config.Debug("[CDC] Batch mode: emitted logical-decoding barrier; SQL returned %s", sqlLSN)
+		return batchBarrier{nonce: nonce, sqlLSN: sqlLSN}, nil
+	}
+	var raw *string
+	if err := s.queryPool.QueryRow(ctx, "SELECT pg_last_wal_replay_lsn()::text").Scan(&raw); err != nil {
+		return batchBarrier{}, fmt.Errorf("failed to read standby replay position: %w", err)
+	}
+	if raw == nil {
+		return batchBarrier{}, fmt.Errorf("PostgreSQL standby has not replayed any WAL yet")
+	}
+	target, err := pglogrepl.ParseLSN(*raw)
+	if err != nil {
+		return batchBarrier{}, fmt.Errorf("failed to parse standby replay position %q: %w", *raw, err)
+	}
+	config.Debug("[CDC] Batch mode: standby replay position %s is the batch target", target)
+	return batchBarrier{target: target}, nil
+}
 
 func emitBatchBarrier(ctx context.Context, pool *pgxpool.Pool) (string, pglogrepl.LSN, error) {
 	return emitLogicalMarker(ctx, pool, batchBarrierPrefix)

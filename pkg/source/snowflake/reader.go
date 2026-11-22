@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -21,7 +22,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	srcadbc "github.com/bruin-data/ingestr/pkg/source/adbc"
 	"github.com/bruin-data/ingestr/pkg/tablename"
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
+	"github.com/snowflakedb/gosnowflake/v2/arrowbatches"
 )
 
 // Default parallelism settings - can be overridden via environment variables:
@@ -62,13 +64,14 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	columns := srcadbc.FilterColumns(opts.Schema.Columns, opts.ExcludeColumns)
 	catalog, schemaName, tableName := d.ParseTableNameWithCatalog(table)
 	fullTable := tablename.TableName{Catalog: catalog, Schema: schemaName, Table: tableName}.String()
-	query := srcadbc.BuildSelectQuery(fullTable, columns, opts, d.QuoteIdentifier)
+	query := srcadbc.BuildSelectQueryWithExpressions(fullTable, columns, selectExpressions(columns, d.QuoteIdentifier), opts, d.QuoteIdentifier)
 	config.Debug("[SNOWFLAKE-NATIVE] Query: %s", query)
 
 	// Create Arrow batch context with microsecond timestamps (our standard)
-	arrowCtx := sf.WithArrowBatches(ctx)
-	arrowCtx = sf.WithArrowBatchesTimestampOption(arrowCtx, sf.UseMicrosecondTimestamp)
-	// Note: WithHigherPrecision changes decimal handling - don't use it for simpler type mapping
+	arrowCtx := arrowbatches.WithArrowBatches(ctx)
+	arrowCtx = arrowbatches.WithTimestampOption(arrowCtx, arrowbatches.UseMicrosecondTimestamp)
+	// Without it the driver casts NUMBER to int64/float64, losing precision and NULLs.
+	arrowCtx = sf.WithHigherPrecision(arrowCtx)
 
 	// Attribute the extract read via Snowflake's QUERY_TAG (Snowflake strips
 	// leading comments, so the destination-style tag is used instead of Prepend).
@@ -109,7 +112,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 		return nil, fmt.Errorf("unexpected rows type, expected SnowflakeRows")
 	}
 
-	batches, err := sfRows.GetArrowBatches()
+	batches, err := arrowbatches.GetArrowBatches(sfRows)
 	if err != nil {
 		_ = rows.Close()
 		_ = conn.Close()
@@ -155,7 +158,7 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 		var fetchWg sync.WaitGroup
 		for batchIdx, batch := range batches {
 			fetchWg.Add(1)
-			go func(idx int, b *sf.ArrowBatch) {
+			go func(idx int, b *arrowbatches.ArrowBatch) {
 				defer fetchWg.Done()
 
 				// Acquire semaphore slot
@@ -227,6 +230,20 @@ func (d *Dialect) ReadWithStorageAPI(ctx context.Context, table string, opts sou
 	}()
 
 	return results, nil
+}
+
+// selectExpressions returns the columns that must be read through an expression
+// instead of being selected as-is, keyed by column name.
+func selectExpressions(columns []schema.Column, quote func(string) string) map[string]string {
+	exprs := make(map[string]string)
+	for _, col := range columns {
+		switch col.DataType {
+		case schema.TypeTime:
+			// The driver ignores the TIME scale when casting to Time64[ns] and fails on TIME(0-4).
+			exprs[col.Name] = fmt.Sprintf("CAST(%s AS TIME(9))", quote(col.Name))
+		}
+	}
+	return exprs
 }
 
 // buildGosnowflakeDSN converts our URI format to a gosnowflake DSN string.
@@ -322,6 +339,15 @@ func convertRecord(mem memory.Allocator, src arrow.RecordBatch, targetSchema *ar
 // convertArray converts a source Arrow array to the target type.
 // Uses bulk operations where possible for performance.
 func convertArray(mem memory.Allocator, src arrow.Array, targetType arrow.DataType, col schema.Column, numRows int) (arrow.Array, error) {
+	if extType, ok := targetType.(arrow.ExtensionType); ok && extType.ExtensionName() == schema.JSONExtensionName {
+		return convertToJSONArray(mem, src, extType)
+	}
+	if targetTime, ok := targetType.(*arrow.Time64Type); ok {
+		if s, ok := src.(*array.Time64); ok {
+			return convertTimeArray(mem, s, targetTime), nil
+		}
+	}
+
 	// Try fast path with bulk copy for matching or compatible types
 	if result := tryBulkConvert(mem, src, targetType, numRows); result != nil {
 		return result, nil
@@ -537,8 +563,61 @@ func convertDecimal128ToInt64(mem memory.Allocator, src *array.Decimal128) arrow
 		if src.IsNull(i) {
 			b.AppendNull()
 		} else {
-			dec := src.Value(i)
-			b.Append(int64(dec.ToFloat64(scale)))
+			b.Append(decimal128ToInt64(src.Value(i), scale))
+		}
+	}
+	return b.NewArray()
+}
+
+func decimal128ToInt64(dec decimal128.Num, scale int32) int64 {
+	if scale > 0 {
+		dec = dec.ReduceScaleBy(scale, false)
+	}
+	return int64(dec.LowBits())
+}
+
+func convertToJSONArray(mem memory.Allocator, src arrow.Array, targetType arrow.ExtensionType) (arrow.Array, error) {
+	b := array.NewStringBuilder(mem)
+	defer b.Release()
+	b.Reserve(src.Len())
+
+	for i := 0; i < src.Len(); i++ {
+		if src.IsNull(i) {
+			b.AppendNull()
+			continue
+		}
+		switch s := src.(type) {
+		case *array.String:
+			b.Append(s.Value(i))
+		case *array.LargeString:
+			b.Append(s.Value(i))
+		default:
+			raw, err := json.Marshal(src.GetOneForMarshal(i))
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal %s value to JSON: %w", src.DataType(), err)
+			}
+			b.Append(string(raw))
+		}
+	}
+
+	storage := b.NewArray()
+	defer storage.Release()
+	return array.NewExtensionArrayWithStorage(targetType, storage), nil
+}
+
+func convertTimeArray(mem memory.Allocator, src *array.Time64, targetType *arrow.Time64Type) arrow.Array {
+	b := array.NewTime64Builder(mem, targetType)
+	defer b.Release()
+	b.Reserve(src.Len())
+
+	srcNanos := int64(src.DataType().(*arrow.Time64Type).Unit.Multiplier())
+	targetNanos := int64(targetType.Unit.Multiplier())
+
+	for i := 0; i < src.Len(); i++ {
+		if src.IsNull(i) {
+			b.AppendNull()
+		} else {
+			b.Append(arrow.Time64(int64(src.Value(i)) * srcNanos / targetNanos))
 		}
 	}
 	return b.NewArray()
@@ -865,9 +944,7 @@ func getInt64Value(src arrow.Array, i int) int64 {
 	case *array.Float64:
 		return int64(arr.Value(i))
 	case *array.Decimal128:
-		dec := arr.Value(i)
-		scale := int32(arr.DataType().(*arrow.Decimal128Type).Scale)
-		return int64(dec.ToFloat64(scale))
+		return decimal128ToInt64(arr.Value(i), int32(arr.DataType().(*arrow.Decimal128Type).Scale))
 	default:
 		return 0
 	}

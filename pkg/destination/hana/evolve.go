@@ -12,6 +12,10 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
 
+func (d *HanaDestination) MaxDecimalPrecision() int {
+	return 38
+}
+
 func (d *HanaDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
 	if comparison == nil || !comparison.HasChanges {
 		return nil, nil

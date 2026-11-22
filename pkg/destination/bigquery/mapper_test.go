@@ -458,6 +458,31 @@ func TestBuildTableMetadataDefaultClustering(t *testing.T) {
 			t.Fatalf("expected no clustering for unknown PK column, got %+v", metadata.Clustering)
 		}
 	})
+
+	t.Run("partition_by_column_keeps_default_type", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, nil, "", "created_at", nil, 0)
+
+		if metadata.TimePartitioning == nil || metadata.TimePartitioning.Field != "created_at" || metadata.TimePartitioning.Type != "" {
+			t.Fatalf("time partitioning = %+v, want field created_at with unset (DAY) type", metadata.TimePartitioning)
+		}
+	})
+
+	t.Run("partition_by_expression_sets_granularity", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, nil, "", "TIMESTAMP_TRUNC(created_at, HOUR)", nil, 0)
+
+		if metadata.TimePartitioning == nil || metadata.TimePartitioning.Field != "created_at" || metadata.TimePartitioning.Type != bigquery.HourPartitioningType {
+			t.Fatalf("time partitioning = %+v, want created_at by HOUR", metadata.TimePartitioning)
+		}
+	})
+
+	t.Run("partition_by_range_bucket", func(t *testing.T) {
+		metadata := BuildTableMetadata(tableSchema, nil, "", "RANGE_BUCKET(id, GENERATE_ARRAY(0, 1000, 10))", nil, 0)
+
+		want := bigquery.RangePartitioningRange{Start: 0, End: 1000, Interval: 10}
+		if metadata.TimePartitioning != nil || metadata.RangePartitioning == nil || metadata.RangePartitioning.Field != "id" || *metadata.RangePartitioning.Range != want {
+			t.Fatalf("partitioning = time %+v range %+v, want id range %+v", metadata.TimePartitioning, metadata.RangePartitioning, want)
+		}
+	})
 }
 
 func TestParseTableName(t *testing.T) {

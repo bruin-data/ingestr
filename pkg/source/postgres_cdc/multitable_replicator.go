@@ -39,20 +39,24 @@ type MultiTableReplicator struct {
 	lsnFilter        LSNUpdater
 	clientXLogPos    pglogrepl.LSN
 	barrierNonce     string
+	barrierTarget    pglogrepl.LSN
+	standby          bool
 	barrierSeen      bool
 	barrierLSN       pglogrepl.LSN
 	protocolV2       bool
 	started          bool
 	streaming        bool
-	recv             *walReceiver
-	decoderBudget    *byteBudget
-	walBudget        *byteBudget
+
+	standbyBarrierProbes bool
+	recv                 *walReceiver
+	decoderBudget        *byteBudget
+	walBudget            *byteBudget
 
 	filterLSN       pglogrepl.LSN
 	filterDecisions map[string]bool
 }
 
-func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, startLSN pglogrepl.LSN, lsnFilter LSNUpdater, streaming bool, barrierNonce string) (*MultiTableReplicator, error) {
+func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTableInfo, cdcConfig CDCConfig, startLSN pglogrepl.LSN, lsnFilter LSNUpdater, streaming bool, barrier batchBarrier) (*MultiTableReplicator, error) {
 	decoderBudget := newByteBudget(defaultDecoderMemoryBytes)
 	decoder := newMultiTableDecoderWithBudget(tables, decoderBudget)
 	decoder.generatedColumns = make(map[string][]string, len(tables))
@@ -75,7 +79,9 @@ func NewMultiTableReplicator(src *PostgresCDCSource, tables []source.SourceTable
 		decoder:          decoder,
 		lsnFilter:        lsnFilter,
 		clientXLogPos:    startLSN,
-		barrierNonce:     barrierNonce,
+		barrierNonce:     barrier.nonce,
+		barrierTarget:    barrier.target,
+		standby:          src.standby,
 		protocolV2:       streaming && src.serverVersion >= 140000,
 		started:          false,
 		streaming:        streaming,
@@ -136,6 +142,9 @@ func (r *MultiTableReplicator) Start(ctx context.Context) error {
 
 	config.Debug("[CDC] Starting replication for slot %s from LSN %s", r.cdcConfig.SlotName, r.startLSN)
 
+	if err := r.source.validateNoSnapshotSlot(ctx, r.startLSN); err != nil {
+		return err
+	}
 	err := pglogrepl.StartReplication(
 		ctx,
 		r.source.replConn,
@@ -147,10 +156,14 @@ func (r *MultiTableReplicator) Start(ctx context.Context) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to start replication: %w", err)
+		return fmt.Errorf("failed to start replication: %w", r.source.explainSlotFailure(ctx, r.cdcConfig.SlotName, err))
 	}
 
-	r.recv = startWALReceiverWithBudget(ctx, r.source.replConn, r.streaming, r.startLSN, r.source.pos, r.source.lag, r.walBudget)
+	var replyProbe time.Duration
+	if r.barrierTarget != 0 || r.standby && r.standbyBarrierProbes {
+		replyProbe = standbyBarrierProbeInterval
+	}
+	r.recv = startWALReceiverWithBudget(ctx, r.source.replConn, r.streaming, r.startLSN, r.source.pos, r.source.lag, r.walBudget, replyProbe)
 	r.started = true
 	config.Debug("[CDC] Multi-table replication started successfully")
 	return nil
@@ -180,7 +193,7 @@ func (r *MultiTableReplicator) BarrierLSN() pglogrepl.LSN {
 }
 
 func (r *MultiTableReplicator) EmitStreamHeartbeat(ctx context.Context) error {
-	if r.source.serverVersion < 140000 {
+	if r.source.serverVersion < 140000 || r.standby {
 		return nil
 	}
 	return emitStreamHeartbeat(ctx, r.source.queryPool)
@@ -206,6 +219,34 @@ func (r *MultiTableReplicator) handleLogicalMessage(data []byte) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// observeStandbyKeepalive advances the decoded position on a standby, where
+// keepalives replace the logical messages a primary would decode, and ends a
+// standby batch run once decoding passes its target.
+func (r *MultiTableReplicator) observeStandbyKeepalive(walEnd pglogrepl.LSN) {
+	if !r.standby {
+		return
+	}
+	_, inFlight := r.decoder.InFlightTxLSN()
+	if _, streamed := r.decoder.StreamedLowWater(); streamed || r.decoder.InStream() {
+		inFlight = true
+	}
+	position, ok := standbyResumePosition(walEnd, inFlight)
+	if !ok {
+		return
+	}
+	if position > r.clientXLogPos {
+		r.clientXLogPos = position
+	}
+	if r.barrierTarget != 0 && !r.barrierSeen && walEnd >= r.barrierTarget {
+		r.barrierSeen = true
+		r.barrierLSN = position
+	}
+}
+
+func (r *MultiTableReplicator) CheckpointsOnKeepalive() bool {
+	return r.standby
 }
 
 // NextChanges returns the decoded per-table change groups of the next
@@ -238,6 +279,7 @@ func (r *MultiTableReplicator) NextChanges(ctx context.Context) ([]DecodedChange
 	defer m.release()
 
 	if m.data == nil {
+		r.observeStandbyKeepalive(m.serverWALEnd)
 		return nil, true, nil
 	}
 

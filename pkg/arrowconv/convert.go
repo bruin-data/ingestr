@@ -532,7 +532,7 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 			}
 		case float64:
-			b.Append(arrow.Timestamp(UnixToMicroseconds(int64(v))))
+			b.Append(arrow.Timestamp(unixFloatToMicroseconds(v)))
 		case int64:
 			b.Append(arrow.Timestamp(UnixToMicroseconds(v)))
 		case int:
@@ -541,13 +541,15 @@ func AppendValue(builder array.Builder, val interface{}) {
 			if i, err := v.Int64(); err == nil {
 				b.Append(arrow.Timestamp(UnixToMicroseconds(i)))
 			} else if f, err := v.Float64(); err == nil {
-				b.Append(arrow.Timestamp(UnixToMicroseconds(int64(f))))
+				b.Append(arrow.Timestamp(unixFloatToMicroseconds(f)))
 			} else {
 				b.AppendNull()
 			}
 		case string:
 			if t, err := dateparse.ParseAny(v); err == nil {
 				b.Append(arrow.Timestamp(t.UnixMicro()))
+			} else if usec, ok := epochStringToMicroseconds(v); ok {
+				b.Append(arrow.Timestamp(usec))
 			} else {
 				b.AppendNull()
 			}
@@ -607,19 +609,12 @@ func AppendValue(builder array.Builder, val interface{}) {
 			} else if num, ok := parseDecimal128Fast(v, dt.Precision, dt.Scale); ok {
 				b.Append(num)
 			} else {
-				num, err := decimal128.FromString(v, dt.Precision, dt.Scale)
-				if err != nil {
-					bf := new(big.Float)
-					if _, ok := bf.SetString(v); ok {
-						scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil))
-						bf.Mul(bf, scale)
-						bi, _ := bf.Int(nil)
-						b.Append(decimal128.FromBigInt(bi))
-					} else {
-						b.AppendNull()
-					}
+				// decimal128.FromString rounds through a binary float and
+				// misrounds exact halves; scale exactly instead.
+				if bi, ok := ScaledDecimal(v, dt.Scale); ok {
+					appendBigIntDecimal128(b, bi)
 				} else {
-					b.Append(num)
+					b.AppendNull()
 				}
 			}
 		case float64:
@@ -694,27 +689,13 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.Append(num)
 			}
 		case []byte:
-			s := strings.TrimSpace(string(v))
-			if s == "" {
-				b.AppendNull()
+			if num, ok := ParseDecimal128BytesFast(v, dt.Precision, dt.Scale); ok {
+				b.Append(num)
 			} else {
-				num, err := decimal128.FromString(s, dt.Precision, dt.Scale)
-				if err != nil {
-					bf := new(big.Float)
-					if _, ok := bf.SetString(s); ok {
-						scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil))
-						bf.Mul(bf, scale)
-						bi, _ := bf.Int(nil)
-						b.Append(decimal128.FromBigInt(bi))
-					} else {
-						b.AppendNull()
-					}
-				} else {
-					b.Append(num)
-				}
+				AppendValue(b, string(v))
 			}
 		case *big.Int:
-			b.Append(decimal128.FromBigInt(v))
+			appendBigIntDecimal128(b, v)
 		case json.Number:
 			AppendValue(b, string(v))
 		default:
@@ -733,20 +714,11 @@ func AppendValue(builder array.Builder, val interface{}) {
 				b.AppendNull()
 				return
 			}
-			num, err := decimal256.FromString(s, dt.Precision, dt.Scale)
-			if err != nil {
-				bf := new(big.Float)
-				if _, ok := bf.SetString(s); ok {
-					scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil))
-					bf.Mul(bf, scale)
-					bi, _ := bf.Int(nil)
-					b.Append(decimal256.FromBigInt(bi))
-				} else {
-					b.AppendNull()
-				}
-				return
+			if bi, ok := ScaledDecimal(s, dt.Scale); ok && bi.BitLen() <= 255 {
+				b.Append(decimal256.FromBigInt(bi))
+			} else {
+				b.AppendNull()
 			}
-			b.Append(num)
 		}
 		switch v := val.(type) {
 		case decimal256.Num:
@@ -999,19 +971,48 @@ func AppendUnknownValue(b *array.StringBuilder, val interface{}) {
 	b.Append(string(jsonBytes))
 }
 
-// UnixToMicroseconds converts a Unix timestamp to microseconds,
-// detecting the unit from the value magnitude.
+// UnixToMicroseconds converts a Unix timestamp to microseconds, detecting the unit from
+// the magnitude. Each unit spans roughly 1973–5138 so pre-2001 epochs aren't read as seconds.
 func UnixToMicroseconds(v int64) int64 {
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
 	switch {
-	case v > 1e18: // nanoseconds
-		return v / 1000
-	case v > 1e15: // microseconds
+	case abs >= 1e17 || abs < 0: // nanoseconds
+		return time.Unix(0, v).UnixMicro()
+	case abs >= 1e14: // microseconds
 		return v
-	case v > 1e12: // milliseconds
+	case abs >= 1e11: // milliseconds
 		return v * 1000
 	default: // seconds
 		return v * 1_000_000
 	}
+}
+
+// unixFloatToMicroseconds is UnixToMicroseconds that keeps the fractional part
+// (e.g. 1700000000.5 seconds); whole values take the integer path unchanged.
+func unixFloatToMicroseconds(f float64) int64 {
+	whole, frac := math.Modf(f)
+	usec := UnixToMicroseconds(int64(whole))
+	if frac == 0 || math.IsNaN(frac) {
+		return usec
+	}
+	unit := int64(1_000_000) // microseconds per unit; exact because usec is whole*unit
+	if whole != 0 {
+		unit = usec / int64(whole)
+	}
+	return usec + int64(math.Round(frac*float64(unit)))
+}
+
+// epochStringToMicroseconds handles digit-only strings dateparse rejects (it only knows
+// 10/13/16/19 digits), so pre-2001 epochs aren't lost.
+func epochStringToMicroseconds(s string) (int64, bool) {
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || s[0] == '+' || v == math.MinInt64 {
+		return 0, false
+	}
+	return UnixToMicroseconds(v), true
 }
 
 func marshalJSON(v interface{}) ([]byte, error) {
@@ -1082,4 +1083,43 @@ func valueLen(v interface{}) int64 {
 	default:
 		return 8
 	}
+}
+
+// appendBigIntDecimal128 appends NULL for values decimal128 cannot hold;
+// decimal128.FromBigInt panics on them.
+func appendBigIntDecimal128(b *array.Decimal128Builder, v *big.Int) {
+	if v == nil || v.BitLen() > 127 {
+		b.AppendNull()
+		return
+	}
+	b.Append(decimal128.FromBigInt(v))
+}
+
+// ScaledDecimal parses a decimal string exactly and returns it scaled by
+// 10^scale, rounded half away from zero like decimal128.FromString.
+func ScaledDecimal(value string, scale int32) (*big.Int, bool) {
+	value = strings.TrimSpace(value)
+	if strings.ContainsRune(value, '/') {
+		return nil, false
+	}
+	r, ok := new(big.Rat).SetString(value)
+	if !ok {
+		return nil, false
+	}
+	exp := int64(scale)
+	if exp < 0 {
+		exp = -exp
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(exp), nil)
+	if scale >= 0 {
+		r.Mul(r, new(big.Rat).SetInt(factor))
+	} else {
+		r.Quo(r, new(big.Rat).SetInt(factor))
+	}
+	num, den := r.Num(), r.Denom()
+	q, rem := new(big.Int).QuoRem(num, den, new(big.Int))
+	if rem.Sign() != 0 && new(big.Int).Mul(new(big.Int).Abs(rem), big.NewInt(2)).Cmp(den) >= 0 {
+		q.Add(q, big.NewInt(int64(num.Sign())))
+	}
+	return q, true
 }

@@ -649,57 +649,58 @@ func (d *BigQueryDestination) waitForBigQueryJob(ctx context.Context, job *bigqu
 	return status, err
 }
 
-// isDatePartitionColumn reports whether the named partition column is a DATE
-// column in the given internal schema. A DATE column must be referenced bare in
-// a PARTITION BY clause; TIMESTAMP/DATETIME columns must be wrapped in DATE().
-func isDatePartitionColumn(s *schema.TableSchema, column string) bool {
-	if s == nil || column == "" {
-		return false
+// partitionByClause builds the PARTITION BY clause. DAY, the default for a bare column, is written
+// as `col` for DATE and `DATE(col)` for TIMESTAMP/DATETIME; other units use the matching *_TRUNC.
+func partitionByClause(tp *bigquery.TimePartitioning, rp *bigquery.RangePartitioning, fieldType bigquery.FieldType) string {
+	if rp != nil {
+		return fmt.Sprintf("PARTITION BY RANGE_BUCKET(%s, GENERATE_ARRAY(%d, %d, %d))\n",
+			quoteIdentifier(rp.Field), rp.Range.Start, rp.Range.End, rp.Range.Interval)
 	}
-	for _, col := range s.Columns {
-		if strings.EqualFold(col.Name, column) {
-			return col.DataType == schema.TypeDate
+	column := quoteIdentifier(tp.Field)
+	unit := effectivePartitionType(tp)
+	if unit == bigquery.DayPartitioningType {
+		if fieldType == bigquery.DateFieldType {
+			return fmt.Sprintf("PARTITION BY %s\n", column)
 		}
+		return fmt.Sprintf("PARTITION BY DATE(%s)\n", column)
 	}
-	return false
+	trunc := "TIMESTAMP_TRUNC"
+	switch fieldType {
+	case bigquery.DateFieldType:
+		trunc = "DATE_TRUNC"
+	case bigquery.DateTimeFieldType:
+		trunc = "DATETIME_TRUNC"
+	}
+	return fmt.Sprintf("PARTITION BY %s(%s, %s)\n", trunc, column, unit)
 }
 
-// partitionFieldIsDate is the equivalent of isDatePartitionColumn for a live
-// BigQuery schema, used where only table metadata (not the internal schema) is
-// available.
-func partitionFieldIsDate(s bigquery.Schema, column string) bool {
-	for _, field := range s {
-		if strings.EqualFold(field.Name, column) {
-			return field.Type == bigquery.DateFieldType
-		}
+func partitionRangeEqual(a, b *bigquery.RangePartitioningRange) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
-	return false
-}
-
-// partitionByClause builds the PARTITION BY clause for a partition column.
-// BigQuery requires a DATE-valued expression: an already-DATE column is used
-// bare, while TIMESTAMP/DATETIME columns are wrapped in DATE().
-func partitionByClause(column string, isDateColumn bool) string {
-	if isDateColumn {
-		return fmt.Sprintf("PARTITION BY %s\n", quoteIdentifier(column))
-	}
-	return fmt.Sprintf("PARTITION BY DATE(%s)\n", quoteIdentifier(column))
+	return *a == *b
 }
 
 // partitionOrClusterMismatch reports whether the table's partition/cluster spec
 // differs from the configured one. An empty configured spec means "leave as-is".
 func (d *BigQueryDestination) partitionOrClusterMismatch(meta *bigquery.TableMetadata, clusterBy []string) bool {
 	if d.partitionBy != "" {
-		if meta.RangePartitioning != nil {
+		tp, rp, err := bigQueryPartitioning(d.partitionBy)
+		if err != nil {
 			return true
 		}
-		if meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, d.partitionBy) {
-			return true
-		}
-		// Compare the partition type against what we would create; ingestr builds
-		// only Field, so the desired type is BigQuery's default.
-		if effectivePartitionType(meta.TimePartitioning) != effectivePartitionType(&bigquery.TimePartitioning{Field: d.partitionBy}) {
-			return true
+		if rp != nil {
+			if meta.TimePartitioning != nil || meta.RangePartitioning == nil ||
+				!strings.EqualFold(meta.RangePartitioning.Field, rp.Field) || !partitionRangeEqual(meta.RangePartitioning.Range, rp.Range) {
+				return true
+			}
+		} else {
+			if meta.RangePartitioning != nil || meta.TimePartitioning == nil || !strings.EqualFold(meta.TimePartitioning.Field, tp.Field) {
+				return true
+			}
+			if effectivePartitionType(meta.TimePartitioning) != effectivePartitionType(tp) {
+				return true
+			}
 		}
 	}
 
@@ -910,6 +911,11 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 		requiredColumns = cdcKeyColumns
 	}
 
+	if opts.PartitionBy != "" {
+		if _, _, err := bigQueryPartitioning(opts.PartitionBy); err != nil {
+			return err
+		}
+	}
 	// Store partition and cluster information for use in SwapTable
 	d.partitionBy = opts.PartitionBy
 	d.clusterBy = opts.ClusterBy
@@ -947,6 +953,16 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 						tableSchema = makeNonPKColumnsNullable(opts.Schema, cdcKeyColumns)
 					}
 					tableSchema = d.normalizeSchemaForLoadMethod(tableSchema, requiredColumns)
+					// A truncated table keeps its column types; recreate it when they no longer fit.
+					if validateBigQuerySchemaCompatibility(existingMeta, tableSchema, false) != nil {
+						config.Debug("[DEST] Recreating table with incompatible schema: %s", opts.Table)
+						if err := tableRef.Delete(ctx); err != nil && !isNotFoundError(err) {
+							errCh <- fmt.Errorf("failed to drop table: %w", err)
+							return
+						}
+						errCh <- d.createTableFresh(ctx, tableRef, project, dataset, metadata)
+						return
+					}
 					if err := d.addMissingColumns(ctx, tableRef, existingMeta, tableSchema); err != nil {
 						errCh <- fmt.Errorf("failed to update schema: %w", err)
 						return
@@ -973,6 +989,9 @@ func (d *BigQueryDestination) PrepareTable(ctx context.Context, opts destination
 	// Non-DropFirst: check if table exists, add missing columns or create
 	existingMeta, err := tableRef.Metadata(ctx)
 	if err == nil {
+		if d.partitionOrClusterMismatch(existingMeta, opts.ClusterBy) {
+			output.Warnf("[WARNING] %s keeps its existing partitioning/clustering: BigQuery can't change it in place, so a new partition_by/cluster_by is applied only by a replace or --full-refresh run\n", opts.Table)
+		}
 		// The table existed at evolution-planning time, so a planned ALTER
 		// backs any type-kind difference.
 		return d.reconcileExistingTable(ctx, tableRef, existingMeta, opts, true)
@@ -1701,7 +1720,16 @@ func (d *BigQueryDestination) runCTASSwap(ctx context.Context, opts destination.
 		// For partitioned/clustered tables, must use SQL to apply partitioning.
 		sql := fmt.Sprintf("CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(targetProject), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName))
 		if d.partitionBy != "" {
-			sql += partitionByClause(d.partitionBy, isDatePartitionColumn(opts.Schema, d.partitionBy))
+			tp, rp, err := bigQueryPartitioning(d.partitionBy)
+			if err != nil {
+				return err
+			}
+			var bqSchema bigquery.Schema
+			if opts.Schema != nil {
+				bqSchema = BuildBigQuerySchema(opts.Schema)
+			}
+			fieldType, _ := partitionFieldType(bqSchema, schema.PartitionColumn(d.partitionBy))
+			sql += partitionByClause(tp, rp, fieldType)
 		}
 		if len(clusterBy) > 0 {
 			clusterCols := make([]string, len(clusterBy))
@@ -2073,9 +2101,6 @@ func (d *BigQueryDestination) buildBatchAlterColumnTypeRewriteSQL(
 	if len(typeChanges) == 0 {
 		return "", errors.New("no column type changes provided")
 	}
-	if meta.RangePartitioning != nil {
-		return "", errors.New("range-partitioned tables are not supported for type rewrite")
-	}
 	if meta.TimePartitioning != nil && meta.TimePartitioning.Field == "" {
 		return "", errors.New("ingestion-time partitioned tables are not supported for type rewrite")
 	}
@@ -2098,8 +2123,12 @@ func (d *BigQueryDestination) buildBatchAlterColumnTypeRewriteSQL(
 
 	var sqlBuilder strings.Builder
 	fmt.Fprintf(&sqlBuilder, "CREATE OR REPLACE TABLE %s.%s.%s\n", quoteIdentifier(project), quoteIdentifier(dataset), quoteIdentifier(table))
-	if meta.TimePartitioning != nil && meta.TimePartitioning.Field != "" {
-		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning.Field, partitionFieldIsDate(meta.Schema, meta.TimePartitioning.Field)))
+	switch {
+	case meta.RangePartitioning != nil:
+		sqlBuilder.WriteString(partitionByClause(nil, meta.RangePartitioning, ""))
+	case meta.TimePartitioning != nil:
+		fieldType, _ := partitionFieldType(meta.Schema, meta.TimePartitioning.Field)
+		sqlBuilder.WriteString(partitionByClause(meta.TimePartitioning, nil, fieldType))
 	}
 	if meta.Clustering != nil && len(meta.Clustering.Fields) > 0 {
 		clusterCols := make([]string, len(meta.Clustering.Fields))
@@ -2203,7 +2232,7 @@ func (d *BigQueryDestination) PrepareMergeTable(ctx context.Context, opts destin
 	}
 
 	// Build MERGE statement
-	mergeSQL := d.buildMergeSQLWithPredicate(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning, opts.IncrementalPredicate)
+	mergeSQL := d.buildMergeSQLWithPredicate(project, targetDataset, targetTableName, stagingDataset, stagingTableName, opts.PrimaryKeys, opts.Columns, castMap, opts.IncrementalKey, nonNullablePKs, pruning, opts.IncrementalPredicate, opts.CDCHardDelete)
 	return &preparedBigQueryMerge{destination: d, sql: mergeSQL}, nil
 }
 
@@ -2254,11 +2283,9 @@ func (d *BigQueryDestination) buildDeleteInsertStatements(project, stagingDatase
 	startVal := formatBigQueryValue(opts.IntervalStart, opts.IncrementalKeyType)
 	endVal := formatBigQueryValue(opts.IntervalEnd, opts.IncrementalKeyType)
 
-	deleteSQL := fmt.Sprintf(
-		"DELETE FROM %s.%s.%s WHERE %s >= %s AND %s <= %s",
-		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
-		quoteIdentifier(opts.IncrementalKey), startVal,
-		quoteIdentifier(opts.IncrementalKey), endVal,
+	deleteSQL := destination.IntervalDeleteSQL(
+		fmt.Sprintf("%s.%s.%s", quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName)),
+		"t", quoteIdentifier(opts.IncrementalKey), startVal, endVal, opts.IncrementalPredicate,
 	)
 
 	quotedCols := make([]string, len(opts.Columns))
@@ -2306,22 +2333,24 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 
 	// Build column comparison for change detection (excluding SCD columns and PKs)
 	nonPKColumns := filterColumns(opts.Columns, destination.SCD2NonDataColumns(opts.PrimaryKeys))
-	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "t", "s")
+	changeConditions := buildChangeConditionsBigQuery(nonPKColumns, "__ingestr_t", "__ingestr_s")
 	onConditions := make([]string, len(opts.PrimaryKeys))
 	for i, pk := range opts.PrimaryKeys {
-		onConditions[i] = fmt.Sprintf("(t.%s = s.%s OR (t.%s IS NULL AND s.%s IS NULL))", quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk))
+		onConditions[i] = fmt.Sprintf("(__ingestr_t.%s = __ingestr_s.%s OR (__ingestr_t.%s IS NULL AND __ingestr_s.%s IS NULL))", quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk), quoteIdentifier(pk))
 	}
 	onClause := strings.Join(onConditions, " AND ")
 
+	// Correlated subqueries resolve an inner column before an outer alias, so
+	// aliases must not match user columns such as "s" or "t".
 	// Step 1: Close changed records (update _scd_valid_to and _scd_is_current)
 	updateSQL := fmt.Sprintf(
 		`
-		MERGE INTO %s.%s.%s AS t
-		USING %s.%s.%s AS s
-		ON %s AND t._scd_is_current = true AND (%s)
+		MERGE INTO %s.%s.%s AS __ingestr_t
+		USING %s.%s.%s AS __ingestr_s
+		ON %s AND __ingestr_t._scd_is_current = true AND (%s)
 		WHEN MATCHED THEN UPDATE SET
-			t._scd_valid_to = s._scd_valid_from,
-			t._scd_is_current = false`,
+			__ingestr_t._scd_valid_to = __ingestr_s._scd_valid_from,
+			__ingestr_t._scd_is_current = false`,
 		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		quoteIdentifier(project), quoteIdentifier(stagingDataset), quoteIdentifier(stagingTableName),
 		onClause,
@@ -2343,12 +2372,12 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 		tsLiteral := fmt.Sprintf("TIMESTAMP '%s'", opts.Timestamp.Format("2006-01-02 15:04:05.999999"))
 		softDeleteSQL := fmt.Sprintf(
 			`
-			UPDATE %s.%s.%s AS t SET
-				t._scd_valid_to = %s,
-				t._scd_is_current = false
-			WHERE t._scd_is_current = true
+			UPDATE %s.%s.%s AS __ingestr_t SET
+				__ingestr_t._scd_valid_to = %s,
+				__ingestr_t._scd_is_current = false
+			WHERE __ingestr_t._scd_is_current = true
 			  AND NOT EXISTS (
-				SELECT 1 FROM %s.%s.%s AS s
+				SELECT 1 FROM %s.%s.%s AS __ingestr_s
 				WHERE %s
 			  )`,
 			quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
@@ -2373,11 +2402,11 @@ func (d *BigQueryDestination) SCD2Table(ctx context.Context, opts destination.SC
 	insertSQL := fmt.Sprintf(
 		`
 		INSERT INTO %s.%s.%s (%s)
-		SELECT %s FROM %s.%s.%s AS s
+		SELECT %s FROM %s.%s.%s AS __ingestr_s
 		WHERE NOT EXISTS (
-			SELECT 1 FROM %s.%s.%s AS t
+			SELECT 1 FROM %s.%s.%s AS __ingestr_t
 			WHERE %s
-			  AND t._scd_is_current = true
+			  AND __ingestr_t._scd_is_current = true
 		)`,
 		quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTableName),
 		strings.Join(quotedColumns, ", "),
@@ -2529,12 +2558,13 @@ func (d *BigQueryDestination) buildMergeSQL(project, targetDataset, targetTable,
 }
 
 func (d *BigQueryDestination) buildMergeSQLWithPartitionPruning(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning) string {
-	return d.buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nonNullablePKs, pruning, "")
+	return d.buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable, primaryKeys, allColumns, castMap, incrementalKey, nonNullablePKs, pruning, "", false)
 }
 
-func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string) string {
+func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset, targetTable, stagingDataset, stagingTable string, primaryKeys, allColumns []string, castMap map[string]string, incrementalKey string, nonNullablePKs map[string]bool, pruning *mergePartitionPruning, incrementalPredicate string, cdcHardDelete bool) string {
 	destColumns := destination.DestinationColumns(allColumns)
 	hasCDCDeleted := destination.HasCDCDeletedColumn(allColumns)
+	hardDelete := cdcHardDelete && hasCDCDeleted && len(primaryKeys) > 0
 	hasActiveColumn := quoteIdentifier("__ingestr_has_active")
 	activeLSNColumn := quoteIdentifier("__ingestr_active_lsn")
 	if hasCDCDeleted && len(primaryKeys) > 0 {
@@ -2613,7 +2643,22 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 	sql.WriteString(mergePartitionPruningDeclarations(stagingRef, pruning))
 	fmt.Fprintf(&sql, "MERGE %s.%s.%s AS t\n", quoteIdentifier(project), quoteIdentifier(targetDataset), quoteIdentifier(targetTable))
 
-	if hasCDCDeleted && len(primaryKeys) > 0 {
+	if hardDelete {
+		// Hard-delete CDC mode: only the latest change overall matters. A live
+		// latest change carries the full row image, and a delete latest change
+		// removes the row, so no active-image composition is needed.
+		pkPartition := make([]string, len(primaryKeys))
+		for i, pk := range primaryKeys {
+			pkPartition[i] = quoteIdentifier(pk)
+		}
+		fmt.Fprintf(
+			&sql,
+			"USING (SELECT * FROM %s QUALIFY ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) = 1) AS s\n",
+			stagingRef,
+			strings.Join(pkPartition, ", "),
+			destination.CDCLatestOverallOrderBy(quoteIdentifier),
+		)
+	} else if hasCDCDeleted && len(primaryKeys) > 0 {
 		// CDC mode: compose the merge source from two per-PK dedups of staging:
 		// data columns come from the latest non-deleted change (so a trailing
 		// delete doesn't discard the last update's values), while the CDC
@@ -2671,7 +2716,23 @@ func (d *BigQueryDestination) buildMergeSQLWithPredicate(project, targetDataset,
 
 	fmt.Fprintf(&sql, "ON %s\n", onClause)
 
-	if hasCDCDeleted {
+	if hardDelete {
+		matchedGuard := func(condition string) string {
+			if incrementalPredicate != "" {
+				return "(" + incrementalPredicate + ") AND " + condition
+			}
+			return condition
+		}
+		fmt.Fprintf(&sql, "WHEN MATCHED AND %s THEN\n", matchedGuard("s.`_cdc_deleted` = true AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` >= t.`_cdc_lsn`)"))
+		sql.WriteString("  DELETE\n")
+		if len(updateSets) > 0 {
+			fmt.Fprintf(&sql, "WHEN MATCHED AND %s THEN\n", matchedGuard("s.`_cdc_deleted` = false AND (t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn`)"))
+			fmt.Fprintf(&sql, "  UPDATE SET %s\n", strings.Join(updateSets, ", "))
+		}
+		sql.WriteString("WHEN NOT MATCHED AND s.`_cdc_deleted` = false THEN\n")
+		fmt.Fprintf(&sql, "  INSERT (%s)\n", strings.Join(quotedCols, ", "))
+		fmt.Fprintf(&sql, "  VALUES (%s)", strings.Join(sourceCols, ", "))
+	} else if hasCDCDeleted {
 		newerLSN := "(t.`_cdc_lsn` IS NULL OR s.`_cdc_lsn` > t.`_cdc_lsn` OR (s.`_cdc_lsn` = t.`_cdc_lsn` AND s.`_cdc_deleted` = true AND COALESCE(t.`_cdc_deleted`, false) = false))"
 		if incrementalPredicate != "" {
 			newerLSN = "(" + incrementalPredicate + ") AND " + newerLSN
@@ -2895,6 +2956,10 @@ func (d *BigQueryDestination) SupportsMergeStrategy() bool { return true }
 // MergeOptions.IncrementalPredicate to MERGE updates.
 func (d *BigQueryDestination) SupportsIncrementalPredicate() bool { return true }
 
+// SupportsDeleteInsertPredicate returns true as BigQuery applies
+// DeleteInsertOptions.IncrementalPredicate to the DELETE (target alias t).
+func (d *BigQueryDestination) SupportsDeleteInsertPredicate() bool { return true }
+
 // SupportsDeleteInsertStrategy returns true as BigQuery supports the delete+insert strategy.
 func (d *BigQueryDestination) SupportsDeleteInsertStrategy() bool { return true }
 
@@ -2938,6 +3003,11 @@ func (d *BigQueryDestination) GetTableSchema(ctx context.Context, table string) 
 			Name:     field.Name,
 			DataType: mapBigQueryTypeToSchema(field),
 			Nullable: !field.Required,
+		}
+		if field.Repeated {
+			elem := *field
+			elem.Repeated = false
+			col.ArrayType = mapBigQueryTypeToSchema(&elem)
 		}
 
 		if field.Type == bigquery.NumericFieldType || field.Type == bigquery.BigNumericFieldType {
@@ -3051,6 +3121,8 @@ func (d *BigQueryDestination) SupportsCDCUnchangedCols() bool { return true }
 func (d *BigQueryDestination) SupportsCDCMerge() bool {
 	return true
 }
+
+func (d *BigQueryDestination) SupportsCDCHardDelete() bool { return true }
 
 func (d *BigQueryDestination) RequiresSerializedCDCRuns() bool { return true }
 

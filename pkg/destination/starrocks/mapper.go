@@ -8,8 +8,30 @@ import (
 
 const maxDecimal128Precision = 38
 
-// MapDataTypeToStarRocks maps an internal schema.Column to a StarRocks DDL type.
+// maxVarcharBytes is StarRocks' VARCHAR limit (1 MB). Tables created before it
+// was used keep their VARCHAR(65533) columns until a full refresh.
+const maxVarcharBytes = 1048576
+
+// StarRocks VARCHAR lengths are bytes; source lengths are characters, and a
+// UTF-8 character needs up to 4 bytes.
+func varcharBytes(chars int) int {
+	if chars <= 0 || chars > maxVarcharBytes/4 {
+		return maxVarcharBytes
+	}
+	return chars * 4
+}
+
+// MapDataTypeToStarRocks maps an internal schema.Column, whose string lengths
+// are in characters, to a StarRocks DDL type.
 func MapDataTypeToStarRocks(col schema.Column) string {
+	if col.DataType == schema.TypeString || col.DataType == schema.TypeUUID || col.DataType == schema.TypeInterval {
+		col.MaxLength = varcharBytes(col.MaxLength)
+	}
+	return mapStarRocksType(col)
+}
+
+// mapStarRocksType maps a column whose string lengths are already in bytes.
+func mapStarRocksType(col schema.Column) string {
 	switch col.DataType {
 	case schema.TypeBoolean:
 		return "BOOLEAN"
@@ -26,28 +48,14 @@ func MapDataTypeToStarRocks(col schema.Column) string {
 	case schema.TypeFloat64:
 		return "DOUBLE"
 	case schema.TypeDecimal:
-		precision := col.Precision
-		scale := col.Scale
-		if precision <= 0 {
-			precision, scale = 38, 9
-		}
-		if precision > maxDecimal128Precision {
-			precision = maxDecimal128Precision
-		}
-		if scale < 0 {
-			scale = 0
-		}
-		if scale > precision {
-			scale = precision
-		}
+		precision, scale := starRocksDecimal(col.Precision, col.Scale)
 		return fmt.Sprintf("DECIMAL(%d, %d)", precision, scale)
 	case schema.TypeString, schema.TypeUUID, schema.TypeInterval:
-		// VARCHAR is usable as a key column; STRING (1 MB) is not. Bound the
-		// length so the column can serve as a primary/distribution key.
-		if col.MaxLength > 0 && col.MaxLength <= 65533 {
+		// VARCHAR (unlike STRING) is usable as a primary/distribution key.
+		if col.MaxLength > 0 && col.MaxLength <= maxVarcharBytes {
 			return fmt.Sprintf("VARCHAR(%d)", col.MaxLength)
 		}
-		return "VARCHAR(65533)"
+		return fmt.Sprintf("VARCHAR(%d)", maxVarcharBytes)
 	case schema.TypeBinary:
 		return "VARBINARY"
 	case schema.TypeDate:
@@ -68,7 +76,7 @@ func MapDataTypeToStarRocks(col schema.Column) string {
 	case schema.TypeJSON:
 		return "JSON"
 	default:
-		return "VARCHAR(65533)"
+		return fmt.Sprintf("VARCHAR(%d)", maxVarcharBytes)
 	}
 }
 
@@ -90,4 +98,13 @@ func starRocksArrayElement(col schema.Column) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// starRocksDecimal returns the DECIMAL(p,s) a column is created with.
+func starRocksDecimal(precision, scale int) (int, int) {
+	if precision <= 0 {
+		precision, scale = 38, 9
+	}
+	precision = min(precision, maxDecimal128Precision)
+	return precision, min(max(scale, 0), precision)
 }

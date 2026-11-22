@@ -32,15 +32,21 @@ const (
 	cdcStateKindSnapshot      = "snapshot"
 	cdcStateKindDestination   = "destination"
 	cdcStateKindRun           = "run"
-	cdcStateStatusInProgress  = "in_progress"
-	zeroCDCPosition           = "00000000/00000000"
-	cdcStatePruneThreshold    = 100
-	cdcStatePruneBatchSize    = 900
-	cdcStateMaxPruneBatchSize = 10000
-	cdcStateWriteBatchSize    = 1000
-	cdcStateInvalidationMax   = 8
-	cdcManagementConnectorID  = "__ingestr_cdc_management__"
-	cdcManagementSourceTable  = "__ingestr_cdc_management__"
+	cdcStateKindNeverSnapshot = "never_snapshot"
+	// cdcStateKindSnapshotProgress records how far a key-ordered snapshot got.
+	// Its position is JSON (cdcSnapshotProgressState), which the position
+	// decoders reject, so only the snapshot-progress code reads or prunes it.
+	cdcStateKindSnapshotProgress = "snapshot_progress"
+	cdcStateStatusInProgress     = "in_progress"
+	cdcStateStatusResuming       = "resuming"
+	zeroCDCPosition              = "00000000/00000000"
+	cdcStatePruneThreshold       = 100
+	cdcStatePruneBatchSize       = 900
+	cdcStateMaxPruneBatchSize    = 10000
+	cdcStateWriteBatchSize       = 1000
+	cdcStateInvalidationMax      = 8
+	cdcManagementConnectorID     = "__ingestr_cdc_management__"
+	cdcManagementSourceTable     = "__ingestr_cdc_management__"
 )
 
 var cdcStateSchema = &schema.TableSchema{Columns: []schema.Column{
@@ -73,6 +79,7 @@ type reducedCDCState struct {
 	position          string
 	destTable         string
 	complete          bool
+	resuming          bool
 	incarnation       string
 	schemaFingerprint string
 	snapshotEpoch     uint64
@@ -87,23 +94,26 @@ type cdcStateWriteEvent struct {
 // destination table. Generations invalidate older completions, while run IDs
 // prevent concurrent processes from completing each other's generation.
 type CDCStateManager struct {
-	dest           destination.Destination
-	reader         destination.CDCStateReader
-	fenceReader    destination.CDCStateFenceReader
-	pruner         destination.CDCStatePruner
-	targetClaimer  destination.CDCTargetClaimer
-	incarnation    destination.CDCTargetIncarnationProvider
-	initializer    destination.CDCTargetIncarnationInitializer
-	pruneBatchSize int
-	connectorID    string
-	stateTable     string
-	targetTable    string
+	dest               destination.Destination
+	reader             destination.CDCStateReader
+	fenceReader        destination.CDCStateFenceReader
+	pruner             destination.CDCStatePruner
+	targetClaimer      destination.CDCTargetClaimer
+	incarnation        destination.CDCTargetIncarnationProvider
+	initializer        destination.CDCTargetIncarnationInitializer
+	pruneBatchSize     int
+	refresh            *cdcRefresh
+	connectorID        string
+	stateTable         string
+	targetTable        string
+	chunkTableIdentity string
 
 	mu                   sync.Mutex
 	prepared             bool
 	targetPrepared       bool
 	loaded               bool
 	started              bool
+	neverSnapshot        bool
 	generation           int64
 	runID                string
 	runEventID           string
@@ -111,6 +121,7 @@ type CDCStateManager struct {
 	states               map[cdcStateKey]reducedCDCState
 	destTables           map[string]string
 	knownComplete        map[string]string
+	keyedResumes         map[string]bool
 	currentIncarnations  map[string]string
 	currentSchemas       map[string]string
 	knownIncarnations    map[string]string
@@ -121,7 +132,12 @@ type CDCStateManager struct {
 	lateTargetModes      map[string]lateTargetMode
 	lateTargetRaw        map[string]string
 	snapshotEpochs       map[string]uint64
+	progressSequence     int64
+	progressGeneration   int64
 	entries              []destination.CDCStateEntry
+	generations          []int64
+	generationRuns       map[int64]map[string]struct{}
+	generationStates     map[int64]map[cdcStateKey]reducedCDCState
 	cleanupDue           bool
 }
 
@@ -183,6 +199,7 @@ func newCDCStateManager(dest destination.Destination, connectorID, stateTable st
 		states:               make(map[cdcStateKey]reducedCDCState),
 		destTables:           make(map[string]string),
 		knownComplete:        make(map[string]string),
+		keyedResumes:         make(map[string]bool),
 		currentIncarnations:  make(map[string]string),
 		currentSchemas:       make(map[string]string),
 		knownIncarnations:    make(map[string]string),
@@ -231,6 +248,51 @@ func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, d
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, true)
+}
+
+// ResumeSnapshot starts a replacement snapshot epoch that continues an
+// interrupted snapshot, keeping its progress so rows it already made durable
+// remain counted if this run is interrupted too.
+func (m *CDCStateManager) ResumeSnapshot(ctx context.Context, sourceTable, destTable, incarnation string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.started || m.generation == 0 {
+		return fmt.Errorf("CDC state run has not started")
+	}
+	entry, progress, ok := m.latestSnapshotProgress(sourceTable)
+	_, valid := decodeCDCSnapshotProgress(entry)
+	if !ok || !valid || entry.Status != cdcStateStatusInProgress || entry.DestinationTable != destTable || progress.Destination == "" {
+		return fmt.Errorf("CDC snapshot of %s has no resumable progress for destination table %q", sourceTable, destTable)
+	}
+	raw, current, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		return err
+	}
+	if !exists || current != progress.Destination {
+		return fmt.Errorf("CDC destination table %q changed before resuming its snapshot", destTable)
+	}
+	m.boundDestinations[sourceTable] = progress.Destination
+	m.boundRawDestinations[sourceTable] = raw
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, incarnation, false, false)
+}
+
+// InvalidateBatchSnapshot prevents resume while a batch replacement is
+// applied. Keep the accepted snapshot and target binding so a successful WAL
+// truncate can be certified by a checkpoint-only commit token.
+func (m *CDCStateManager) InvalidateBatchSnapshot(ctx context.Context, sourceTable, destTable string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.invalidateSnapshot(ctx, sourceTable, destTable, "", true, true)
+}
+
+// invalidateSnapshot starts a new snapshot epoch. Unless resetProgress is
+// false, it also durably discards snapshot progress in the same write, before
+// the caller empties or replaces the target, so a later run can never resume
+// after rows that no longer exist.
+func (m *CDCStateManager) invalidateSnapshot(ctx context.Context, sourceTable, destTable, incarnation string, preserveSnapshot, resetProgress bool) error {
 	if err := m.claimTarget(ctx, sourceTable, destTable); err != nil {
 		return err
 	}
@@ -245,16 +307,32 @@ func (m *CDCStateManager) InvalidateSnapshot(ctx context.Context, sourceTable, d
 	}
 	epoch := m.snapshotEpochs[sourceTable] + 1
 	position := encodeCDCStatePositionWithSchema(zeroCDCPosition, incarnation, m.currentSchemas[sourceTable], epoch)
-	if err := m.writeState(ctx, sourceTable, destTable, cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, position); err != nil {
+	events := []cdcStateWriteEvent{m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, position)}
+	if resetProgress {
+		reset, ok, err := m.snapshotProgressReset(sourceTable, destTable)
+		if err != nil {
+			return err
+		}
+		if ok {
+			events = append(events, reset)
+		}
+	}
+	if err := m.writeStateEvents(ctx, events); err != nil {
 		return fmt.Errorf("failed to invalidate CDC snapshot for %s: %w", sourceTable, err)
 	}
 	m.snapshotEpochs[sourceTable] = epoch
+	delete(m.keyedResumes, sourceTable)
+	if preserveSnapshot {
+		return nil
+	}
 	delete(m.knownComplete, sourceTable)
 	delete(m.knownIncarnations, sourceTable)
 	delete(m.knownSchemas, sourceTable)
 	delete(m.knownDestinations, sourceTable)
-	delete(m.boundDestinations, sourceTable)
-	delete(m.boundRawDestinations, sourceTable)
+	if resetProgress {
+		delete(m.boundDestinations, sourceTable)
+		delete(m.boundRawDestinations, sourceTable)
+	}
 	return nil
 }
 
@@ -623,6 +701,9 @@ func (m *CDCStateManager) claimTarget(ctx context.Context, sourceTable, destTabl
 }
 
 func (m *CDCStateManager) validateTarget(ctx context.Context, destTable string) error {
+	if err := m.validateChunkTableTarget(ctx, destTable); err != nil {
+		return err
+	}
 	if validator, ok := m.dest.(destination.ManagedCDCTargetValidator); ok {
 		if err := validator.ValidateManagedCDCTarget(ctx, destTable); err != nil {
 			return fmt.Errorf("CDC destination table %q failed managed-state validation: %w", destTable, err)
@@ -723,7 +804,7 @@ func (m *CDCStateManager) prepareTargetTable(ctx context.Context) error {
 		ConnectorID: cdcManagementConnectorID,
 		SourceTable: cdcManagementSourceTable,
 	}
-	for _, table := range []string{m.stateTable, m.targetTable} {
+	for _, table := range []string{m.stateTable, m.targetTable, m.chunkTableName()} {
 		managementClaim.DestinationTable = table
 		if err := m.targetClaimer.ClaimCDCTarget(ctx, m.targetTable, managementClaim); err != nil {
 			return fmt.Errorf("failed to reserve managed CDC table %q: %w", table, err)
@@ -755,12 +836,49 @@ func (m *CDCStateManager) RegisterTableForReadState(sourceTable, destTable, inca
 	m.currentSchemas[sourceTable] = schemaFingerprint
 }
 
+type cdcResumeOutcome uint8
+
+const (
+	// cdcResumeUnproven means the generation never certified the table, so an
+	// older generation may still describe what the destination holds.
+	cdcResumeUnproven cdcResumeOutcome = iota
+	// cdcResumeRejected means the generation certified the table but the
+	// certificate no longer matches the source or the target. Older
+	// generations are staler still, so none of them can be trusted either.
+	cdcResumeRejected
+	cdcResumeAccepted
+)
+
+// cdcResumeCertificate is what a generation proves about a source table.
+// Evaluating a generation never mutates the manager; acceptResumeCertificate
+// commits the one the caller decided to trust.
+type cdcResumeCertificate struct {
+	position          string
+	snapshotPosition  string
+	incarnation       string
+	schemaFingerprint string
+	destIncarnation   string
+}
+
 // ResumePosition requires a complete marker for the latest generation of the
 // source table. The later complete connector checkpoint is then safe to use.
 func (m *CDCStateManager) ResumePosition(ctx context.Context, sourceTable string) (string, error) {
+	return m.resumePosition(ctx, sourceTable, false)
+}
+
+// ResumePositionForKeyedMerge also accepts the newest complete generation when
+// every intervening run durably recorded a keyed resume and never invalidated
+// that snapshot. Only callers running the merge strategy with primary keys may
+// use it; everything else must use ResumePosition.
+func (m *CDCStateManager) ResumePositionForKeyedMerge(ctx context.Context, sourceTable string) (string, error) {
+	return m.resumePosition(ctx, sourceTable, true)
+}
+
+func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable string, allowInterruptedLatest bool) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	delete(m.keyedResumes, sourceTable)
 	if _, ok := m.destTables[sourceTable]; !ok {
 		return "", fmt.Errorf("CDC state is not registered for source table %q", sourceTable)
 	}
@@ -768,55 +886,171 @@ func (m *CDCStateManager) ResumePosition(ctx context.Context, sourceTable string
 		return "", err
 	}
 
-	if len(m.runs) != 1 {
+	if len(m.runs) != 1 || (m.refresh != nil && m.generation < m.refresh.Generation) {
 		return "", nil
 	}
-	runID := onlyCDCStateRun(m.runs)
-	snapshot := m.states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
-	if !snapshot.complete {
-		return "", nil
-	}
-	if snapshot.destTable != m.destTables[sourceTable] {
-		return "", fmt.Errorf("CDC state ID %q maps source table %q to destination %q, not %q", m.connectorID, sourceTable, snapshot.destTable, m.destTables[sourceTable])
-	}
-	if current := m.currentIncarnations[sourceTable]; current != "" && snapshot.incarnation != current {
-		return "", nil
-	}
-	if current := compactSchemaFingerprint(m.currentSchemas[sourceTable]); current != "" && snapshot.schemaFingerprint != current {
-		return "", nil
-	}
-	if m.incarnation == nil {
-		return "", nil
-	}
-	destinationState := m.states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindDestination}]
-	if !destinationState.complete || destinationState.destTable != m.destTables[sourceTable] ||
-		destinationState.snapshotEpoch != snapshot.snapshotEpoch || compareCDCPositions(destinationState.position, snapshot.position) != 0 {
-		return "", nil
-	}
-	currentDestination, exists, err := m.currentDestinationIncarnation(ctx, sourceTable)
+	certificate, outcome, err := m.evaluateGeneration(ctx, sourceTable, m.runs, m.states)
 	if err != nil {
 		return "", err
 	}
-	if !exists || currentDestination != destinationState.incarnation {
+	if outcome == cdcResumeAccepted {
+		m.keyedResumes[sourceTable] = allowInterruptedLatest
+		return m.acceptResumeCertificate(sourceTable, certificate), nil
+	}
+	if outcome == cdcResumeRejected || !allowInterruptedLatest {
 		return "", nil
+	}
+	position, err := m.resumeFromCompletedGeneration(ctx, sourceTable)
+	if err == nil && position != "" {
+		m.keyedResumes[sourceTable] = true
+	}
+	return position, err
+}
+
+func (m *CDCStateManager) evaluateGeneration(
+	ctx context.Context,
+	sourceTable string,
+	runs map[string]struct{},
+	states map[cdcStateKey]reducedCDCState,
+) (cdcResumeCertificate, cdcResumeOutcome, error) {
+	runID := onlyCDCStateRun(runs)
+	snapshot := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
+	if !snapshot.complete {
+		return cdcResumeCertificate{}, cdcResumeUnproven, nil
+	}
+	if snapshot.destTable != m.destTables[sourceTable] {
+		return cdcResumeCertificate{}, cdcResumeRejected, fmt.Errorf("CDC state ID %q maps source table %q to destination %q, not %q", m.connectorID, sourceTable, snapshot.destTable, m.destTables[sourceTable])
+	}
+	if current := m.currentIncarnations[sourceTable]; current != "" && snapshot.incarnation != current {
+		return cdcResumeCertificate{}, cdcResumeRejected, nil
+	}
+	if current := compactSchemaFingerprint(m.currentSchemas[sourceTable]); current != "" && snapshot.schemaFingerprint != current {
+		return cdcResumeCertificate{}, cdcResumeRejected, nil
+	}
+	if m.incarnation == nil {
+		return cdcResumeCertificate{}, cdcResumeRejected, nil
+	}
+	destinationState := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindDestination}]
+	if !destinationState.complete || destinationState.destTable != m.destTables[sourceTable] ||
+		destinationState.snapshotEpoch != snapshot.snapshotEpoch || compareCDCPositions(destinationState.position, snapshot.position) != 0 {
+		return cdcResumeCertificate{}, cdcResumeRejected, nil
+	}
+	currentDestination, exists, err := m.currentDestinationIncarnation(ctx, sourceTable)
+	if err != nil {
+		return cdcResumeCertificate{}, cdcResumeRejected, err
+	}
+	if !exists || currentDestination != destinationState.incarnation {
+		return cdcResumeCertificate{}, cdcResumeRejected, nil
 	}
 	destSchema, err := m.dest.GetTableSchema(ctx, m.destTables[sourceTable])
 	if err != nil {
-		return "", fmt.Errorf("failed to verify CDC destination table %q: %w", m.destTables[sourceTable], err)
+		return cdcResumeCertificate{}, cdcResumeRejected, fmt.Errorf("failed to verify CDC destination table %q: %w", m.destTables[sourceTable], err)
 	}
 	if destSchema == nil {
+		return cdcResumeCertificate{}, cdcResumeRejected, nil
+	}
+
+	certificate := cdcResumeCertificate{
+		position:          snapshot.position,
+		snapshotPosition:  snapshot.position,
+		incarnation:       snapshot.incarnation,
+		schemaFingerprint: snapshot.schemaFingerprint,
+		destIncarnation:   destinationState.incarnation,
+	}
+	checkpoint := states[cdcStateKey{runID: runID, kind: cdcStateKindCheckpoint}]
+	if checkpoint.complete && compareCDCPositions(checkpoint.position, snapshot.position) > 0 {
+		certificate.position = checkpoint.position
+	}
+	return certificate, cdcResumeAccepted, nil
+}
+
+func (m *CDCStateManager) acceptResumeCertificate(sourceTable string, certificate cdcResumeCertificate) string {
+	m.knownComplete[sourceTable] = certificate.snapshotPosition
+	m.knownIncarnations[sourceTable] = certificate.incarnation
+	m.knownSchemas[sourceTable] = certificate.schemaFingerprint
+	m.knownDestinations[sourceTable] = certificate.destIncarnation
+	return certificate.position
+}
+
+// resumeFromCompletedGeneration looks past generations whose run was killed
+// before it certified anything. Every skipped run must prove it resumed a keyed
+// merge without starting a replacement snapshot; a destination cursor alone
+// cannot distinguish a certified snapshot from a partial reload.
+func (m *CDCStateManager) resumeFromCompletedGeneration(ctx context.Context, sourceTable string) (string, error) {
+	// A table the interrupted run never marked was not part of it. Its changes
+	// were never decoded, so no older certificate can account for them.
+	latest, tracked := m.states[cdcStateKey{runID: onlyCDCStateRun(m.runs), sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
+	if !tracked || !latest.resuming || latest.snapshotEpoch > 0 {
 		return "", nil
 	}
-	m.knownComplete[sourceTable] = snapshot.position
-	m.knownIncarnations[sourceTable] = snapshot.incarnation
-	m.knownSchemas[sourceTable] = snapshot.schemaFingerprint
-	m.knownDestinations[sourceTable] = destinationState.incarnation
-
-	checkpoint := m.states[cdcStateKey{runID: runID, kind: cdcStateKindCheckpoint}]
-	if checkpoint.complete && compareCDCPositions(checkpoint.position, snapshot.position) > 0 {
-		return checkpoint.position, nil
+	// Without snapshots, keyed replay can safely repeat partially committed
+	// merges, including a baseline whose untouched rows still have NULL LSNs.
+	var destinationPosition string
+	if !m.neverSnapshot {
+		var proven bool
+		var err error
+		destinationPosition, proven, err = m.destinationCDCPosition(ctx, sourceTable)
+		if err != nil || !proven {
+			return "", err
+		}
 	}
-	return snapshot.position, nil
+	for _, generation := range m.generationsDescending() {
+		if generation >= m.generation {
+			continue
+		}
+		if m.refresh != nil && generation < m.refresh.Generation {
+			break
+		}
+		runs, states := m.reducedGeneration(generation)
+		if len(runs) != 1 {
+			return "", nil
+		}
+		snapshot, tracked := states[cdcStateKey{runID: onlyCDCStateRun(runs), sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
+		if !tracked {
+			return "", nil
+		}
+		certificate, outcome, err := m.evaluateGeneration(ctx, sourceTable, runs, states)
+		if err != nil {
+			return "", err
+		}
+		switch outcome {
+		case cdcResumeAccepted:
+			// The interrupted run merged changes this certificate cannot
+			// account for, so the target it describes is gone.
+			if !m.neverSnapshot && compareCDCPositions(destinationPosition, certificate.position) > 0 {
+				return "", nil
+			}
+			return m.acceptResumeCertificate(sourceTable, certificate), nil
+		case cdcResumeRejected:
+			return "", nil
+		case cdcResumeUnproven:
+			// This generation was interrupted too. Keep looking, unless it had
+			// already started replacing the table's snapshot.
+			if !snapshot.resuming || snapshot.snapshotEpoch > 0 {
+				return "", nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// destinationCDCPosition reports the newest CDC position the destination table
+// actually holds. An empty target, an unreadable cursor, or a destination that
+// cannot report one is not evidence about what an interrupted run left behind.
+func (m *CDCStateManager) destinationCDCPosition(ctx context.Context, sourceTable string) (string, bool, error) {
+	provider, ok := m.dest.(destination.CDCResumeProvider)
+	if !ok {
+		return "", false, nil
+	}
+	destTable := m.destTables[sourceTable]
+	position, err := provider.GetMaxCDCLSN(ctx, destTable)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to inspect CDC cursor for destination table %q: %w", destTable, err)
+	}
+	if !cdcStatePositionValid(position) {
+		return "", false, nil
+	}
+	return position, true, nil
 }
 
 func (m *CDCStateManager) currentDestinationIncarnation(ctx context.Context, sourceTable string) (string, bool, error) {
@@ -833,6 +1067,20 @@ func (m *CDCStateManager) currentDestinationIncarnation(ctx context.Context, sou
 	return cdcDestinationIncarnationDigest(incarnation), true, nil
 }
 
+// HasCDCState checks whether a connector has entered destination-managed state,
+// including runs whose snapshot has not completed. It does not create metadata.
+func HasCDCState(ctx context.Context, dest destination.Destination, connectorID, stagingDataset string) (bool, error) {
+	reader, ok := dest.(destination.CDCStateReader)
+	if !ok {
+		return false, nil
+	}
+	entries, err := reader.LoadCDCState(ctx, managedCDCStateTableName(dest, cdcStateTableName, stagingDataset), connectorID)
+	if err != nil {
+		return false, fmt.Errorf("failed to detect destination-managed CDC state: %w", err)
+	}
+	return len(entries) > 0, nil
+}
+
 // StateEmpty reports whether this connector has no state events at all. Once
 // state exists, an empty resume position can mean a crashed or conflicting run
 // and must force a snapshot instead of trusting a potentially partial
@@ -847,9 +1095,41 @@ func (m *CDCStateManager) StateEmpty(ctx context.Context) (bool, error) {
 	return len(m.entries) == 0, nil
 }
 
-// BeginRun appends an in-progress marker for every registered source table at
-// a new connector generation. A crash leaves that generation incomplete, so
-// older completed rows cannot make a partial target resumable.
+// ResolveSnapshotMode makes the no-snapshot policy sticky across generations.
+func (m *CDCStateManager) ResolveSnapshotMode(ctx context.Context, requested string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.load(ctx); err != nil {
+		return "", err
+	}
+	if m.neverSnapshot && requested == "auto" {
+		return "", fmt.Errorf("this CDC connector has a durable never-snapshot policy; automatic snapshots cannot be enabled")
+	}
+	m.neverSnapshot = m.neverSnapshot || requested == "never"
+	if m.neverSnapshot {
+		return "never", nil
+	}
+	return "auto", nil
+}
+
+// AdoptBaseline certifies an explicitly supplied external snapshot boundary.
+// The caller has validated and prepared the existing keyed targets, without
+// replacing their data. No WAL may be acknowledged before this succeeds.
+func (m *CDCStateManager) AdoptBaseline(ctx context.Context, positions map[string]string) error {
+	if err := m.Persist(ctx, source.CDCStateCommitToken{SnapshotPositions: positions}); err != nil {
+		return err
+	}
+	for table := range positions {
+		if position, err := m.ResumePositionForKeyedMerge(ctx, table); err != nil {
+			return err
+		} else if position == "" {
+			return fmt.Errorf("failed to certify external CDC baseline for %s", table)
+		}
+	}
+	return nil
+}
+
+// BeginRun starts a new CDC state generation for registered tables.
 func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -866,8 +1146,12 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
+	if fullRefresh && m.neverSnapshot {
+		return fmt.Errorf("full refresh is prohibited by this CDC connector's never-snapshot policy")
+	}
 	if fullRefresh {
 		m.knownComplete = make(map[string]string)
+		m.keyedResumes = make(map[string]bool)
 		m.knownIncarnations = make(map[string]string)
 		m.knownDestinations = make(map[string]string)
 	}
@@ -881,11 +1165,18 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	m.runs = map[string]struct{}{runID: {}}
 	m.states = make(map[cdcStateKey]reducedCDCState)
 	runEvent := m.newStateWriteEvent("", "", cdcStateKindRun, m.generation, cdcStateStatusInProgress, zeroCDCPosition)
+	if m.refresh != nil {
+		runEvent.entry.DestinationTable = "refresh:" + m.refresh.writer.connectorID
+	}
 	m.runEventID = runEvent.entry.EventID
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}
-	if err := m.writeStateEvents(ctx, []cdcStateWriteEvent{runEvent}); err != nil {
+	runEvents := []cdcStateWriteEvent{runEvent}
+	if m.neverSnapshot {
+		runEvents = append(runEvents, m.newStateWriteEvent("", "", cdcStateKindNeverSnapshot, m.generation, destination.CDCStateStatusComplete, zeroCDCPosition))
+	}
+	if err := m.writeStateEvents(ctx, runEvents); err != nil {
 		return err
 	}
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
@@ -900,7 +1191,11 @@ func (m *CDCStateManager) BeginRun(ctx context.Context, fullRefresh bool) error 
 	sort.Strings(tables)
 	events := make([]cdcStateWriteEvent, 0, len(tables))
 	for _, sourceTable := range tables {
-		events = append(events, m.newStateWriteEvent(sourceTable, m.destTables[sourceTable], cdcStateKindSnapshot, m.generation, cdcStateStatusInProgress, zeroCDCPosition))
+		status := cdcStateStatusInProgress
+		if m.keyedResumes[sourceTable] && m.knownComplete[sourceTable] != "" {
+			status = cdcStateStatusResuming
+		}
+		events = append(events, m.newStateWriteEvent(sourceTable, m.destTables[sourceTable], cdcStateKindSnapshot, m.generation, status, zeroCDCPosition))
 	}
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
@@ -1042,11 +1337,25 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 		}
 		position = encodeCDCStatePositionWithSchema(position, incarnation, schemaFingerprint, m.snapshotEpochs[sourceTable])
 		events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindSnapshot, m.generation, destination.CDCStateStatusComplete, position))
+		if _, completed := token.SnapshotPositions[sourceTable]; completed {
+			reset, ok, err := m.snapshotProgressReset(sourceTable, destTable)
+			if err != nil {
+				return err
+			}
+			if ok {
+				events = append(events, reset)
+			}
+		}
 		if destinationIncarnation := capturedDestinations[sourceTable]; destinationIncarnation != "" {
 			destinationPosition := encodeCDCDestinationState(positions[sourceTable], destinationIncarnation, m.snapshotEpochs[sourceTable])
 			events = append(events, m.newStateWriteEvent(sourceTable, destTable, cdcStateKindDestination, m.generation, destination.CDCStateStatusComplete, destinationPosition))
 		}
 	}
+	progressEvents, err := m.snapshotProgressEvents(token)
+	if err != nil {
+		return err
+	}
+	events = append(events, progressEvents...)
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
 	}
@@ -1067,6 +1376,9 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 			delete(m.boundRawDestinations, sourceTable)
 		}
 	}
+	if err := m.completeRefresh(ctx); err != nil {
+		return err
+	}
 	m.pruneSuperseded(ctx)
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
@@ -1082,6 +1394,9 @@ func (m *CDCStateManager) prepareTable(ctx context.Context) error {
 		return err
 	}
 	prepare := func() error {
+		if preparer, ok := m.dest.(destination.CDCStateTablePreparer); ok {
+			return preparer.PrepareCDCStateTable(ctx, m.stateTable, cdcStateSchema)
+		}
 		return m.dest.PrepareTable(ctx, destination.PrepareOptions{
 			Table: m.stateTable, Schema: cdcStateSchema, DropFirst: false, PrimaryKeys: []string{"connector_id", "event_id"},
 		})
@@ -1122,7 +1437,11 @@ func (m *CDCStateManager) load(ctx context.Context) error {
 		return fmt.Errorf("failed to load shared CDC state: %w", err)
 	}
 	m.entries = append(m.entries[:0], entries...)
+	m.invalidateGenerationIndex()
 	for _, entry := range entries {
+		if entry.StateKind == cdcStateKindNeverSnapshot || entry.StateKind == cdcStateKindBaseline {
+			m.neverSnapshot = true
+		}
 		if entry.Generation > m.generation {
 			m.generation = entry.Generation
 		}
@@ -1295,6 +1614,7 @@ func (m *CDCStateManager) applyWrittenState(entry destination.CDCStateEntry) {
 	}
 	m.states[key] = state
 	m.entries = append(m.entries, entry)
+	m.invalidateGenerationIndex()
 	if entry.StateKind == cdcStateKindSnapshot && entry.Status == destination.CDCStateStatusComplete {
 		delete(m.knownComplete, entry.SourceTable)
 	}
@@ -1308,12 +1628,16 @@ func reduceCDCStateEntry(state reducedCDCState, entry destination.CDCStateEntry,
 		}
 		if epoch > state.snapshotEpoch {
 			state.complete = false
+			state.resuming = false
 			state.position = ""
 			state.incarnation = incarnation
 			state.schemaFingerprint = schemaFingerprint
 			state.destTable = entry.DestinationTable
 			state.snapshotEpoch = epoch
 		}
+	}
+	if entry.StateKind == cdcStateKindSnapshot && entry.Status == cdcStateStatusResuming && epoch == 0 {
+		state.resuming = true
 	}
 	if entry.Status != destination.CDCStateStatusComplete {
 		return state
@@ -1431,6 +1755,7 @@ func (m *CDCStateManager) pruneSuperseded(ctx context.Context) {
 			}
 		}
 		m.entries = kept
+		m.invalidateGenerationIndex()
 	}
 	m.cleanupDue = len(stale) > 0
 }
@@ -1445,9 +1770,13 @@ func (m *CDCStateManager) supersededEventIDs() []string {
 		return nil
 	}
 
+	retained := m.retainedResumeGenerations()
 	keep := make(map[cdcStateKey]destination.CDCStateEntry)
 	for _, entry := range m.entries {
 		if !cdcStateEntryPositionValid(entry) {
+			continue
+		}
+		if _, ok := retained[entry.Generation]; ok {
 			continue
 		}
 		runID, ok := cdcStateRunID(entry.EventID, m.connectorID)
@@ -1467,11 +1796,134 @@ func (m *CDCStateManager) supersededEventIDs() []string {
 	}
 	stale := make([]string, 0, len(m.entries)-len(keepIDs))
 	for _, entry := range m.entries {
+		// Keep policy evidence even if a failed run only persisted its run marker.
+		if entry.StateKind == cdcStateKindNeverSnapshot {
+			key := cdcStateKey{runID: m.runID, kind: cdcStateKindNeverSnapshot}
+			if _, exists := keep[key]; !exists {
+				continue
+			}
+		}
+		if _, ok := retained[entry.Generation]; ok {
+			continue
+		}
 		if _, ok := keepIDs[entry.EventID]; !ok && entry.EventID != "" && cdcStateEntryPositionValid(entry) {
 			stale = append(stale, entry.EventID)
 		}
 	}
-	return stale
+	return append(stale, m.supersededSnapshotProgress()...)
+}
+
+// retainedResumeGenerations names the generations that still hold the newest
+// certificate for a table this generation has not certified yet. Pruning them
+// would leave a run that is killed before Persist with nothing to resume from.
+func (m *CDCStateManager) retainedResumeGenerations() map[int64]struct{} {
+	retained := make(map[int64]struct{})
+	pending := make(map[string]string, len(m.destTables))
+	for sourceTable, destTable := range m.destTables {
+		if !generationCertifies(m.runs, m.states, sourceTable, destTable) {
+			pending[sourceTable] = destTable
+		}
+	}
+	if len(pending) == 0 {
+		return retained
+	}
+	for _, generation := range m.generationsDescending() {
+		if generation >= m.generation {
+			continue
+		}
+		runs, states := m.reducedGeneration(generation)
+		for sourceTable, destTable := range pending {
+			if generationCertifies(runs, states, sourceTable, destTable) {
+				retained[generation] = struct{}{}
+				delete(pending, sourceTable)
+			}
+		}
+		if len(pending) == 0 {
+			break
+		}
+	}
+	return retained
+}
+
+// generationCertifies reports whether a generation completed both halves of the
+// proof for a table: the snapshot it wrote and the target it wrote it to.
+func generationCertifies(
+	runs map[string]struct{},
+	states map[cdcStateKey]reducedCDCState,
+	sourceTable, destTable string,
+) bool {
+	if len(runs) != 1 {
+		return false
+	}
+	runID := onlyCDCStateRun(runs)
+	snapshot := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
+	destinationState := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindDestination}]
+	return snapshot.complete && destinationState.complete &&
+		snapshot.destTable == destTable && destinationState.destTable == destTable &&
+		snapshot.snapshotEpoch == destinationState.snapshotEpoch &&
+		compareCDCPositions(snapshot.position, destinationState.position) == 0
+}
+
+func (m *CDCStateManager) invalidateGenerationIndex() {
+	m.generations = nil
+	m.generationRuns = nil
+	m.generationStates = nil
+}
+
+func (m *CDCStateManager) generationsDescending() []int64 {
+	if m.generations != nil {
+		return m.generations
+	}
+	seen := make(map[int64]struct{}, len(m.entries))
+	generations := make([]int64, 0, len(m.entries))
+	for _, entry := range m.entries {
+		if _, ok := seen[entry.Generation]; ok {
+			continue
+		}
+		seen[entry.Generation] = struct{}{}
+		generations = append(generations, entry.Generation)
+	}
+	sort.Slice(generations, func(i, j int) bool {
+		return generations[i] > generations[j]
+	})
+	m.generations = generations
+	return m.generations
+}
+
+// reducedGeneration reduces one generation the way load reduces the newest one.
+// Results are memoised because resume walks it once per registered table.
+func (m *CDCStateManager) reducedGeneration(generation int64) (map[string]struct{}, map[cdcStateKey]reducedCDCState) {
+	if runs, ok := m.generationRuns[generation]; ok {
+		return runs, m.generationStates[generation]
+	}
+	runs := make(map[string]struct{})
+	states := make(map[cdcStateKey]reducedCDCState)
+	for _, entry := range m.entries {
+		if entry.Generation != generation {
+			continue
+		}
+		runID, ok := cdcStateRunID(entry.EventID, m.connectorID)
+		if !ok {
+			continue
+		}
+		runs[runID] = struct{}{}
+		key := cdcStateKey{runID: runID, sourceTable: entry.SourceTable, kind: entry.StateKind}
+		state := states[key]
+		if entry.Generation > state.generation {
+			state = reducedCDCState{generation: entry.Generation}
+		}
+		if position, incarnation, epoch, valid := decodeCDCStateEntry(entry); valid {
+			state = reduceCDCStateEntry(state, entry, position, incarnation, epoch)
+		}
+		states[key] = state
+	}
+	if m.generationRuns == nil {
+		m.generationRuns = make(map[int64]map[string]struct{})
+		m.generationStates = make(map[int64]map[cdcStateKey]reducedCDCState)
+	}
+	m.generationRuns[generation] = runs
+	m.generationStates[generation] = states
+	return runs, states
 }
 
 func preferCDCStateEntry(candidate, current destination.CDCStateEntry) bool {
@@ -1503,7 +1955,7 @@ func cdcStatePositionValid(position string) bool {
 	if _, err := pglogrepl.ParseLSN(position); err == nil {
 		return true
 	}
-	return mysqlCDCStatePositionRE.MatchString(position) || mssqlCDCStatePositionRE.MatchString(position)
+	return mysqlCDCStatePositionRE.MatchString(position) || mssqlCDCStatePositionRE.MatchString(position) || mssqlCTStatePositionRE.MatchString(position)
 }
 
 func cdcStateEntryPositionValid(entry destination.CDCStateEntry) bool {
@@ -1529,9 +1981,10 @@ func compareCDCPositions(left, right string) int {
 		if mysqlCDCStatePositionRE.MatchString(left) && mysqlCDCStatePositionRE.MatchString(right) {
 			return strings.Compare(left, right)
 		}
-		// SQL Server CDC positions are fixed-width uppercase hex, so their
-		// lexicographic order is their LSN order.
-		if mssqlCDCStatePositionRE.MatchString(left) && mssqlCDCStatePositionRE.MatchString(right) {
+		// SQL Server CDC positions and Change Tracking versions are
+		// fixed-width, so lexicographic order preserves position order.
+		if (mssqlCDCStatePositionRE.MatchString(left) && mssqlCDCStatePositionRE.MatchString(right)) ||
+			(mssqlCTStatePositionRE.MatchString(left) && mssqlCTStatePositionRE.MatchString(right)) {
 			return strings.Compare(left, right)
 		}
 		return 0
@@ -1547,6 +2000,8 @@ func compareCDCPositions(left, right string) int {
 }
 
 var mysqlCDCStatePositionRE = regexp.MustCompile(`^\d{20}:[^:]+:\d{20}:\d{20}(?::l1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]*)?$`)
+
+var mssqlCTStatePositionRE = regexp.MustCompile(`^[0-9]{20}$`)
 
 // mssqlCDCStatePositionRE matches SQL Server CDC stored positions:
 // start LSN and seqval as fixed-width uppercase hex plus a two-digit

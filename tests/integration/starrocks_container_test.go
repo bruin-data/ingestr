@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,36 +22,78 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Runs as part of `make test-integration`. The all-in-one image is slow to boot,
-// so this test manages its own container instead of the shared TestMain.
-func startStarRocksContainer(ctx context.Context, t *testing.T) (dsn, uri string) {
+var starRocksShared struct {
+	sync.Once
+	dsn, uri string
+	cleanup  func()
+}
+
+// sharedStarRocks boots one StarRocks for the whole package; TestMain terminates it.
+func sharedStarRocks(t *testing.T) (dsn, uri string) {
+	t.Helper()
+	if !containerWanted("starrocks") {
+		t.Skip("StarRocks excluded by INTEGRATION_BACKENDS")
+	}
+	requireDocker(t)
+	starRocksShared.Do(func() {
+		dsn, uri, cleanup := startStarRocksContainerWithCleanup(context.Background(), t)
+		starRocksShared.cleanup = cleanup
+		waitForStarRocksBackend(t, dsn)
+		db, err := sql.Open("mysql", dsn)
+		require.NoError(t, err)
+		defer func() { _ = db.Close() }()
+		// Alive precedes tablet placement readiness; probe before handing it out.
+		execEventually(t, db, "CREATE DATABASE IF NOT EXISTS ready_probe")
+		execEventually(t, db, "CREATE TABLE IF NOT EXISTS ready_probe.ready (id BIGINT) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES ('replication_num'='1')")
+		starRocksShared.dsn, starRocksShared.uri = dsn, uri
+	})
+	require.NotEmpty(t, starRocksShared.uri, "shared StarRocks setup failed")
+	return starRocksShared.dsn, starRocksShared.uri
+}
+
+func startStarRocksContainerWithCleanup(ctx context.Context, t *testing.T) (dsn, uri string, cleanup func()) {
 	requireDocker(t)
 	t.Helper()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        "starrocks/allin1-ubuntu:3.3-latest",
-			ExposedPorts: []string{"9030/tcp"},
+			ExposedPorts: []string{"9030/tcp", "8030/tcp", "8040/tcp"},
 			// Relax the backend disk-flood thresholds before startup: the defaults
 			// (~1 GiB free / <95% used) mark the BE unavailable for tablet placement
 			// on disk-constrained CI runners, so CREATE TABLE finds no usable backend.
 			Cmd: []string{"/bin/sh", "-c", "echo 'storage_flood_stage_usage_percent=99' >> /data/deploy/starrocks/be/conf/be.conf && " +
 				"echo 'storage_flood_stage_left_capacity_bytes=104857600' >> /data/deploy/starrocks/be/conf/be.conf && " +
+				"echo 'alter_scheduler_interval_millisecond=1000' >> /data/deploy/starrocks/fe/conf/fe.conf && " +
 				"cd /data/deploy && ./entrypoint.sh"},
 			WaitingFor: wait.ForListeningPort("9030/tcp").WithStartupTimeout(300 * time.Second),
 		},
 		Started: true,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+	cleanup = func() { _ = container.Terminate(context.Background()) }
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cleanup()
+		}
+	}()
 
 	host, err := container.Host(ctx)
 	require.NoError(t, err)
 	port, err := container.MappedPort(ctx, "9030")
 	require.NoError(t, err)
+	fePort, err := container.MappedPort(ctx, "8030")
+	require.NoError(t, err)
+	bePort, err := container.MappedPort(ctx, "8040")
+	require.NoError(t, err)
+	dsn, uri, closeProxy := proxyStarRocksPorts(t, host, port.Port(), fePort.Port(), bePort.Port())
+	cleanup = func() {
+		closeProxy()
+		_ = container.Terminate(context.Background())
+	}
 
-	dsn = fmt.Sprintf("root@tcp(%s:%s)/", host, port.Port())
-	uri = fmt.Sprintf("starrocks://root@%s:%s/", host, port.Port())
-	return dsn, uri
+	handedOff = true
+	return dsn, uri, cleanup
 }
 
 // waitForStarRocksBackend blocks until a backend reports Alive=true; the FE
@@ -129,9 +172,9 @@ func TestStarRocksToSQLite(t *testing.T) {
 		t.Skip("Skipping integration test in short mode")
 	}
 
+	t.Parallel()
 	ctx := context.Background()
-	dsn, baseURI := startStarRocksContainer(ctx, t)
-	waitForStarRocksBackend(t, dsn)
+	dsn, baseURI := sharedStarRocks(t)
 
 	db, err := sql.Open("mysql", dsn)
 	require.NoError(t, err)

@@ -503,6 +503,10 @@ func sameOneLakePhysicalType(left, right schema.Column) bool {
 	return string(leftType) == string(rightType)
 }
 
+func (d *OneLakeDestination) MaxDecimalPrecision() int {
+	return 38
+}
+
 func (d *OneLakeDestination) ApplySchemaEvolution(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) ([]string, error) {
 	if comparison == nil || !comparison.HasChanges {
 		return nil, nil

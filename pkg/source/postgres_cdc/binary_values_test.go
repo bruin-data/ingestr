@@ -208,12 +208,12 @@ func TestMultiTableReplicatorUsesProtocolV2OnlyForStreamingRuns(t *testing.T) {
 	src := &PostgresCDCSource{serverVersion: 160000, lag: &lagState{}}
 	cfg := CDCConfig{Publication: "pub"}
 
-	batch, err := NewMultiTableReplicator(src, nil, cfg, 0, nil, false, "barrier")
+	batch, err := NewMultiTableReplicator(src, nil, cfg, 0, nil, false, batchBarrier{nonce: "barrier"})
 	require.NoError(t, err)
 	assert.False(t, batch.protocolV2)
 	assert.NotContains(t, buildPluginArgs(cfg, src.serverVersion, batch.streaming), "streaming 'true'")
 
-	stream, err := NewMultiTableReplicator(src, nil, cfg, 0, nil, true, "")
+	stream, err := NewMultiTableReplicator(src, nil, cfg, 0, nil, true, batchBarrier{})
 	require.NoError(t, err)
 	assert.True(t, stream.protocolV2)
 	assert.Contains(t, buildPluginArgs(cfg, src.serverVersion, stream.streaming), "streaming 'true'")

@@ -19,6 +19,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	srcpostgres "github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -29,6 +30,10 @@ import (
 type PostgresDestination struct {
 	pool *pgxpool.Pool
 	uri  string
+
+	// DefaultSchema bypasses PostgreSQL catalog resolution for compatible
+	// destinations that use a fixed schema for unqualified table names.
+	DefaultSchema string
 }
 
 type postgresStatementDescriber interface {
@@ -101,14 +106,14 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	if err != nil {
 		return err
 	}
-	resolvedTable := schemaName + "." + tableName
+	resolvedTable := quotePostgresTable(schemaName, tableName)
 	if err := d.ensureSchemaExists(ctx, schemaName); err != nil {
 		return fmt.Errorf("failed to ensure schema exists: %w", err)
 	}
 
 	if opts.DropFirst {
 		startDrop := time.Now()
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", destination.QuoteTableName(resolvedTable))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", resolvedTable)
 		if _, err := d.pool.Exec(ctx, dropSQL); err != nil {
 			config.LogFailedQuery(dropSQL, err)
 			return fmt.Errorf("failed to drop table: %w", err)
@@ -117,7 +122,7 @@ func (d *PostgresDestination) PrepareTable(ctx context.Context, opts destination
 	}
 
 	startCreate := time.Now()
-	createSQL := buildCreateTableSQL(destination.QuoteTableName(resolvedTable), opts.Schema.Columns, opts.PrimaryKeys)
+	createSQL := buildCreateTableSQL(resolvedTable, opts.Schema.Columns, opts.PrimaryKeys)
 	if _, err := d.pool.Exec(ctx, createSQL); err != nil {
 		config.LogFailedQuery(createSQL, err)
 		return fmt.Errorf("failed to create table: %w", err)
@@ -442,12 +447,16 @@ func (d *PostgresDestination) copyRecordGroup(ctx context.Context, record arrow.
 		return rows, 1, nil, err
 	}
 
-	stream, err := newPostgresRecordCopyStream(ctx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	stream, err := newPostgresRecordCopyStream(readCtx, records, record, opts.Schema, pgxConn.TypeMap(), plan.oids)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 	defer stream.Close()
-	tag, err := pgxConn.PgConn().CopyFrom(ctx, stream, plan.copySQL)
+	reader := newPostgresCopyReader(stream, cancelRead)
+	tag, err := pgxConn.PgConn().CopyFrom(readCtx, reader, plan.copySQL)
+	reader.Close()
 	return tag.RowsAffected(), stream.Batches(), stream.Pending(), err
 }
 
@@ -464,7 +473,10 @@ func copyPostgresRecord(ctx context.Context, pgxConn *pgx.Conn, record arrow.Rec
 		}))
 	}
 
-	tag, err := pgxConn.PgConn().CopyFrom(ctx, reader, plan.copySQL)
+	readCtx, cancelRead := context.WithCancel(ctx)
+	copyReader := newPostgresCopyReader(reader, cancelRead)
+	defer copyReader.Close()
+	tag, err := pgxConn.PgConn().CopyFrom(readCtx, copyReader, plan.copySQL)
 	if err != nil {
 		return 0, err
 	}
@@ -687,6 +699,19 @@ func postgresValueGetterForType(col arrow.Array, dataType schema.DataType) func(
 		}
 	case array.ExtensionArray:
 		return postgresValueGetterForType(a.Storage(), dataType)
+	case *array.List:
+		getElement := postgresValueGetter(a.ListValues())
+		return func(i int) any {
+			if a.IsNull(i) {
+				return nil
+			}
+			start, end := a.ValueOffsets(i)
+			values := make([]any, end-start)
+			for j := start; j < end; j++ {
+				values[j-start] = getElement(int(j))
+			}
+			return values
+		}
 	default:
 		return func(i int) any {
 			return arrowutil.Value(col, i)
@@ -827,6 +852,9 @@ func (d *PostgresDestination) resolveSchemaTable(ctx context.Context, queryer po
 	}
 	if len(parts) == 2 {
 		return parts[0], parts[1], nil
+	}
+	if d.DefaultSchema != "" {
+		return d.DefaultSchema, parts[0], nil
 	}
 
 	var schemaName, tableName string
@@ -1000,6 +1028,11 @@ func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opt
 			`latest_active AS (SELECT DISTINCT ON (%s) %s FROM %s WHERE "_cdc_deleted" = false ORDER BY %s)`,
 			pkList, selectCols, quotedStagingTable, orderBy,
 		)
+		if opts.CDCHardDelete {
+			// Rows whose latest change is a delete are removed below, so only
+			// rows whose latest change is live need their image upserted.
+			latestActive = `latest_active AS (SELECT * FROM latest_all WHERE "_cdc_deleted" = false)`
+		}
 		latestAll := fmt.Sprintf(
 			`latest_all AS (SELECT DISTINCT ON (%s) %s FROM %s ORDER BY %s)`,
 			pkList, selectCols, quotedStagingTable, orderBy,
@@ -1036,8 +1069,8 @@ func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opt
 			INSERT INTO %s (%s)
 			SELECT %s FROM latest_active la
 			WHERE NOT EXISTS (SELECT 1 FROM %s AS target WHERE %s)`,
-			latestActive,
 			latestAll,
+			latestActive,
 			quotedTargetTable,
 			buildCDCConflictUpdateSet(nonPKColumns, "target", "la", unchangedRef),
 			onTargetCondition,
@@ -1053,6 +1086,22 @@ func (d *PostgresDestination) mergeTableInTx(ctx context.Context, tx pgx.Tx, opt
 		if _, err := tx.Exec(ctx, upsertSQL); err != nil {
 			config.LogFailedQuery(upsertSQL, err)
 			return fmt.Errorf("failed to upsert non-deleted records: %w", err)
+		}
+
+		if opts.CDCHardDelete {
+			deleteSQL := fmt.Sprintf(
+				`WITH %s DELETE FROM %s AS target USING latest_all AS latest WHERE %s AND latest."_cdc_deleted" = true AND (target."_cdc_lsn" IS NULL OR latest."_cdc_lsn" >= target."_cdc_lsn")`,
+				latestAll,
+				quotedTargetTable,
+				destination.MergeJoinCondition(buildJoinCondition(opts.PrimaryKeys, "target", "latest"), opts.IncrementalPredicate),
+			)
+			config.Debug("[MERGE] Executing CDC hard delete: %s", deleteSQL)
+			if _, err := tx.Exec(ctx, deleteSQL); err != nil {
+				config.LogFailedQuery(deleteSQL, err)
+				return fmt.Errorf("failed to delete CDC-deleted records: %w", err)
+			}
+			config.Debug("[MERGE] Merge completed in %v", time.Since(startMerge))
+			return nil
 		}
 
 		// Step 2: Mark deletes only when the latest change is a delete
@@ -1214,10 +1263,7 @@ func (d *PostgresDestination) DeleteInsertTable(ctx context.Context, opts destin
 		return fmt.Errorf("failed to lock target table: %w", err)
 	}
 
-	deleteSQL := fmt.Sprintf(
-		`DELETE FROM %s WHERE %s >= $1 AND %s <= $2`,
-		quotedTargetTable, destination.QuoteIdentifier(opts.IncrementalKey), destination.QuoteIdentifier(opts.IncrementalKey),
-	)
+	deleteSQL := destination.IntervalDeleteSQL(quotedTargetTable, "target", destination.QuoteIdentifier(opts.IncrementalKey), "$1", "$2", opts.IncrementalPredicate)
 	config.Debug("[DELETE+INSERT] Executing DELETE: %s", deleteSQL)
 
 	if _, err := tx.Exec(ctx, deleteSQL, opts.IntervalStart, opts.IntervalEnd); err != nil {
@@ -1388,6 +1434,8 @@ func (d *PostgresDestination) SupportsAppendStrategy() bool { return true }
 func (d *PostgresDestination) SupportsMergeStrategy() bool { return true }
 
 func (d *PostgresDestination) SupportsIncrementalPredicate() bool { return true }
+
+func (d *PostgresDestination) SupportsDeleteInsertPredicate() bool { return true }
 
 // SupportsDeleteInsertStrategy returns true as PostgreSQL supports the delete+insert strategy.
 func (d *PostgresDestination) SupportsDeleteInsertStrategy() bool { return true }
@@ -1828,6 +1876,20 @@ func (d *PostgresDestination) SupportsCDCMerge() bool {
 	return true
 }
 
+func (d *PostgresDestination) SupportsCDCHardDelete() bool { return true }
+
+func (d *PostgresDestination) GeneratedColumns(ctx context.Context, table string) ([]string, error) {
+	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := d.pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND is_generated = 'ALWAYS'`, schemaName, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query generated columns: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 // GetTableSchema returns the current schema of a table, or nil if table doesn't exist.
 func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
@@ -1836,12 +1898,15 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 	}
 
 	query := `
-		SELECT column_name, data_type, is_nullable,
-		       numeric_precision, numeric_scale, character_maximum_length,
-		       udt_name
-		FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = $2
-		ORDER BY ordinal_position`
+		SELECT c.column_name, c.data_type, c.is_nullable,
+		       c.numeric_precision, c.numeric_scale, c.character_maximum_length,
+		       c.udt_name, COALESCE(attr.atttypmod, -1)
+		FROM information_schema.columns AS c
+		LEFT JOIN pg_catalog.pg_namespace AS nsp ON nsp.nspname = c.table_schema
+		LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = nsp.oid AND rel.relname = c.table_name
+		LEFT JOIN pg_catalog.pg_attribute AS attr ON attr.attrelid = rel.oid AND attr.attname = c.column_name
+		WHERE c.table_schema = $1 AND c.table_name = $2 AND COALESCE(c.is_generated, 'NEVER') <> 'ALWAYS'
+		ORDER BY c.ordinal_position`
 
 	rows, err := d.pool.Query(ctx, query, schemaName, tableName)
 	if err != nil {
@@ -1854,8 +1919,9 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 	for rows.Next() {
 		var colName, dataType, isNullable, udtName string
 		var numPrecision, numScale, charMaxLen *int
+		var typmod int32
 
-		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &udtName); err != nil {
+		if err := rows.Scan(&colName, &dataType, &isNullable, &numPrecision, &numScale, &charMaxLen, &udtName, &typmod); err != nil {
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 
@@ -1875,6 +1941,9 @@ func (d *PostgresDestination) GetTableSchema(ctx context.Context, table string) 
 		}
 		if charMaxLen != nil {
 			col.MaxLength = *charMaxLen
+		}
+		if udtName == "_numeric" {
+			col.Precision, col.Scale = srcpostgres.NumericTypmodPrecisionScale(typmod)
 		}
 
 		columns = append(columns, col)
@@ -2139,3 +2208,22 @@ func parseTableIdentifier(table string) pgx.Identifier {
 	}
 	return pgx.Identifier{table}
 }
+
+func (d *PostgresDestination) ListStagingTables(ctx context.Context, schema, prefix string) ([]string, error) {
+	rows, err := d.pool.Query(ctx, "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND left(table_name, $2) = $3", schema, len(prefix), prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
+var _ destination.StagingTableLister = (*PostgresDestination)(nil)

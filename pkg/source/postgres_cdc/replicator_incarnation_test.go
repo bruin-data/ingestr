@@ -18,7 +18,7 @@ func TestReplicatorChecksTableIncarnationWithoutDatabase(t *testing.T) {
 		CDCConfig{DiscoverInterval: time.Nanosecond},
 		0,
 		true,
-		"",
+		batchBarrier{},
 	)
 	require.NoError(t, err)
 	require.NoError(t, repl.ExpectTableIncarnation("41"))

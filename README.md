@@ -175,6 +175,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td><a href="https://bruin-data.github.io/ingestr/supported-sources/cloudflare-d1.html">Cloudflare D1</a></td>
+        <td>-</td>
+        <td>✅</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Couchbase</td>
         <td>✅</td>
         <td>-</td>
@@ -460,6 +466,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>-</td>
     </tr>
     <tr>
+        <td>AllRatesToday</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
         <td>Amazon Kinesis</td>
         <td>✅</td>
         <td>-</td>
@@ -523,6 +535,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
         <td>Attio</td>
         <td>✅</td>
         <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Azure Blob Storage</td>
+        <td>✅</td>
+        <td>✅</td>
         <td>-</td>
     </tr>
     <tr>
@@ -899,6 +917,12 @@ Pull requests are welcome. However, please open an issue first to discuss what y
     </tr>
     <tr>
         <td>Primer</td>
+        <td>✅</td>
+        <td>-</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>Privatus Analytics</td>
         <td>✅</td>
         <td>-</td>
         <td>-</td>

@@ -32,6 +32,7 @@ func TestMQTTToSQLite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	mqttURI := sharedMQTTURI(t)
@@ -73,6 +74,7 @@ func TestMQTTStreamingToPostgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	t.Parallel()
 
 	ctx := context.Background()
 	mqttURI := sharedMQTTURI(t)

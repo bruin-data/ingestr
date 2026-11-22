@@ -1,12 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/bruin-data/ingestr/internal/output"
+	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/jackc/pglogrepl"
 )
 
 var DebugMode bool
@@ -68,6 +71,18 @@ const (
 	TableNamingTable TableNaming = "table"
 )
 
+// CDCDeleteBehavior selects how a CDC merge applies source deletes to the
+// destination table.
+type CDCDeleteBehavior string
+
+const (
+	// CDCDeleteSoft keeps deleted rows as tombstones with _cdc_deleted = true.
+	// Default.
+	CDCDeleteSoft CDCDeleteBehavior = "soft"
+	// CDCDeleteHard removes deleted rows from the destination table.
+	CDCDeleteHard CDCDeleteBehavior = "hard"
+)
+
 type IngestConfig struct {
 	SourceURI   string
 	DestURI     string
@@ -106,13 +121,15 @@ type IngestConfig struct {
 	PartitionBy string
 	ClusterBy   []string
 
-	FullRefresh    bool
-	SchemaContract string      // Schema contract mode: evolve, freeze, discard_row, discard_value
-	SchemaNaming   string      // Schema naming convention: direct, snake_case, auto
-	CDCTableNaming TableNaming // Multi-table CDC destination naming: schema_table, table
-	Yes            bool
-	Progress       ProgressMode
-	Debug          bool
+	FullRefresh       bool
+	RefreshID         string
+	SchemaContract    string            // Schema contract mode: evolve, freeze, discard_row, discard_value
+	SchemaNaming      string            // Schema naming convention: direct, snake_case, auto
+	CDCTableNaming    TableNaming       // Multi-table CDC destination naming: schema_table, table
+	CDCDeleteBehavior CDCDeleteBehavior // How CDC merges apply source deletes: soft, hard
+	Yes               bool
+	Progress          ProgressMode
+	Debug             bool
 
 	PageSize                        int
 	MaxBatchBytes                   int64
@@ -144,6 +161,16 @@ type IngestConfig struct {
 	StagingDataset string
 	KeepStaging    bool // testing only: skip final DropTable so tests can inspect staging
 
+	CDCSnapshotMode            string // Empty inherits the durable policy, or defaults to auto
+	CDCChunkedSnapshot         bool
+	CDCSnapshotSpool           bool
+	CDCSnapshotExecution       string // parallel or serial
+	CDCSnapshotChunkSize       int
+	CDCSnapshotChunkTimeout    time.Duration
+	CDCWALStaging              string // inmemory, destination, or disk
+	CDCWALSpoolDir             string
+	CDCWALBufferBytes          int64
+	CDCStartLSN                string // Bootstrap boundary for externally loaded PostgreSQL CDC targets
 	CDCResumeLSN               string // For CDC sources: resume from this LSN (auto-detected from destination)
 	CDCResumeIncarnation       string
 	CDCResumeSchemaFingerprint string
@@ -166,6 +193,13 @@ type IngestConfig struct {
 // the default" apart from an explicit choice, which cmd records by setting
 // DestinationParallelism.
 const DefaultExtractParallelism = 5
+
+const (
+	DefaultCDCSnapshotExecution    = "serial"
+	DefaultCDCSnapshotChunkSize    = 10000
+	DefaultCDCSnapshotChunkTimeout = 30 * time.Second
+	DefaultCDCWALBufferBytes       = int64(64 << 20)
+)
 
 const defaultPostgresWriteParallelism = 8
 
@@ -190,17 +224,23 @@ func isPostgresURI(uri string) bool {
 
 func DefaultConfig() *IngestConfig {
 	return &IngestConfig{
-		IncrementalStrategy: StrategyReplace,
-		SchemaContract:      "evolve",
-		SchemaNaming:        "",
-		CDCTableNaming:      TableNamingSchemaTable,
-		Progress:            ProgressInteractive,
-		PageSize:            25000,
-		MaxBatchBytes:       512 << 20, // 512 MiB
-		LoaderFileSize:      25000,
-		ExtractParallelism:  5,
-		FlushInterval:       30 * time.Second,
-		FlushRecords:        50000,
+		IncrementalStrategy:     StrategyReplace,
+		SchemaContract:          "evolve",
+		SchemaNaming:            "",
+		CDCTableNaming:          TableNamingSchemaTable,
+		CDCDeleteBehavior:       CDCDeleteSoft,
+		CDCSnapshotExecution:    DefaultCDCSnapshotExecution,
+		CDCSnapshotChunkSize:    DefaultCDCSnapshotChunkSize,
+		CDCSnapshotChunkTimeout: DefaultCDCSnapshotChunkTimeout,
+		CDCWALStaging:           "inmemory",
+		CDCWALBufferBytes:       DefaultCDCWALBufferBytes,
+		Progress:                ProgressInteractive,
+		PageSize:                25000,
+		MaxBatchBytes:           512 << 20, // 512 MiB
+		LoaderFileSize:          25000,
+		ExtractParallelism:      5,
+		FlushInterval:           30 * time.Second,
+		FlushRecords:            50000,
 	}
 }
 
@@ -236,6 +276,12 @@ func (c *IngestConfig) Validate() error {
 	if err := c.validateCDCTableNaming(); err != nil {
 		return err
 	}
+	if err := c.ValidateCDCSnapshotMode(); err != nil {
+		return err
+	}
+	if err := c.validateCDCDeleteBehavior(); err != nil {
+		return err
+	}
 	if err := c.validateExtractPartitioning(); err != nil {
 		return err
 	}
@@ -247,10 +293,10 @@ func (c *IngestConfig) Validate() error {
 			return &ValidationError{Field: "incremental-predicate", Message: "cannot be combined with --full-refresh"}
 		}
 	}
+	if c.RefreshID != "" && (!c.FullRefresh || !c.Stream) {
+		return &ValidationError{Field: "refresh-id", Message: "requires --full-refresh and --stream"}
+	}
 	if c.Stream {
-		if c.FullRefresh {
-			return &ValidationError{Field: "full-refresh", Message: "cannot be combined with --stream"}
-		}
 		if c.IntervalEnd != nil {
 			return &ValidationError{Field: "interval-end", Message: "cannot be combined with --stream (a bounded end contradicts continuous ingestion)"}
 		}
@@ -277,10 +323,172 @@ func (c *IngestConfig) Validate() error {
 	if c.IsChangeTrackingSource() && c.SQLLimit > 0 {
 		return &ValidationError{Field: "sql-limit", Message: "is not supported for SQL Server Change Tracking sources because partial snapshots cannot safely advance the resume cursor"}
 	}
-	if c.IsChangeTrackingSource() && !c.FullRefresh && c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge {
-		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("must be %q for SQL Server Change Tracking sources unless full-refresh is enabled", StrategyMerge)}
+	if c.IsChangeTrackingSource() && (!c.FullRefresh || c.Stream) && c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge {
+		return &ValidationError{Field: "incremental-strategy", Message: fmt.Sprintf("must be %q for SQL Server Change Tracking sources unless batch full-refresh is enabled", StrategyMerge)}
 	}
 	return nil
+}
+
+// ValidateCDCSnapshotMode also runs after loading the destination's saved policy.
+func (c *IngestConfig) ValidateCDCSnapshotMode() error {
+	if err := c.validateCDCSnapshotSpool(); err != nil {
+		return err
+	}
+	if err := c.validateCDCChunkedSnapshot(); err != nil {
+		return err
+	}
+	if c.CDCSnapshotMode == "" && c.CDCStartLSN == "" {
+		return nil
+	}
+	u, err := url.Parse(c.SourceURI)
+	if err != nil || (u.Scheme != "postgres+cdc" && u.Scheme != "postgresql+cdc") {
+		return &ValidationError{Field: "cdc-snapshot-mode", Message: "is only supported for postgres+cdc sources"}
+	}
+	if c.CDCSnapshotMode != "" && c.CDCSnapshotMode != "auto" && c.CDCSnapshotMode != "never" {
+		return &ValidationError{Field: "cdc-snapshot-mode", Message: "must be auto or never"}
+	}
+	if c.CDCStartLSN != "" {
+		if c.CDCSnapshotMode != "never" {
+			return &ValidationError{Field: "cdc-start-lsn", Message: "requires --cdc-snapshot-mode never"}
+		}
+		lsn, err := pglogrepl.ParseLSN(c.CDCStartLSN)
+		if err != nil || lsn == 0 {
+			return &ValidationError{Field: "cdc-start-lsn", Message: "must be a nonzero PostgreSQL LSN"}
+		}
+	}
+	if c.CDCSnapshotMode != "never" {
+		return nil
+	}
+	if c.FullRefresh {
+		return &ValidationError{Field: "full-refresh", Message: "cannot be combined with CDC snapshot mode never"}
+	}
+	if c.SourceTable == "" && len(c.SourceTables) == 0 {
+		return &ValidationError{Field: "source-table", Message: "must explicitly select tables with CDC snapshot mode never"}
+	}
+	if u.Query().Get("slot") == "" {
+		return &ValidationError{Field: "source-uri", Message: "CDC snapshot mode never requires an existing explicit slot= replication slot"}
+	}
+	if c.IncrementalStrategy != "" && c.IncrementalStrategy != StrategyMerge &&
+		(c.IncrementalStrategy != StrategyReplace || c.IncrementalStrategyExplicit) {
+		return &ValidationError{Field: "incremental-strategy", Message: "CDC snapshot mode never requires merge"}
+	}
+	return nil
+}
+
+// ApplyCDCChunkedSnapshotDefaults fills options omitted by programmatic callers.
+func (c *IngestConfig) ApplyCDCChunkedSnapshotDefaults() {
+	if !c.CDCChunkedSnapshot {
+		return
+	}
+	if c.CDCSnapshotExecution == "" {
+		c.CDCSnapshotExecution = DefaultCDCSnapshotExecution
+	}
+	if c.CDCSnapshotChunkSize == 0 {
+		c.CDCSnapshotChunkSize = DefaultCDCSnapshotChunkSize
+	}
+	if c.CDCSnapshotChunkTimeout == 0 {
+		c.CDCSnapshotChunkTimeout = DefaultCDCSnapshotChunkTimeout
+	}
+	if c.CDCWALStaging == "" {
+		c.CDCWALStaging = "inmemory"
+	}
+	if c.CDCWALBufferBytes == 0 {
+		c.CDCWALBufferBytes = DefaultCDCWALBufferBytes
+	}
+	if c.FlushInterval == 0 {
+		c.FlushInterval = 30 * time.Second
+	}
+	if c.FlushRecords == 0 {
+		c.FlushRecords = 50000
+	}
+}
+
+func (c *IngestConfig) validateCDCChunkedSnapshot() error {
+	if c.CDCSnapshotExecution != "" && c.CDCSnapshotExecution != "parallel" && c.CDCSnapshotExecution != "serial" {
+		return &ValidationError{Field: "cdc-snapshot-execution", Message: "must be parallel or serial"}
+	}
+	if c.CDCWALStaging == "memory" {
+		c.CDCWALStaging = "inmemory"
+	}
+	if c.CDCWALStaging != "" && c.CDCWALStaging != "inmemory" && c.CDCWALStaging != "destination" && c.CDCWALStaging != "disk" {
+		return &ValidationError{Field: "cdc-wal-staging", Message: "must be memory, inmemory, destination, or disk"}
+	}
+	if c.CDCWALStaging == "disk" && !c.CDCSnapshotSpool {
+		return &ValidationError{Field: "cdc-wal-staging", Message: "disk requires --cdc-snapshot-spool"}
+	}
+	if c.CDCWALSpoolDir != "" && (!c.CDCSnapshotSpool || c.CDCWALStaging != "disk") {
+		return &ValidationError{Field: "cdc-wal-spool-dir", Message: "requires --cdc-snapshot-spool and --cdc-wal-staging disk"}
+	}
+	if !c.CDCChunkedSnapshot {
+		return nil
+	}
+	c.ApplyCDCChunkedSnapshotDefaults()
+	if c.CDCSnapshotExecution == "serial" && c.CDCWALStaging == "destination" {
+		return &ValidationError{Field: "cdc-wal-staging", Message: "destination staging requires --cdc-snapshot-execution parallel; serial execution retains pending changes in source WAL"}
+	}
+	u, err := url.Parse(c.SourceURI)
+	if err != nil || (u.Scheme != "postgres+cdc" && u.Scheme != "postgresql+cdc") {
+		return &ValidationError{Field: "cdc-snapshot-chunked", Message: "is only supported for postgres+cdc sources"}
+	}
+	if c.CDCSnapshotMode == "never" {
+		return &ValidationError{Field: "cdc-snapshot-chunked", Message: "cannot be combined with CDC snapshot mode never"}
+	}
+	if c.CDCStartLSN != "" {
+		return &ValidationError{Field: "cdc-snapshot-chunked", Message: "cannot be combined with --cdc-start-lsn"}
+	}
+	if c.IncrementalStrategy != "" && c.IncrementalStrategy != StrategyMerge &&
+		(c.IncrementalStrategy != StrategyReplace || c.IncrementalStrategyExplicit) {
+		return &ValidationError{Field: "incremental-strategy", Message: "chunked CDC snapshots require merge"}
+	}
+	for _, option := range []struct {
+		field string
+		set   bool
+	}{
+		{"sql-limit", c.SQLLimit != 0},
+		{"sql-exclude-columns", len(c.SQLExcludeColumns) != 0},
+		{"incremental-key", c.IncrementalKey != ""},
+		{"incremental-predicate", strings.TrimSpace(c.IncrementalPredicate) != ""},
+		{"interval-start", c.IntervalStart != nil},
+		{"interval-end", c.IntervalEnd != nil},
+		{"extract-partition-by", c.ExtractPartitionBy != ""},
+	} {
+		if option.set {
+			return &ValidationError{Field: option.field, Message: "cannot be combined with chunked CDC snapshots"}
+		}
+	}
+	if c.CDCSnapshotChunkSize <= 0 {
+		return &ValidationError{Field: "cdc-snapshot-chunk-size", Message: "must be positive"}
+	}
+	if c.CDCSnapshotChunkTimeout <= 0 {
+		return &ValidationError{Field: "cdc-snapshot-chunk-timeout", Message: "must be positive"}
+	}
+	if c.CDCWALBufferBytes <= 0 {
+		return &ValidationError{Field: "cdc-wal-buffer-bytes", Message: "must be positive"}
+	}
+	if c.FlushInterval <= 0 {
+		return &ValidationError{Field: "flush-interval", Message: "must be positive"}
+	}
+	if c.FlushRecords <= 0 {
+		return &ValidationError{Field: "flush-records", Message: "must be positive"}
+	}
+	return nil
+}
+
+// ParsePartitionExpression checks a partition_by expression against the destination's syntax.
+func (c *IngestConfig) ParsePartitionExpression(value string) error {
+	if !schema.IsPartitionExpression(value) {
+		return nil
+	}
+	var err error
+	switch scheme, _, _ := strings.Cut(strings.ToLower(c.DestURI), "://"); {
+	case scheme == "bigquery":
+		_, err = schema.ParseBigQueryPartitionBy(value)
+	case scheme == "iceberg" || strings.HasPrefix(scheme, "iceberg+"):
+		_, err = schema.ParseIcebergPartitionBy(value)
+	default:
+		err = errors.New("partition expressions are not supported for this destination")
+	}
+	return err
 }
 
 func (c *IngestConfig) validateExtractPartitioning() error {
@@ -375,6 +583,38 @@ func (c *IngestConfig) validateCDCTableNaming() error {
 		return &ValidationError{
 			Field:   "cdc-table-naming",
 			Message: fmt.Sprintf("invalid value %q (must be %q or %q)", c.CDCTableNaming, TableNamingSchemaTable, TableNamingTable),
+		}
+	}
+}
+
+// HardDeletesCDC reports whether CDC merges remove deleted rows instead of
+// keeping tombstones.
+func (c *IngestConfig) HardDeletesCDC() bool {
+	return c.CDCDeleteBehavior == CDCDeleteHard
+}
+
+func (c *IngestConfig) validateCDCDeleteBehavior() error {
+	switch c.CDCDeleteBehavior {
+	case "", CDCDeleteSoft:
+		return nil
+	case CDCDeleteHard:
+		if !c.IsCDCSource() && !c.IsChangeTrackingSource() {
+			return &ValidationError{
+				Field:   "cdc-delete-behavior",
+				Message: fmt.Sprintf("%q applies to CDC and Change Tracking sources only", CDCDeleteHard),
+			}
+		}
+		if c.IncrementalStrategyExplicit && c.IncrementalStrategy != StrategyMerge && (!c.FullRefresh || c.Stream) {
+			return &ValidationError{
+				Field:   "cdc-delete-behavior",
+				Message: fmt.Sprintf("%q requires the %q incremental strategy or a non-streaming full refresh", CDCDeleteHard, StrategyMerge),
+			}
+		}
+		return nil
+	default:
+		return &ValidationError{
+			Field:   "cdc-delete-behavior",
+			Message: fmt.Sprintf("invalid value %q (must be %q or %q)", c.CDCDeleteBehavior, CDCDeleteSoft, CDCDeleteHard),
 		}
 	}
 }

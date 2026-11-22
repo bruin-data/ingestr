@@ -21,16 +21,18 @@ type RunJobRequest struct {
 	PartitionBy string `json:"partitionBy"`
 	ClusterBy   string `json:"clusterBy"`
 
-	FullRefresh      bool   `json:"fullRefresh"`
-	SchemaContract   string `json:"schemaContract"`
-	SchemaNaming     string `json:"schemaNaming"`
-	CDCTableNaming   string `json:"cdcTableNaming"`
-	Progress         string `json:"progress"`
-	PageSize         int    `json:"pageSize"`
-	LoaderFileSize   int    `json:"loaderFileSize"`
-	LoaderFileFormat string `json:"loaderFileFormat"`
+	FullRefresh       bool   `json:"fullRefresh"`
+	SchemaContract    string `json:"schemaContract"`
+	SchemaNaming      string `json:"schemaNaming"`
+	CDCTableNaming    string `json:"cdcTableNaming"`
+	CDCDeleteBehavior string `json:"cdcDeleteBehavior"`
+	Progress          string `json:"progress"`
+	PageSize          int    `json:"pageSize"`
+	LoaderFileSize    int    `json:"loaderFileSize"`
+	LoaderFileFormat  string `json:"loaderFileFormat"`
 
 	ExtractParallelism       int      `json:"extractParallelism"`
+	DestinationParallelism   *int     `json:"destinationParallelism"`
 	ExtractPartitionBy       string   `json:"extractPartitionBy"`
 	ExtractPartitionInterval string   `json:"extractPartitionInterval"`
 	SQLLimit                 int      `json:"sqlLimit"`
@@ -94,11 +96,15 @@ func (r RunJobRequest) IngestArgs() []string {
 	appendString("schema-contract", r.SchemaContract)
 	appendString("schema-naming", r.SchemaNaming)
 	appendString("cdc-table-naming", r.CDCTableNaming)
+	appendString("cdc-delete-behavior", r.CDCDeleteBehavior)
 	appendString("progress", r.Progress)
 	appendInt("page-size", r.PageSize)
 	appendInt("loader-file-size", r.LoaderFileSize)
 	appendString("loader-file-format", r.LoaderFileFormat)
 	appendInt("extract-parallelism", r.ExtractParallelism)
+	if r.DestinationParallelism != nil {
+		args = append(args, "--destination-parallelism="+strconv.Itoa(*r.DestinationParallelism))
+	}
 	appendString("extract-partition-by", r.ExtractPartitionBy)
 	appendString("extract-partition-interval", r.ExtractPartitionInterval)
 	appendInt("sql-limit", r.SQLLimit)

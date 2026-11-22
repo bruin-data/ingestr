@@ -41,6 +41,19 @@ const receiveTimeout = 1 * time.Second
 // point rather than the database-wide WAL head reported by a keepalive.
 const streamHeartbeatInterval = 10 * time.Second
 
+// streamingAccumulatorMaxAge bounds how long a partial per-table batch may
+// pin the streaming commit position while other tables keep producing WAL.
+const streamingAccumulatorMaxAge = 10 * time.Second
+
+// streamingMaxAge is the longest buffered rows wait before a streaming flush;
+// a shorter --flush-interval tightens the default.
+func streamingMaxAge(opts source.ReadOptions) time.Duration {
+	if opts.FlushInterval > 0 {
+		return min(opts.FlushInterval, streamingAccumulatorMaxAge)
+	}
+	return streamingAccumulatorMaxAge
+}
+
 // streamPosition holds the LSN the pipeline has confirmed durable (flushed and
 // merged into the destination). The pipeline goroutine advances it via
 // CommitStream; the replicator goroutine reads it when sending standby status
@@ -165,6 +178,27 @@ func emitIdleCommitToken(ctx context.Context, repl lowWaterReporter, accum *batc
 	} else {
 		return lastEmitted, err
 	}
+}
+
+// keepaliveCheckpointer is implemented by replicators whose keepalives advance
+// the decoded position, which is the case on a standby. A standby walsender
+// sends a keepalive with nearly every replayed transaction, so a stream behind
+// busy unpublished tables never looks idle and checkpoints on a timer instead.
+type keepaliveCheckpointer interface {
+	lowWaterReporter
+	CheckpointsOnKeepalive() bool
+}
+
+// maybeEmitBusyCommitToken is emitIdleCommitToken for a stream that keeps
+// receiving keepalives. Rows still in the accumulator are excluded from the
+// safe position, so it does not need the flush an idle tick performs.
+func maybeEmitBusyCommitToken(ctx context.Context, repl any, accum *batchAccumulator, results chan<- source.RecordBatchResult, lastEmitted pglogrepl.LSN, lastAttempt *time.Time) (pglogrepl.LSN, error) {
+	checkpointer, ok := repl.(keepaliveCheckpointer)
+	if !ok || !checkpointer.CheckpointsOnKeepalive() || time.Since(*lastAttempt) < streamHeartbeatInterval {
+		return lastEmitted, nil
+	}
+	*lastAttempt = time.Now()
+	return emitIdleCommitToken(ctx, checkpointer, accum, results, lastEmitted)
 }
 
 type streamHeartbeatEmitter interface {

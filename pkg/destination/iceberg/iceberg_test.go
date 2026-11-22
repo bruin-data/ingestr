@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1045,6 +1048,84 @@ func TestDestinationReplaceWriteFailureDoesNotMutateExistingMetadata(t *testing.
 	require.EqualValues(t, 1, icebergRowCount(ctx, t, dest, tableName))
 }
 
+func TestNewPartitionSpecFromExpression(t *testing.T) {
+	iceSchema, err := icebergSchemaFromTableSchema(&schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "ts", DataType: schema.TypeTimestampTZ},
+			{Name: "d", DataType: schema.TypeDate},
+			{Name: "Date (UTC)", DataType: schema.TypeDate},
+			{Name: "Day (UTC)", DataType: schema.TypeDate},
+		},
+	})
+	require.NoError(t, err)
+
+	tests := map[string]string{
+		"id":              "id",
+		"Date (UTC)":      "Date (UTC)",
+		"Day (UTC)":       "Day (UTC)",
+		"ts":              "ts",
+		"day(ts)":         "ts_day",
+		"hour(ts)":        "ts_hour",
+		"month(d)":        "d_month",
+		"years(ts)":       "ts_year",
+		"bucket(16, id)":  "id_bucket_16",
+		"truncate(id, 5)": "id_trunc_5",
+	}
+	for partitionBy, wantName := range tests {
+		spec, err := newPartitionSpec(iceSchema, partitionBy)
+		require.NoError(t, err, partitionBy)
+		require.Equal(t, 1, spec.NumFields(), partitionBy)
+		require.Equal(t, wantName, spec.Field(0).Name, partitionBy)
+	}
+
+	_, err = newPartitionSpec(iceSchema, "hour(d)")
+	require.ErrorContains(t, err, "cannot transform")
+	_, err = newPartitionSpec(iceSchema, "TIMESTAMP_TRUNC(ts, HOUR)")
+	require.ErrorContains(t, err, "unsupported partition_by expression")
+	_, err = newPartitionSpec(iceSchema, "day(missing)")
+	require.ErrorContains(t, err, "not found in schema")
+}
+
+func TestDestinationPartitionExpressionReplaceWithHadoopCatalog(t *testing.T) {
+	ctx := context.Background()
+	tableName := "lake.analytics.ranged"
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: false}},
+	}
+
+	dest := NewDestination()
+	require.NoError(t, dest.Connect(ctx, "iceberg+hadoop://?warehouse="+url.QueryEscape(t.TempDir())))
+	defer func() {
+		require.NoError(t, dest.Close(ctx))
+	}()
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       tableName,
+		Schema:      tableSchema,
+		PartitionBy: "truncate(10, id)",
+	}))
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 1, 15, 27)), destination.WriteOptions{
+		Table:  tableName,
+		Schema: tableSchema,
+	}))
+	require.Equal(t, []string{"id_trunc_10"}, icebergPartitionFieldNames(ctx, t, dest, tableName))
+	require.EqualValues(t, 3, icebergRowCount(ctx, t, dest, tableName))
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table:       tableName,
+		Schema:      tableSchema,
+		DropFirst:   true,
+		PartitionBy: "bucket(id, 4)",
+	}))
+	require.NoError(t, dest.WriteParallel(ctx, recordBatches(int64Batch(t, 4, 9)), destination.WriteOptions{
+		Table:  tableName,
+		Schema: tableSchema,
+	}))
+	require.Equal(t, []string{"id_bucket_4"}, icebergPartitionFieldNames(ctx, t, dest, tableName))
+	require.EqualValues(t, 2, icebergRowCount(ctx, t, dest, tableName))
+}
+
 func int64Batch(t *testing.T, values ...int64) arrow.RecordBatch {
 	t.Helper()
 
@@ -1197,4 +1278,80 @@ func icebergPartitionFieldNames(ctx context.Context, t *testing.T, dest *Destina
 		names = append(names, field.Name)
 	}
 	return names
+}
+
+func TestManagedStagingPolicyAvoidsUnderscoreOnS3Tables(t *testing.T) {
+	tests := []struct {
+		name string
+		uri  string
+		want string
+	}{
+		{
+			name: "s3 tables rest",
+			uri:  "iceberg+rest://?uri=https://s3tables.us-east-1.amazonaws.com/iceberg&warehouse=arn:aws:s3tables:us-east-1:123456789012:bucket/b&rest.sigv4-enabled=true&rest.signing-name=s3tables&rest.signing-region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "glue iceberg rest endpoint",
+			uri:  "iceberg+rest://?uri=https://glue.us-east-1.amazonaws.com/iceberg&warehouse=123456789012:s3tablescatalog/b&rest.sigv4-enabled=true&rest.signing-name=glue&rest.signing-region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "glue federated catalog",
+			uri:  "iceberg+glue://?glue.id=123456789012:s3tablescatalog/b&glue.region=us-east-1",
+			want: "bruin_staging",
+		},
+		{
+			name: "plain glue",
+			uri:  "iceberg+glue://?warehouse=s3://bucket/wh&glue.region=us-east-1",
+		},
+		{
+			name: "plain rest",
+			uri:  "iceberg+rest://?uri=http://localhost:8181&warehouse=s3://bucket/wh",
+		},
+		{
+			name: "warehouse path containing s3tablescatalog",
+			uri:  "iceberg+rest://?uri=http://localhost:8181&warehouse=s3://bucket/s3tablescatalog/",
+		},
+		{
+			name: "glue catalog id without s3tablescatalog",
+			uri:  "iceberg+glue://?glue.id=123456789012&warehouse=s3://bucket/wh",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseIcebergConfig(tt.uri)
+			require.NoError(t, err)
+			dest := &Destination{cfg: cfg}
+			require.Equal(t, tt.want, dest.ManagedStagingPolicy().DefaultManagedSchema)
+		})
+	}
+}
+
+func TestDestinationConnectSignsSigV4RESTCatalog(t *testing.T) {
+	var authHeader atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader.Store(r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"defaults":{},"overrides":{}}`))
+	}))
+	defer srv.Close()
+
+	uri := "iceberg+rest://?uri=" + url.QueryEscape(srv.URL) +
+		"&warehouse=wh&rest.sigv4-enabled=true&rest.signing-name=s3tables&rest.signing-region=us-east-1" +
+		"&s3.access-key-id=AKIDEXAMPLE&s3.secret-access-key=secret"
+	dest := &Destination{}
+	require.NoError(t, dest.Connect(context.Background(), uri))
+	defer func() { _ = dest.Close(context.Background()) }()
+	require.Contains(t, authHeader.Load(), "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+}
+
+func TestNormalizeSchemaEvolutionSourceColumnKeepsDecimalArrayScale(t *testing.T) {
+	d := &Destination{}
+	decimalArray := func(p, s int) schema.Column {
+		return schema.Column{DataType: schema.TypeArray, ArrayType: schema.TypeDecimal, Precision: p, Scale: s}
+	}
+
+	require.Equal(t, decimalArray(3, 0), d.NormalizeSchemaEvolutionSourceColumn(decimalArray(5, 2), decimalArray(38, 0)))
+	require.Equal(t, decimalArray(8, 2), d.NormalizeSchemaEvolutionSourceColumn(decimalArray(10, 4), decimalArray(5, 2)))
+	require.Equal(t, decimalArray(6, 1), d.NormalizeSchemaEvolutionSourceColumn(decimalArray(6, 1), decimalArray(5, 2)))
 }

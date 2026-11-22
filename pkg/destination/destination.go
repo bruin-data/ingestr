@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -32,8 +33,8 @@ type PrepareOptions struct {
 	PreserveExistingLayout  bool // Leave an existing table's properties, partition spec, and sort order unchanged.
 	TableProperties         map[string]string
 	OwnershipToken          string
-	// Strategy names the write behavior for reverse-ETL destinations so they can
-	// validate the dest-table up front. Ignored by SQL destinations.
+	// Strategy names the write behavior so reverse-ETL destinations can validate the
+	// dest-table up front and SQL destinations can skip key constraints on append.
 	Strategy string
 }
 
@@ -42,6 +43,19 @@ type WriteOptions struct {
 	Schema      *schema.TableSchema
 	PrimaryKeys []string
 	Parallelism int
+	// CDCSnapshot guarantees complete snapshot row images with unique keys,
+	// without WAL changes, tombstones, or unchanged TOAST markers. Only set
+	// for a CDCSnapshotWriter.
+	CDCSnapshot bool
+	// CDCSnapshotProgress persists a cumulative snapshot cursor only after all
+	// preceding rows are committed and query-visible. It must not acknowledge WAL.
+	CDCSnapshotProgress func(context.Context, source.CDCStateCommitToken) error
+	// CDCSnapshotCommitted reports original Arrow rows and payload bytes from
+	// complete pages after they are committed, query-visible, and any covered
+	// progress is persisted. Each page is counted once, in its final commit
+	// window if it spans windows. Calls are serialized and finish before
+	// WriteParallel returns.
+	CDCSnapshotCommitted func(context.Context, int64, uint64) error
 
 	// Reverse-ETL fields. Strategy names the write behavior (merge/update/
 	// delete/append/replace) so an API destination can pick the right endpoint;
@@ -107,7 +121,21 @@ type MergeOptions struct {
 	// CDCExpectedIncarnation fences a managed CDC merge to the physical target
 	// that was bound before the source read began.
 	CDCExpectedIncarnation string
-	Parallelism            int
+	// CDCHardDelete removes rows whose latest change is a delete instead of
+	// keeping them as _cdc_deleted tombstones. Only set for destinations that
+	// implement CDCHardDeleteCapable.
+	CDCHardDelete bool
+	// CDCSnapshot guarantees full snapshot row images without WAL or unchanged
+	// TOAST markers. The optional range contains every staged key.
+	CDCSnapshot      bool
+	CDCSnapshotRange *CDCSnapshotRange
+	Parallelism      int
+}
+
+// CDCSnapshotRange describes (After, Last] in PrimaryKeys order.
+type CDCSnapshotRange struct {
+	After []string
+	Last  []string
 }
 
 type CDCAtomicTableMerge struct {
@@ -149,6 +177,9 @@ type DeleteInsertOptions struct {
 	IntervalEnd        interface{}
 	Columns            []string
 	PrimaryKeys        []string
+	// IncrementalPredicate narrows the DELETE to target rows that also match
+	// it; the target is aliased like the merge target (t or target).
+	IncrementalPredicate string
 }
 
 type SwapOptions struct {
@@ -252,11 +283,47 @@ func RequiresExplicitStrategy(d Destination) bool {
 	return ok
 }
 
+// FixedStrategyDestination is implemented by destinations whose tables each
+// accept a single strategy; FixedStrategy returns it, or "" when the table has none.
+type FixedStrategyDestination interface {
+	FixedStrategy(table string) string
+}
+
 // IncrementalPredicateSupport is implemented by destinations whose MergeTable
 // honors MergeOptions.IncrementalPredicate; others silently ignore it, so the
 // pipeline rejects the flag for them.
 type IncrementalPredicateSupport interface {
 	SupportsIncrementalPredicate() bool
+}
+
+// DeleteInsertPredicateSupport is implemented by destinations whose
+// DeleteInsertTable honors DeleteInsertOptions.IncrementalPredicate.
+type DeleteInsertPredicateSupport interface {
+	SupportsDeleteInsertPredicate() bool
+}
+
+func SupportsDeleteInsertPredicate(d Destination) bool {
+	sup, ok := d.(DeleteInsertPredicateSupport)
+	return ok && sup.SupportsDeleteInsertPredicate()
+}
+
+// IntervalDeleteSQL builds the delete+insert DELETE for dialects that accept
+// `DELETE FROM table AS alias`. The alias is only introduced with a predicate,
+// so the unfiltered statement stays unchanged.
+func IntervalDeleteSQL(quotedTable, alias, quotedKey, lower, upper, predicate string) string {
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quotedTable, quotedKey, lower, quotedKey, upper)
+	}
+	return fmt.Sprintf("DELETE FROM %s AS %s WHERE %s", quotedTable, alias, IntervalDeleteCondition(alias, quotedKey, lower, upper, predicate))
+}
+
+// IntervalDeleteCondition is the WHERE clause of IntervalDeleteSQL, for
+// dialects that need a different DELETE head to alias the target.
+func IntervalDeleteCondition(alias, quotedKey, lower, upper, predicate string) string {
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("%s >= %s AND %s <= %s", quotedKey, lower, quotedKey, upper)
+	}
+	return MergeJoinCondition(fmt.Sprintf("%s.%s >= %s AND %s.%s <= %s", alias, quotedKey, lower, alias, quotedKey, upper), predicate)
 }
 
 func MergeJoinCondition(condition, incrementalPredicate string) string {
@@ -271,6 +338,41 @@ func MergeJoinCondition(condition, incrementalPredicate string) string {
 // types using the canonical types it can recover from its physical schema.
 type SchemaEvolutionColumnNormalizer interface {
 	NormalizeSchemaEvolutionColumn(schema.Column) schema.Column
+}
+
+// SchemaEvolutionSourceColumnNormalizer resolves unspecified source metadata
+// against an existing destination column before comparing their types.
+type SchemaEvolutionSourceColumnNormalizer interface {
+	NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column
+}
+
+// GeneratedColumnsProvider lists columns the destination computes itself, so
+// schema evolution neither adds nor writes them.
+type GeneratedColumnsProvider interface {
+	GeneratedColumns(ctx context.Context, table string) ([]string, error)
+}
+
+// WithoutGeneratedColumns drops source columns that the destination table generates.
+func WithoutGeneratedColumns(ctx context.Context, dest Destination, table string, s *schema.TableSchema) (*schema.TableSchema, error) {
+	provider, ok := dest.(GeneratedColumnsProvider)
+	if !ok || s == nil {
+		return s, nil
+	}
+	names, err := provider.GeneratedColumns(ctx, table)
+	if err != nil || len(names) == 0 {
+		return s, err
+	}
+	filtered := *s
+	filtered.Columns = slices.DeleteFunc(slices.Clone(s.Columns), func(c schema.Column) bool {
+		return slices.Contains(names, c.Name)
+	})
+	return &filtered, nil
+}
+
+// DecimalPrecisionLimiter reports the widest decimal precision a destination can store,
+// so schema evolution trims extra scale instead of widening past it.
+type DecimalPrecisionLimiter interface {
+	MaxDecimalPrecision() int
 }
 
 // TableWriteConfig contains per-table write configuration for multi-table writes.
@@ -322,6 +424,12 @@ type CDCStateEntry struct {
 	Status           string
 	Position         string
 	RecordedAt       time.Time
+}
+
+// CDCStateTablePreparer allows an append-only state log to use a native layout
+// without requiring the logical event identity to fit a physical primary key.
+type CDCStateTablePreparer interface {
+	PrepareCDCStateTable(ctx context.Context, table string, tableSchema *schema.TableSchema) error
 }
 
 // CDCStateReader loads all state events for one logical connector from the
@@ -566,6 +674,18 @@ type CDCMergeAware interface {
 	SupportsCDCMerge() bool
 }
 
+// CDCHardDeleteCapable advertises that the CDC merge honors
+// MergeOptions.CDCHardDelete, and CDCRetireOptions.HardDelete when the
+// destination also soft-replaces snapshots.
+type CDCHardDeleteCapable interface {
+	SupportsCDCHardDelete() bool
+}
+
+func SupportsCDCHardDelete(dest Destination) bool {
+	capable, ok := dest.(CDCHardDeleteCapable)
+	return ok && capable.SupportsCDCHardDelete()
+}
+
 // AtomicCommitWriter is an optional interface for destinations that can make a
 // write atomically visible after the write phase completes.
 type AtomicCommitWriter interface {
@@ -603,10 +723,24 @@ func DefaultMultiTableName(destSchema, sourceTable string) string {
 	return destSchema + "." + strings.ReplaceAll(sourceTable, ".", "_")
 }
 
+// ReplaceFinalizer is an optional interface for destinations that write a replace
+// directly into the target and complete it, such as by removing the previous data,
+// only once the strategy knows every row was written.
+type ReplaceFinalizer interface {
+	FinalizeReplace(ctx context.Context, table string) error
+}
+
 // ExactRowCountWaiter is an optional interface for destinations that can
 // verify when a table has become query-consistent at an exact row count.
 type ExactRowCountWaiter interface {
 	WaitForExactRowCount(ctx context.Context, table string, expectedRows int64) error
+}
+
+// StagingTableLister lists the tables in a staging schema whose names start
+// with prefix, so the strategy can drop staging tables a crashed run left
+// behind.
+type StagingTableLister interface {
+	ListStagingTables(ctx context.Context, schema, prefix string) ([]string, error)
 }
 
 // TruncateCapable is an optional interface for destinations that can empty a

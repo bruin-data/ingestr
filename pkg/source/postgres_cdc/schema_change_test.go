@@ -313,6 +313,26 @@ func TestDecoderRejectsVarcharLengthChangedMidStream(t *testing.T) {
 	require.ErrorContains(t, err, `column "name" changed type modifier mid-stream`)
 }
 
+func TestDecoderRejectsVarcharWidenedToTextMidStream(t *testing.T) {
+	tableSchema := schemaChangeTestSchema(schema.Column{Name: "name", DataType: schema.TypeString, MaxLength: 20})
+	d := NewDecoder(tableSchema, "public", "t")
+
+	_, err := d.Decode(pgoRelationMsgWithTypeMods(1, "public", "t", pgoModCol{"name", 1043, 24}), 10)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoRelationMsgWithTypeMods(1, "public", "t", pgoModCol{"name", 25, -1}), 20)
+	require.ErrorContains(t, err, `column "name" changed type mid-stream (OID 1043 -> 25)`)
+}
+
+func TestDecoderAcceptsTextReplayAfterRefreshedSchema(t *testing.T) {
+	tableSchema := schemaChangeTestSchema(schema.Column{Name: "name", DataType: schema.TypeString})
+	d := NewDecoder(tableSchema, "public", "t")
+
+	_, err := d.Decode(pgoRelationMsgWithTypeMods(1, "public", "t", pgoModCol{"name", 25, -1}), 10)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoRelationMsgWithTypeMods(1, "public", "t", pgoModCol{"name", 1043, -1}), 20)
+	require.NoError(t, err)
+}
+
 func TestDecoderAcceptsTypeModifierTransitionMatchingRefreshedSchema(t *testing.T) {
 	tableSchema := schemaChangeTestSchema(schema.Column{Name: "amount", DataType: schema.TypeDecimal, Precision: 30, Scale: 6})
 	d := NewDecoder(tableSchema, "public", "t")

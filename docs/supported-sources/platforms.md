@@ -30,6 +30,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Google Analytics](/supported-sources/google_analytics.md)
 - [Mixpanel](/supported-sources/mixpanel.md)
 - [PostHog](/supported-sources/posthog.md)
+- [Privatus Analytics](/supported-sources/privatus.md)
 - [SatisMeter](/supported-sources/satismeter.md)
 - [SurveyMonkey](/supported-sources/surveymonkey.md)
 - [Trustpilot](/supported-sources/trustpilot.md)
@@ -59,6 +60,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [FastSpring](/supported-sources/fastspring.md)
 - [FundraiseUp](/supported-sources/fundraiseup.md)
 - [Hostaway](/supported-sources/hostaway.md)
+- [Odoo](/supported-sources/odoo.md)
 - [Paddle](/supported-sources/paddle.md)
 - [Primer](/supported-sources/primer.md)
 - [QuickBooks](/supported-sources/quickbooks.md)
@@ -96,6 +98,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Amazon Kinesis](/supported-sources/kinesis.md)
 - [Amazon SQS](/supported-sources/sqs.md)
 - [Anthropic](/supported-sources/anthropic.md)
+- [Azure Blob Storage](/supported-sources/azure-blob.md)
 - [Azure Data Lake Storage Gen2](/supported-sources/adls.md)
 - [Bruin](/supported-sources/bruin.md)
 - [Cloudflare Radar](/supported-sources/cloudflare-radar.md)
@@ -112,6 +115,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 
 ## Sports, games, and public data
 
+- [AllRatesToday](/supported-sources/allratestoday.md)
 - [API-Football](/supported-sources/api-football.md)
 - [BallDontLie FIFA](/supported-sources/balldontlie.md)
 - [Chess.com](/supported-sources/chess.md)
@@ -124,3 +128,4 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Lumify](/supported-sources/lumify.md)
 - [Polymarket](/supported-sources/polymarket.md)
 - [RIPEstat](/supported-sources/ripestat.md)
+- [Yahoo Finance](/supported-sources/yfinance.md)

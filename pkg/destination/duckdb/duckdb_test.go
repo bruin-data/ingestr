@@ -10,9 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-adbc/go/adbc"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -950,6 +952,32 @@ func TestPrepareTable_CreateTable(t *testing.T) {
 	assert.Equal(t, 1, count, "table should exist")
 }
 
+func TestPrepareTable_AppendSkipsPrimaryKeyConstraint(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	tableSchema := &schema.TableSchema{
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt64},
+			{Name: "name", DataType: schema.TypeString, Nullable: true},
+		},
+	}
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "appended", Schema: tableSchema, PrimaryKeys: []string{"id"}, Strategy: string(config.StrategyAppend),
+	}))
+	appended, err := dest.GetTableSchema(ctx, "appended")
+	require.NoError(t, err)
+	assert.Empty(t, appended.PrimaryKeys)
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO appended VALUES (1, 'a'), (1, 'b')`))
+
+	require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+		Table: "merged", Schema: tableSchema, PrimaryKeys: []string{"id"},
+	}))
+	merged, err := dest.GetTableSchema(ctx, "merged")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id"}, merged.PrimaryKeys)
+}
+
 func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
 	ctx := t.Context()
 	dest, path := connectTestDuckDB(t, ctx)
@@ -1176,6 +1204,47 @@ func TestWrite_BasicData(t *testing.T) {
 		assert.Equal(t, expected[i].id, id)
 		assert.Equal(t, expected[i].name, string(append([]byte(nil), nameRaw...)))
 		i++
+	}
+}
+
+func TestWrite_BatchLargerThanVectorSizeIntoCastColumn(t *testing.T) {
+	const rows = 3*2048 + 7
+	for name, env := range map[string][2]string{
+		"single":     {"INGESTR_DUCKDB_INGEST_CONNS", "1"},
+		"parallel":   {"INGESTR_DUCKDB_INGEST_CONNS", "4"},
+		"checkpoint": {"INGESTR_DUCKDB_CHECKPOINT_ROWS", "-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(env[0], env[1])
+			ctx := context.Background()
+			dest, path := connectTestDuckDB(t, ctx)
+			require.NoError(t, dest.PrepareTable(ctx, destination.PrepareOptions{
+				Table:     "cast_table",
+				Schema:    &schema.TableSchema{Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt32}}},
+				DropFirst: true,
+			}))
+
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			builder := array.NewInt64Builder(mem)
+			for i := range int64(rows) {
+				builder.Append(i)
+			}
+			values := builder.NewArray()
+			builder.Release()
+			arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+			records := make(chan source.RecordBatchResult, 1)
+			records <- source.RecordBatchResult{Batch: array.NewRecordBatch(arrowSchema, []arrow.Array{values}, rows)}
+			values.Release()
+			close(records)
+
+			require.NoError(t, dest.Write(ctx, records, destination.WriteOptions{Table: "cast_table"}))
+			mem.AssertSize(t, 0)
+
+			var count, sum int64
+			require.NoError(t, openDuckDB(t, ctx, path).QueryRowContext(ctx, "SELECT COUNT(*), SUM(id)::BIGINT FROM cast_table").Scan(&count, &sum))
+			assert.Equal(t, int64(rows), count)
+			assert.Equal(t, int64(rows*(rows-1)/2), sum)
+		})
 	}
 }
 
@@ -1862,6 +1931,84 @@ func TestMergeTable_CDCInternalAliasesDoNotCollide(t *testing.T) {
 	assert.Equal(t, []string{"user-dedup", "user-image", "user-equal-delete", "user-lsn", "user-deleted", "user-synced"}, []string{string(values[0]), string(values[1]), string(values[2]), string(values[3]), string(values[4]), string(values[5])})
 }
 
+func TestMergeTable_ColumnsNamedLikeAliases(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE candidates (_id VARCHAR PRIMARY KEY, source JSON, target STRUCT(_id VARCHAR), name VARCHAR);
+		INSERT INTO candidates VALUES ('a1', '{"id":"linkedin"}', {'_id': 'b2'}, 'old');
+		CREATE TABLE staging_candidates AS SELECT * FROM candidates WHERE false;
+		INSERT INTO staging_candidates VALUES
+			('a1', '{"id":"indeed"}', {'_id': 'zz'}, 'updated'),
+			('b2', '{"id":"x"}', {'_id': 'a1'}, 'new');
+	`))
+
+	require.NoError(t, dest.MergeTable(ctx, destination.MergeOptions{
+		StagingTable: "staging_candidates",
+		TargetTable:  "candidates",
+		PrimaryKeys:  []string{"_id"},
+		Columns:      []string{"_id", "source", "target", "name"},
+	}))
+	require.NoError(t, dest.Close(ctx))
+
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, `SELECT _id || ':' || name || ':' || (source->>'id') FROM candidates ORDER BY _id`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var row []byte
+		require.NoError(t, rows.Scan(&row))
+		got = append(got, string(row))
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"a1:updated:indeed", "b2:new:x"}, got)
+}
+
+func TestSCD2Table_ColumnsNamedLikeAliases(t *testing.T) {
+	ctx := t.Context()
+	dest, path := connectTestDuckDB(t, ctx)
+	// Struct fields hold keys that differ from _id, so binding source."_id" or
+	// target."_id" to these columns changes which rows match.
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE dim (
+			_id VARCHAR, source STRUCT(_id VARCHAR), target STRUCT(_id VARCHAR), name VARCHAR,
+			"_scd_valid_from" TIMESTAMP, "_scd_valid_to" TIMESTAMP, "_scd_is_current" BOOLEAN
+		);
+		INSERT INTO dim VALUES
+			('a1', {'_id': 'zz'}, {'_id': 'zz'}, 'kept', '2026-01-01', NULL, true),
+			('c3', {'_id': 'zz'}, {'_id': 'zz'}, 'gone', '2026-01-01', NULL, true);
+		CREATE TABLE staging_dim AS SELECT * FROM dim WHERE false;
+		INSERT INTO staging_dim VALUES
+			('a1', {'_id': 'zz'}, {'_id': 'zz'}, 'kept', '2026-02-01', NULL, true),
+			('b2', {'_id': 'zz'}, {'_id': 'zz'}, 'new', '2026-02-01', NULL, true);
+	`))
+
+	require.NoError(t, dest.SCD2Table(ctx, destination.SCD2Options{
+		StagingTable: "staging_dim",
+		TargetTable:  "dim",
+		PrimaryKeys:  []string{"_id"},
+		Columns:      []string{"_id", "source", "target", "name"},
+		Timestamp:    time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}))
+	require.NoError(t, dest.Close(ctx))
+
+	db := openDuckDB(t, ctx, path)
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, `SELECT _id || ':' || "_scd_is_current" FROM dim ORDER BY _id, "_scd_valid_from"`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var row []byte
+		require.NoError(t, rows.Scan(&row))
+		got = append(got, string(row))
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"a1:true", "b2:true", "c3:false"}, got)
+}
+
 func TestDeleteInsertTable_DedupesStagingByPK(t *testing.T) {
 	ctx := context.Background()
 	dest, path := connectTestDuckDB(t, ctx)
@@ -2322,6 +2469,26 @@ func TestGetTableSchema_Basic(t *testing.T) {
 	assert.Equal(t, schema.TypeBoolean, colMap["active"].DataType)
 }
 
+func TestGetTableSchema_Arrays(t *testing.T) {
+	ctx := context.Background()
+	dest, _ := connectTestDuckDB(t, ctx)
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE array_test (amounts DECIMAL(5,2)[], labels VARCHAR[], ids INTEGER[])`))
+
+	tableSchema, err := dest.GetTableSchema(ctx, "array_test")
+	require.NoError(t, err)
+	require.Len(t, tableSchema.Columns, 3)
+
+	amounts, labels, ids := tableSchema.Columns[0], tableSchema.Columns[1], tableSchema.Columns[2]
+	assert.Equal(t, schema.TypeArray, amounts.DataType)
+	assert.Equal(t, schema.TypeDecimal, amounts.ArrayType)
+	assert.Equal(t, 5, amounts.Precision)
+	assert.Equal(t, 2, amounts.Scale)
+	assert.Equal(t, schema.TypeArray, labels.DataType)
+	assert.Equal(t, schema.TypeString, labels.ArrayType)
+	assert.Equal(t, schema.TypeArray, ids.DataType)
+	assert.Equal(t, schema.TypeInt32, ids.ArrayType)
+}
+
 func TestGetTableSchema_NonExistentTable(t *testing.T) {
 	ctx := context.Background()
 	dest, _ := connectTestDuckDB(t, ctx)
@@ -2513,4 +2680,72 @@ func TestGetTableSchema_SpecialCharacterColumnNames(t *testing.T) {
 	assert.True(t, colMap["UPPERCASE"], "should preserve uppercase column name")
 	assert.True(t, colMap["MixedCase"], "should preserve mixed case column name")
 	assert.True(t, colMap["with_underscore"], "should preserve underscore column name")
+}
+
+func TestDeleteInsertTable_IncrementalPredicateLimitsDelete(t *testing.T) {
+	ctx := context.Background()
+	dest, path := connectTestDuckDB(t, ctx)
+
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE target_table (id BIGINT, region VARCHAR, ts BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `CREATE TABLE staging_table (id BIGINT, region VARCHAR, ts BIGINT)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO target_table VALUES (1, 'eu', 10), (2, 'us', 20), (3, 'eu', 500)`))
+	require.NoError(t, dest.Exec(ctx, `INSERT INTO staging_table VALUES (4, 'eu', 15)`))
+
+	require.NoError(t, dest.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
+		StagingTable:         "staging_table",
+		TargetTable:          "target_table",
+		IncrementalKey:       "ts",
+		IntervalStart:        int64(0),
+		IntervalEnd:          int64(100),
+		Columns:              []string{"id", "region", "ts"},
+		IncrementalPredicate: "target.region = 'eu'",
+	}))
+
+	db := openDuckDB(t, ctx, path)
+	rows, err := db.QueryContext(ctx, "SELECT id FROM target_table ORDER BY id")
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []int64{2, 3, 4}, ids, "only in-interval rows matching the predicate are deleted")
+}
+
+// consumedParamsStatement mimics DuckDB 1.4/1.5 drivers: a failed parameterised
+// execution consumes the bound parameters, and a retry reports success.
+type consumedParamsStatement struct {
+	adbc.Statement
+	updateErr error
+}
+
+func (s *consumedParamsStatement) SetSqlQuery(string) error                      { return nil }
+func (s *consumedParamsStatement) Prepare(context.Context) error                 { return nil }
+func (s *consumedParamsStatement) Bind(context.Context, arrow.RecordBatch) error { return nil }
+func (s *consumedParamsStatement) Close() error                                  { return nil }
+func (s *consumedParamsStatement) ExecuteUpdate(context.Context) (int64, error) {
+	return -1, s.updateErr
+}
+
+func (s *consumedParamsStatement) ExecuteQuery(context.Context) (array.RecordReader, int64, error) {
+	rdr, err := array.NewRecordReader(arrow.NewSchema(nil, nil), nil)
+	return rdr, 0, err
+}
+
+type consumedParamsConnection struct {
+	adbc.Connection
+	stmt *consumedParamsStatement
+}
+
+func (c *consumedParamsConnection) NewStatement() (adbc.Statement, error) { return c.stmt, nil }
+
+func TestExecReturnsFailedParameterisedUpdateError(t *testing.T) {
+	updateErr := fmt.Errorf("Binder Error: Cannot compare values of type VARCHAR and type TIMESTAMP")
+	d := &DuckDBDestination{conn: &consumedParamsConnection{stmt: &consumedParamsStatement{updateErr: updateErr}}}
+
+	err := d.exec(t.Context(), `DELETE FROM t WHERE k >= ? AND k <= ?`, "a", "b")
+	require.ErrorIs(t, err, updateErr)
 }

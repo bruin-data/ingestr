@@ -76,7 +76,7 @@ func TestParseStarRocksURI(t *testing.T) {
 		},
 		{
 			name:         "destination-only params are stripped from the DSN",
-			uri:          "starrocks://root@host:9030/db?http_port=8030&replication_num=1",
+			uri:          "starrocks://root@host:9030/db?http_port=443&http_scheme=https&replication_num=1",
 			wantDSN:      "root@tcp(host:9030)/?parseTime=true",
 			wantCatalog:  defaultCatalog,
 			wantDatabase: "db",
@@ -214,7 +214,7 @@ func TestMapStarRocksToDataType(t *testing.T) {
 		{"BLOB", schema.TypeBinary, 0, 0, schema.TypeUnknown},
 		{"JSON", schema.TypeJSON, 0, 0, schema.TypeUnknown},
 		{"array<int>", schema.TypeArray, 0, 0, schema.TypeInt32},
-		{"array<decimal(10,2)>", schema.TypeArray, 0, 0, schema.TypeDecimal},
+		{"array<decimal(10,2)>", schema.TypeArray, 10, 2, schema.TypeDecimal},
 		{"map<string,int>", schema.TypeJSON, 0, 0, schema.TypeUnknown},
 		{"struct<a:int>", schema.TypeJSON, 0, 0, schema.TypeUnknown},
 		{"HLL", schema.TypeString, 0, 0, schema.TypeUnknown},

@@ -30,17 +30,22 @@ func PrintSummary(cfg *config.IngestConfig) {
 	if cfg.CDCTableNaming != config.TableNamingSchemaTable && cfg.CDCTableNaming != "" {
 		tableNaming = string(cfg.CDCTableNaming)
 	}
+	deleteBehavior := ""
+	if cfg.HardDeletesCDC() {
+		deleteBehavior = string(cfg.CDCDeleteBehavior)
+	}
 	if output.IsJSON() {
 		output.EventStart(output.StartInfo{
-			SourceType:     displayFromURI(cfg.SourceURI)[0],
-			DestType:       displayFromURI(cfg.DestURI)[0],
-			SourceTable:    sourceTableSummary(cfg),
-			DestTable:      cfg.DestTable,
-			Strategy:       string(cfg.IncrementalStrategy),
-			IncrementalKey: cfg.IncrementalKey,
-			PrimaryKey:     cfg.PrimaryKeys,
-			SchemaNaming:   cfg.SchemaNaming,
-			CDCTableNaming: tableNaming,
+			SourceType:        displayFromURI(cfg.SourceURI)[0],
+			DestType:          displayFromURI(cfg.DestURI)[0],
+			SourceTable:       sourceTableSummary(cfg),
+			DestTable:         cfg.DestTable,
+			Strategy:          string(cfg.IncrementalStrategy),
+			IncrementalKey:    cfg.IncrementalKey,
+			PrimaryKey:        cfg.PrimaryKeys,
+			SchemaNaming:      cfg.SchemaNaming,
+			CDCTableNaming:    tableNaming,
+			CDCDeleteBehavior: deleteBehavior,
 		})
 		return
 	}
@@ -91,6 +96,9 @@ func PrintSummary(cfg *config.IngestConfig) {
 	}
 	if tableNaming != "" {
 		output.Statusf("%s %s\n", yellow("CDC table naming:"), tableNaming)
+	}
+	if deleteBehavior != "" {
+		output.Statusf("%s %s\n", yellow("CDC delete behavior:"), deleteBehavior)
 	}
 
 	output.Statusf("\n\n")

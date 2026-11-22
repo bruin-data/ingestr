@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -153,6 +154,54 @@ func TestStreamingSnapshotInvalidationFailurePreventsTruncate(t *testing.T) {
 	if len(dest.truncateCalls) != 0 {
 		t.Fatalf("truncate calls after failed invalidation = %v", dest.truncateCalls)
 	}
+}
+
+func TestStreamingSnapshotFallbackInvalidatesBeforePartialReload(t *testing.T) {
+	for _, position := range []string{"00000000/00000010", "00000000/00000020"} {
+		t.Run(position, func(t *testing.T) {
+			loop, dest, manager, _ := replacementSnapshotLoop(t)
+			resume, err := manager.ResumePositionForKeyedMerge(t.Context(), "public.items")
+			require.NoError(t, err)
+			require.Equal(t, "00000000/00000020", resume)
+			require.NoError(t, manager.BeginRun(t.Context(), false))
+			dest.resetOrder()
+
+			// A missing replication slot can replace a resumed stream with a
+			// snapshot that starts with a truncate and no invalidation event.
+			require.NoError(t, loop.processResult(t.Context(), source.RecordBatchResult{
+				TableName: "public.items",
+				Truncate:  true,
+			}))
+			require.Equal(t, []string{"state", "truncate"}, dest.recordedOrder())
+			require.NoError(t, loop.processResult(t.Context(), source.RecordBatchResult{
+				TableName: "public.items",
+				Batch:     int64RecordBatch(t, "id", []int64{7}, nil),
+			}))
+			require.NoError(t, loop.flush(t.Context()))
+			require.Len(t, dest.writeCalls, 1)
+			dest.maxLSNs["raw.items"] = position
+
+			restarted, err := NewCDCStateManager(dest, "stream-replacement", "raw.items", "")
+			require.NoError(t, err)
+			require.NoError(t, restarted.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "100"))
+			resume, err = restarted.ResumePositionForKeyedMerge(t.Context(), "public.items")
+			require.NoError(t, err)
+			require.Empty(t, resume)
+		})
+	}
+}
+
+func TestStreamingSnapshotFallbackInvalidationFailurePreventsTruncate(t *testing.T) {
+	loop, dest, _, _ := replacementSnapshotLoop(t)
+	dest.failWrite = dest.cdcWrites + 1
+
+	err := loop.processResult(t.Context(), source.RecordBatchResult{
+		TableName: "public.items",
+		Truncate:  true,
+	})
+	require.ErrorContains(t, err, "failed to invalidate CDC state before source truncate")
+	require.Equal(t, []string{"state"}, dest.recordedOrder())
+	require.Empty(t, dest.truncateCalls)
 }
 
 func TestStreamingWALTruncateCompletesStableDestinationIncarnation(t *testing.T) {
@@ -323,24 +372,30 @@ func TestStreamingWALTruncateInvalidationFailurePreventsPhysicalTruncate(t *test
 	}
 }
 
-func TestStreamingWALTruncateWithoutCommitTokenRemainsInvalidated(t *testing.T) {
-	loop, dest, _, _ := replacementSnapshotLoop(t)
-	records := make(chan source.RecordBatchResult, 1)
-	records <- source.RecordBatchResult{TableName: "public.items", Truncate: true, CDCWALTruncate: true}
-	close(records)
+func TestStreamingTruncateWithoutCommitTokenRecovery(t *testing.T) {
+	for _, mode := range []string{"auto", "never"} {
+		for _, wal := range []bool{false, true} {
+			t.Run(fmt.Sprintf("mode=%s/wal=%t", mode, wal), func(t *testing.T) {
+				loop, dest, manager, _ := replacementSnapshotLoop(t)
+				_, err := manager.ResolveSnapshotMode(t.Context(), mode)
+				require.NoError(t, err)
+				require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, manager, "public.items"))
+				require.NoError(t, manager.BeginRun(t.Context(), false))
+				records := make(chan source.RecordBatchResult, 1)
+				records <- source.RecordBatchResult{TableName: "public.items", Truncate: true, CDCWALTruncate: wal}
+				close(records)
+				require.NoError(t, loop.run(t.Context(), records))
 
-	if err := loop.run(t.Context(), records); err != nil {
-		t.Fatal(err)
-	}
-	restarted, err := NewCDCStateManager(dest, "stream-replacement", "raw.items", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "100"); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := restarted.ResumePosition(t.Context(), "public.items"); err != nil || got != "" {
-		t.Fatalf("resume after uncommitted WAL truncate = %q, %v; want empty", got, err)
+				restarted, err := NewCDCStateManager(dest, "stream-replacement", "raw.items", "")
+				require.NoError(t, err)
+				require.NoError(t, restarted.RegisterTableIncarnation(t.Context(), "public.items", "raw.items", "100"))
+				var expected string
+				if mode == "never" && wal {
+					expected = "00000000/00000020"
+				}
+				require.Equal(t, expected, mustKeyedResumePosition(t, restarted, "public.items"))
+			})
+		}
 	}
 }
 

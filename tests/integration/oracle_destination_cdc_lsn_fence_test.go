@@ -16,6 +16,7 @@ import (
 )
 
 func TestOracleDestinationCDCPrepareRequiresMatchingPrimaryKey(t *testing.T) {
+	t.Parallel()
 	if oracleDest.uri == "" {
 		t.Skip("shared oracle destination container not available")
 	}

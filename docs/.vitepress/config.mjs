@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import { organization, website } from "./schema.mjs";
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -27,6 +28,16 @@ export default defineConfig({
       { rel: 'canonical', href: canonicalUrl }
     ])
   },
+  // The getbruin.com/docs proxy rewrites every "/ingestr/" in the HTML to
+  // "/docs/ingestr/", which turns the canonical into /docs/docs/ingestr/... (404).
+  // Writing the "i" as a character reference keeps the proxy from matching it,
+  // while browsers and crawlers still read https://getbruin.com/docs/ingestr/...
+  transformHtml(code) {
+    return code.replace(
+      '<link rel="canonical" href="https://getbruin.com/docs/ingestr/',
+      '<link rel="canonical" href="https://getbruin.com/docs/&#105;ngestr/'
+    )
+  },
   head: [
     [
       "script",
@@ -42,6 +53,8 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
       {},
       `<iframe src="https://www.googletagmanager.com/ns.html?id=GTM-K2L7S5FP" height="0" width="0" style="display:none;visibility:hidden"></iframe>`,
     ],
+    ["script", { type: "application/ld+json" }, JSON.stringify(organization)],
+    ["script", { type: "application/ld+json" }, JSON.stringify(website)],
   ],
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
@@ -65,6 +78,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
           {
             text: "Incremental Loading",
             link: "/getting-started/incremental-loading.md",
+          },
+          {
+            text: "Parallel Extract Partitioning",
+            link: "/getting-started/extract-partitioning.md",
           },
           {
             text: "Change Data Capture (CDC)",
@@ -104,7 +121,9 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "AWS Redshift", link: "/supported-sources/redshift.md" },
               { text: "Cassandra", link: "/supported-sources/cassandra.md" },
               { text: "ClickHouse", link: "/supported-sources/clickhouse.md" },
+              { text: "Cloudflare D1", link: "/supported-sources/cloudflare-d1.md" },
               { text: "Couchbase", link: "/supported-sources/couchbase.md" },
+              { text: "CouchDB", link: "/supported-sources/couchdb.md" },
               { text: "CrateDB", link: "/supported-sources/cratedb.md" },
               { text: "Databricks", link: "/supported-sources/databricks.md" },
               { text: "DuckDB", link: "/supported-sources/duckdb.md" },
@@ -160,6 +179,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
                 collapsed: true,
                 items: [
                   { text: "CDC to DuckDB Tutorial", link: "/tutorials/cdc-postgres-duckdb.md" },
+                  { text: "Snapshot to CDC Tutorial", link: "/tutorials/cdc-postgres-snapshot.md" },
                 ],
               },
               { text: "RabbitMQ", link: "/supported-sources/rabbitmq.md" },
@@ -188,6 +208,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Adjust", link: "/supported-sources/adjust.md" },
               { text: "Airtable", link: "/supported-sources/airtable.md" },
               { text: "Allium", link: "/supported-sources/allium.md" },
+              { text: "AllRatesToday", link: "/supported-sources/allratestoday.md" },
               { text: "Amazon Kinesis", link: "/supported-sources/kinesis.md" },
               { text: "Amplitude", link: "/supported-sources/amplitude.md" },
               { text: "Anthropic", link: "/supported-sources/anthropic.md" },
@@ -199,10 +220,12 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Applovin Max", link: "/supported-sources/applovin_max.md"},
               { text: "Asana", link: "/supported-sources/asana.md" },
               { text: "Attio", link: "/supported-sources/attio.md" },
+              { text: "Azure Blob Storage", link: "/supported-sources/azure-blob.md" },
               { text: "Azure Data Lake Storage Gen2", link: "/supported-sources/adls.md" },
               { text: "BallDontLie FIFA", link: "/supported-sources/balldontlie.md" },
               { text: "BambooHR", link: "/supported-sources/bamboohr.md" },
               { text: "Braze", link: "/supported-sources/braze.md" },
+              { text: "Breezy HR", link: "/supported-sources/breezyhr.md" },
               { text: "Bruin", link: "/supported-sources/bruin.md" },
               { text: "Chargebee", link: "/supported-sources/chargebee.md" },
               { text: "Chess.com", link: "/supported-sources/chess.md" },
@@ -253,6 +276,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Mixpanel", link: "/supported-sources/mixpanel.md" },
               { text: "Monday", link: "/supported-sources/monday.md" },
               { text: "Notion", link: "/supported-sources/notion.md" },
+              { text: "Odoo", link: "/supported-sources/odoo.md" },
               { text: "Okta", link: "/supported-sources/okta.md" },
               { text: "Paddle", link: "/supported-sources/paddle.md" },
               { text: "Payrails", link: "/supported-sources/payrails.md" },
@@ -263,6 +287,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Polymarket", link: "/supported-sources/polymarket.md" },
               { text: "PostHog", link: "/supported-sources/posthog.md" },
               { text: "Primer", link: "/supported-sources/primer.md" },
+              { text: "Privatus Analytics", link: "/supported-sources/privatus.md" },
               { text: "Plus Vibe AI", link: "/supported-sources/plusvibeai.md" },
               { text: "QuickBooks", link: "/supported-sources/quickbooks.md" },
               { text: "Recurly", link: "/supported-sources/recurly.md" },
@@ -292,6 +317,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Typeform", link: "/supported-sources/typeform.md" },
               { text: "Wise", link: "/supported-sources/wise.md" },
               { text: "Wistia", link: "/supported-sources/wistia.md" },
+              { text: "Yahoo Finance", link: "/supported-sources/yfinance.md" },
               { text: "Zendesk", link: "/supported-sources/zendesk.md" },
               { text: "Zoom", link: "/supported-sources/zoom.md" },
             ],

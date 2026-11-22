@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/internal/oracleutil"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -26,9 +27,10 @@ const (
 )
 
 type OracleDestination struct {
-	db          *sql.DB
-	uri         string
-	currentUser string
+	db              *sql.DB
+	uri             string
+	currentUser     string
+	identifierLimit int
 }
 
 type oracleCDCInternalAliases struct {
@@ -76,11 +78,26 @@ func (d *OracleDestination) Connect(ctx context.Context, uri string) error {
 			return fmt.Errorf("failed to get current Oracle user: %w", err)
 		}
 		config.Debug("[ORACLE] Connected as: %s", d.currentUser)
+		d.identifierLimit = d.queryIdentifierLimit(ctx)
 		return nil
 	}
 
 	return fmt.Errorf("failed to connect to Oracle: %w", lastErr)
 }
+
+// queryIdentifierLimit returns 30 or 128 by COMPATIBLE on 12.2+; servers
+// without ORA_MAX_NAME_LEN_SUPPORTED predate 12.2 and allow only 30 bytes.
+func (d *OracleDestination) queryIdentifierLimit(ctx context.Context) int {
+	var limit int
+	if err := d.db.QueryRowContext(ctx, "SELECT DBMS_STANDARD.ORA_MAX_NAME_LEN_SUPPORTED FROM DUAL").Scan(&limit); err != nil {
+		config.Debug("[ORACLE] Using 30-byte identifiers; server predates 12.2: %v", err)
+		return 30
+	}
+	config.Debug("[ORACLE] Identifier limit: %d bytes", limit)
+	return limit
+}
+
+func (d *OracleDestination) IdentifierLimit() int { return d.identifierLimit }
 
 func buildConnStrings(uri string) ([]string, error) {
 	normalized := uri
@@ -91,6 +108,11 @@ func buildConnStrings(uri string) ([]string, error) {
 		}
 	}
 
+	normalized, err := oracleutil.LiftInlineDescriptor(normalized)
+	if err != nil {
+		return nil, err
+	}
+
 	u, err := url.Parse(normalized)
 	if err != nil {
 		return nil, err
@@ -98,6 +120,14 @@ func buildConnStrings(uri string) ([]string, error) {
 
 	if strings.ToLower(u.Scheme) != "oracle" {
 		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
+	}
+
+	connStr, hasDescriptor, err := oracleutil.DescriptorConnString(u)
+	if err != nil {
+		return nil, err
+	}
+	if hasDescriptor {
+		return []string{connStr}, nil
 	}
 
 	host := u.Hostname()
@@ -390,7 +420,7 @@ func (d *OracleDestination) SwapTable(ctx context.Context, opts destination.Swap
 	}
 	var backupTable string
 	if targetExists {
-		backupTable = backupTableName(targetSchema, targetName)
+		backupTable = backupTableName(targetSchema, targetName, destination.IdentifierLimit(d))
 		if err := d.DropTable(ctx, backupTable); err != nil {
 			return err
 		}
@@ -435,7 +465,7 @@ func (d *OracleDestination) copySwapTable(ctx context.Context, opts destination.
 	}
 	var backupTable string
 	if targetExists {
-		backupTable = backupTableName(targetSchema, targetName)
+		backupTable = backupTableName(targetSchema, targetName, destination.IdentifierLimit(d))
 		if err := d.DropTable(ctx, backupTable); err != nil {
 			return err
 		}
@@ -700,11 +730,11 @@ func (d *OracleDestination) DeleteInsertTable(ctx context.Context, opts destinat
 		}
 		return "", false
 	}
-	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE %s >= :1 AND %s <= :2", quoteTable(opts.TargetTable), key, key)
+	deleteSQL := buildDeleteInsertDeleteSQL(opts.TargetTable, key, ":1", ":2", opts.IncrementalPredicate)
 	deleteArgs := []interface{}{opts.IntervalStart, opts.IntervalEnd}
 	if start, ok := bound(opts.IntervalStart); ok {
 		if end, ok := bound(opts.IntervalEnd); ok {
-			deleteSQL = fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quoteTable(opts.TargetTable), key, start, key, end)
+			deleteSQL = buildDeleteInsertDeleteSQL(opts.TargetTable, key, start, end, opts.IncrementalPredicate)
 			deleteArgs = nil
 		}
 	}
@@ -878,6 +908,18 @@ func (d *OracleDestination) SupportsSCD2Strategy() bool         { return true }
 func (d *OracleDestination) SupportsAtomicSwap() bool           { return true }
 func (d *OracleDestination) SupportsCDCMerge() bool             { return true }
 func (d *OracleDestination) SupportsCDCUnchangedCols() bool     { return true }
+
+func (d *OracleDestination) SupportsDeleteInsertPredicate() bool { return true }
+
+// buildDeleteInsertDeleteSQL aliases the target without AS, which Oracle
+// rejects for table aliases.
+func buildDeleteInsertDeleteSQL(targetTable, quotedKey, lower, upper, predicate string) string {
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quoteTable(targetTable), quotedKey, lower, quotedKey, upper)
+	}
+	return fmt.Sprintf("DELETE FROM %s target WHERE %s", quoteTable(targetTable),
+		destination.IntervalDeleteCondition("target", quotedKey, lower, upper, predicate))
+}
 
 func (d *OracleDestination) ReplaceStagingPolicy() destination.ReplaceStagingPolicy {
 	return destination.ReplaceStagingPolicy{
@@ -1221,9 +1263,9 @@ func extractTableName(table string) string {
 	return tableName
 }
 
-func backupTableName(schemaName, tableName string) string {
+func backupTableName(schemaName, tableName string, maxLen int) string {
 	candidate := fmt.Sprintf("%s_OLD_%d", canonicalIdentifier(tableName), time.Now().UnixNano())
-	backupName := destination.ShortenIdentifier(candidate, candidate, destination.MaxIdentifierLength("oracle"))
+	backupName := destination.ShortenIdentifier(candidate, candidate, maxLen)
 	backupRef := oracleResolvedIdentifierReference(backupName)
 	if schemaName == "" {
 		return backupRef

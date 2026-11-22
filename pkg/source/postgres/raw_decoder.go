@@ -26,7 +26,7 @@ type postgresRawAppender func([]byte) error
 
 func newPostgresRawAppender(builder array.Builder, field pgconn.FieldDescription, column schema.Column, typeMap *pgtype.Map) postgresRawAppender {
 	fallback := func(src []byte) error {
-		value, err := decodePostgresValue(typeMap, field, src)
+		value, err := DecodePostgresValue(typeMap, field, src)
 		if err != nil {
 			return err
 		}
@@ -114,7 +114,8 @@ func newPostgresRawAppender(builder array.Builder, field pgconn.FieldDescription
 			}
 		}
 	case *array.StringBuilder:
-		if isPostgresTextOID(field.DataTypeOID) && (field.Format == pgx.TextFormatCode || field.Format == pgx.BinaryFormatCode) {
+		textColumn := field.Format == pgx.TextFormatCode && postgresTextColumn(column)
+		if textColumn || (isPostgresTextOID(field.DataTypeOID) && field.Format == pgx.BinaryFormatCode) {
 			return func(src []byte) error {
 				b.BinaryBuilder.Append(src)
 				return nil
@@ -198,6 +199,22 @@ func newPostgresRawAppender(builder array.Builder, field pgconn.FieldDescription
 			}
 		}
 	}
+	if field.Format == pgx.TextFormatCode && column.DataType == schema.TypeArray && postgresTextColumn(schema.Column{DataType: column.ArrayType}) {
+		return func(src []byte) error {
+			elems, ok := ParseArrayLiteralDelim(string(src), ArrayDelimiter(field.DataTypeOID))
+			if !ok {
+				return fallback(src)
+			}
+			values := make([]any, len(elems))
+			for i, e := range elems {
+				if !e.IsNull {
+					values[i] = e.Value
+				}
+			}
+			arrowconv.AppendValue(builder, values)
+			return nil
+		}
+	}
 
 	return fallback
 }
@@ -213,7 +230,7 @@ func appendPostgresTextInt(src []byte, format int16, bitSize int, appendValue fu
 	return fallback(src)
 }
 
-func decodePostgresValue(typeMap *pgtype.Map, field pgconn.FieldDescription, src []byte) (any, error) {
+func DecodePostgresValue(typeMap *pgtype.Map, field pgconn.FieldDescription, src []byte) (any, error) {
 	if dataType, ok := typeMap.TypeForOID(field.DataTypeOID); ok {
 		return dataType.Codec.DecodeValue(typeMap, field.DataTypeOID, field.Format, src)
 	}

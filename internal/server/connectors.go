@@ -109,6 +109,7 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 		genericURIConnector("postgres-cdc", "PostgreSQL CDC", []string{"postgres+cdc", "postgresql+cdc"}, true, false),
+		genericURIConnector("couchdb", "CouchDB", []string{"couchdb", "couchdb+https"}, true, false),
 		genericURIConnector("mysql-cdc", "MySQL CDC", []string{"mysql+cdc", "mysql+pymysql+cdc", "mariadb+cdc"}, true, false),
 		genericURIConnector("vitess-cdc", "Vitess CDC", []string{"vitess+cdc"}, true, false),
 		genericURIConnector("ps_mysql-cdc", "PlanetScale MySQL CDC", []string{"ps_mysql+cdc"}, true, false),
@@ -217,6 +218,18 @@ func GetConnectors() []ConnectorType {
 			},
 		},
 		{
+			ID:            "d1",
+			Name:          "Cloudflare D1",
+			Schemes:       []string{"d1", "cloudflare-d1"},
+			IsSource:      false,
+			IsDestination: true,
+			Fields: []ConnectorField{
+				{Name: "account_id", Label: "Account ID", Type: "string", Required: true},
+				{Name: "database_id", Label: "Database ID", Type: "string", Required: true, Placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+				{Name: "api_token", Label: "API Token", Type: "password", Required: true},
+			},
+		},
+		{
 			ID:            "csv",
 			Name:          "CSV File",
 			Schemes:       []string{"csv"},
@@ -282,6 +295,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("adapty", "Adapty", []string{"adapty"}, true, false),
 		genericURIConnector("airtable", "Airtable", []string{"airtable"}, true, false),
 		genericURIConnector("allium", "Allium", []string{"allium"}, true, false),
+		genericURIConnector("allratestoday", "AllRatesToday", []string{"allratestoday"}, true, false),
 		genericURIConnector("amplitude", "Amplitude", []string{"amplitude"}, true, false),
 		genericURIConnector("anthropic", "Anthropic", []string{"anthropic"}, true, false),
 		genericURIConnector("apifootball", "API Football", []string{"apifootball"}, true, false),
@@ -294,12 +308,13 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("asana", "Asana", []string{"asana"}, true, false),
 		genericURIConnector("athena", "Amazon Athena", []string{"athena"}, true, true),
 		genericURIConnector("iceberg", "Apache Iceberg", []string{"iceberg", "iceberg+rest", "iceberg+r2", "iceberg+glue", "iceberg+hive", "iceberg+hadoop", "iceberg+sql", "iceberg+sqlite", "iceberg+postgres"}, false, true),
-		genericURIConnector("attio", "Attio", []string{"attio"}, true, false),
+		genericURIConnector("attio", "Attio", []string{"attio"}, true, true),
 		genericURIConnector("avro", "Avro File", []string{"avro"}, true, false),
 		genericURIConnector("balldontlie", "balldontlie", []string{"balldontlie"}, true, false),
 		genericURIConnector("bamboohr", "BambooHR", []string{"bamboohr"}, true, false),
 		genericURIConnector("blobstore", "Object Storage", []string{"s3", "gs", "gcs", "az", "azure", "adls", "adlsgen2", "azdatalake", "abfs", "abfss"}, true, true),
 		genericURIConnector("braze", "Braze", []string{"braze"}, true, false),
+		genericURIConnector("breezyhr", "Breezy HR", []string{"breezyhr"}, true, false),
 		genericURIConnector("bruin", "Bruin", []string{"bruin"}, true, false),
 		genericURIConnector("chargebee", "Chargebee", []string{"chargebee"}, true, false),
 		genericURIConnector("chess", "Chess.com", []string{"chess"}, true, false),
@@ -370,6 +385,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("mqtt", "MQTT", []string{"mqtt", "mqtts"}, true, false),
 		genericURIConnector("nats", "NATS JetStream", []string{"nats"}, true, false),
 		genericURIConnector("notion", "Notion", []string{"notion"}, true, false),
+		genericURIConnector("odoo", "Odoo", []string{"odoo"}, true, false),
 		genericURIConnector("okta", "Okta", []string{"okta"}, true, false),
 		genericURIConnector("onelake", "OneLake", []string{"onelake"}, false, true),
 		genericURIConnector("openai", "OpenAI", []string{"openai"}, true, false),
@@ -384,6 +400,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("polymarket", "Polymarket", []string{"polymarket"}, true, false),
 		genericURIConnector("posthog", "PostHog", []string{"posthog"}, true, false),
 		genericURIConnector("primer", "Primer", []string{"primer"}, true, false),
+		genericURIConnector("privatus", "Privatus Analytics", []string{"privatus"}, true, false),
 		genericURIConnector("pulsar", "Apache Pulsar", []string{"pulsar", "pulsar+ssl"}, true, false),
 		genericURIConnector("pubsub", "Pub/Sub", []string{"pubsub"}, true, false),
 		genericURIConnector("quickbooks", "QuickBooks", []string{"quickbooks"}, true, false),
@@ -424,6 +441,7 @@ func GetConnectors() []ConnectorType {
 		genericURIConnector("vertica", "Vertica", []string{"vertica"}, true, true),
 		genericURIConnector("wise", "Wise", []string{"wise"}, true, false),
 		genericURIConnector("wistia", "Wistia", []string{"wistia"}, true, false),
+		genericURIConnector("yfinance", "Yahoo Finance", []string{"yfinance"}, true, false),
 		genericURIConnector("zendesk", "Zendesk", []string{"zendesk"}, true, false),
 		genericURIConnector("zoom", "Zoom", []string{"zoom"}, true, false),
 	)
@@ -489,6 +507,14 @@ func BuildURI(connectorID string, fields map[string]string) string {
 		return "duckdb:///" + fields["path"]
 	case "sqlite":
 		return "sqlite:///" + fields["path"]
+	case "d1":
+		uri := url.URL{
+			Scheme:   "d1",
+			Host:     fields["account_id"],
+			Path:     "/" + fields["database_id"],
+			RawQuery: url.Values{"api_token": {fields["api_token"]}}.Encode(),
+		}
+		return uri.String()
 	case "csv":
 		return "csv://" + fields["path"]
 	case "parquet":

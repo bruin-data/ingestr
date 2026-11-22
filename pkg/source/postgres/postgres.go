@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math/big"
 	"sort"
@@ -15,17 +16,24 @@ import (
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type PostgresSource struct {
-	pool *pgxpool.Pool
-	uri  string
+	pool            *pgxpool.Pool
+	uri             string
+	snapshot        string
+	primaryKeyQuery string
 }
 
 func NewPostgresSource() *PostgresSource {
 	return &PostgresSource{}
+}
+
+func NewPostgresSourceWithPrimaryKeyQuery(query string) *PostgresSource {
+	return &PostgresSource{primaryKeyQuery: query}
 }
 
 func (s *PostgresSource) Schemes() []string {
@@ -33,17 +41,17 @@ func (s *PostgresSource) Schemes() []string {
 }
 
 func (s *PostgresSource) Connect(ctx context.Context, uri string) error {
-	normalizedURI := uri
-	if strings.Contains(uri, "+") {
-		parts := strings.SplitN(uri, "://", 2)
-		if len(parts) == 2 {
-			normalizedURI = "postgres://" + parts[1]
-		}
+	normalizedURI, snapshot, err := parseSnapshotURI(uri)
+	if err != nil {
+		return err
 	}
 
 	pgConfig, err := pgxpool.ParseConfig(normalizedURI)
 	if err != nil {
 		return fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	if snapshot != "" {
+		pgConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, pgConfig)
@@ -58,6 +66,16 @@ func (s *PostgresSource) Connect(ctx context.Context, uri string) error {
 
 	s.pool = pool
 	s.uri = uri
+	s.snapshot = snapshot
+	if snapshot != "" {
+		_, release, err := s.acquireReadConnection(ctx)
+		if err != nil {
+			pool.Close()
+			s.pool = nil
+			return err
+		}
+		release()
+	}
 	return nil
 }
 
@@ -120,19 +138,24 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseTableName(table)
 
+	primaryKeyQuery := s.primaryKeyQuery
+	if primaryKeyQuery == "" {
+		primaryKeyQuery = `
+			SELECT attr.attname AS column_name, key_column.ordinality AS ordinal_position
+			FROM pg_catalog.pg_constraint con
+			JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+			JOIN pg_catalog.pg_namespace nsp ON nsp.oid = rel.relnamespace
+			CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+			JOIN pg_catalog.pg_attribute attr
+				ON attr.attrelid = rel.oid AND attr.attnum = key_column.attnum
+			WHERE con.contype = 'p'
+				AND nsp.nspname = $1
+				AND rel.relname = $2
+		`
+	}
+
 	query := `
-		WITH primary_keys AS (
-			SELECT kcu.column_name, kcu.ordinal_position
-			FROM information_schema.table_constraints tc
-			JOIN information_schema.key_column_usage kcu
-				ON tc.constraint_catalog = kcu.constraint_catalog
-				AND tc.constraint_schema = kcu.constraint_schema
-				AND tc.constraint_name = kcu.constraint_name
-				AND tc.table_schema = kcu.table_schema
-				AND tc.table_name = kcu.table_name
-			WHERE tc.constraint_type = 'PRIMARY KEY'
-				AND tc.table_schema = $1
-				AND tc.table_name = $2
+		WITH primary_keys AS (` + primaryKeyQuery + `
 		)
 		SELECT
 			c.column_name,
@@ -142,14 +165,24 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 			c.numeric_scale,
 			c.character_maximum_length,
 			c.udt_name,
-			pk.ordinal_position
+			pk.ordinal_position,
+			COALESCE(attr.atttypmod, -1)
 		FROM information_schema.columns c
 		LEFT JOIN primary_keys pk ON pk.column_name = c.column_name
+		LEFT JOIN pg_catalog.pg_namespace nsp ON nsp.nspname = c.table_schema
+		LEFT JOIN pg_catalog.pg_class rel ON rel.relnamespace = nsp.oid AND rel.relname = c.table_name
+		LEFT JOIN pg_catalog.pg_attribute attr ON attr.attrelid = rel.oid AND attr.attname = c.column_name
 		WHERE c.table_schema = $1 AND c.table_name = $2
 		ORDER BY c.ordinal_position
 	`
 
-	rows, err := s.pool.Query(ctx, query, schemaName, tableName)
+	conn, release, err := s.acquireReadConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	rows, err := conn.Query(ctx, query, schemaName, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query schema: %w", err)
 	}
@@ -164,8 +197,9 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 		var columnName, dataType, isNullable, udtName string
 		var numericPrecision, numericScale, charMaxLen *int
 		var pkOrdinal *int
+		var typmod int32
 
-		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName, &pkOrdinal); err != nil {
+		if err := rows.Scan(&columnName, &dataType, &isNullable, &numericPrecision, &numericScale, &charMaxLen, &udtName, &pkOrdinal, &typmod); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -178,6 +212,9 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 		}
 
 		dt, precision, scale, arrayType := MapPostgresToDataType(pgType)
+		if p, sc := NumericTypmodPrecisionScale(typmod); udtName == "_numeric" && p > 0 {
+			precision, scale = p-min(sc, 0), max(sc, 0)
+		}
 
 		col := schema.Column{
 			Name:      columnName,
@@ -282,18 +319,18 @@ func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []
 		defer close(results)
 
 		startConn := time.Now()
-		conn, err := s.pool.Acquire(ctx)
+		conn, release, err := s.acquireReadConnection(ctx)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
 			return
 		}
-		defer conn.Release()
+		defer release()
 		config.Debug("[SOURCE] Connection acquired in %v", time.Since(startConn))
 
 		query := buildSelectQuery(table, columns, opts)
 
 		startQuery := time.Now()
-		rows, err := conn.Query(ctx, query)
+		rows, err := queryWithTextStrings(ctx, conn, query, columns)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to query: %w", err)}
 			return
@@ -332,11 +369,11 @@ func (s *PostgresSource) readQuery(ctx context.Context, table string, columns []
 func (s *PostgresSource) discoverExtractPartitionBounds(ctx context.Context, table string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
 	query := source.SQLExtractPartitionBoundsQuery(table, opts.ExtractPartitionBy, opts.IncrementalKey, opts.IncrementalKeyDataType, opts.IntervalStart, opts.IntervalEnd, quoteIdentifier, quoteTableName, source.DefaultSQLTimeFormat)
 
-	conn, err := s.pool.Acquire(ctx)
+	conn, release, err := s.acquireReadConnection(ctx)
 	if err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer release()
 
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
@@ -347,11 +384,11 @@ func (s *PostgresSource) discoverExtractPartitionBounds(ctx context.Context, tab
 }
 
 func (s *PostgresSource) getCustomQuerySchema(ctx context.Context, query string) (*schema.TableSchema, error) {
-	conn, err := s.pool.Acquire(ctx)
+	conn, release, err := s.acquireReadConnection(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer release()
 
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
@@ -382,11 +419,11 @@ func (s *PostgresSource) getCustomQuerySchema(ctx context.Context, query string)
 }
 
 func (s *PostgresSource) discoverCustomQueryExtractPartitionBounds(ctx context.Context, query string, opts source.ReadOptions) (source.ExtractPartitionBounds, error) {
-	conn, err := s.pool.Acquire(ctx)
+	conn, release, err := s.acquireReadConnection(ctx)
 	if err != nil {
 		return source.ExtractPartitionBounds{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
-	defer conn.Release()
+	defer release()
 
 	var minValue, maxValue any
 	var totalCount, nonNullCount int64
@@ -397,6 +434,9 @@ func (s *PostgresSource) discoverCustomQueryExtractPartitionBounds(ctx context.C
 }
 
 func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	if s.snapshot != "" {
+		query = source.SQLCustomQuerySelectQuery(query, source.ReadOptions{}, quoteIdentifier, source.DefaultSQLTimeFormat)
+	}
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000
@@ -407,38 +447,32 @@ func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, o
 	go func() {
 		defer close(results)
 
-		conn, err := s.pool.Acquire(ctx)
+		conn, release, err := s.acquireReadConnection(ctx)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to acquire connection: %w", err)}
 			return
 		}
-		defer conn.Release()
+		defer release()
 
 		config.Debug("[SOURCE] Executing custom query: %s", query)
-		rows, err := conn.Query(ctx, query)
+		typeMap := conn.Conn().TypeMap()
+		var rows pgx.Rows
+		var columns []schema.Column
+		if description, descErr := conn.Conn().PgConn().Prepare(ctx, "", query, nil); descErr == nil {
+			columns = customQueryColumns(typeMap, description.Fields)
+			rows, err = conn.Query(ctx, query, TextResultFormats(typeMap, description.Fields, columns, postgresTextFormat))
+		} else if conn.Conn().PgConn().TxStatus() != 'I' {
+			err = descErr
+		} else {
+			rows, err = conn.Query(ctx, query)
+		}
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
 		}
 		defer rows.Close()
-
-		fields := rows.FieldDescriptions()
-		typeMap := conn.Conn().TypeMap()
-		columns := make([]schema.Column, len(fields))
-		for i, fd := range fields {
-			pgTypeName := "text"
-			if t, ok := typeMap.TypeForOID(fd.DataTypeOID); ok {
-				pgTypeName = t.Name
-			}
-			dt, precision, scale, arrayType := MapPostgresToDataType(pgTypeName)
-			columns[i] = schema.Column{
-				Name:      string(fd.Name),
-				DataType:  dt,
-				Nullable:  true,
-				Precision: precision,
-				Scale:     scale,
-				ArrayType: arrayType,
-			}
+		if columns == nil {
+			columns = customQueryColumns(typeMap, rows.FieldDescriptions())
 		}
 		arrowSchema := buildArrowSchema(columns)
 
@@ -497,6 +531,62 @@ func filterColumns(columns []schema.Column, exclude []string) []schema.Column {
 		}
 	}
 	return filtered
+}
+
+// queryWithTextStrings reads string-typed columns in PostgreSQL text format.
+// pgx decodes types such as interval, bit, ranges, geometry, and "char" into
+// Go structs or integers, while their text form is the value users expect.
+func queryWithTextStrings(ctx context.Context, conn *pgxpool.Conn, query string, columns []schema.Column) (pgx.Rows, error) {
+	description, err := conn.Conn().PgConn().Prepare(ctx, "", query, nil)
+	// Retrying inside a transaction can hide the original preparation error.
+	if err != nil && conn.Conn().PgConn().TxStatus() != 'I' {
+		return nil, err
+	}
+	if err != nil || len(description.Fields) != len(columns) {
+		return conn.Query(ctx, query)
+	}
+	return conn.Query(ctx, query, TextResultFormats(conn.Conn().TypeMap(), description.Fields, columns, postgresTextFormat))
+}
+
+// TextResultFormats requests text for the columns useText selects and each
+// type's preferred format otherwise.
+func TextResultFormats(typeMap *pgtype.Map, fields []pgconn.FieldDescription, columns []schema.Column, useText func(schema.Column) bool) pgx.QueryResultFormats {
+	formats := make(pgx.QueryResultFormats, len(fields))
+	for i, field := range fields {
+		formats[i] = typeMap.FormatCodeForOID(field.DataTypeOID)
+		if i < len(columns) && useText(columns[i]) {
+			formats[i] = pgx.TextFormatCode
+		}
+	}
+	return formats
+}
+
+func customQueryColumns(typeMap *pgtype.Map, fields []pgconn.FieldDescription) []schema.Column {
+	columns := make([]schema.Column, len(fields))
+	for i, fd := range fields {
+		pgTypeName := "text"
+		if t, ok := typeMap.TypeForOID(fd.DataTypeOID); ok {
+			pgTypeName = t.Name
+		}
+		dt, precision, scale, arrayType := MapPostgresToDataType(pgTypeName)
+		columns[i] = schema.Column{
+			Name:      fd.Name,
+			DataType:  dt,
+			Nullable:  true,
+			Precision: precision,
+			Scale:     scale,
+			ArrayType: arrayType,
+		}
+	}
+	return columns
+}
+
+func postgresTextColumn(col schema.Column) bool {
+	return col.DataType == schema.TypeString || col.DataType == schema.TypeInterval
+}
+
+func postgresTextFormat(col schema.Column) bool {
+	return postgresTextColumn(col) || (col.DataType == schema.TypeArray && postgresTextColumn(schema.Column{DataType: col.ArrayType}))
 }
 
 func buildArrowSchema(columns []schema.Column) *arrow.Schema {
@@ -625,8 +715,35 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 		return convertUUIDValue(val)
 	}
 	switch v := val.(type) {
+	case string:
+		// pgx returns arrays of types it does not know (e.g. enum[]) as text.
+		if col.DataType != schema.TypeArray {
+			return val
+		}
+		elems, ok := ParseArrayLiteral(v)
+		if !ok {
+			return val
+		}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		out := make([]any, len(elems))
+		for i, e := range elems {
+			if !e.IsNull {
+				out[i] = convertValue(e.Value, elemCol)
+			}
+		}
+		return out
+	case []any:
+		if col.DataType != schema.TypeArray {
+			return val
+		}
+		elemCol := schema.Column{DataType: col.ArrayType, Precision: col.Precision, Scale: col.Scale}
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = convertValue(e, elemCol)
+		}
+		return out
 	case pgtype.Numeric:
-		if !v.Valid || v.NaN {
+		if !v.Valid || v.NaN || v.InfinityModifier != pgtype.Finite {
 			return nil
 		}
 		if col.DataType == schema.TypeString {
@@ -637,6 +754,22 @@ func convertValue(val interface{}, col schema.Column) interface{} {
 			}
 		}
 		return numericToBigInt(v, col.Scale)
+	case pgtype.Time:
+		if !v.Valid {
+			return nil
+		}
+		return time.Date(0, time.January, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(v.Microseconds) * time.Microsecond)
+	case driver.Valuer:
+		// Array elements are decoded by pgx; render struct values (interval,
+		// bit, ...) as PostgreSQL text like the scalar text-format path.
+		if col.DataType == schema.TypeString || col.DataType == schema.TypeInterval {
+			if text, err := v.Value(); err == nil {
+				if str, ok := text.(string); ok {
+					return str
+				}
+			}
+		}
+		return val
 	default:
 		return val
 	}

@@ -1,6 +1,33 @@
 package destination
 
-import "testing"
+import (
+	"database/sql"
+	"testing"
+
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDedupStagingSelectAliasCollision(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	_, err = db.Exec(`CREATE TABLE staging (id INTEGER, __BRUIN_DEDUP_RN INTEGER, __bruin_dedup_rn_1 INTEGER);
+		INSERT INTO staging VALUES (7, 40, 3), (7, 80, 9)`)
+	require.NoError(t, err)
+	query := DedupStagingSelect(`"id", "__BRUIN_DEDUP_RN", "__bruin_dedup_rn_1"`, `"id"`, `"staging"`, `"__bruin_dedup_rn_1"`)
+	rows, err := db.Query(query)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	require.True(t, rows.Next(), "must not filter on the user column")
+	var id, value, version int
+	require.NoError(t, rows.Scan(&id, &value, &version))
+	require.Equal(t, 7, id)
+	require.Equal(t, 80, value)
+	require.Equal(t, 9, version)
+	require.False(t, rows.Next())
+	require.NoError(t, rows.Err())
+}
 
 func TestDedupStagingSelect(t *testing.T) {
 	cols := `"id", "name", "ts"`

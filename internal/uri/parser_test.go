@@ -1,6 +1,9 @@
 package uri
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // url.Parse rejects scheme characters ingestr allows (the underscore in
 // ps_mysql), so Parse extracts the scheme itself and must handle compound and
@@ -99,5 +102,48 @@ func TestParseSkipsStrictParseForAuthorityOpaqueSchemes(t *testing.T) {
 	// The leniency is scoped to onelake: other schemes still validate the host.
 	if _, err := Parse("postgres://Fabric Dev/db"); err == nil {
 		t.Error("Parse(postgres with a space in the host): expected an error")
+	}
+}
+
+// Connector selection parses the URI before the connector sees it, so an Oracle
+// connect descriptor in the host position must survive Parse and resolve to the
+// Oracle source and destination.
+func TestOracleConnectDescriptorSelectsOracleConnectors(t *testing.T) {
+	const descriptor = "(DESCRIPTION=\n  (ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))\n  (CONNECT_DATA=(SERVICE_NAME=ORCLPDB))\n)"
+	for _, raw := range []string{
+		"oracle://user:pass@" + descriptor,
+		"oracle+cx_oracle://user:pass@" + descriptor + "?SSL=true",
+		"exadata://user:pass@" + descriptor,
+	} {
+		parsed, err := Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(%q): unexpected error: %v", raw, err)
+		}
+		if parsed.Params["dsn"] != descriptor {
+			t.Errorf("Parse(%q): dsn = %q, want the descriptor", raw, parsed.Params["dsn"])
+		}
+		if parsed.RawURI != raw {
+			t.Errorf("Parse(%q): RawURI = %q", raw, parsed.RawURI)
+		}
+
+		dest, err := DefaultRegistry.GetDestination(raw)
+		if err != nil {
+			t.Fatalf("GetDestination(%q): %v", raw, err)
+		}
+		if got := fmt.Sprintf("%T", dest); got != "*oracle.OracleDestination" {
+			t.Errorf("GetDestination(%q) = %s, want *oracle.OracleDestination", raw, got)
+		}
+	}
+
+	src, err := DefaultRegistry.GetSource("oracle://user:pass@" + descriptor)
+	if err != nil {
+		t.Fatalf("GetSource: %v", err)
+	}
+	if got := fmt.Sprintf("%T", src); got != "*oracle.OracleSource" {
+		t.Errorf("GetSource = %s, want *oracle.OracleSource", got)
+	}
+
+	if _, err := Parse("oracle://user:pass@(DESCRIPTION=(ADDRESS=(HOST=db)"); err == nil {
+		t.Error("Parse(unbalanced descriptor): expected an error")
 	}
 }

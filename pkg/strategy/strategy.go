@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/bruin-data/ingestr/internal/annotation"
@@ -91,6 +92,27 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 	return j.ApplyBatchTransformation(ctx, records)
 }
 
+// sourceIncrementalKeyForRead returns the incremental key as the source names it.
+// Config.IncrementalKey carries the destination name after naming conventions.
+func sourceIncrementalKeyForRead(job *IngestionJob) string {
+	if job.Config.IncrementalKey == "" {
+		return ""
+	}
+	sourceKey := job.Config.IncrementalKey
+	if job.SourceSchema != nil && job.SourceSchema.IncrementalKey != "" {
+		sourceKey = job.SourceSchema.IncrementalKey
+	} else if job.ColumnRenamer != nil && job.ColumnRenamer.HasRenames() {
+		for src, dst := range job.ColumnRenamer.Mapping() {
+			if dst == job.Config.IncrementalKey || strings.EqualFold(dst, job.Config.IncrementalKey) {
+				sourceKey = src
+				break
+			}
+		}
+	}
+	sourceKey, _ = resolveSchemaColumn(job.SourceSchema, sourceKey)
+	return sourceKey
+}
+
 // ApplyEvolution applies the pending schema evolution plan to the destination.
 // The destination turns the abstract plan into DDL and executes it; this
 // strategy layer only decides when the plan runs.
@@ -109,15 +131,17 @@ type WriteStrategy interface {
 // MultiTableIngestionJob represents an ingestion job for multiple tables.
 // Used by CDC sources that emit data from multiple tables concurrently.
 type MultiTableIngestionJob struct {
-	Config          *config.IngestConfig
-	Source          source.MultiTableSource
-	Destination     destination.Destination
-	Tables          []source.SourceTableInfo
-	TableDestNames  map[string]string // source table → dest table mapping
-	Tracker         progress.Tracker
-	CDCResumeLSNs   map[string]string                         // Per-table CDC resume LSNs: source table → max LSN already processed
-	EvolutionPlans  map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
-	CDCStateManager *CDCStateManager
+	Config         *config.IngestConfig
+	Source         source.MultiTableSource
+	Destination    destination.Destination
+	Tables         []source.SourceTableInfo
+	TableDestNames map[string]string // source table → dest table mapping
+	Tracker        progress.Tracker
+	CDCResumeLSNs  map[string]string // Per-table CDC resume LSNs: source table → max LSN already processed
+	// CDCSnapshotResumes lists interrupted snapshots the consumer can continue.
+	CDCSnapshotResumes map[string]source.CDCSnapshotProgress
+	EvolutionPlans     map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
+	CDCStateManager    *CDCStateManager
 
 	// WhitespaceTrimmer trims string values when --trim-whitespace is enabled.
 	WhitespaceTrimmer *transformer.WhitespaceTrimmer
@@ -194,7 +218,17 @@ func evolveDestinationTableIfIncarnation(
 	if normalizer, ok := dest.(destination.SchemaEvolutionColumnNormalizer); ok {
 		compareOptions.NormalizeColumn = normalizer.NormalizeSchemaEvolutionColumn
 	}
-	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(sourceSchema), destSchema, compareOptions)
+	if normalizer, ok := dest.(destination.SchemaEvolutionSourceColumnNormalizer); ok {
+		compareOptions.NormalizeSourceColumn = normalizer.NormalizeSchemaEvolutionSourceColumn
+	}
+	if limiter, ok := dest.(destination.DecimalPrecisionLimiter); ok {
+		compareOptions.MaxDecimalPrecision = limiter.MaxDecimalPrecision()
+	}
+	compareSource, err := destination.WithoutGeneratedColumns(ctx, dest, destTable, sourceSchema)
+	if err != nil {
+		return "", fmt.Errorf("failed to get generated columns: %w", err)
+	}
+	comparison, err := schemaevolution.Compare(destination.DestinationTableSchema(compareSource), destSchema, compareOptions)
 	if err != nil {
 		return "", fmt.Errorf("failed to compare schemas: %w", err)
 	}

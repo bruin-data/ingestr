@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -459,9 +460,6 @@ func (s *MySQLCDCSource) GetTable(ctx context.Context, req source.TableRequest) 
 	if err := validateMySQLCDCSourceColumns(fullSchema, req.Name); err != nil {
 		return nil, err
 	}
-	if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, req.Name); err != nil {
-		return nil, err
-	}
 	tableSchema := addMySQLCDCColumns(fullSchema)
 
 	pks := req.PrimaryKeys
@@ -499,7 +497,7 @@ func (s *MySQLCDCSource) IsMultiTable() bool {
 }
 
 func (s *MySQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInfo, error) {
-	tables, err := s.getTables(ctx, true)
+	tables, err := s.getTables(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -512,12 +510,12 @@ func (s *MySQLCDCSource) GetTables(ctx context.Context) ([]source.SourceTableInf
 	return tables, nil
 }
 
-func (s *MySQLCDCSource) getTables(ctx context.Context, validateSupported bool) ([]source.SourceTableInfo, error) {
+func (s *MySQLCDCSource) getTables(ctx context.Context) ([]source.SourceTableInfo, error) {
 	tableNames, err := s.getMySQLCDCTableNames(ctx, s.db)
 	if err != nil {
 		return nil, err
 	}
-	tables, err := s.loadMySQLCDCTables(ctx, tableNames, validateSupported)
+	tables, err := s.loadMySQLCDCTables(ctx, tableNames)
 	if err != nil {
 		return nil, err
 	}
@@ -604,7 +602,7 @@ func (s *MySQLCDCSource) getMySQLCDCTableNames(ctx context.Context, q mysqlCDCPo
 	return tableNames, nil
 }
 
-func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []string, validateSupported bool) ([]source.SourceTableInfo, error) {
+func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []string) ([]source.SourceTableInfo, error) {
 	tables := make([]source.SourceTableInfo, 0, len(tableNames))
 	for _, tableName := range tableNames {
 		fullSchema, err := s.getSchema(ctx, tableName)
@@ -613,11 +611,6 @@ func (s *MySQLCDCSource) loadMySQLCDCTables(ctx context.Context, tableNames []st
 		}
 		if err := validateMySQLCDCSourceColumns(fullSchema, tableName); err != nil {
 			return nil, err
-		}
-		if validateSupported {
-			if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, tableName); err != nil {
-				return nil, err
-			}
 		}
 		tableSchema := addMySQLCDCColumns(fullSchema)
 		if len(tableSchema.PrimaryKeys) == 0 {
@@ -665,16 +658,7 @@ func (s *MySQLCDCSource) getSelectedTables(ctx context.Context) ([]source.Source
 		return nil, fmt.Errorf("no MySQL tables found in database %s", s.database)
 	}
 
-	selected, err := s.loadMySQLCDCTables(ctx, tableNames, false)
-	if err != nil {
-		return nil, err
-	}
-	for _, table := range selected {
-		if err := validateMySQLCDCTableSupported(ctx, s.db, s.database, table.Name); err != nil {
-			return nil, err
-		}
-	}
-	return selected, nil
+	return s.loadMySQLCDCTables(ctx, tableNames)
 }
 
 func (s *MySQLCDCSource) ReadAll(ctx context.Context, opts source.MultiTableReadOptions) (<-chan source.RecordBatchResult, error) {
@@ -1014,6 +998,17 @@ func checkMySQLBinlogSettings(ctx context.Context, db *sql.DB) error {
 }
 
 func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database string, table string) error {
+	unsupported, err := unsupportedMySQLCDCColumns(ctx, db, database, table)
+	if err != nil {
+		return err
+	}
+	if len(unsupported) > 0 {
+		return fmt.Errorf("MySQL CDC does not support ENUM, SET, BIT, or spatial (GEOMETRY) columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
+	}
+	return nil
+}
+
+func unsupportedMySQLCDCColumns(ctx context.Context, db *sql.DB, database string, table string, supportedTypes ...string) ([]string, error) {
 	schemaName, tableName := parseMySQLTableName(database, table)
 	rows, err := db.QueryContext(ctx, `
 		SELECT COLUMN_NAME, DATA_TYPE
@@ -1028,7 +1023,7 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 		ORDER BY ORDINAL_POSITION
 	`, schemaName, tableName)
 	if err != nil {
-		return fmt.Errorf("failed to check MySQL CDC column support: %w", err)
+		return nil, fmt.Errorf("failed to check MySQL CDC column support: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -1036,17 +1031,17 @@ func validateMySQLCDCTableSupported(ctx context.Context, db *sql.DB, database st
 	for rows.Next() {
 		var name, dataType string
 		if err := rows.Scan(&name, &dataType); err != nil {
-			return fmt.Errorf("failed to scan MySQL CDC column support: %w", err)
+			return nil, fmt.Errorf("failed to scan MySQL CDC column support: %w", err)
+		}
+		if slices.Contains(supportedTypes, strings.ToLower(dataType)) {
+			continue
 		}
 		unsupported = append(unsupported, fmt.Sprintf("%s %s", name, strings.ToUpper(dataType)))
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	if len(unsupported) > 0 {
-		return fmt.Errorf("MySQL CDC does not support ENUM, SET, BIT, or spatial (GEOMETRY) columns yet; unsupported columns in %s: %s", table, strings.Join(unsupported, ", "))
-	}
-	return nil
+	return unsupported, nil
 }
 
 func mysqlCDCResumeExpiredError(table string, pos gomysql.Position) error {
@@ -1445,18 +1440,22 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		return safeMySQLCDCCheckpoint(position, pendingXA, buffers)
 	}
 	lastTokenPosition := ""
-	streamingToken := func(position gomysql.Position, preferredLSN string) (source.CDCStateCommitToken, error) {
-		safe := safeCheckpoint(position)
+	// Streaming checkpoints may only name a transaction boundary: resuming
+	// between a TABLE_MAP event and its rows event fails, and resuming inside
+	// a transaction would skip its earlier rows. Timer, heartbeat and drain
+	// flushes wait for a boundary, so only a buffer filled mid-transaction
+	// loads rows past the checkpoint: keyed merges ignore their replay, and
+	// keyless change logs are at-least-once.
+	txnBoundary := start
+	inTransaction := false
+	streamingToken := func() (source.CDCStateCommitToken, error) {
+		// Changes still buffered or in pending XA transactions pull the
+		// checkpoint back to their own transaction boundaries.
+		safe := safeCheckpoint(txnBoundary)
 		if safe.Name == "" {
 			return source.CDCStateCommitToken{}, nil
 		}
-		commitPosition := ""
-		if preferredLSN != "" {
-			if parsed, ok := parseStoredMySQLPosition(preferredLSN); ok && parsed.Compare(safe) == 0 {
-				commitPosition = preferredLSN
-			}
-		}
-		token, err := s.checkpointCommitToken(ctx, commitPosition, safe)
+		token, err := s.checkpointCommitToken(ctx, "", safe)
 		if err != nil {
 			return source.CDCStateCommitToken{}, err
 		}
@@ -1469,11 +1468,10 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	var tokenFn mysqlCDCCommitTokenFunc
 	if opts.Streaming {
 		tokenFn = func(lastLSN string) (any, error) {
-			position, ok := parseStoredMySQLPosition(lastLSN)
-			if !ok {
+			if _, ok := parseStoredMySQLPosition(lastLSN); !ok {
 				return nil, fmt.Errorf("invalid MySQL CDC change LSN %q", lastLSN)
 			}
-			token, err := streamingToken(position, lastLSN)
+			token, err := streamingToken()
 			if err != nil {
 				return nil, err
 			}
@@ -1483,11 +1481,11 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			return token, nil
 		}
 	}
-	emitStreamingProgress := func(sendCtx context.Context, position gomysql.Position) error {
+	emitStreamingProgress := func(sendCtx context.Context) error {
 		if !opts.Streaming {
 			return nil
 		}
-		token, err := streamingToken(position, "")
+		token, err := streamingToken()
 		if err != nil {
 			return err
 		}
@@ -1496,20 +1494,24 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 	flushBuffers := func(sendCtx context.Context) error {
 		return flushMySQLCDCChangeBuffersWithTokenContext(sendCtx, buffers, results, tokenFn)
 	}
-	flushBuffersAndProgress := func(sendCtx context.Context, position gomysql.Position) error {
-		if err := flushBuffers(sendCtx); err != nil {
-			return err
+	// Mid-transaction the checkpoint stays at the transaction start, so
+	// rows flushed now would be replayed on resume; keep them buffered.
+	flushBuffersAndProgress := func(sendCtx context.Context) error {
+		if !inTransaction {
+			if err := flushBuffers(sendCtx); err != nil {
+				return err
+			}
 		}
-		return emitStreamingProgress(sendCtx, position)
+		return emitStreamingProgress(sendCtx)
 	}
 	streamingFlushInterval := mysqlCDCStreamingFlushInterval(opts)
 	lastStreamingFlush := time.Now()
-	maybeFlushStreaming := func(position gomysql.Position) error {
-		if !opts.Streaming || time.Since(lastStreamingFlush) < streamingFlushInterval {
+	maybeFlushStreaming := func() error {
+		if !opts.Streaming || time.Since(lastStreamingFlush) < streamingFlushInterval || inTransaction {
 			return nil
 		}
 		lastStreamingFlush = time.Now()
-		return flushBuffersAndProgress(ctx, position)
+		return flushBuffersAndProgress(ctx)
 	}
 	finish := func(position gomysql.Position) error {
 		if err := flushMySQLCDCChangeBuffersWithTokenContext(ctx, buffers, results, nil); err != nil {
@@ -1572,7 +1574,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 		case <-ctx.Done():
 			if opts.Streaming {
 				drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-				err := flushBuffersAndProgress(drainCtx, current)
+				err := flushBuffersAndProgress(drainCtx)
 				cancel()
 				if err != nil {
 					return err
@@ -1591,7 +1593,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			if ctx.Err() != nil {
 				if opts.Streaming {
 					drainCtx, cancel := detachedMySQLCDCStreamDrainContext(ctx)
-					flushErr := flushBuffersAndProgress(drainCtx, current)
+					flushErr := flushBuffersAndProgress(drainCtx)
 					cancel()
 					if flushErr != nil {
 						return flushErr
@@ -1606,7 +1608,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 					}
 					return fmt.Errorf("MySQL binlog stream stalled at %s while catching up to %s: no events or heartbeats received for %s; check connectivity to the server", current, target, mysqlCDCStreamStallTimeout)
 				}
-				if err := maybeFlushStreaming(current); err != nil {
+				if err := maybeFlushStreaming(); err != nil {
 					return err
 				}
 				continue
@@ -1625,7 +1627,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			if event.Header.EventType == replication.HEARTBEAT_EVENT || event.Header.EventType == replication.HEARTBEAT_LOG_EVENT_V2 {
 				if opts.Streaming {
 					lastStreamingFlush = time.Now()
-					if err := flushBuffersAndProgress(ctx, current); err != nil {
+					if err := flushBuffersAndProgress(ctx); err != nil {
 						return err
 					}
 					continue
@@ -1679,7 +1681,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 						}
 						pendingXA[xaID] = &mysqlCDCXAChanges{
 							byTable: make(map[string]*mysqlCDCXATableChanges),
-							start:   previousPosition,
+							start:   txnBoundary,
 							bytes:   transactionBytes,
 						}
 						pendingXABytes += transactionBytes
@@ -1719,7 +1721,10 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 							return err
 						}
 					}
-					if err := emitStreamingProgress(ctx, eventPos); err != nil {
+					// TRUNCATE commits implicitly and the buffers were just
+					// flushed, so its end is a safe checkpoint.
+					txnBoundary = eventPos
+					if err := emitStreamingProgress(ctx); err != nil {
 						return err
 					}
 				}
@@ -1767,7 +1772,7 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 			if err := validateMySQLCDCFullRowImage(rowsEvent, len(sourceColumnsWithoutMySQLCDC(meta.FullSchema))); err != nil {
 				return fmt.Errorf("failed to decode MySQL CDC rows for %s: %w", meta.Name, err)
 			}
-			changes, nextRowSeq, err := mysqlRowsEventToChangesFromSequence(rowsEvent.Type(), rowsEvent.Rows, meta.FullSchema, outputSchema, eventPos, rowSeq, previousPosition)
+			changes, nextRowSeq, err := mysqlRowsEventToChangesFromSequence(rowsEvent.Type(), rowsEvent.Rows, meta.FullSchema, outputSchema, eventPos, rowSeq, txnBoundary)
 			if err != nil {
 				return fmt.Errorf("failed to decode MySQL CDC rows for %s: %w", meta.Name, err)
 			}
@@ -1813,10 +1818,56 @@ func (s *MySQLCDCSource) streamTables(ctx context.Context, tables []source.Sourc
 				return err
 			}
 		}
-		if err := maybeFlushStreaming(current); err != nil {
+		switch {
+		case mysqlCDCEndsTransaction(logicalEvents):
+			txnBoundary, inTransaction = eventPos, false
+		case mysqlCDCInTransaction(logicalEvents):
+			inTransaction = true
+		}
+		if err := maybeFlushStreaming(); err != nil {
 			return err
 		}
 	}
+}
+
+// mysqlCDCEndsTransaction reports whether the events end a binlog
+// transaction: a commit (XID or COMMIT), an implicitly committed statement
+// such as DDL, an XA outcome or prepare, or a whole compressed transaction.
+func mysqlCDCEndsTransaction(events []*replication.BinlogEvent) bool {
+	if len(events) == 0 {
+		return false
+	}
+	last := events[len(events)-1]
+	if last.Header != nil && last.Header.EventType == replication.XA_PREPARE_LOG_EVENT {
+		return true
+	}
+	switch e := last.Event.(type) {
+	case *replication.XIDEvent, *replication.RotateEvent:
+		// Transactions never span binlog files, so a rotation is a boundary.
+		return true
+	case *replication.QueryEvent:
+		query := strings.ToUpper(strings.TrimSpace(string(e.Query)))
+		for _, inside := range []string{"BEGIN", "XA START", "XA BEGIN", "XA END", "SAVEPOINT", "ROLLBACK TO", "RELEASE SAVEPOINT"} {
+			if strings.HasPrefix(query, inside) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// mysqlCDCInTransaction reports whether the events open or continue a binlog
+// transaction without ending it.
+func mysqlCDCInTransaction(events []*replication.BinlogEvent) bool {
+	if len(events) == 0 {
+		return false
+	}
+	switch events[len(events)-1].Event.(type) {
+	case *replication.GTIDEvent, *replication.MariadbGTIDEvent, *replication.TableMapEvent, *replication.RowsEvent, *replication.QueryEvent:
+		return true
+	}
+	return false
 }
 
 func safeMySQLCDCCheckpoint(position gomysql.Position, pendingXA map[string]*mysqlCDCXAChanges, buffers map[string]*mysqlCDCChangeBuffer) gomysql.Position {
@@ -2490,9 +2541,98 @@ func projectMySQLCDCRow(row []interface{}, fullSourceColumns []schema.Column, ou
 		if err := validateMySQLCDCTimeValue(row[sourceIdx], outputSourceColumns[i]); err != nil {
 			return nil, err
 		}
-		values[i] = convertMySQLCDCBinlogValue(row[sourceIdx], outputSourceColumns[i])
+		value, err := decodeMySQLCDCBinlogValue(row[sourceIdx], outputSourceColumns[i])
+		if err != nil {
+			return nil, err
+		}
+		values[i] = value
 	}
 	return values, nil
+}
+
+// decodeMySQLCDCBinlogValue converts a value decoded from a binlog row image
+// to the representation the snapshot reads. go-mysql delivers ENUM values as
+// 1-based member indexes, SET values as member bitmasks and BIT values as
+// integers.
+func decodeMySQLCDCBinlogValue(value interface{}, col schema.Column) (interface{}, error) {
+	if v, ok := value.(int64); ok {
+		switch {
+		case col.EnumValues != nil:
+			return mysqlCDCEnumLabel(v, col)
+		case col.SetValues != nil:
+			return mysqlCDCSetLabels(v, col)
+		case col.DataType == schema.TypeString:
+			return nil, fmt.Errorf("binlog delivered an ENUM or SET member number for column %s, but its declared members could not be read from INFORMATION_SCHEMA", col.Name)
+		case col.DataType == schema.TypeBinary:
+			return mysqlCDCBitBytes(v, col)
+		}
+	}
+	value, err := convertMySQLCDCSpatialValue(value, col)
+	if err != nil {
+		return nil, err
+	}
+	return convertMySQLCDCBinlogValue(value, col), nil
+}
+
+func mysqlCDCEnumLabel(index int64, col schema.Column) (string, error) {
+	// Index 0 is the empty string MySQL stores for invalid values in
+	// non-strict SQL mode; the snapshot reads it as ''.
+	if index == 0 {
+		return "", nil
+	}
+	if index < 0 || index > int64(len(col.EnumValues)) {
+		return "", fmt.Errorf("binlog ENUM index %d for column %s is outside its %d declared members; the column definition changed since the sync started; run with --full-refresh to rebuild the destination safely", index, col.Name, len(col.EnumValues))
+	}
+	return col.EnumValues[index-1], nil
+}
+
+func mysqlCDCSetLabels(bits int64, col schema.Column) (string, error) {
+	mask := uint64(bits)
+	if len(col.SetValues) < 64 && mask>>len(col.SetValues) != 0 {
+		return "", fmt.Errorf("binlog SET value %#x for column %s references members beyond its %d declared members; the column definition changed since the sync started; run with --full-refresh to rebuild the destination safely", mask, col.Name, len(col.SetValues))
+	}
+	members := make([]string, 0, len(col.SetValues))
+	for i, member := range col.SetValues {
+		if mask&(1<<i) != 0 {
+			members = append(members, member)
+		}
+	}
+	return strings.Join(members, ","), nil
+}
+
+// mysqlCDCBitBytes encodes a BIT(n) value as the ceil(n/8) big-endian bytes
+// the driver returns for it in the snapshot.
+func mysqlCDCBitBytes(value int64, col schema.Column) ([]byte, error) {
+	if col.Precision < 1 || col.Precision > 64 {
+		return nil, fmt.Errorf("binlog delivered a BIT value for column %s, but its bit width %d is not between 1 and 64", col.Name, col.Precision)
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(value))
+	width := (col.Precision + 7) / 8
+	return append([]byte(nil), buf[8-width:]...), nil
+}
+
+// convertMySQLCDCSpatialValue converts geometry values to WKT. The snapshot and
+// the binlog both deliver MySQL's internal geometry bytes, so converting both
+// here keeps their values identical.
+func convertMySQLCDCSpatialValue(value interface{}, col schema.Column) (interface{}, error) {
+	if !col.Spatial {
+		return value, nil
+	}
+	var raw []byte
+	switch v := value.(type) {
+	case []byte:
+		raw = v
+	case string:
+		raw = []byte(v)
+	default:
+		return value, nil
+	}
+	wkt, err := mysqlGeometryToWKT(raw)
+	if err != nil {
+		return nil, fmt.Errorf("column %s: %w", col.Name, err)
+	}
+	return wkt, nil
 }
 
 // convertMySQLCDCBinlogValue converts a value decoded from a binlog row image.
@@ -2703,7 +2843,12 @@ func buildMySQLCDCSQLBatch(rows *sql.Rows, tableSchema *schema.TableSchema, sour
 				releaseMySQLCDCBuilders(builders)
 				return nil, 0, err
 			}
-			arrowconv.AppendValue(builders[i], convertMySQLCDCValue(value, sourceColumns[i]))
+			spatialValue, err := convertMySQLCDCSpatialValue(value, sourceColumns[i])
+			if err != nil {
+				releaseMySQLCDCBuilders(builders)
+				return nil, 0, err
+			}
+			arrowconv.AppendValue(builders[i], convertMySQLCDCValue(spatialValue, sourceColumns[i]))
 			if maxBatchBytes > 0 {
 				accBytes += arrowconv.ValueBytes(value)
 			}

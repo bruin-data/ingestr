@@ -14,6 +14,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	_ "github.com/bruin-data/ingestr/internal/testutil/quiettc"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"

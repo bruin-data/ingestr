@@ -4,6 +4,8 @@
 
 `ingestr` supports Azure Data Lake Storage Gen2 as both a source and destination.
 
+To read through the Blob endpoint instead, for example when the account has no hierarchical namespace or only a blob private endpoint, use [Azure Blob Storage](/supported-sources/azure-blob.md).
+
 ## URI format
 
 The URI for connecting to Azure Data Lake Storage Gen2 is structured as follows:
@@ -125,6 +127,8 @@ lakehouse/
 ## Supported strategies
 
 Azure Data Lake Storage Gen2 supports `replace` and `append` strategies. It does not support `merge`, `delete+insert`, or `scd2`.
+
+`replace` removes every parquet file in the destination path whose name matches the `layout` once the new files are written, including files another pipeline wrote to the same path with the same layout. Give each pipeline its own destination path. Files that don't match the layout are kept. If the load fails, the previous files stay. Files written directly into the root of a file system are never removed. `replace` needs permission to list and delete files (for example `Storage Blob Data Contributor`); use `append` to keep existing files.
 
 ::: info NOTE
 When reading from Azure Data Lake Storage Gen2, CSV, JSONL/NDJSON, parquet, gzip-compressed variants, and ZIP archive members are supported. Select ZIP members with `<file-system>/<archive.zip>!<member-glob>`, for example `lakehouse/releases/data.zip!**/*.csv`. When writing to Azure Data Lake Storage Gen2, only parquet output is supported.

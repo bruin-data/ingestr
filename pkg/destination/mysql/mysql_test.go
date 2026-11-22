@@ -8,13 +8,96 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
+	"github.com/bruin-data/ingestr/pkg/source"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestWriteTypedLists(t *testing.T) {
+	for _, dt := range []arrow.DataType{
+		arrow.ListOf(arrow.PrimitiveTypes.Int64),
+		arrow.LargeListOf(arrow.PrimitiveTypes.Int64),
+	} {
+		t.Run(dt.String(), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			values, _, err := array.FromJSON(mem, dt, strings.NewReader(`[[99],[7,null,-2],null,[],[42]]`))
+			require.NoError(t, err)
+			defer values.Release()
+			sliced := array.NewSlice(values, 1, 5)
+			defer sliced.Release()
+			record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "values", Type: dt, Nullable: true}}, nil), []arrow.Array{sliced}, 4)
+			defer record.Release()
+
+			t.Run("insert", func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				defer func() { _ = db.Close() }()
+				mock.ExpectBegin()
+				mock.ExpectExec(regexp.QuoteMeta("INSERT INTO `lists` (`values`) VALUES (?), (?), (?), (?)")).
+					WithArgs("[7,null,-2]", nil, "[]", "[42]").WillReturnResult(sqlmock.NewResult(0, 4))
+				mock.ExpectCommit()
+				record.Retain()
+				records := make(chan source.RecordBatchResult, 1)
+				records <- source.RecordBatchResult{Batch: record}
+				close(records)
+				dest := &MySQLDestination{db: db}
+				require.NoError(t, dest.Write(t.Context(), records, destination.WriteOptions{Table: "lists"}))
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+			t.Run("load data", func(t *testing.T) {
+				var got strings.Builder
+				require.NoError(t, writeRecordBatchTSV(&got, record))
+				assert.Equal(t, "[7,null,-2]\n\\N\n[]\n[42]\n", got.String())
+			})
+		})
+	}
+}
+
+func TestTimestampTZEvolutionPreservesExistingTemporalRange(t *testing.T) {
+	col := schema.Column{Name: "created_at", DataType: schema.TypeTimestampTZ, Nullable: true}
+	assert.Equal(t, "TIMESTAMP(6)", MapDataTypeToMySQL(col))
+	for _, tt := range []struct {
+		name     string
+		existing []schema.Column
+		want     []string
+	}{
+		{
+			name: "new column matches create",
+			want: []string{"ALTER TABLE events ADD COLUMN `created_at` TIMESTAMP(6) NULL"},
+		},
+		{
+			name:     "legacy datetime is not narrowed",
+			existing: []schema.Column{{Name: "created_at", DataType: schema.TypeTimestamp, Nullable: true}},
+		},
+		{
+			name:     "date widens without losing its range",
+			existing: []schema.Column{{Name: "created_at", DataType: schema.TypeDate, Nullable: true}},
+			want:     []string{"ALTER TABLE events MODIFY COLUMN `created_at` DATETIME(6) NULL"},
+		},
+		{
+			name:     "existing timestamp is unchanged",
+			existing: []schema.Column{col},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			comparison, err := schemaevolution.Compare(
+				&schema.TableSchema{Columns: []schema.Column{col}},
+				&schema.TableSchema{Columns: tt.existing}, nil)
+			require.NoError(t, err)
+			statements, _, err := destination.RenderEvolution(&Dialect{}, "events", comparison)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, statements)
+		})
+	}
+}
 
 func TestPrepareTableRequiresMatchingCDCMergePrimaryKey(t *testing.T) {
 	tests := []struct {
@@ -437,12 +520,12 @@ func TestVitessManagedCDCStateFailsWithoutDurableIncarnation(t *testing.T) {
 
 func TestCDCTargetClaimTableUsesBinaryCollation(t *testing.T) {
 	columns := []schema.Column{
-		{Name: "destination_table", DataType: schema.TypeString, MaxLength: 512},
+		{Name: "destination_table", DataType: schema.TypeString, MaxLength: 2048},
 		{Name: "connector_id", DataType: schema.TypeString, MaxLength: 64},
 		{Name: "claimed_at", DataType: schema.TypeTimestampTZ},
 	}
 	sql := buildCreateTableSQL("cdc_targets", columns, []string{"destination_table"})
-	if !strings.Contains(sql, "`destination_table` VARCHAR(512) CHARACTER SET ascii COLLATE ascii_bin") {
+	if !strings.Contains(sql, "`destination_table` VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin") {
 		t.Fatalf("CDC target DDL lacks binary claim key:\n%s", sql)
 	}
 }
@@ -1026,6 +1109,18 @@ func TestBuildCreateTableSQL(t *testing.T) {
 			primaryKeys: []string{"id"},
 			want:        "CREATE TABLE IF NOT EXISTS `test_table` (\n  `id` BIGINT,\n  `name` TEXT,\n  `active` BOOLEAN,\n  `score` DOUBLE,\n  `amount` DECIMAL(10,2),\n  `created_at` TIMESTAMP(6),\n  PRIMARY KEY (`id`)\n)",
 		},
+		{
+			name:  "unbounded string primary keys bounded at indexable width",
+			table: "keys",
+			columns: []schema.Column{
+				{Name: "unbounded", DataType: schema.TypeString},
+				{Name: "narrow", DataType: schema.TypeString, MaxLength: 100},
+				{Name: "wide", DataType: schema.TypeString, MaxLength: 1000},
+				{Name: "note", DataType: schema.TypeString, Nullable: true},
+			},
+			primaryKeys: []string{"UNBOUNDED", "narrow", "wide"},
+			want:        "CREATE TABLE IF NOT EXISTS `keys` (\n  `unbounded` VARCHAR(768),\n  `narrow` VARCHAR(100),\n  `wide` VARCHAR(1000),\n  `note` TEXT,\n  PRIMARY KEY (`UNBOUNDED`, `narrow`, `wide`)\n)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1075,4 +1170,15 @@ func TestMySQLVersionAllowsRenameUnderLock(t *testing.T) {
 	assert.False(t, mysqlVersionAllowsRenameUnderLock("10.11.6-MariaDB-1:10.11.6+maria~ubu2204"))
 	assert.False(t, mysqlVersionAllowsRenameUnderLock("11.4.2-MariaDB"))
 	assert.False(t, mysqlVersionAllowsRenameUnderLock("garbage"))
+}
+
+func TestBuildDeleteInsertDeleteSQL(t *testing.T) {
+	if got, want := buildDeleteInsertDeleteSQL("db.events", "updated_at", ""), "DELETE FROM `db`.`events` WHERE `updated_at` >= ? AND `updated_at` <= ?"; got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
+	got := buildDeleteInsertDeleteSQL("db.events", "updated_at", "target.event_date >= '2026-01-01'")
+	want := "DELETE target FROM `db`.`events` AS target WHERE target.`updated_at` >= ? AND target.`updated_at` <= ? AND (target.event_date >= '2026-01-01')"
+	if got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
 }

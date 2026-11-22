@@ -8,14 +8,18 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 
-	sf "github.com/snowflakedb/gosnowflake"
+	sf "github.com/snowflakedb/gosnowflake/v2"
 	"github.com/youmark/pkcs8"
 )
 
 type Auth struct {
 	Account              string
+	Host                 string
+	Port                 int
 	User                 string
 	Password             string
 	Database             string
@@ -64,6 +68,10 @@ func ParseURI(uri string) (*Auth, error) {
 	auth.PrivateKeyPassphrase = query.Get("private_key_passphrase")
 	auth.ExtraParams = StripAuthParams(query)
 
+	if err := auth.parseEndpoint(query); err != nil {
+		return nil, err
+	}
+
 	authenticator := strings.ToLower(query.Get("authenticator"))
 	switch authenticator {
 	case "", "snowflake":
@@ -87,6 +95,36 @@ func ParseURI(uri string) (*Auth, error) {
 	}
 
 	return auth, nil
+}
+
+var validHost = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+
+// parseEndpoint reads the optional host and port overrides. Without them the driver
+// derives the host from the account. The driver always connects over HTTPS.
+func (a *Auth) parseEndpoint(query url.Values) error {
+	if host := query.Get("host"); host != "" {
+		if !validHost.MatchString(host) {
+			return fmt.Errorf("snowflake URI: host must be a hostname or IPv4 address without a scheme, port, or path")
+		}
+		a.Host = host
+	}
+
+	if raw := query.Get("port"); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("snowflake URI: port must be a number between 1 and 65535")
+		}
+		a.Port = port
+	}
+
+	return nil
+}
+
+const localStackDomain = "localhost.localstack.cloud"
+
+func isLocalStackHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == localStackDomain || strings.HasSuffix(host, "."+localStackDomain)
 }
 
 func (a *Auth) resolvePrivateKey() error {
@@ -128,12 +166,20 @@ func (a *Auth) validate() error {
 func (a *Auth) ToConfig() *sf.Config {
 	cfg := &sf.Config{
 		Account:   a.Account,
+		Host:      a.Host,
+		Port:      a.Port,
 		User:      a.User,
 		Password:  a.Password,
 		Database:  a.Database,
 		Schema:    a.Schema,
 		Warehouse: a.Warehouse,
 		Role:      a.Role,
+		// OCSP is off by default since gosnowflake v2.3.0, but SF_DISABLE_OCSP_CHECKS=false
+		// opts every connection back in, so the LocalStack emulator still skips revocation
+		// checks per connection. Its certificate names no OCSP responder, so the check never
+		// had anything to verify; it only spent seconds retrying ocsp.<host>:80. TLS
+		// verification stays on.
+		DisableOCSPChecks: isLocalStackHost(a.Host),
 	}
 
 	if a.Authenticator != sf.AuthTypeSnowflake {

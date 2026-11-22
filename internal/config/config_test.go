@@ -189,6 +189,57 @@ func TestIngestConfigValidate_TableNaming(t *testing.T) {
 	})
 }
 
+func TestIngestConfigValidate_CDCDeleteBehavior(t *testing.T) {
+	tests := []struct {
+		name        string
+		sourceURI   string
+		behavior    CDCDeleteBehavior
+		strategy    IncrementalStrategy
+		fullRefresh bool
+		stream      bool
+		wantErr     string
+	}{
+		{name: "default soft", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteSoft},
+		{name: "empty", sourceURI: "postgres+cdc://localhost/db"},
+		{name: "hard for CDC", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard},
+		{name: "hard for change tracking", sourceURI: "mssql+ct://localhost/db", behavior: CDCDeleteHard},
+		{name: "hard with explicit merge", sourceURI: "mysql+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyMerge},
+		{name: "hard with append", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyAppend, wantErr: "requires the \"merge\" incremental strategy"},
+		{name: "hard refresh with explicit merge", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyMerge, fullRefresh: true},
+		{name: "hard refresh with explicit replace", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyReplace, fullRefresh: true},
+		{name: "hard refresh overrides append", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyAppend, fullRefresh: true},
+		{name: "hard streaming refresh rejects append", sourceURI: "postgres+cdc://localhost/db", behavior: CDCDeleteHard, strategy: StrategyAppend, fullRefresh: true, stream: true, wantErr: "requires the \"merge\" incremental strategy"},
+		{name: "hard for non-CDC source", sourceURI: "postgres://localhost/db", behavior: CDCDeleteHard, wantErr: "CDC and Change Tracking sources only"},
+		{name: "soft for non-CDC source", sourceURI: "postgres://localhost/db", behavior: CDCDeleteSoft},
+		{name: "unknown", sourceURI: "postgres+cdc://localhost/db", behavior: "purge", wantErr: "invalid value"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = tt.sourceURI
+			cfg.DestURI = "duckdb://out.duckdb"
+			cfg.SourceTable = "public.users"
+			cfg.CDCDeleteBehavior = tt.behavior
+			cfg.FullRefresh = tt.fullRefresh
+			cfg.Stream = tt.stream
+			if tt.strategy != "" {
+				cfg.IncrementalStrategy = tt.strategy
+				cfg.IncrementalStrategyExplicit = true
+			}
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "cdc-delete-behavior") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected cdc-delete-behavior error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestIngestConfigValidate_IncrementalPredicateDefersStrategyValidation(t *testing.T) {
 	newCfg := func() *IngestConfig {
 		cfg := DefaultConfig()
@@ -242,9 +293,8 @@ func TestIngestConfigValidate_Stream(t *testing.T) {
 			mutate: func(c *IngestConfig) {},
 		},
 		{
-			name:    "full refresh rejected",
-			mutate:  func(c *IngestConfig) { c.FullRefresh = true },
-			wantErr: "full-refresh",
+			name:   "full refresh allowed",
+			mutate: func(c *IngestConfig) { c.FullRefresh = true },
 		},
 		{
 			name:    "interval end rejected",
@@ -382,6 +432,37 @@ func TestIngestConfigValidate_CDCMode(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestIngestConfigParsePartitionExpression(t *testing.T) {
+	tests := []struct {
+		destURI     string
+		partitionBy string
+		wantErr     bool
+	}{
+		{"bigquery://project/dataset", "created_at", false},
+		{"bigquery://project/dataset", "TIMESTAMP_TRUNC(created_at, HOUR)", false},
+		{"bigquery://project/dataset", "RANGE_BUCKET(id, GENERATE_ARRAY(0, 100, 10))", false},
+		{"bigquery://project/dataset", "HOUR(created_at)", true},
+		{"iceberg+r2://account/warehouse", "hour(created_at)", false},
+		{"iceberg+r2://account/warehouse", "bucket(16, id)", false},
+		{"iceberg+r2://account/warehouse", "TIMESTAMP_TRUNC(created_at, HOUR)", true},
+		{"bigquery://project/dataset", "hour(created_at)", true},
+		{"duckdb:///tmp/out.duckdb", "created_at", false},
+		{"postgres://localhost/out", "DATE(created_at)", true},
+		{"duckdb:///tmp/out.duckdb", "DATE(created_at)", true},
+		{"ducklake://catalog.ducklake", "DATE(created_at)", true},
+		{"bigquery://project/dataset", "WEEK(created_at)", true},
+	}
+	for _, tt := range tests {
+		cfg := DefaultConfig()
+		cfg.DestURI = tt.destURI
+
+		err := cfg.ParsePartitionExpression(tt.partitionBy)
+		if (err != nil) != tt.wantErr {
+			t.Fatalf("ParsePartitionExpression(%s, %q) error = %v, wantErr %v", tt.destURI, tt.partitionBy, err, tt.wantErr)
+		}
 	}
 }
 
@@ -649,5 +730,205 @@ func TestIngestConfigValidate_SubsetLeavesDestTableEmpty(t *testing.T) {
 	// DestTable must not be defaulted to a joined name.
 	if cfg.DestTable != "" {
 		t.Fatalf("DestTable = %q, want empty", cfg.DestTable)
+	}
+}
+
+func TestIngestConfigValidate_CDCNoSnapshot(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		change  func(*IngestConfig)
+		wantErr string
+	}{
+		{name: "bootstrap", change: func(c *IngestConfig) { c.CDCStartLSN = "1/ABCDEF" }},
+		{name: "resume", change: func(c *IngestConfig) {}},
+		{name: "alias auto", change: func(c *IngestConfig) {
+			c.SourceURI = "postgresql+cdc://localhost/db"
+			c.CDCSnapshotMode = "auto"
+		}},
+		{name: "alias bootstrap", change: func(c *IngestConfig) {
+			c.SourceURI = "postgresql+cdc://localhost/db?slot=external"
+			c.CDCStartLSN = "1/ABCDEF"
+		}},
+		{name: "subset", change: func(c *IngestConfig) { c.SourceTable = ""; c.SourceTables = []string{"a", "b"} }},
+		{name: "unknown mode", change: func(c *IngestConfig) { c.CDCSnapshotMode = "skip" }, wantErr: "must be auto or never"},
+		{name: "wrong source", change: func(c *IngestConfig) { c.SourceURI = "mysql+cdc://localhost/db" }, wantErr: "only supported for postgres+cdc"},
+		{name: "no selection", change: func(c *IngestConfig) { c.SourceTable = "" }, wantErr: "explicitly select tables"},
+		{name: "no slot", change: func(c *IngestConfig) { c.SourceURI = "postgres+cdc://localhost/db" }, wantErr: "existing explicit slot"},
+		{name: "full refresh", change: func(c *IngestConfig) { c.FullRefresh = true }, wantErr: "cannot be combined"},
+		{name: "append", change: func(c *IngestConfig) { c.IncrementalStrategy = StrategyAppend }, wantErr: "requires merge"},
+		{name: "explicit replace", change: func(c *IngestConfig) { c.IncrementalStrategyExplicit = true }, wantErr: "requires merge"},
+		{name: "invalid LSN", change: func(c *IngestConfig) { c.CDCStartLSN = "now" }, wantErr: "nonzero PostgreSQL LSN"},
+		{name: "zero LSN", change: func(c *IngestConfig) { c.CDCStartLSN = "0/0" }, wantErr: "nonzero PostgreSQL LSN"},
+		{name: "LSN without never", change: func(c *IngestConfig) { c.CDCSnapshotMode = "auto"; c.CDCStartLSN = "0/1234" }, wantErr: "requires --cdc-snapshot-mode never"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://localhost/db?slot=external"
+			cfg.DestURI = "postgres://localhost/dest"
+			cfg.SourceTable = "public.orders"
+			cfg.CDCSnapshotMode = "never"
+			tt.change(cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("got %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIngestConfigValidateCDCChunkedSnapshot(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		change  func(*IngestConfig)
+		wantErr string
+	}{
+		{name: "inmemory", change: func(c *IngestConfig) {}},
+		{name: "destination", change: func(c *IngestConfig) { c.CDCSnapshotExecution, c.CDCWALStaging = "parallel", "destination" }},
+		{name: "parallel", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "parallel" }},
+		{name: "serial destination", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "serial"; c.CDCWALStaging = "destination" }, wantErr: "destination staging requires --cdc-snapshot-execution parallel"},
+		{name: "disabled serial destination", change: func(c *IngestConfig) {
+			c.CDCChunkedSnapshot, c.CDCSnapshotExecution, c.CDCWALStaging = false, "serial", "destination"
+		}},
+		{name: "unknown execution", change: func(c *IngestConfig) { c.CDCSnapshotExecution = "concurrent" }, wantErr: "cdc-snapshot-execution must be parallel or serial"},
+		{name: "unknown execution while disabled", change: func(c *IngestConfig) { c.CDCChunkedSnapshot = false; c.CDCSnapshotExecution = "concurrent" }, wantErr: "cdc-snapshot-execution must be parallel or serial"},
+		{name: "alias", change: func(c *IngestConfig) { c.SourceURI = "postgresql+cdc://localhost/db" }},
+		{name: "multi table", change: func(c *IngestConfig) { c.SourceTable = ""; c.SourceTables = []string{"public.a", "public.b"} }},
+		{name: "wrong source", change: func(c *IngestConfig) { c.SourceURI = "mysql+cdc://localhost/db" }, wantErr: "only supported for postgres+cdc"},
+		{name: "regular postgres", change: func(c *IngestConfig) { c.SourceURI = "postgres://localhost/db" }, wantErr: "only supported for postgres+cdc"},
+		{name: "never", change: func(c *IngestConfig) { c.CDCSnapshotMode = "never" }, wantErr: "cannot be combined with CDC snapshot mode never"},
+		{name: "external baseline", change: func(c *IngestConfig) { c.CDCStartLSN = "1/ABCDEF" }, wantErr: "cannot be combined with --cdc-start-lsn"},
+		{name: "negative chunk size", change: func(c *IngestConfig) { c.CDCSnapshotChunkSize = -1 }, wantErr: "cdc-snapshot-chunk-size"},
+		{name: "negative timeout", change: func(c *IngestConfig) { c.CDCSnapshotChunkTimeout = -time.Second }, wantErr: "cdc-snapshot-chunk-timeout"},
+		{name: "negative buffer", change: func(c *IngestConfig) { c.CDCWALBufferBytes = -1 }, wantErr: "cdc-wal-buffer-bytes"},
+		{name: "negative finite flush interval", change: func(c *IngestConfig) { c.FlushInterval = -time.Second }, wantErr: "flush-interval"},
+		{name: "negative finite flush records", change: func(c *IngestConfig) { c.FlushRecords = -1 }, wantErr: "flush-records"},
+		{name: "explicit replace", change: func(c *IngestConfig) { c.IncrementalStrategyExplicit = true }, wantErr: "require merge"},
+		{name: "append", change: func(c *IngestConfig) { c.IncrementalStrategy = StrategyAppend }, wantErr: "require merge"},
+		{name: "scd2", change: func(c *IngestConfig) { c.IncrementalStrategy = StrategySCD2 }, wantErr: "require merge"},
+		{name: "delete insert", change: func(c *IngestConfig) { c.IncrementalStrategy = StrategyDeleteInsert }, wantErr: "require merge"},
+		{name: "limit", change: func(c *IngestConfig) { c.SQLLimit = 1 }, wantErr: "sql-limit"},
+		{name: "exclude columns", change: func(c *IngestConfig) { c.SQLExcludeColumns = []string{"payload"} }, wantErr: "sql-exclude-columns"},
+		{name: "incremental key", change: func(c *IngestConfig) { c.IncrementalKey = "id" }, wantErr: "incremental-key"},
+		{name: "predicate", change: func(c *IngestConfig) { c.IncrementalPredicate = "id > 5" }, wantErr: "incremental-predicate"},
+		{name: "interval start", change: func(c *IngestConfig) { now := time.Now(); c.IntervalStart = &now }, wantErr: "interval-start"},
+		{name: "interval end", change: func(c *IngestConfig) { now := time.Now(); c.IntervalEnd = &now }, wantErr: "interval-end"},
+		{name: "partition", change: func(c *IngestConfig) { c.ExtractPartitionBy = "id" }, wantErr: "extract-partition-by"},
+		{name: "unknown staging", change: func(c *IngestConfig) { c.CDCWALStaging = "invalid" }, wantErr: "must be memory, inmemory, destination, or disk"},
+		{name: "unknown staging while disabled", change: func(c *IngestConfig) { c.CDCChunkedSnapshot = false; c.CDCWALStaging = "invalid" }, wantErr: "must be memory, inmemory, destination, or disk"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://localhost/db"
+			cfg.DestURI = "postgres://localhost/dest"
+			cfg.SourceTable = "public.orders"
+			cfg.CDCChunkedSnapshot = true
+			tt.change(cfg)
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("got %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCDCChunkedSnapshotProgrammaticDefaults(t *testing.T) {
+	cfg := &IngestConfig{
+		SourceURI:          "postgres+cdc://localhost/db",
+		DestURI:            "postgres://localhost/dest",
+		SourceTable:        "public.orders",
+		CDCChunkedSnapshot: true,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CDCSnapshotExecution != "serial" {
+		t.Fatalf("chunked snapshot execution = %q, want serial", cfg.CDCSnapshotExecution)
+	}
+	if cfg.CDCSnapshotChunkSize != DefaultCDCSnapshotChunkSize ||
+		cfg.CDCSnapshotChunkTimeout != DefaultCDCSnapshotChunkTimeout ||
+		cfg.CDCWALBufferBytes != DefaultCDCWALBufferBytes || cfg.CDCWALStaging != "inmemory" {
+		t.Fatalf("chunked snapshot defaults = (%d, %s, %d, %q)", cfg.CDCSnapshotChunkSize, cfg.CDCSnapshotChunkTimeout, cfg.CDCWALBufferBytes, cfg.CDCWALStaging)
+	}
+	if cfg.FlushInterval != 30*time.Second || cfg.FlushRecords != 50000 {
+		t.Fatalf("chunked snapshot flush defaults = (%s, %d)", cfg.FlushInterval, cfg.FlushRecords)
+	}
+
+	cfg.CDCSnapshotMode = "never"
+	if err := cfg.ValidateCDCSnapshotMode(); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("inherited never policy validation = %v", err)
+	}
+}
+
+func TestCDCChunkedSnapshotDisabledByDefault(t *testing.T) {
+	if DefaultConfig().CDCChunkedSnapshot {
+		t.Fatal("chunked snapshots must be opt in")
+	}
+	if DefaultConfig().CDCSnapshotExecution != "serial" {
+		t.Fatal("chunked snapshot execution must default to serial")
+	}
+	cfg := &IngestConfig{}
+	cfg.ApplyCDCChunkedSnapshotDefaults()
+	if cfg.CDCSnapshotExecution != "" || cfg.CDCSnapshotChunkSize != 0 || cfg.CDCSnapshotChunkTimeout != 0 || cfg.CDCWALBufferBytes != 0 || cfg.CDCWALStaging != "" {
+		t.Fatal("chunked snapshot defaults changed a disabled configuration")
+	}
+}
+
+func TestIngestConfigValidateRefreshID(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		stream, fullRefresh bool
+		wantError           bool
+	}{
+		{"durable streaming refresh", true, true, false},
+		{"missing refresh", true, false, true},
+		{"missing streaming", false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SourceURI = "postgres+cdc://localhost/db"
+			cfg.DestURI = "postgres://localhost/dest"
+			cfg.IncrementalStrategy = StrategyMerge
+			cfg.Stream = tc.stream
+			cfg.FullRefresh = tc.fullRefresh
+			cfg.RefreshID = "stream:opaque-request"
+			err := cfg.Validate()
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "refresh-id") {
+					t.Fatalf("expected refresh-id validation, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestChangeTrackingStreamingRefreshRequiresMerge(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SourceURI = "mssql+ct://source/db"
+	cfg.SourceTable = "dbo.users"
+	cfg.DestURI = "postgres://destination/db"
+	cfg.Stream, cfg.FullRefresh = true, true
+	cfg.IncrementalStrategy, cfg.IncrementalStrategyExplicit = StrategyAppend, true
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "incremental-strategy") {
+		t.Fatalf("expected CT streaming strategy rejection, got %v", err)
+	}
+	cfg.IncrementalStrategy = StrategyMerge
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Stream = false
+	cfg.IncrementalStrategy = StrategyReplace
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("batch refresh should still allow replace: %v", err)
 	}
 }
