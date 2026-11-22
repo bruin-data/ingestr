@@ -749,9 +749,11 @@ func finalizeMultiTableInPlaceReplace(ctx context.Context, job *MultiTableIngest
 
 		columns := tableInfo.Schema.ColumnNames()
 		stagingPrimaryKeysUnique := false
-		if job.Config.HardDeletesCDC() && hasCDCColumns(tableInfo.Schema) && len(tableInfo.PrimaryKeys) > 0 {
+		// CDC staging can hold several changes per key, so pick the latest one
+		// by LSN through the CDC merge rather than DISTINCT ON alone.
+		if hasCDCColumns(tableInfo.Schema) && len(tableInfo.PrimaryKeys) > 0 {
 			normalised, err := deduplicateStaging(ctx, job.Destination, stagingTable, destTable,
-				job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil, job.Config.RunID, true)
+				job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil, job.Config.RunID, job.Config.HardDeletesCDC())
 			if err != nil {
 				delete(pending, tableInfo.Name)
 				return fmt.Errorf("failed to deduplicate table %s: %w", tableInfo.Name, err)

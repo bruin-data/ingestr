@@ -745,6 +745,82 @@ func TestPostgresMultiTableRefreshReadFailurePreservesTargetKeys(t *testing.T) {
 	}
 }
 
+func TestPostgresMultiTableCDCRefreshKeepsLatestChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	destURI := sharedPostgresURI(t, "dest")
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	// A snapshot followed by streamed changes, as MySQL and MSSQL CDC full
+	// refreshes produce, with the rows for one key out of LSN order.
+	changes := strings.Join([]string{
+		`{"_cdc_deleted":false,"_cdc_lsn":"0001","_cdc_synced_at":"s","id":1,"name":"snapshot"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0003","_cdc_synced_at":"s","id":1,"name":"updated"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0002","_cdc_synced_at":"s","id":1,"name":"older update"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0001","_cdc_synced_at":"s","id":2,"name":"snapshot"}`,
+		`{"_cdc_deleted":true,"_cdc_lsn":"0004","_cdc_synced_at":"s","id":2,"name":"snapshot"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0001","_cdc_synced_at":"s","id":3,"name":"snapshot"}`,
+	}, "\n")
+	for _, hardDelete := range []bool{false, true} {
+		t.Run(fmt.Sprintf("hard_delete=%t", hardDelete), func(t *testing.T) {
+			destSchema := uniqueSchemaName(t, "cdc_refresh")
+			ensurePostgresSchema(t, ctx, destURI, destSchema)
+			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+			table := pqTable(destSchema, "orders")
+			_, err := db.ExecContext(ctx, "CREATE TABLE "+table+" (_cdc_deleted boolean, _cdc_lsn text, _cdc_synced_at text, id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (false, '0000', 's', 99, 'stale')")
+			require.NoError(t, err)
+			path := filepath.Join(t.TempDir(), "orders.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(changes), 0o600))
+
+			dest := postgresdest.NewPostgresDestination()
+			require.NoError(t, dest.Connect(ctx, destURI))
+			defer func() { _ = dest.Close(ctx) }()
+			src := newMockMultiTableSource()
+			src.tables["orders"] = path
+			cfg := &config.IngestConfig{FullRefresh: true}
+			if hardDelete {
+				cfg.CDCDeleteBehavior = config.CDCDeleteHard
+			}
+			job := &strategy.MultiTableIngestionJob{
+				Config: cfg, Source: src, Destination: dest,
+				Tables: []source.SourceTableInfo{{Name: "orders", PrimaryKeys: []string{"id"}, Schema: &schema.TableSchema{
+					Columns: []schema.Column{
+						{Name: "_cdc_deleted", DataType: schema.TypeBoolean, Nullable: true},
+						{Name: "_cdc_lsn", DataType: schema.TypeString, Nullable: true},
+						{Name: "_cdc_synced_at", DataType: schema.TypeString, Nullable: true},
+						{Name: "id", DataType: schema.TypeInt64},
+						{Name: "name", DataType: schema.TypeString, Nullable: true},
+					},
+				}}},
+				TableDestNames: map[string]string{"orders": destSchema + ".orders"},
+			}
+			require.NoError(t, (&strategy.ReplaceStrategy{}).ExecuteMultiTable(ctx, job))
+
+			rows, err := db.QueryContext(ctx, "SELECT id, name, _cdc_deleted FROM "+table+" ORDER BY id")
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			got := map[int64]string{}
+			for rows.Next() {
+				var id int64
+				var name string
+				var deleted bool
+				require.NoError(t, rows.Scan(&id, &name, &deleted))
+				got[id] = fmt.Sprintf("%s deleted=%t", name, deleted)
+			}
+			require.NoError(t, rows.Err())
+			want := map[int64]string{1: "updated deleted=false", 2: "snapshot deleted=true", 3: "snapshot deleted=false"}
+			if hardDelete {
+				delete(want, 2)
+			}
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
 // TestDestinations_MultiTable_Append validates multi-table append strategy.
 func TestDestinations_MultiTable_Append(t *testing.T) {
 	if testing.Short() {

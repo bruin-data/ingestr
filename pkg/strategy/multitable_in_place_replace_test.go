@@ -169,3 +169,23 @@ func TestReplaceStrategy_ExecuteMultiTable_NonPostgresStillSwaps(t *testing.T) {
 		require.False(t, opts.PrimaryKeysOnlyOnCreate)
 	}
 }
+
+func TestReplaceStrategy_ExecuteMultiTable_PostgresInPlaceSoftDeleteCDCNormalizes(t *testing.T) {
+	job, _, _ := cdcReplaceJob()
+	job.Config.CDCDeleteBehavior = config.CDCDeleteSoft
+	table := source.SourceTableInfo{Name: "public.items", Schema: job.Schema, PrimaryKeys: job.Config.PrimaryKeys}
+	multiJob, dest := multiTableInPlaceReplaceJob(table)
+	multiJob.Config = job.Config
+
+	require.NoError(t, (&ReplaceStrategy{}).ExecuteMultiTable(t.Context(), multiJob))
+
+	require.Len(t, dest.mergeCalls, 1)
+	merge := dest.mergeCalls[0]
+	require.False(t, merge.CDCHardDelete)
+	require.Contains(t, merge.Columns, destination.CDCDeletedColumn)
+	require.Len(t, dest.finalizeCalls, 1)
+	finalize := dest.finalizeCalls[0]
+	require.Equal(t, merge.TargetTable, finalize.StagingTable)
+	require.True(t, finalize.StagingPrimaryKeysUnique)
+	require.Contains(t, dest.dropCalls, finalize.StagingTable)
+}

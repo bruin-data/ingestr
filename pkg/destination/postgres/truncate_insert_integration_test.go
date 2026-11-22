@@ -210,6 +210,15 @@ func TestTruncateInsertFromStagingReplacesMismatchedPrimaryKey(t *testing.T) {
 	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT tenant IS NULL FROM public.current_accounts WHERE id = 3`).Scan(&tenantIsNull))
 	require.True(t, tenantIsNull, "a column leaving the key must accept NULLs")
 
+	// A keyless source drops the old key, as a swap would.
+	opts.PrimaryKeys = nil
+	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
+	keys, err = postgresPrimaryKeyColumns(ctx, dest.pool, "public", "accounts")
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	opts.PrimaryKeys = []string{"id"}
+	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
+
 	require.NoError(t, dest.Exec(ctx, `
 		CREATE TABLE public.account_refs (id bigint REFERENCES public.accounts (id));
 		TRUNCATE _bruin_staging.accounts; INSERT INTO _bruin_staging.accounts VALUES (4, 'x', 'blocked');
