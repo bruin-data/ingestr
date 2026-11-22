@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -199,6 +200,13 @@ func TestTruncateInsertFromStagingReplacesMismatchedPrimaryKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, warnings, 1)
+	tenant := schema.Column{Name: "tenant", DataType: schema.TypeString}
+	warnings, err = dest.ApplySchemaEvolution(ctx, "public.accounts", &schemaevolution.SchemaComparison{
+		Changes:    []schemaevolution.SchemaChange{{Type: schemaevolution.ChangeRemoveColumn, ColumnName: "tenant", OldColumn: &tenant}},
+		HasChanges: true,
+	})
+	require.NoError(t, err, "a key column removed at the source must not be relaxed before the rekey")
+	require.Len(t, warnings, 1)
 
 	require.NoError(t, dest.Exec(ctx, `TRUNCATE _bruin_staging.accounts; INSERT INTO _bruin_staging.accounts VALUES (3, NULL, 'shrunk')`))
 	opts.PrimaryKeys = []string{"id"}
@@ -219,12 +227,13 @@ func TestTruncateInsertFromStagingReplacesMismatchedPrimaryKey(t *testing.T) {
 	opts.PrimaryKeys = []string{"id"}
 	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
 
+	// A self-reference lets TRUNCATE succeed, so the key change itself is blocked.
 	require.NoError(t, dest.Exec(ctx, `
-		CREATE TABLE public.account_refs (id bigint REFERENCES public.accounts (id));
+		ALTER TABLE public.accounts ADD COLUMN parent bigint REFERENCES public.accounts (id);
 		TRUNCATE _bruin_staging.accounts; INSERT INTO _bruin_staging.accounts VALUES (4, 'x', 'blocked');
 	`))
 	opts.PrimaryKeys = []string{"id", "tenant"}
-	require.Error(t, dest.TruncateInsertFromStaging(ctx, opts))
+	require.ErrorContains(t, dest.TruncateInsertFromStaging(ctx, opts), "failed to set primary key")
 	keys, err = postgresPrimaryKeyColumns(ctx, dest.pool, "public", "accounts")
 	require.NoError(t, err)
 	require.Equal(t, []string{"id"}, keys, "a referenced key must not be dropped")

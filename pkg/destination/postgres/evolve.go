@@ -31,13 +31,17 @@ func (d *PostgresDestination) SupportsColumnTypeChanges() bool {
 	return (&Dialect{}).SupportsAlterType()
 }
 
+// relaxesNullability reports changes rendered as DROP NOT NULL: relaxations and
+// removed source columns, which stay behind as nullable columns.
+func relaxesNullability(change schemaevolution.SchemaChange) bool {
+	return change.Type == schemaevolution.ChangeRelaxNullability || change.Type == schemaevolution.ChangeRemoveColumn
+}
+
 // keepPrimaryKeyColumnsNotNull removes NOT NULL relaxations for columns in the
 // target's primary key, which PostgreSQL rejects. A replacement that changes
 // the key relaxes the former key columns itself.
 func (d *PostgresDestination) keepPrimaryKeyColumnsNotNull(ctx context.Context, table string, comparison *schemaevolution.SchemaComparison) (*schemaevolution.SchemaComparison, []string, error) {
-	if comparison == nil || !slices.ContainsFunc(comparison.Changes, func(change schemaevolution.SchemaChange) bool {
-		return change.Type == schemaevolution.ChangeRelaxNullability
-	}) {
+	if comparison == nil || !slices.ContainsFunc(comparison.Changes, relaxesNullability) {
 		return comparison, nil, nil
 	}
 	schemaName, tableName, err := d.resolveSchemaTable(ctx, d.pool, table)
@@ -55,7 +59,7 @@ func (d *PostgresDestination) keepPrimaryKeyColumnsNotNull(ctx context.Context, 
 	filtered.Changes = make([]schemaevolution.SchemaChange, 0, len(comparison.Changes))
 	var warnings []string
 	for _, change := range comparison.Changes {
-		if change.Type == schemaevolution.ChangeRelaxNullability && slices.Contains(keys, change.ColumnName) {
+		if relaxesNullability(change) && slices.Contains(keys, change.ColumnName) {
 			warnings = append(warnings, fmt.Sprintf("column %q on table %q stays NOT NULL because it is part of the primary key", change.ColumnName, table))
 			continue
 		}

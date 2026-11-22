@@ -622,9 +622,9 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 			ensurePostgresSchema(t, ctx, destURI, destSchema)
 			ensurePostgresSchema(t, ctx, sourceURI, destSchema)
 			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
-			tables := make([]string, 0, 2)
+			tables := make([]string, 0, 3)
 			oids := make(map[string]int64)
-			for _, name := range []string{"users", "orders"} {
+			for _, name := range []string{"users", "orders", "events"} {
 				table := pqTable(destSchema, name)
 				_, err := sourceDB.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (7, '"+name+"')")
 				require.NoError(t, err)
@@ -636,6 +636,14 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 				}
 				if name == "orders" {
 					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" DROP CONSTRAINT orders_pkey; INSERT INTO "+table+" VALUES (99, 'duplicate stale row')")
+					require.NoError(t, err)
+				}
+				if name == "events" {
+					// The target key includes a column the source no longer has,
+					// and the source gained a column the target lacks.
+					_, err = sourceDB.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN email text; UPDATE "+table+" SET email = 'new@example.com'")
+					require.NoError(t, err)
+					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN legacy_id bigint NOT NULL DEFAULT 0, DROP CONSTRAINT events_pkey, ADD PRIMARY KEY (id, legacy_id); ALTER TABLE "+table+" ALTER COLUMN legacy_id DROP DEFAULT")
 					require.NoError(t, err)
 				}
 				if withView {
@@ -657,7 +665,10 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 				cfg.CDCDeleteBehavior = config.CDCDeleteHard
 			}
 			require.NoError(t, pipeline.New(cfg).Run(ctx))
-			for _, name := range []string{"users", "orders"} {
+			var email string
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT email FROM "+pqTable(destSchema, "events")+" WHERE id = 7").Scan(&email))
+			assert.Equal(t, "new@example.com", email, "columns added at the source must be added before the replacement")
+			for _, name := range []string{"users", "orders", "events"} {
 				table := pqTable(destSchema, name)
 				var oid int64
 				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
