@@ -157,6 +157,9 @@ type TruncateInsertFromStagingOptions struct {
 	Columns                  []string
 	IncrementalKey           string
 	CDCExpectedIncarnation   string
+	// ReplacePrimaryKey replaces an existing target primary key that differs
+	// from PrimaryKeys, so a full refresh rekeys the table like a swap would.
+	ReplacePrimaryKey bool
 }
 
 // InsertFromStagingOptions configures a keyless insert from a populated

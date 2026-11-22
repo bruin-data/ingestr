@@ -1220,12 +1220,39 @@ func (d *PostgresDestination) TruncateInsertFromStaging(ctx context.Context, opt
 		if err != nil {
 			return fmt.Errorf("failed to check primary key: %w", err)
 		}
-		if len(actualKeys) == 0 {
-			// Old rows may contain duplicate keys, so add the constraint only
-			// after truncation, in the same transaction as the replacement.
-			alterSQL := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)", quotePostgresTable(schemaName, tableName), strings.Join(quoteColumns(opts.PrimaryKeys), ", "))
+		// Old rows may contain duplicate keys, so change the constraint only
+		// after truncation, in the same transaction as the replacement.
+		quotedTarget := quotePostgresTable(schemaName, tableName)
+		addPrimaryKey := fmt.Sprintf("ADD PRIMARY KEY (%s)", strings.Join(quoteColumns(opts.PrimaryKeys), ", "))
+		var alterSQL string
+		switch {
+		case len(actualKeys) == 0:
+			alterSQL = fmt.Sprintf("ALTER TABLE %s %s", quotedTarget, addPrimaryKey)
+		case opts.ReplacePrimaryKey && !postgresPrimaryKeySetsEqual(opts.PrimaryKeys, actualKeys):
+			var constraintName string
+			if err := tx.QueryRow(ctx, `
+				SELECT con.conname::text
+				FROM pg_catalog.pg_constraint AS con
+				JOIN pg_catalog.pg_class AS rel ON rel.oid = con.conrelid
+				JOIN pg_catalog.pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+				WHERE nsp.nspname = $1 AND rel.relname = $2 AND con.contype = 'p'
+			`, schemaName, tableName).Scan(&constraintName); err != nil {
+				return fmt.Errorf("failed to find primary key constraint: %w", err)
+			}
+			alterSQL = fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", quotedTarget, pgx.Identifier{constraintName}.Sanitize())
+			// Schema evolution cannot relax key columns, so columns leaving the
+			// key become nullable here.
+			for _, column := range actualKeys {
+				if !slices.Contains(opts.PrimaryKeys, column) {
+					alterSQL += fmt.Sprintf(", ALTER COLUMN %s DROP NOT NULL", destination.QuoteIdentifier(column))
+				}
+			}
+			alterSQL += ";\nALTER TABLE " + quotedTarget + " " + addPrimaryKey
+		}
+		if alterSQL != "" {
 			if _, err := tx.Exec(ctx, alterSQL); err != nil {
-				return fmt.Errorf("failed to add primary key: %w", err)
+				config.LogFailedQuery(alterSQL, err)
+				return fmt.Errorf("failed to set primary key: %w", err)
 			}
 		}
 	}

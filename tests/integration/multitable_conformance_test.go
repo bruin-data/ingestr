@@ -615,8 +615,9 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	for _, withView := range []bool{false, true} {
-		t.Run(fmt.Sprintf("view=%t", withView), func(t *testing.T) {
+	for _, tc := range []struct{ withView, hardDelete bool }{{false, false}, {true, false}, {false, true}} {
+		withView := tc.withView
+		t.Run(fmt.Sprintf("view=%t/hard_delete=%t", tc.withView, tc.hardDelete), func(t *testing.T) {
 			destSchema := uniqueSchemaName(t, "refresh")
 			ensurePostgresSchema(t, ctx, destURI, destSchema)
 			ensurePostgresSchema(t, ctx, sourceURI, destSchema)
@@ -629,6 +630,10 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 				require.NoError(t, err)
 				_, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (99, 'stale'); GRANT SELECT ON "+table+" TO PUBLIC")
 				require.NoError(t, err)
+				if name == "users" {
+					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" DROP CONSTRAINT users_pkey, ADD PRIMARY KEY (id, name)")
+					require.NoError(t, err)
+				}
 				if name == "orders" {
 					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" DROP CONSTRAINT orders_pkey; INSERT INTO "+table+" VALUES (99, 'duplicate stale row')")
 					require.NoError(t, err)
@@ -648,6 +653,9 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 				IncrementalStrategy: config.StrategyMerge, FullRefresh: true,
 				NoLoadTimestamp: true, NoRunID: true,
 			}
+			if tc.hardDelete {
+				cfg.CDCDeleteBehavior = config.CDCDeleteHard
+			}
 			require.NoError(t, pipeline.New(cfg).Run(ctx))
 			for _, name := range []string{"users", "orders"} {
 				table := pqTable(destSchema, name)
@@ -660,6 +668,9 @@ func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
 				var hasPrimaryKey bool
 				require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p')`, table).Scan(&hasPrimaryKey))
 				assert.True(t, hasPrimaryKey, "missing primary keys must be added after stale rows are removed")
+				var keys string
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT string_agg(a.attname::text, ',' ORDER BY a.attnum) FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) WHERE c.conrelid = $1::regclass AND c.contype = 'p'`, table).Scan(&keys))
+				assert.Equal(t, "id", keys, "full refresh must replace a primary key that drifted from the source")
 				if withView {
 					table = pqTable(destSchema, name+"_view")
 				}

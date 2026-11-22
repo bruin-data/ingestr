@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -118,4 +119,106 @@ func TestTruncateInsertFromStagingIsAtomic(t *testing.T) {
 	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT id, value FROM public.events`).Scan(&id, &value))
 	require.Equal(t, int64(99), id)
 	require.Equal(t, "different table", value)
+}
+
+func TestTruncateInsertFromStagingReplacesMismatchedPrimaryKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image: "postgres:16-alpine",
+			Env: map[string]string{
+				"POSTGRES_USER": "testuser", "POSTGRES_PASSWORD": "testpass", "POSTGRES_DB": "testdb",
+			},
+			ExposedPorts: []string{"5432/tcp"},
+			WaitingFor: wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).WithStartupTimeout(time.Minute),
+		},
+		Started: true,
+	})
+	require.NoError(t, err)
+	defer func() { _ = container.Terminate(context.Background()) }()
+	host, err := container.Host(ctx)
+	require.NoError(t, err)
+	port, err := container.MappedPort(ctx, "5432/tcp")
+	require.NoError(t, err)
+
+	dest := NewPostgresDestination()
+	uri := fmt.Sprintf("postgres://testuser:testpass@%s:%s/testdb?sslmode=disable", host, port.Port())
+	require.NoError(t, dest.Connect(ctx, uri))
+	defer func() { _ = dest.Close(context.Background()) }()
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE SCHEMA _bruin_staging;
+		CREATE TABLE public.accounts (id bigint, tenant text NOT NULL, value text, CONSTRAINT "accounts ""pk""" PRIMARY KEY (id));
+		INSERT INTO public.accounts VALUES (1, 'old', 'old');
+		CREATE VIEW public.current_accounts AS SELECT id, tenant, value FROM public.accounts;
+		CREATE TABLE _bruin_staging.accounts (id bigint, tenant text, value text);
+		INSERT INTO _bruin_staging.accounts VALUES (1, 'a', 'first'), (1, 'b', 'second');
+	`))
+	var oid int64
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT 'public.accounts'::regclass::oid::bigint`).Scan(&oid))
+
+	opts := destination.TruncateInsertFromStagingOptions{
+		StagingTable: "_bruin_staging.accounts",
+		TargetTable:  "public.accounts",
+		PrimaryKeys:  []string{"id", "tenant"},
+		Columns:      []string{"id", "tenant", "value"},
+	}
+	require.ErrorContains(t, dest.TruncateInsertFromStaging(ctx, opts), "duplicate key")
+	keys, err := postgresPrimaryKeyColumns(ctx, dest.pool, "public", "accounts")
+	require.NoError(t, err)
+	require.Equal(t, []string{"id"}, keys, "without ReplacePrimaryKey the existing key is kept")
+
+	opts.ReplacePrimaryKey = true
+	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
+	keys, err = postgresPrimaryKeyColumns(ctx, dest.pool, "public", "accounts")
+	require.NoError(t, err)
+	require.Equal(t, []string{"id", "tenant"}, keys)
+	var count int64
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.current_accounts WHERE id = 1`).Scan(&count))
+	require.Equal(t, int64(2), count)
+	var afterOID int64
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT 'public.accounts'::regclass::oid::bigint`).Scan(&afterOID))
+	require.Equal(t, oid, afterOID)
+
+	// A matching key in a different column order is left alone.
+	opts.PrimaryKeys = []string{"tenant", "id"}
+	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
+	keys, err = postgresPrimaryKeyColumns(ctx, dest.pool, "public", "accounts")
+	require.NoError(t, err)
+	require.Equal(t, []string{"id", "tenant"}, keys)
+
+	// Evolution cannot relax a key column; the rekey below relaxes it instead.
+	warnings, err := dest.ApplySchemaEvolution(ctx, "public.accounts", &schemaevolution.SchemaComparison{
+		Changes:    []schemaevolution.SchemaChange{{Type: schemaevolution.ChangeRelaxNullability, ColumnName: "tenant"}},
+		HasChanges: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, warnings, 1)
+
+	require.NoError(t, dest.Exec(ctx, `TRUNCATE _bruin_staging.accounts; INSERT INTO _bruin_staging.accounts VALUES (3, NULL, 'shrunk')`))
+	opts.PrimaryKeys = []string{"id"}
+	require.NoError(t, dest.TruncateInsertFromStaging(ctx, opts))
+	keys, err = postgresPrimaryKeyColumns(ctx, dest.pool, "public", "accounts")
+	require.NoError(t, err)
+	require.Equal(t, []string{"id"}, keys)
+	var tenantIsNull bool
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT tenant IS NULL FROM public.current_accounts WHERE id = 3`).Scan(&tenantIsNull))
+	require.True(t, tenantIsNull, "a column leaving the key must accept NULLs")
+
+	require.NoError(t, dest.Exec(ctx, `
+		CREATE TABLE public.account_refs (id bigint REFERENCES public.accounts (id));
+		TRUNCATE _bruin_staging.accounts; INSERT INTO _bruin_staging.accounts VALUES (4, 'x', 'blocked');
+	`))
+	opts.PrimaryKeys = []string{"id", "tenant"}
+	require.Error(t, dest.TruncateInsertFromStaging(ctx, opts))
+	keys, err = postgresPrimaryKeyColumns(ctx, dest.pool, "public", "accounts")
+	require.NoError(t, err)
+	require.Equal(t, []string{"id"}, keys, "a referenced key must not be dropped")
+	require.NoError(t, dest.pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.accounts WHERE id = 3`).Scan(&count))
+	require.Equal(t, int64(1), count)
 }
