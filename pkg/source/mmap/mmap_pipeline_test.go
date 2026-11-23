@@ -139,7 +139,7 @@ func TestMMapDeleteInsertSQLiteRerunSkipsRowsOutsideInterval(t *testing.T) {
 	require.Equal(t, "2026-11-18", rows)
 }
 
-func TestMMapDeleteInsertDateKeyIntoTimestampColumnNeedsOverride(t *testing.T) {
+func TestMMapDeleteInsertDateKeyIntoTimestampColumnUsesExactBounds(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -169,11 +169,8 @@ func TestMMapDeleteInsertDateKeyIntoTimestampColumnNeedsOverride(t *testing.T) {
 	writeKeyArrowFile(t, sourcePath, "k", timestamps)
 	require.NoError(t, pipeline.New(cfg).Run(ctx))
 
+	// The DATE values become midnight TIMESTAMPs, so Nov 18 is outside the noon-to-noon DELETE window.
 	writeKeyArrowFile(t, sourcePath, "k", date32Array(t, 18, 19))
-	require.ErrorContains(t, pipeline.New(cfg).Run(ctx), `set its type with --columns k:timestamp`)
-
-	// As midnight TIMESTAMPs, Nov 18 is outside the noon-to-noon DELETE window and must be skipped.
-	cfg.Columns = "k:timestamp"
 	for range 2 {
 		require.NoError(t, pipeline.New(cfg).Run(ctx))
 	}
