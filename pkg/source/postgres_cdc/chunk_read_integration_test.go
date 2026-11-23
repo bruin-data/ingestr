@@ -13,6 +13,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,14 +83,24 @@ func TestSnapshotChunkByteCapBoundsServerExecution(t *testing.T) {
 		_, err := pool.Exec(ctx, "SELECT pg_stat_reset_single_function_counters('public.count_chunk_row(bigint)'::regprocedure)")
 		require.NoError(t, err)
 	}
-	counter := func() int64 {
-		var calls int64
-		require.NoError(t, pool.QueryRow(ctx, `
-			SELECT calls
-			FROM pg_stat_user_functions
-			WHERE funcid = 'public.count_chunk_row(bigint)'::regprocedure
-		`).Scan(&calls))
-		return calls
+	// Each backend flushes its function counters to the cumulative stats
+	// asynchronously, up to PGSTAT_IDLE_INTERVAL (10s) after it goes idle, so
+	// wait for the reader's calls to become visible.
+	requireCalls := func(expected int64, msg string) {
+		t.Helper()
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			var calls int64
+			err := pool.QueryRow(ctx, `
+				SELECT COALESCE((
+					SELECT calls
+					FROM pg_stat_user_functions
+					WHERE funcid = 'public.count_chunk_row(bigint)'::regprocedure
+				), 0)
+			`).Scan(&calls)
+			if assert.NoError(c, err) {
+				assert.Equal(c, expected, calls, msg)
+			}
+		}, 30*time.Second, 200*time.Millisecond)
 	}
 	readChunk := func(after, upper []string, size int) (snapshotChunk, [][]int64) {
 		t.Helper()
@@ -120,7 +131,7 @@ func TestSnapshotChunkByteCapBoundsServerExecution(t *testing.T) {
 	require.EqualValues(t, 10, first.Rows)
 	require.Equal(t, []string{"10"}, first.LastKey)
 	require.False(t, first.Done)
-	require.EqualValues(t, 11, counter(), "the upper-key lookup and ten emitted rows should be the only rows executed")
+	requireCalls(11, "the upper-key lookup and ten emitted rows should be the only rows executed")
 
 	second, pages := readChunk(first.LastKey, first.UpperKey, 100)
 	require.Equal(t, ids(11, 100), slices.Concat(pages...))
@@ -129,7 +140,7 @@ func TestSnapshotChunkByteCapBoundsServerExecution(t *testing.T) {
 	}
 	require.EqualValues(t, 90, second.Rows)
 	require.True(t, second.Done)
-	require.EqualValues(t, 101, counter(), "the resumed chunk should execute only the rows it emits")
+	requireCalls(101, "the resumed chunk should execute only the rows it emits")
 
 	_, err = pool.Exec(ctx, "UPDATE public.chunk_width_items SET payload = 'x'")
 	require.NoError(t, err)
@@ -137,5 +148,5 @@ func TestSnapshotChunkByteCapBoundsServerExecution(t *testing.T) {
 	narrow, pages := readChunk(nil, nil, 10)
 	require.Equal(t, [][]int64{ids(1, 10)}, pages)
 	require.False(t, narrow.Done)
-	require.EqualValues(t, 11, counter(), "the upper-key lookup and row cap should bound a narrow chunk")
+	requireCalls(11, "the upper-key lookup and row cap should bound a narrow chunk")
 }
