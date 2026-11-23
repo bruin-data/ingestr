@@ -54,3 +54,28 @@ func TestClickUpByteCap(t *testing.T) {
 		t.Fatalf("row mismatch off=%d on=%d", offR, onR)
 	}
 }
+
+func TestParseClickUpURI(t *testing.T) {
+	tests := []struct {
+		uri, want, wantErr string
+	}{
+		{uri: "clickup://?api_token=pk_token", want: "pk_token"},
+		{uri: "clickup://?api_key=pk_key", want: "pk_key"},
+		{uri: "clickup://?api_key=pk_key&api_token=pk_token", want: "pk_token"},
+		{uri: "clickup://?api_token=pk_a%2Bb%26c", want: "pk_a+b&c"},
+		{uri: "clickup://", wantErr: "api_token is required"},
+		{uri: "clickup://?other=x", wantErr: "api_token is required"},
+	}
+	for _, tt := range tests {
+		got, err := parseClickUpURI(tt.uri)
+		if tt.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("%s: want error %q, got %v", tt.uri, tt.wantErr, err)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("%s: got %q, %v; want %q", tt.uri, got, err, tt.want)
+		}
+	}
+}
