@@ -608,6 +608,18 @@ func TestReplaceFlowUnderURIPrefix(t *testing.T) {
 	}
 }
 
+func TestReplaceKeepsRewrittenFileWhenWriteOmitsTable(t *testing.T) {
+	table := "lake/exports/orders"
+	key := "exports/orders/orders.parquet"
+	store := newFakeObjectStore(key)
+	d := newFakeObjectDestination(t, ProviderS3, "{table_name}.parquet", store)
+
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: table, Schema: flowSchema, DropFirst: true}))
+	require.NoError(t, d.WriteParallel(t.Context(), flowRecords(nil), destination.WriteOptions{}))
+	require.NoError(t, d.FinalizeReplace(t.Context(), table))
+	assert.Contains(t, store.list(), key)
+}
+
 func TestConcurrentTablesUseTheirOwnSchema(t *testing.T) {
 	store := newFakeObjectStore()
 	d := newFakeObjectDestination(t, ProviderAzure, "{load_id}.{file_id}.{ext}", store)

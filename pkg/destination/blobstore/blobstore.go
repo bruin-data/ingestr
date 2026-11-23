@@ -334,7 +334,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		if err := d.writeBlob(ctx, bucket, key, buffer.Bytes()); err != nil {
 			return fmt.Errorf("failed to write to blob %s: %w", path, err)
 		}
-		d.markWritten(opts.Table, key)
+		d.markWritten(tableName, key)
 
 		config.Debug("[BLOBSTORE] Wrote %d rows to %s (%d bytes)", rowsInCurrentFile, path, buffer.Len())
 		fileID++
