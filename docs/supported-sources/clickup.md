@@ -10,7 +10,7 @@ clickup://?api_token=<token>
 ```
 
 URI parameters:
-- `api_token` is a personal token used to authenticate with the ClickUp API.
+- `api_token` is a personal token used to authenticate with the ClickUp API. `api_key` is still accepted as an alias.
 
 ClickUp requires a `api_token` to connect to the ClickUP API. For more information, read [here](https://developer.clickup.com/docs/authentication#generate-your-personal-api-token) to get credentail. 
 
