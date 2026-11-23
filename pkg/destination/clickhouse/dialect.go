@@ -9,11 +9,85 @@ import (
 
 // Dialect implements the destination.Dialect interface for ClickHouse.
 type Dialect struct {
-	cluster string
+	cluster     string
+	columns     map[string]schema.Column
+	nativeTypes map[string]string
 }
 
 func (d *Dialect) Name() string {
 	return "ClickHouse"
+}
+
+// RelaxColumnNullabilitySQL keeps the column's existing ClickHouse type (for
+// example DateTime64(9) or LowCardinality(String)) and changes only its
+// nullability; rebuilding the type from the simplified schema would lose
+// precision and encodings.
+func (d *Dialect) RelaxColumnNullabilitySQL(table, colName string) string {
+	key := strings.ToLower(colName)
+	col, ok := d.columns[key]
+	if !ok || col.IsPrimaryKey {
+		return ""
+	}
+	var typeName string
+	if native := strings.TrimSpace(d.nativeTypes[key]); native != "" {
+		typeName = nullableClickHouseType(native)
+	} else {
+		col.Nullable = true
+		typeName = MapDataTypeToClickHouse(col)
+	}
+	if typeName == "" {
+		return ""
+	}
+	return fmt.Sprintf("ALTER TABLE %s%s MODIFY COLUMN %s %s",
+		table,
+		onClusterClause(d.cluster),
+		d.QuoteIdentifier(colName),
+		typeName)
+}
+
+// nullableClickHouseType wraps a native ClickHouse type so it accepts NULL.
+// Composite types that cannot be Nullable return "".
+func nullableClickHouseType(native string) string {
+	t := strings.TrimSpace(native)
+	if _, ok := clickHouseTypeArgs(t, "Nullable"); ok {
+		return t
+	}
+	if inner, ok := clickHouseTypeArgs(t, "LowCardinality"); ok {
+		relaxed := nullableClickHouseType(inner)
+		if relaxed == "" {
+			return ""
+		}
+		return "LowCardinality(" + relaxed + ")"
+	}
+	if inner, ok := clickHouseTypeArgs(t, "Array"); ok {
+		relaxed := nullableClickHouseType(inner)
+		if relaxed == "" {
+			return ""
+		}
+		return "Array(" + relaxed + ")"
+	}
+	for _, name := range []string{"Map", "Tuple", "Nested", "AggregateFunction", "SimpleAggregateFunction"} {
+		if _, ok := clickHouseTypeArgs(t, name); ok {
+			return ""
+		}
+	}
+	if t == "Dynamic" || t == "JSON" || t == "Object" {
+		return t
+	}
+	for _, name := range []string{"Variant", "Dynamic", "JSON", "Object"} {
+		if _, ok := clickHouseTypeArgs(t, name); ok {
+			return t
+		}
+	}
+	return "Nullable(" + t + ")"
+}
+
+func clickHouseTypeArgs(typeName, wrapper string) (string, bool) {
+	prefix := wrapper + "("
+	if !strings.HasPrefix(typeName, prefix) || !strings.HasSuffix(typeName, ")") {
+		return "", false
+	}
+	return strings.TrimSpace(typeName[len(prefix) : len(typeName)-1]), true
 }
 
 func (d *Dialect) AddColumnSQL(table string, col schema.Column) string {

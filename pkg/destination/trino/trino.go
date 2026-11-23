@@ -500,7 +500,7 @@ func (d *TrinoDestination) SCD2Table(ctx context.Context, opts destination.SCD2O
 	insertSQL := fmt.Sprintf(
 		`
 		INSERT INTO %s (%s)
-		SELECT %s FROM %s AS source
+		SELECT %s FROM %s AS __ingestr_source
 		WHERE %s`,
 		targetFQN,
 		strings.Join(quotedCols, ", "),
@@ -927,11 +927,12 @@ func buildSCD2NotExistsCondition(targetFQN, stagingFQN string, primaryKeys []str
 	)`, stagingFQN, buildSCD2PKMatchCondition(targetFQN, primaryKeys))
 }
 
-// buildSCD2InsertNotExistsCondition builds NOT EXISTS condition for insert step
+// buildSCD2InsertNotExistsCondition builds NOT EXISTS condition for insert step.
+// The outer alias must not match a column, which Trino would resolve first.
 func buildSCD2InsertNotExistsCondition(targetFQN string, primaryKeys []string) string {
 	pkConditions := make([]string, len(primaryKeys))
 	for i, key := range primaryKeys {
-		pkConditions[i] = fmt.Sprintf(`target.%s = source.%s`, quoteIdentifier(key), quoteIdentifier(key))
+		pkConditions[i] = fmt.Sprintf(`target.%s = __ingestr_source.%s`, quoteIdentifier(key), quoteIdentifier(key))
 	}
 
 	return fmt.Sprintf(`NOT EXISTS (

@@ -20,6 +20,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/tablename"
 	_ "github.com/go-sql-driver/mysql"
+	"golang.org/x/sync/errgroup"
 )
 
 const defaultHTTPPort = 8030
@@ -38,6 +39,7 @@ type StarRocksDestination struct {
 	replicationNum     string // empty => use the cluster default
 	labelCounter       int64
 	legacyLoadMetadata atomic.Bool
+	snapshotLimits     *snapshotWriteLimits
 
 	swapMu sync.Mutex
 	// preparedSwaps maps cross-database staging tables to the copies that
@@ -132,6 +134,7 @@ func (d *StarRocksDestination) Connect(ctx context.Context, uri string) error {
 	d.legacyLoadMetadata.Store(false)
 	d.loader = loader
 	d.loader.waitForPublish = d.waitForPublish
+	d.loader.transactionState = d.transactionState
 	config.Debug("[STARROCKS] Connected (database: %s, stream_load: %s)", d.database, loader.endpoint)
 	return nil
 }
@@ -305,33 +308,81 @@ func (d *StarRocksDestination) Write(ctx context.Context, records <-chan source.
 }
 
 func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+	if opts.CDCSnapshot {
+		if err := validateCDCSnapshotOptions(opts); err != nil {
+			return err
+		}
+		if err := d.validatePrimaryKey(ctx, "CDC snapshot target", opts.Table, opts.PrimaryKeys); err != nil {
+			return err
+		}
+		complete, err := d.CanWriteCDCSnapshot(ctx, opts.Table, opts.Schema, opts.CDCExpectedIncarnation)
+		if err != nil {
+			return err
+		}
+		if !complete {
+			return fmt.Errorf("StarRocks direct CDC snapshot requires every target column in the snapshot schema")
+		}
+		return d.writeSnapshot(ctx, records, opts)
+	}
 	if err := d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation); err != nil {
 		return err
 	}
 	startTime := time.Now()
-	var totalRows int64
-	var batchNum int
+	var totalRows, batchNum atomic.Int64
+	parallelism := opts.Parallelism
+	if parallelism <= 0 {
+		parallelism = 4
+	}
+	// Direct writes must finish in input order to preserve repeated-key updates.
+	if !opts.StagingTable {
+		parallelism = 1
+	}
 
 	db, table := splitDatabaseTable(opts.Table)
 	if db == "" {
 		db = d.database
 	}
 
-	for result := range records {
-		if result.Err != nil {
-			return result.Err
-		}
-		batchNum++
-
-		rows, err := d.loadRecord(ctx, db, table, result.Batch)
-		result.Batch.Release()
-		if err != nil {
-			return fmt.Errorf("failed to stream load batch %d: %w", batchNum, err)
-		}
-		totalRows += rows
+	workers, writeCtx := errgroup.WithContext(ctx)
+	for range parallelism {
+		workers.Go(func() error {
+			for {
+				if err := writeCtx.Err(); err != nil {
+					return err
+				}
+				select {
+				case <-writeCtx.Done():
+					return writeCtx.Err()
+				case result, ok := <-records:
+					if !ok {
+						return nil
+					}
+					if result.Err != nil {
+						if result.Batch != nil {
+							result.Batch.Release()
+						}
+						return result.Err
+					}
+					if result.Batch == nil {
+						continue
+					}
+					batch := result.Batch
+					n := batchNum.Add(1)
+					rows, err := d.loadRecord(writeCtx, db, table, batch, "")
+					batch.Release()
+					if err != nil {
+						return fmt.Errorf("failed to stream load batch %d: %w", n, err)
+					}
+					totalRows.Add(rows)
+				}
+			}
+		})
+	}
+	if err := workers.Wait(); err != nil {
+		return err
 	}
 
-	config.Debug("[STARROCKS] Wrote %d rows in %d batches in %v", totalRows, batchNum, time.Since(startTime))
+	config.Debug("[STARROCKS] Wrote %d rows in %d batches with %d workers in %v", totalRows.Load(), batchNum.Load(), parallelism, time.Since(startTime))
 	return d.checkCDCIncarnation(ctx, opts.Table, opts.CDCExpectedIncarnation)
 }
 
@@ -339,36 +390,28 @@ func (d *StarRocksDestination) WriteParallel(ctx context.Context, records <-chan
 // Load limit (streaming_load_max_batch_size_mb).
 var maxStreamLoadJSONBytes = 90 << 20
 
-// loadRecord stream-loads a batch, splitting it until each JSON body fits.
-func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string, rec arrow.RecordBatch) (int64, error) {
-	body, rows, binaryCols, err := recordBatchToJSON(rec)
-	if err != nil {
-		return 0, fmt.Errorf("encode batch: %w", err)
-	}
-	if rows == 0 {
-		return 0, nil
-	}
-	if len(body) > maxStreamLoadJSONBytes {
-		if rows == 1 {
-			return 0, fmt.Errorf("a single row encodes to %d bytes, above the %d-byte Stream Load limit", len(body), maxStreamLoadJSONBytes)
-		}
-		mid := rec.NumRows() / 2
-		var loaded int64
-		for _, bounds := range [][2]int64{{0, mid}, {mid, rec.NumRows()}} {
-			part := rec.NewSlice(bounds[0], bounds[1])
-			n, err := d.loadRecord(ctx, db, table, part)
-			part.Release()
-			loaded += n
-			if err != nil {
-				return loaded, err
-			}
-		}
-		return loaded, nil
-	}
-	if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, columnsHeader(rec.Schema(), binaryCols)); err != nil {
+// loadRecord builds bounded JSON bodies one row at a time, retaining a body
+// until its load (including any FE redirect) completes.
+func (d *StarRocksDestination) loadRecord(ctx context.Context, db, table string, rec arrow.RecordBatch, mergeCondition string) (int64, error) {
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	return rows, nil
+	encoder := newJSONBatchEncoder(rec, maxStreamLoadJSONBytes)
+	columns := columnsHeader(rec.Schema(), encoder.binaryColumns())
+	var loaded int64
+	for {
+		body, rows, err := encoder.next(ctx)
+		if err != nil {
+			return loaded, fmt.Errorf("encode batch: %w", err)
+		}
+		if rows == 0 {
+			return loaded, nil
+		}
+		if err := d.loader.load(ctx, db, table, d.nextLabel(table), body, streamLoadOptions{columns: columns, mergeCondition: mergeCondition}); err != nil {
+			return loaded, err
+		}
+		loaded += rows
+	}
 }
 
 // nextLabel returns a unique load label. StarRocks labels must match
@@ -687,6 +730,7 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 	defer func() { _ = rows.Close() }()
 
 	var columns []schema.Column
+	var hasCDCOrderColumn bool
 	for rows.Next() {
 		var colName, dataType, columnType, isNullable string
 		var numPrecision, numScale, charMaxLen *int
@@ -694,6 +738,10 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 			return nil, fmt.Errorf("failed to scan column: %w", err)
 		}
 		if colName == syntheticSortKeyColumn {
+			continue
+		}
+		if strings.EqualFold(colName, cdcOrderColumn) {
+			hasCDCOrderColumn = true
 			continue
 		}
 		col := schema.Column{
@@ -718,6 +766,14 @@ func (d *StarRocksDestination) GetTableSchema(ctx context.Context, table string)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close table schema: %w", err)
+	}
+	if hasCDCOrderColumn {
+		if err := d.validateCDCSnapshotOrderColumn(ctx, table); err != nil {
+			return nil, err
+		}
 	}
 	if len(columns) == 0 {
 		return nil, nil

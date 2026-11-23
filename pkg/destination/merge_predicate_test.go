@@ -36,3 +36,14 @@ func TestMergeJoinCondition(t *testing.T) {
 		})
 	}
 }
+
+func TestIntervalDeleteSQL(t *testing.T) {
+	if got, want := IntervalDeleteSQL(`"events"`, "target", `"ts"`, "?", "?", "  "), `DELETE FROM "events" WHERE "ts" >= ? AND "ts" <= ?`; got != want {
+		t.Fatalf("IntervalDeleteSQL() without predicate = %q, want %q", got, want)
+	}
+	got := IntervalDeleteSQL(`"events"`, "target", `"ts"`, "$1", "$2", "target.event_date >= '2026-01-01'")
+	want := `DELETE FROM "events" AS target WHERE target."ts" >= $1 AND target."ts" <= $2 AND (target.event_date >= '2026-01-01')`
+	if got != want {
+		t.Fatalf("IntervalDeleteSQL() with predicate = %q, want %q", got, want)
+	}
+}

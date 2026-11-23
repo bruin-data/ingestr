@@ -46,9 +46,11 @@ type MultiTableReplicator struct {
 	protocolV2       bool
 	started          bool
 	streaming        bool
-	recv             *walReceiver
-	decoderBudget    *byteBudget
-	walBudget        *byteBudget
+
+	standbyBarrierProbes bool
+	recv                 *walReceiver
+	decoderBudget        *byteBudget
+	walBudget            *byteBudget
 
 	filterLSN       pglogrepl.LSN
 	filterDecisions map[string]bool
@@ -158,7 +160,7 @@ func (r *MultiTableReplicator) Start(ctx context.Context) error {
 	}
 
 	var replyProbe time.Duration
-	if r.barrierTarget != 0 {
+	if r.barrierTarget != 0 || r.standby && r.standbyBarrierProbes {
 		replyProbe = standbyBarrierProbeInterval
 	}
 	r.recv = startWALReceiverWithBudget(ctx, r.source.replConn, r.streaming, r.startLSN, r.source.pos, r.source.lag, r.walBudget, replyProbe)

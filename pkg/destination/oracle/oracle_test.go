@@ -190,6 +190,31 @@ func TestBuildConnStrings(t *testing.T) {
 			},
 		},
 		{
+			name: "inline connect descriptor",
+			uri:  "oracle://user:pass@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name: "inline connect descriptor with Exadata scheme and driver options",
+			uri:  "exadata://user:pass@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB)))?SSL=false",
+			want: []string{"oracle://user:pass@:0/?SSL=false&connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name: "multi-line connect descriptor",
+			uri:  "oracle://user:pass@(DESCRIPTION=\n  (ADDRESS=\n    (PROTOCOL=TCP)\n    (HOST=db.example.com)\n    (PORT=1521)\n  )\n  (CONNECT_DATA=\n    (SERVICE_NAME=ORCLPDB)\n  )\n)",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%0A++%28ADDRESS%3D%0A++++%28PROTOCOL%3DTCP%29%0A++++%28HOST%3Ddb.example.com%29%0A++++%28PORT%3D1521%29%0A++%29%0A++%28CONNECT_DATA%3D%0A++++%28SERVICE_NAME%3DORCLPDB%29%0A++%29%0A%29"},
+		},
+		{
+			name: "connect descriptor in dsn query parameter",
+			uri:  "oracle://user:pass@/?dsn=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29",
+			want: []string{"oracle://user:pass@:0/?connStr=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29"},
+		},
+		{
+			name:    "connect descriptor with host",
+			uri:     "oracle://user:pass@host:1521/?dsn=%28DESCRIPTION%3D%28ADDRESS%3D%28PROTOCOL%3DTCP%29%28HOST%3Ddb.example.com%29%28PORT%3D1521%29%29%28CONNECT_DATA%3D%28SERVICE_NAME%3DORCLPDB%29%29%29",
+			wantErr: true,
+		},
+		{
 			name:    "invalid scheme",
 			uri:     "postgres://user:pass@host/db",
 			wantErr: true,
@@ -313,13 +338,13 @@ func TestOracleStagingNamesPreserveQuotedSchemaSemantics(t *testing.T) {
 
 	for _, suffix := range []string{"staging", "merge", "stream"} {
 		t.Run(suffix, func(t *testing.T) {
-			quoted := strategy.GenerateReplaceStagingTableName(`"appUser".orders`, suffix, "", policy, "")
+			quoted := strategy.GenerateReplaceStagingTableName(`"appUser".orders`, suffix, "", policy, "", 0)
 			require.True(t, strings.HasPrefix(quoteTable(quoted), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), quoted)
 
-			unquoted := strategy.GenerateReplaceStagingTableName(`appUser.orders`, suffix, "", policy, "")
+			unquoted := strategy.GenerateReplaceStagingTableName(`appUser.orders`, suffix, "", policy, "", 0)
 			require.True(t, strings.HasPrefix(quoteTable(unquoted), `"APPUSER"."ORDERS_`+strings.ToUpper(suffix)+`_`), unquoted)
 
-			defaultSchema := strategy.GenerateReplaceStagingTableName("orders", suffix, "", policy, "")
+			defaultSchema := strategy.GenerateReplaceStagingTableName("orders", suffix, "", policy, "", 0)
 			require.True(t, strings.HasPrefix(quoteTable(defaultSchema), `"appUser"."ORDERS_`+strings.ToUpper(suffix)+`_`), defaultSchema)
 		})
 	}
@@ -331,7 +356,7 @@ func TestOracleStagingNamesEncodeQuotedTableDots(t *testing.T) {
 
 	for _, suffix := range []string{"staging", "merge", "stream"} {
 		t.Run(suffix, func(t *testing.T) {
-			staging := strategy.GenerateReplaceStagingTableName(`"appUser"."order.events"`, suffix, "", policy, "")
+			staging := strategy.GenerateReplaceStagingTableName(`"appUser"."order.events"`, suffix, "", policy, "", 0)
 			require.NoError(t, tablename.TwoLevel("oracle").CheckName(staging))
 			parts := splitOracleIdentifiers(staging)
 			require.Len(t, parts, 2)
@@ -819,13 +844,16 @@ func TestOracleManagedStagingUsesCurrentUserByDefault(t *testing.T) {
 }
 
 func TestBackupTableName(t *testing.T) {
-	got := backupTableName("hr", "employees")
+	got := backupTableName("hr", "employees", destination.MaxIdentifierLength("oracle"))
 
 	assert.True(t, strings.HasPrefix(got, "hr.EMPLOYEES_OLD_"), got)
 	_, tableName := parseTableName(got)
 	assert.LessOrEqual(t, len(tableName), destination.MaxIdentifierLength("oracle"))
 
-	quoted := backupTableName(`"appUser"`, `"order.events"`)
+	_, legacyName := parseTableName(backupTableName("hr", "test10000", 30))
+	assert.LessOrEqual(t, len(canonicalIdentifier(legacyName)), 30, legacyName)
+
+	quoted := backupTableName(`"appUser"`, `"order.events"`, destination.MaxIdentifierLength("oracle"))
 	parts := splitOracleIdentifiers(quoted)
 	require.Len(t, parts, 2)
 	require.Equal(t, `"appUser"`, parts[0])
@@ -960,4 +988,15 @@ func TestExtractValue_ListUsesRowValue(t *testing.T) {
 
 	assert.Equal(t, "[1,2]", extractValue(arr, 0))
 	assert.Equal(t, "[3]", extractValue(arr, 1))
+}
+
+func TestBuildDeleteInsertDeleteSQL(t *testing.T) {
+	if got, want := buildDeleteInsertDeleteSQL("events", `"UPDATED_AT"`, ":1", ":2", ""), `DELETE FROM "EVENTS" WHERE "UPDATED_AT" >= :1 AND "UPDATED_AT" <= :2`; got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
+	got := buildDeleteInsertDeleteSQL("events", `"UPDATED_AT"`, ":1", ":2", `target."EVENT_DATE" >= DATE '2026-01-01'`)
+	want := `DELETE FROM "EVENTS" target WHERE target."UPDATED_AT" >= :1 AND target."UPDATED_AT" <= :2 AND (target."EVENT_DATE" >= DATE '2026-01-01')`
+	if got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
 }

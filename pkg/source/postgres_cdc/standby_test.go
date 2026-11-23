@@ -1,16 +1,45 @@
 package postgres_cdc
 
 import (
+	"bytes"
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestStandbySlotWaitHintIsImmediateAndOnlyReportedOnce(t *testing.T) {
+	stdout, stderr, mode := output.Current()
+	t.Cleanup(func() { output.Init(stdout, stderr, mode) })
+	var logs bytes.Buffer
+	output.Init(&logs, &logs, output.ModeText)
+
+	primary := &PostgresCDCSource{}
+	primary.warnStandbySlotWait()
+	require.Empty(t, logs.String(), "primary slots do not need standby advice")
+
+	standby := &PostgresCDCSource{standby: true}
+	standby.warnStandbySlotWait()
+	require.Contains(t, logs.String(), "SELECT pg_log_standby_snapshot(); on the primary")
+	require.Contains(t, logs.String(), "every second with pg_cron")
+	require.True(t, strings.HasSuffix(logs.String(), "to reduce these waits.\n"))
+
+	var callbacks sync.WaitGroup
+	for range 20 {
+		callbacks.Go(standby.warnStandbySlotWait)
+	}
+	callbacks.Wait()
+	require.Equal(t, 1, strings.Count(logs.String(), "pg_log_standby_snapshot"), "chunk and delayed slot callbacks must share the same hint")
+	require.Less(t, standbySlotHintAfter, 15*time.Second, "the delayed hint should fire within a normal standby slot wait")
+}
 
 func TestStandbyResumePosition(t *testing.T) {
 	position, ok := standbyResumePosition(0x500, false)

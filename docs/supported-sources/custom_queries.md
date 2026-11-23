@@ -50,6 +50,9 @@ In this example, the query is filtering the data to only include rows where the 
 
 ### Parallel extract partitioning
 
+> [!TIP]
+> See [Parallel Extract Partitioning](/getting-started/extract-partitioning) for how windows are built, the available options, and the tradeoffs of reading in parallel.
+
 Custom queries on PostgreSQL, MySQL, Microsoft SQL Server, SQLite, DuckDB, Snowflake, and BigQuery can split the query result into parallel extract windows. The partition column must be returned by the query and must have a unique output name.
 
 ```bash
@@ -77,6 +80,6 @@ WHERE __ingestr_query.partition_ts >= <window start>
   AND __ingestr_query.partition_ts < <window end>
 ```
 
-The final window includes its end boundary. Numeric partition columns and `--extract-partition-interval auto` use a bounds query over the same custom-query result.
+The final window includes its end boundary. Integer partition columns, and partition columns that differ from the incremental key, use a bounds query over the same custom-query result.
 
 Because the query is used as a derived table, it must be a single query that is valid inside a `FROM (...)` clause. Some dialect-specific constructs, such as an unbounded `ORDER BY` in Microsoft SQL Server, cannot be used in a derived table.

@@ -3,7 +3,6 @@ package postgres_cdc
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -26,19 +25,20 @@ import (
 )
 
 type Snapshot struct {
-	source      *PostgresCDCSource
-	tableName   string
-	tableSchema *schema.TableSchema
-	cdcConfig   CDCConfig
-	slotName    string
-	typeMap     *pgtype.Map
-	// progressKeys makes the snapshot read in key order and follow every batch
-	// with a copy of progress naming its last key, so an interrupted snapshot
-	// can resume after its last durable key. resumeAfter holds that key's text
-	// values when this snapshot continues an earlier one.
+	source       *PostgresCDCSource
+	tableName    string
+	tableSchema  *schema.TableSchema
+	cdcConfig    CDCConfig
+	slotName     string
+	typeMap      *pgtype.Map
+	readBudget   *snapshotReadBudget
 	progressKeys []string
 	progress     source.CDCSnapshotProgress
-	resumeAfter  []string
+	resuming     bool
+	// batchDataHint holds each column's data bytes in recent batches, so a
+	// reader can size its next batch's buffers instead of doubling them. Only
+	// a reader's own copy of the snapshot sets it.
+	batchDataHint []int
 }
 
 func NewSnapshot(src *PostgresCDCSource, tableName string, tableSchema *schema.TableSchema, cdcConfig CDCConfig, slotSuffix string) (*Snapshot, error) {
@@ -217,253 +217,166 @@ func (s *Snapshot) dropSlot(ctx context.Context) error {
 }
 
 func (s *Snapshot) readWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions) error {
-	conn, err := s.source.queryPool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	defer conn.Release()
-
-	// Start transaction with REPEATABLE READ isolation level (required for snapshot import)
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.RepeatableRead,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Set transaction snapshot
-	_, err = tx.Exec(ctx, fmt.Sprintf("SET TRANSACTION SNAPSHOT '%s'", snapshotName))
-	if err != nil {
-		return fmt.Errorf("failed to set transaction snapshot: %w", err)
-	}
-
-	config.Debug("[CDC] Reading snapshot data from %s", s.tableName)
-
-	// Build select query (excluding CDC columns as they don't exist in source)
-	sourceColumns := s.tableSchema.Columns[:sourceColumnCount(s.tableSchema)]
-	colNames := make([]string, len(sourceColumns))
-	for i, col := range sourceColumns {
-		colNames[i] = quoteIdentifier(col.Name)
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(colNames, ", "), quoteTableName(s.tableName))
-	var args []any
 	if len(s.progressKeys) > 0 {
-		keyTypes, err := snapshotKeyTypes(ctx, tx, s.tableName, s.progressKeys)
-		if err != nil {
-			return err
-		}
-		query, args = keyedSnapshotQuery(colNames, quoteTableName(s.tableName), s.progressKeys, keyTypes, s.resumeAfter)
+		return s.readProgressSnapshot(ctx, snapshotName, lsn, results, opts)
 	}
-	config.Debug("[CDC] Snapshot query: %s", query)
+	return s.ReadWithSnapshot(ctx, snapshotName, lsn, results, opts, nil, nil)
+}
 
-	// A replacement snapshot can run the same SELECT text after DDL changed a
-	// column OID. Describe it afresh so pgx cannot decode rows with the cached
-	// pre-DDL statement description.
-	description, err := tx.Conn().PgConn().Prepare(ctx, "", query, nil)
-	if err != nil {
-		return fmt.Errorf("failed to describe snapshot query: %w", err)
+// ReadWithSnapshot reads (after, upper] from an existing exported snapshot.
+// Nil bounds scan the whole table. The caller keeps the exporting connection
+// idle and open until this returns, and owns completion and WAL orchestration.
+func (s *Snapshot) ReadWithSnapshot(ctx context.Context, snapshotName string, lsn pglogrepl.LSN, results chan<- source.RecordBatchResult, opts source.ReadOptions, after, upper []string) error {
+	if err := s.source.requireSnapshotAllowed(); err != nil {
+		return err
 	}
-	s.typeMap = tx.Conn().TypeMap()
-	formats := postgres.TextResultFormats(s.typeMap, description.Fields, sourceColumns, snapshotTextColumn)
-	for i := len(sourceColumns); i < len(formats); i++ {
-		formats[i] = pgx.TextFormatCode
+	if opts.CDCSnapshotReplace && (after != nil || upper != nil) {
+		return fmt.Errorf("a bounded snapshot cannot replace the whole table")
 	}
-	rows, err := tx.Query(ctx, query, append([]any{pgx.QueryExecModeDescribeExec, formats}, args...)...)
-	if err != nil {
-		return fmt.Errorf("failed to query: %w", err)
-	}
-	defer func() { rows.Close() }()
-
-	if opts.CDCSnapshotReplace {
-		// A snapshot is a complete replacement boundary. Consumers that opt in
-		// discard target rows left by an interrupted snapshot or a lost slot;
-		// a resumed snapshot instead keeps the rows its earlier run made durable.
-		marker := source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)}
-		if s.resumeAfter != nil {
-			marker.CDCSnapshotPosition, marker.CDCSnapshotResumed = s.progress.Boundary, true
-		}
-		if err := sendResult(ctx, results, marker); err != nil {
-			return err
-		}
-	}
-
-	batchSize := opts.PageSize
-	if batchSize <= 0 {
-		batchSize = 100000
-	}
-
-	lsnStr := FormatLSN(lsn)
-	syncedAt := time.Now().UTC()
-
-	// Build Arrow schema including CDC columns
-	arrowSchema := buildArrowSchema(s.tableSchema.Columns)
-
-	batchNum := 0
-	var totalRows int64
-
-	for {
-		record, count, lastKey, err := s.rowsToBatch(rows, arrowSchema, sourceColumns, len(s.progressKeys), batchSize, opts.MaxBatchBytes, lsnStr, syncedAt)
-		if err != nil {
-			return fmt.Errorf("failed to convert rows to batch: %w", err)
-		}
-
-		if count == 0 {
-			break
-		}
-
-		batchNum++
-		totalRows += count
-		config.Debug("[CDC] Snapshot batch %d: %d rows (total: %d)", batchNum, count, totalRows)
-
-		if err := sendResult(ctx, results, source.RecordBatchResult{Batch: record}); err != nil {
-			return err
-		}
-		if lastKey != nil {
-			key, err := json.Marshal(lastKey)
-			if err != nil {
-				return fmt.Errorf("failed to encode snapshot progress key: %w", err)
+	reader := *s
+	reader.progressKeys = resumableSnapshotKeys(source.SourceTableInfo{Schema: s.tableSchema, PrimaryKeys: s.tableSchema.PrimaryKeys})
+	return reader.readBoundedSnapshot(ctx, boundedSnapshotOptions{
+		name: snapshotName, boundary: lsn, after: after, upper: upper, read: opts, budget: s.readBudget,
+		normalSnapshot: after == nil && upper == nil,
+		started: func() error {
+			if opts.CDCSnapshotReplace {
+				return sendResult(ctx, results, source.RecordBatchResult{Truncate: true, CDCSnapshotPosition: FormatLSN(lsn)})
 			}
-			progress := s.progress
-			progress.Key = string(key)
-			token := source.CDCStateCommitToken{SnapshotProgress: map[string]source.CDCSnapshotProgress{s.tableName: progress}}
-			if err := sendResult(ctx, results, source.RecordBatchResult{CommitToken: token}); err != nil {
-				return err
-			}
-		}
-	}
-
-	config.Debug("[CDC] Snapshot completed: %d rows in %d batches", totalRows, batchNum)
-	return nil
+			return nil
+		},
+	}, results)
 }
 
 // rowsToBatch converts up to batchSize rows. The last keyColumns values of
 // each row are the text-cast keys of a key-ordered snapshot; lastKey returns
 // those of the final row converted.
 func (s *Snapshot) rowsToBatch(rows pgx.Rows, arrowSchema *arrow.Schema, columns []schema.Column, keyColumns, batchSize int, maxBatchBytes int64, lsn string, syncedAt time.Time) (arrow.RecordBatch, int64, []string, error) {
+	mem := memory.NewGoAllocator()
+
+	// Create builders for all columns including CDC columns
+	builders := make([]array.Builder, len(s.tableSchema.Columns))
+	for i, field := range arrowSchema.Fields() {
+		builders[i] = array.NewBuilder(mem, field.Type)
+		if s.batchDataHint != nil {
+			if batchSize > 0 {
+				builders[i].Reserve(batchSize)
+			}
+			if hint := s.batchDataHint[i]; hint > 0 {
+				reserveBuilderData(builders[i], hint+hint/16)
+			}
+		}
+	}
+	defer func() {
+		for _, builder := range builders {
+			builder.Release()
+		}
+	}()
+
+	var rowCount int64
+	var accBytes int64
+	var lastKey []string
 	typeMap := s.typeMap
 	if typeMap == nil {
 		typeMap = pgtype.NewMap()
 	}
-	builder := newSnapshotBatchBuilder(s.tableSchema, arrowSchema, columns, keyColumns, typeMap, lsn, syncedAt, maxBatchBytes > 0)
-	defer builder.release()
-
 	for rows.Next() {
-		if err := builder.appendRow(rows.RawValues(), rows.FieldDescriptions()); err != nil {
-			return nil, 0, nil, err
+		raw, fields := rows.RawValues(), rows.FieldDescriptions()
+		if len(raw) != len(columns)+keyColumns || len(fields) != len(columns)+keyColumns {
+			return nil, 0, nil, fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), len(columns)+keyColumns)
 		}
-		if batchSize > 0 && builder.rowCount >= int64(batchSize) {
+
+		// Append source column values
+		for i, buf := range raw[:len(columns)] {
+			if columns[i].DataType == schema.TypeJSON && (fields[i].DataTypeOID == pgtype.JSONOID || fields[i].DataTypeOID == pgtype.JSONBOID) {
+				if buf == nil {
+					builders[i].AppendNull()
+				} else {
+					if fields[i].DataTypeOID == pgtype.JSONBOID && fields[i].Format == pgx.BinaryFormatCode {
+						if len(buf) < 2 || buf[0] != 1 {
+							return nil, 0, nil, fmt.Errorf("invalid binary JSONB in snapshot column %q", columns[i].Name)
+						}
+						buf = buf[1:]
+					}
+					// PostgreSQL validates the JSON; Arrow copies it before pgx can
+					// reuse the row buffer, without decoding or re-encoding it.
+					storage := builders[i].(*array.ExtensionBuilder).StorageBuilder().(*array.StringBuilder)
+					storage.BinaryBuilder.Append(buf)
+				}
+				if maxBatchBytes > 0 {
+					accBytes += int64(len(buf)) + 8
+				}
+				continue
+			}
+			val, err := snapshotValue(typeMap, fields[i], buf, columns[i])
+			var converted any
+			if err == nil {
+				converted, err = convertValue(val, columns[i])
+			}
+			if err != nil {
+				return nil, 0, nil, fmt.Errorf("failed to convert snapshot column %q: %w", columns[i].Name, err)
+			}
+			arrowconv.AppendValue(builders[i], converted)
+			if maxBatchBytes > 0 {
+				accBytes += arrowconv.ValueBytes(converted) + 8
+			}
+		}
+
+		builders[len(columns)].(*array.StringBuilder).Append(lsn)
+		builders[len(columns)+1].(*array.BooleanBuilder).Append(false)
+		builders[len(columns)+2].(*array.TimestampBuilder).Append(arrow.Timestamp(syncedAt.UnixMicro()))
+		builders[len(columns)+3].(*array.StringBuilder).Append("[]")
+		// Include offsets, validity and CDC metadata in the byte budget, even
+		// when every source value is NULL.
+		accBytes += int64(len(lsn) + 2 + 8 + 1 + 8 + 4)
+
+		if keyColumns > 0 {
+			lastKey = make([]string, keyColumns)
+			for i, buf := range raw[len(columns):] {
+				if buf == nil {
+					return nil, 0, nil, fmt.Errorf("snapshot key column %d is NULL", i)
+				}
+				lastKey[i] = string(buf)
+			}
+		}
+
+		rowCount++
+
+		if batchSize > 0 && rowCount >= int64(batchSize) {
 			break
 		}
-		if maxBatchBytes > 0 && builder.accBytes >= maxBatchBytes {
+		if maxBatchBytes > 0 && accBytes >= maxBatchBytes {
 			break
 		}
+	}
+
+	if rowCount == 0 {
+		if err := rows.Err(); err != nil {
+			return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
+		}
+		return nil, 0, nil, nil
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, 0, nil, fmt.Errorf("error iterating rows: %w", err)
 	}
-	if builder.rowCount == 0 {
-		return nil, 0, nil, nil
-	}
 
-	return builder.record(), builder.rowCount, builder.lastKey, nil
-}
-
-type snapshotBatchBuilder struct {
-	arrowSchema  *arrow.Schema
-	columns      []schema.Column
-	keyColumns   int
-	typeMap      *pgtype.Map
-	builders     []array.Builder
-	lsn          string
-	syncedAt     time.Time
-	measureBytes bool
-	rowCount     int64
-	accBytes     int64
-	widestRow    int64
-	lastKey      []string
-}
-
-func newSnapshotBatchBuilder(tableSchema *schema.TableSchema, arrowSchema *arrow.Schema, columns []schema.Column, keyColumns int, typeMap *pgtype.Map, lsn string, syncedAt time.Time, measureBytes bool) *snapshotBatchBuilder {
-	builders := make([]array.Builder, len(tableSchema.Columns))
-	mem := memory.NewGoAllocator()
-	for i, field := range arrowSchema.Fields() {
-		builders[i] = array.NewBuilder(mem, field.Type)
-	}
-	return &snapshotBatchBuilder{
-		arrowSchema:  arrowSchema,
-		columns:      columns,
-		keyColumns:   keyColumns,
-		typeMap:      typeMap,
-		builders:     builders,
-		lsn:          lsn,
-		syncedAt:     syncedAt,
-		measureBytes: measureBytes,
-	}
-}
-
-func (b *snapshotBatchBuilder) appendRow(raw [][]byte, fields []pgconn.FieldDescription) error {
-	expected := len(b.columns) + b.keyColumns
-	if len(raw) != expected || len(fields) != expected {
-		return fmt.Errorf("snapshot returned %d columns, expected %d", len(raw), expected)
-	}
-
-	var rowBytes int64
-	for i, buf := range raw[:len(b.columns)] {
-		val, err := snapshotValue(b.typeMap, fields[i], buf, b.columns[i])
-		var converted any
-		if err == nil {
-			converted, err = convertValue(val, b.columns[i])
-		}
-		if err != nil {
-			return fmt.Errorf("failed to convert snapshot column %q: %w", b.columns[i].Name, err)
-		}
-		arrowconv.AppendValue(b.builders[i], converted)
-		if b.measureBytes {
-			rowBytes += arrowconv.ValueBytes(val)
-		}
-	}
-
-	columnCount := len(b.columns)
-	b.builders[columnCount].(*array.StringBuilder).Append(b.lsn)
-	b.builders[columnCount+1].(*array.BooleanBuilder).Append(false)
-	b.builders[columnCount+2].(*array.TimestampBuilder).Append(arrow.Timestamp(b.syncedAt.UnixMicro()))
-	b.builders[columnCount+3].(*array.StringBuilder).Append("[]")
-
-	if b.keyColumns > 0 {
-		b.lastKey = make([]string, b.keyColumns)
-		for i, buf := range raw[columnCount:] {
-			if buf == nil {
-				return fmt.Errorf("snapshot key column %d is NULL", i)
+	arrays := make([]arrow.Array, len(builders))
+	for i, b := range builders {
+		if s.batchDataHint != nil {
+			if n := builderDataLen(b); n > 0 {
+				s.batchDataHint[i] = max(n, s.batchDataHint[i]*7/8)
 			}
-			b.lastKey[i] = string(buf)
 		}
+		arrays[i] = b.NewArray()
 	}
 
-	b.rowCount++
-	b.accBytes += rowBytes
-	b.widestRow = max(b.widestRow, rowBytes)
-	return nil
-}
+	record := array.NewRecordBatch(arrowSchema, arrays, rowCount)
 
-func (b *snapshotBatchBuilder) record() arrow.RecordBatch {
-	arrays := make([]arrow.Array, len(b.builders))
-	for i, builder := range b.builders {
-		arrays[i] = builder.NewArray()
-	}
-	record := array.NewRecordBatch(b.arrowSchema, arrays, b.rowCount)
 	for _, arr := range arrays {
 		arr.Release()
 	}
-	return record
-}
 
-func (b *snapshotBatchBuilder) release() {
-	for _, builder := range b.builders {
-		builder.Release()
-	}
+	return record, rowCount, lastKey, nil
 }
 
 // String-like columns and all arrays are read as PostgreSQL text and decoded
@@ -606,22 +519,31 @@ func snapshotKeyTypes(ctx context.Context, tx pgx.Tx, table string, keys []strin
 // key columns' own types so the order matches ORDER BY. Keys are qualified by
 // a table alias: the text casts would otherwise make the names ambiguous.
 func keyedSnapshotQuery(columns []string, table string, keys, keyTypes, resumeAfter []string) (string, []any) {
-	const alias = "__ingestr_snapshot"
-	quotedKeys := make([]string, len(keys))
-	keyText := make([]string, len(keys))
-	for i, key := range keys {
-		quotedKeys[i] = alias + "." + quoteIdentifier(key)
-		keyText[i] = fmt.Sprintf("%s::text AS %s", quotedKeys[i], quoteIdentifier(fmt.Sprintf("__ingestr_key_%d", i)))
+	return boundedSnapshotQuery(columns, table, keys, keyTypes, resumeAfter, nil)
+}
+
+func variableWidthBuilder(builder array.Builder) *array.BinaryBuilder {
+	if extension, ok := builder.(*array.ExtensionBuilder); ok {
+		builder = extension.StorageBuilder()
 	}
-	query := fmt.Sprintf("SELECT %s, %s FROM %s AS %s", strings.Join(columns, ", "), strings.Join(keyText, ", "), table, alias)
-	var args []any
-	if resumeAfter != nil {
-		params := make([]string, len(keys))
-		for i := range keys {
-			params[i] = fmt.Sprintf("$%d::text::%s", i+1, keyTypes[i])
-			args = append(args, resumeAfter[i])
-		}
-		query += fmt.Sprintf(" WHERE (%s) > (%s)", strings.Join(quotedKeys, ", "), strings.Join(params, ", "))
+	switch b := builder.(type) {
+	case *array.StringBuilder:
+		return b.BinaryBuilder
+	case *array.BinaryBuilder:
+		return b
 	}
-	return query + " ORDER BY " + strings.Join(quotedKeys, ", "), args
+	return nil
+}
+
+func reserveBuilderData(builder array.Builder, n int) {
+	if b := variableWidthBuilder(builder); b != nil {
+		b.ReserveData(n)
+	}
+}
+
+func builderDataLen(builder array.Builder) int {
+	if b := variableWidthBuilder(builder); b != nil {
+		return b.DataLen()
+	}
+	return 0
 }

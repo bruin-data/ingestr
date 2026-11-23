@@ -5,8 +5,13 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/output"
 	"github.com/bruin-data/ingestr/pkg/destination"
@@ -102,6 +107,15 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		FullRefresh:                     job.Config.FullRefresh,
 	}
 
+	filter := &intervalFilter{
+		ctx: ctx, key: destinationIncrementalKey, start: job.Config.IntervalStart, end: job.Config.IntervalEnd,
+		wholeDays: incrementalKeyType == schema.TypeDate,
+	}
+	if ut, ok := job.Table.(source.IntervalUnfilteredTable); ok && ut.ReadsIgnoreInterval() &&
+		(filter.start != nil || filter.end != nil) {
+		job.RowFilter = filter
+	}
+
 	records, err := job.GetRecords(ctx, readOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get records: %w", err)
@@ -125,12 +139,19 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	}); err != nil {
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
+	if n := filter.dropped.Load(); n > 0 {
+		output.Warnf("Skipped %d rows whose %q is outside --interval-start/--interval-end\n", n, destinationIncrementalKey)
+	}
 
 	intervalStart := resolveIntervalBound(job.Config.IntervalStart, intervalTracker.Min)
 	intervalEnd := resolveIntervalBound(job.Config.IntervalEnd, intervalTracker.Max)
 
 	if intervalStart == nil || intervalEnd == nil {
-		config.Debug("[DELETE+INSERT] No interval detected (empty data?), skipping delete+insert")
+		if intervalTracker.Rows > 0 {
+			return fmt.Errorf("delete+insert could not derive an interval from incremental key %q (type %s) for %d rows: use a date, timestamp, numeric, or string key with non-null values, or pass --interval-start and --interval-end",
+				destinationIncrementalKey, incrementalKeyType, intervalTracker.Rows)
+		}
+		config.Debug("[DELETE+INSERT] No rows read, skipping delete+insert")
 		if !job.Config.KeepStaging {
 			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
 				config.Debug("[DELETE+INSERT] Warning: failed to drop staging table: %v", err)
@@ -154,14 +175,15 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 	}
 
 	if err := job.Destination.DeleteInsertTable(ctx, destination.DeleteInsertOptions{
-		StagingTable:       stagingTable,
-		TargetTable:        job.Config.DestTable,
-		IncrementalKey:     destinationIncrementalKey,
-		IncrementalKeyType: incrementalKeyType,
-		IntervalStart:      intervalStart,
-		IntervalEnd:        intervalEnd,
-		Columns:            job.Schema.ColumnNames(),
-		PrimaryKeys:        job.Config.PrimaryKeys,
+		StagingTable:         stagingTable,
+		TargetTable:          job.Config.DestTable,
+		IncrementalKey:       destinationIncrementalKey,
+		IncrementalKeyType:   incrementalKeyType,
+		IntervalStart:        intervalStart,
+		IntervalEnd:          intervalEnd,
+		Columns:              job.Schema.ColumnNames(),
+		PrimaryKeys:          job.Config.PrimaryKeys,
+		IncrementalPredicate: job.Config.IncrementalPredicate,
 	}); err != nil {
 		return fmt.Errorf("failed to delete+insert data: %w", err)
 	}
@@ -192,22 +214,6 @@ func resolveSchemaColumn(tableSchema *schema.TableSchema, columnName string) (st
 	return columnName, schema.TypeUnknown
 }
 
-func sourceIncrementalKeyForRead(job *IngestionJob) string {
-	sourceKey := job.Config.IncrementalKey
-	if job.SourceSchema != nil && job.SourceSchema.IncrementalKey != "" {
-		sourceKey = job.SourceSchema.IncrementalKey
-	} else if job.ColumnRenamer != nil && job.ColumnRenamer.HasRenames() {
-		for src, dst := range job.ColumnRenamer.Mapping() {
-			if dst == job.Config.IncrementalKey || strings.EqualFold(dst, job.Config.IncrementalKey) {
-				sourceKey = src
-				break
-			}
-		}
-	}
-	sourceKey, _ = resolveSchemaColumn(job.SourceSchema, sourceKey)
-	return sourceKey
-}
-
 func resolveIntervalBound(userProvided interface{}, autoDetected interface{}) interface{} {
 	if !isNilInterface(userProvided) {
 		return userProvided
@@ -225,6 +231,108 @@ func isNilInterface(v interface{}) bool {
 		return rv.IsNil()
 	default:
 		return false
+	}
+}
+
+// intervalFilter drops rows whose key is outside [start, end], for tables whose reads ignore the
+// interval. Otherwise rows outside the delete window are inserted on every run without being deleted.
+type intervalFilter struct {
+	ctx        context.Context
+	key        string
+	start, end *time.Time
+	wholeDays  bool
+	dropped    atomic.Int64
+}
+
+func (f *intervalFilter) Transform(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+	filtered, n, err := filterBatchToInterval(f.ctx, batch, f.key, f.start, f.end, f.wholeDays)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter rows to the interval: %w", err)
+	}
+	f.dropped.Add(n)
+	return filtered, nil
+}
+
+func (f *intervalFilter) OutputSchema(inputSchema *arrow.Schema) *arrow.Schema {
+	return inputSchema
+}
+
+func filterBatchToInterval(ctx context.Context, batch arrow.RecordBatch, key string, start, end *time.Time, wholeDays bool) (arrow.RecordBatch, int64, error) {
+	idx := -1
+	for i := 0; i < int(batch.NumCols()); i++ {
+		if batch.ColumnName(i) == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		batch.Retain()
+		return batch, 0, nil
+	}
+	col := batch.Column(idx)
+	inInterval := intervalMatcher(col, start, end, wholeDays)
+	if inInterval == nil {
+		batch.Retain()
+		return batch, 0, nil
+	}
+
+	mask := array.NewBooleanBuilder(memory.DefaultAllocator)
+	defer mask.Release()
+	var dropped int64
+	for i := 0; i < col.Len(); i++ {
+		keep := col.IsNull(i) || inInterval(i)
+		if !keep {
+			dropped++
+		}
+		mask.Append(keep)
+	}
+	if dropped == 0 {
+		batch.Retain()
+		return batch, 0, nil
+	}
+	maskArr := mask.NewArray()
+	defer maskArr.Release()
+	filtered, err := compute.FilterRecordBatch(ctx, batch, maskArr, compute.DefaultFilterOptions())
+	if err != nil {
+		return nil, 0, err
+	}
+	return filtered, dropped, nil
+}
+
+// intervalMatcher mirrors the DELETE bounds, which follow the written key type: DATE keys compare
+// whole days (see toDateOnly), others compare exactly. It returns nil for non-temporal columns.
+func intervalMatcher(col arrow.Array, start, end *time.Time, wholeDays bool) func(int) bool {
+	var value func(int) time.Time
+	switch arr := col.(type) {
+	case *array.Timestamp:
+		unit := arr.DataType().(*arrow.TimestampType).Unit
+		value = func(i int) time.Time { return arr.Value(i).ToTime(unit) }
+	case *array.Date32:
+		value = func(i int) time.Time { return arr.Value(i).ToTime() }
+	case *array.Date64:
+		value = func(i int) time.Time { return arr.Value(i).ToTime() }
+	default:
+		return nil
+	}
+	day := func(t time.Time) time.Time {
+		y, m, d := t.Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	if wholeDays {
+		inner := value
+		value = func(i int) time.Time { return day(inner(i)) }
+		if start != nil {
+			s := day(*start)
+			start = &s
+		}
+		if end != nil {
+			e := day(*end)
+			end = &e
+		}
+	}
+	return func(i int) bool {
+		t := value(i)
+		return (start == nil || !t.Before(*start)) && (end == nil || !t.After(*end))
 	}
 }
 

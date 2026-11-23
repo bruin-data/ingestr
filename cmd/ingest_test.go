@@ -277,7 +277,7 @@ func parseIngestConfig(t *testing.T, args ...string) (*config.IngestConfig, erro
 
 func clearIngestMappingEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"EXTRACT_PARALLELISM", "BATCH_SIZE", "INCREMENTAL_STRATEGY", "INTERVAL_START", "INTERVAL_END"} {
+	for _, key := range []string{"EXTRACT_PARALLELISM", "DESTINATION_PARALLELISM", "BATCH_SIZE", "INCREMENTAL_STRATEGY", "INTERVAL_START", "INTERVAL_END"} {
 		for _, prefix := range []string{"", "INGESTR_"} {
 			name := prefix + key
 			t.Setenv(name, "")
@@ -299,18 +299,26 @@ func TestIngestConfigParallelism(t *testing.T) {
 	for _, tt := range []struct {
 		name                            string
 		args                            []string
-		env                             string
+		env                             map[string]string
 		extract, destination, effective int
 	}{
 		{name: "implicit default", extract: 5, effective: 8},
 		{name: "explicit default", args: []string{"--extract-parallelism=5"}, extract: 5, destination: 5, effective: 5},
 		{name: "override", args: []string{"--extract-parallelism=3"}, extract: 3, destination: 3, effective: 3},
-		{name: "environment default", env: "5", extract: 5, destination: 5, effective: 5},
-		{name: "flag beats environment", env: "9", args: []string{"--extract-parallelism=2"}, extract: 2, destination: 2, effective: 2},
+		{name: "environment default", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "5"}, extract: 5, destination: 5, effective: 5},
+		{name: "flag beats environment", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "9"}, args: []string{"--extract-parallelism=2"}, extract: 2, destination: 2, effective: 2},
+		{name: "destination only", args: []string{"--destination-parallelism=3"}, extract: 5, destination: 3, effective: 3},
+		{name: "independent parallelism", args: []string{"--extract-parallelism=2", "--destination-parallelism=8"}, extract: 2, destination: 8, effective: 8},
+		{name: "independent parallelism reversed flags", args: []string{"--destination-parallelism=2", "--extract-parallelism=8"}, extract: 8, destination: 2, effective: 2},
+		{name: "destination environment", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "3"}, extract: 5, destination: 3, effective: 3},
+		{name: "destination environment alias", env: map[string]string{"DESTINATION_PARALLELISM": "3"}, extract: 5, destination: 3, effective: 3},
+		{name: "destination environment overrides extract flag", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "8"}, args: []string{"--extract-parallelism=2"}, extract: 2, destination: 8, effective: 8},
+		{name: "destination flag overrides extract environment", env: map[string]string{"INGESTR_EXTRACT_PARALLELISM": "2"}, args: []string{"--destination-parallelism=8"}, extract: 2, destination: 8, effective: 8},
+		{name: "destination flag beats environment", env: map[string]string{"INGESTR_DESTINATION_PARALLELISM": "9"}, args: []string{"--destination-parallelism=3"}, extract: 5, destination: 3, effective: 3},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.env != "" {
-				t.Setenv("INGESTR_EXTRACT_PARALLELISM", tt.env)
+			for name, value := range tt.env {
+				t.Setenv(name, value)
 			}
 			cfg, err := parseIngestConfig(t, tt.args...)
 			if err != nil {
@@ -320,6 +328,26 @@ func TestIngestConfigParallelism(t *testing.T) {
 				t.Fatalf("parallelism = (%d, %d, %d), want (%d, %d, %d)", cfg.ExtractParallelism, cfg.DestinationParallelism, cfg.EffectiveDestinationParallelism(), tt.extract, tt.destination, tt.effective)
 			}
 		})
+	}
+}
+
+func TestIngestConfigDestinationParallelismRejectsNonPositive(t *testing.T) {
+	clearIngestMappingEnv(t)
+	for _, input := range []string{"flag", "INGESTR_DESTINATION_PARALLELISM", "DESTINATION_PARALLELISM"} {
+		for _, value := range []string{"0", "-1"} {
+			t.Run(input+"="+value, func(t *testing.T) {
+				args := []string{"--extract-parallelism=2"}
+				if input == "flag" {
+					args = append(args, "--destination-parallelism="+value)
+				} else {
+					t.Setenv(input, value)
+				}
+				_, err := parseIngestConfig(t, args...)
+				if err == nil || !strings.Contains(err.Error(), "destination-parallelism must be positive") {
+					t.Fatalf("error = %v, want destination-parallelism must be positive", err)
+				}
+			})
+		}
 	}
 }
 
@@ -379,7 +407,7 @@ func TestIngestConfigStream(t *testing.T) {
 		{name: "explicit replace is not default", args: []string{"--stream", "--incremental-strategy=replace"}, err: "not supported with --stream"},
 		{name: "explicit default interval requires stream", args: []string{"--flush-interval=30s"}, err: "only valid together with --stream"},
 		{name: "explicit default records requires stream", args: []string{"--flush-records=50000"}, err: "only valid together with --stream"},
-		{name: "metrics requires stream", args: []string{"--metrics-addr=:9090"}, err: "--metrics-addr is only valid"},
+		{name: "batch metrics", args: []string{"--metrics-addr=:9090"}, strategy: config.StrategyReplace, interval: 30 * time.Second, records: 50000},
 		{name: "zero interval", args: []string{"--stream", "--flush-interval=0s"}, err: "flush-interval"},
 		{name: "zero records", args: []string{"--stream", "--flush-records=0"}, err: "flush-records"},
 	} {
@@ -408,6 +436,7 @@ func clearCDCChunkedSnapshotEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"INGESTR_CDC_SNAPSHOT_CHUNKED", "INGESTR_CDC_SNAPSHOT_CHUNK_SIZE",
+		"INGESTR_CDC_SNAPSHOT_SPOOL", "INGESTR_CDC_WAL_SPOOL_DIR",
 		"INGESTR_CDC_SNAPSHOT_EXECUTION",
 		"INGESTR_CDC_SNAPSHOT_CHUNK_TIMEOUT", "INGESTR_CDC_WAL_STAGING",
 		"INGESTR_CDC_WAL_BUFFER_BYTES", "INGESTR_CDC_SNAPSHOT_MODE", "INGESTR_CDC_START_LSN",
@@ -430,7 +459,7 @@ func TestIngestConfigCDCChunkedSnapshot(t *testing.T) {
 		{name: "disabled"},
 		{name: "enabled", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked"}},
 		{name: "wrong source", args: []string{"--cdc-snapshot-chunked"}, wantErr: "only supported for postgres+cdc"},
-		{name: "unknown staging", args: []string{"--cdc-wal-staging=disk"}, wantErr: "must be inmemory or destination"},
+		{name: "unknown staging", args: []string{"--cdc-wal-staging=invalid"}, wantErr: "must be memory, inmemory, destination, or disk"},
 		{name: "zero size", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-size=0"}, wantErr: "cdc-snapshot-chunk-size"},
 		{name: "zero timeout", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-snapshot-chunk-timeout=0s"}, wantErr: "cdc-snapshot-chunk-timeout"},
 		{name: "zero buffer", args: []string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-chunked", "--cdc-wal-buffer-bytes=0"}, wantErr: "cdc-wal-buffer-bytes"},
@@ -574,4 +603,53 @@ func TestIngestConfigIntervals(t *testing.T) {
 			t.Fatalf("%s error = %v", flag, err)
 		}
 	}
+}
+
+func TestIngestConfigCDCSnapshotSpool(t *testing.T) {
+	clearIngestMappingEnv(t)
+	clearCDCChunkedSnapshotEnv(t)
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		staging string
+		wantErr string
+	}{
+		{name: "default destination", staging: "destination"},
+		{name: "memory alias", args: []string{"--cdc-wal-staging=memory"}, staging: "inmemory"},
+		{name: "inmemory", args: []string{"--cdc-wal-staging=inmemory"}, staging: "inmemory"},
+		{name: "disk", args: []string{"--cdc-wal-staging=disk", "--cdc-wal-spool-dir=/spool"}, staging: "disk"},
+		{name: "disk missing directory", args: []string{"--cdc-wal-staging=disk"}, wantErr: "cdc-wal-spool-dir"},
+		{name: "chunked", args: []string{"--cdc-snapshot-chunked"}, wantErr: "cannot be combined"},
+		{name: "zero buffer", args: []string{"--cdc-wal-buffer-bytes=0"}, wantErr: "must be positive"},
+		{name: "zero interval", args: []string{"--stream", "--flush-interval=0s"}, wantErr: "must be positive"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string{"--source-uri=postgres+cdc://localhost/db", "--cdc-snapshot-spool"}, tt.args...)
+			cfg, err := parseIngestConfig(t, args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.CDCSnapshotSpool || cfg.CDCWALStaging != tt.staging {
+				t.Fatalf("spool config = (%v, %q)", cfg.CDCSnapshotSpool, cfg.CDCWALStaging)
+			}
+		})
+	}
+	t.Run("environment", func(t *testing.T) {
+		t.Setenv("INGESTR_CDC_SNAPSHOT_SPOOL", "true")
+		t.Setenv("INGESTR_CDC_WAL_STAGING", "disk")
+		t.Setenv("INGESTR_CDC_WAL_SPOOL_DIR", "/persistent/spool")
+		cfg, err := parseIngestConfig(t, "--source-uri=postgres+cdc://localhost/db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.CDCSnapshotSpool || cfg.CDCWALStaging != "disk" || cfg.CDCWALSpoolDir != "/persistent/spool" {
+			t.Fatalf("spool config = %+v", cfg)
+		}
+	})
 }

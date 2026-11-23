@@ -3,6 +3,7 @@ package postgres_cdc
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -241,18 +244,17 @@ func getTableSchema(ctx context.Context, pool *pgxpool.Pool, table string) (*sch
 	}
 
 	pkQuery := `
-		SELECT kcu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-			ON tc.constraint_catalog = kcu.constraint_catalog
-			AND tc.constraint_schema = kcu.constraint_schema
-			AND tc.constraint_name = kcu.constraint_name
-			AND tc.table_schema = kcu.table_schema
-			AND tc.table_name = kcu.table_name
-		WHERE tc.constraint_type = 'PRIMARY KEY'
-			AND tc.table_schema = $1
-			AND tc.table_name = $2
-		ORDER BY kcu.ordinal_position
+		SELECT attr.attname
+		FROM pg_catalog.pg_constraint con
+		JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
+		JOIN pg_catalog.pg_namespace nsp ON nsp.oid = rel.relnamespace
+		CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+		JOIN pg_catalog.pg_attribute attr
+			ON attr.attrelid = rel.oid AND attr.attnum = key_column.attnum
+		WHERE con.contype = 'p'
+			AND nsp.nspname = $1
+			AND rel.relname = $2
+		ORDER BY key_column.ordinality
 	`
 
 	var primaryKeys []string
@@ -392,6 +394,24 @@ func buildArrowSchema(columns []schema.Column) *arrow.Schema {
 		}
 	}
 	return arrow.NewSchema(fields, nil)
+}
+
+// markValidatedJSON flags JSON columns read from json or jsonb, whose text
+// PostgreSQL has already validated; rowsToBatch copies that text unchanged.
+func markValidatedJSON(arrowSchema *arrow.Schema, columns []schema.Column, fields []pgconn.FieldDescription) *arrow.Schema {
+	out := slices.Clone(arrowSchema.Fields())
+	changed := false
+	for i := range min(len(columns), len(fields), len(out)) {
+		if columns[i].DataType == schema.TypeJSON && (fields[i].DataTypeOID == pgtype.JSONOID || fields[i].DataTypeOID == pgtype.JSONBOID) {
+			out[i].Metadata = arrow.NewMetadata([]string{schema.JSONValidatedMetadataKey}, []string{"true"})
+			changed = true
+		}
+	}
+	if !changed {
+		return arrowSchema
+	}
+	metadata := arrowSchema.Metadata()
+	return arrow.NewSchema(out, &metadata)
 }
 
 var _ source.SourceTable = (*CDCTable)(nil)

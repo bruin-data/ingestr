@@ -15,6 +15,7 @@ URI parameters:
 - `credentials_path`: optional, the path to the service account JSON file. If not provided, ingestr will use [Application Default Credentials](https://googleapis.dev/python/google-api-core/latest/auth.html#overview)
 - `credentials_base64`: optional, base64-encoded service account JSON credentials
 - `location`: optional, the location of the dataset
+- `read_api`: optional, source only. How ingestr reads data from BigQuery: `storage` (default) or `rest`. See [Choosing the read API](#choosing-the-read-api).
 
 ### Authentication
 
@@ -35,7 +36,38 @@ ingestr supports multiple authentication methods for BigQuery:
    - User credentials set via `gcloud auth application-default login`
    - Service account credentials when running on Google Cloud (Compute Engine, App Engine, Cloud Run, etc.)
 
-The same URI structure can be used both for sources and destinations. You can read more about SQLAlchemy's BigQuery dialect [here](https://github.com/googleapis/python-bigquery-sqlalchemy?tab=readme-ov-file#connection-string-parameters).
+The same URI structure can be used both for sources and destinations. Source-only parameters such as `read_api` are ignored when the URI is used as a destination.
+
+### Choosing the read API
+
+By default (`read_api=storage`, or no `read_api`), ingestr reads tables through the [BigQuery Storage Read API](https://cloud.google.com/bigquery/docs/reference/storage), which streams Arrow data in parallel and is the fastest option. Custom queries and any table read the Storage Read API cannot serve run through the BigQuery ADBC driver, which also fetches query results through the Storage Read API.
+
+Set `read_api=rest` to read only through the BigQuery REST API and never touch the Storage Read API:
+
+```plaintext
+bigquery://my-project?credentials_path=/path/to/service-account.json&read_api=rest
+```
+
+With `read_api=rest`:
+- Whole-table reads of regular tables use `tabledata.list`, which is free and runs no query. This also applies when only `--sql-limit` is set: ingestr stops after the requested number of rows. `tabledata.list` cannot select columns, so columns excluded with `--sql-exclude-columns` are still downloaded and then dropped.
+- Filtered reads (`--incremental-key` with `--interval-start`/`--interval-end`, `--extract-partition-by`), views, materialized views, external tables, and custom queries (`query:...`) run as a query job, and ingestr pages through the results with `jobs.getQueryResults`. Query jobs are billed like any other BigQuery query. Filtered reads add `--sql-limit` to the query as a `LIMIT`.
+- Rows are converted to the same Arrow types the Storage Read API produces, so destination tables come out the same.
+- Errors from the REST API are returned as is. ingestr never falls back to the Storage Read API.
+
+Use `read_api=rest` when:
+- the credentials lack the `bigquery.readsessions.*` permissions (for example `roles/bigquery.readSessionUser`) that the Storage Read API needs,
+- an organization policy or VPC Service Controls perimeter blocks the Storage Read API, or
+- you don't want to pay for Storage Read API usage.
+
+The REST API returns rows as JSON, one page at a time, over a single connection. Expect it to be much slower than the Storage Read API on large tables. Keep the default unless one of the reasons above applies.
+
+```bash
+ingestr ingest
+    --source-uri 'bigquery://my-project?credentials_path=/path/to/service-account.json&read_api=rest' # [!code focus]
+    --source-table 'my_dataset.events'
+    --dest-uri $DEST_URI
+    --dest-table 'raw.events'
+```
 
 ### Using GCS as a staging area
 

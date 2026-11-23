@@ -25,7 +25,7 @@ func TestClickUpPipeline(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sourceURI := fmt.Sprintf("clickup://?api_key=%s", apiKey)
+	sourceURI := fmt.Sprintf("clickup://?api_token=%s", apiKey)
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, fmt.Sprintf("clickup_%d.duckdb", time.Now().UnixNano()))

@@ -13,6 +13,7 @@ type IntervalTracker struct {
 	IncrementalKey string
 	Min            interface{}
 	Max            interface{}
+	Rows           int64
 
 	mu       sync.Mutex
 	colIndex int
@@ -43,6 +44,8 @@ func (t *IntervalTracker) Wrap(records <-chan source.RecordBatchResult) <-chan s
 func (t *IntervalTracker) updateBounds(batch arrow.RecordBatch) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	t.Rows += batch.NumRows()
 
 	if !t.foundCol || t.colIndex < 0 || t.colIndex >= int(batch.NumCols()) ||
 		batch.ColumnName(t.colIndex) != t.IncrementalKey {

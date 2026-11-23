@@ -63,9 +63,9 @@ SELECT 1 FROM "landing"."raw"."stage" AS source
 WHERE source."tenant" = "iceberg"."analytics"."order"."tenant" AND source."key""id" = "iceberg"."analytics"."order"."key""id" )`).WillReturnResult(sqlmock.NewResult(0, 1))
 			}
 			mock.ExpectExec(`INSERT INTO "iceberg"."analytics"."order" ("tenant", "key""id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current")
-SELECT "tenant", "key""id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current" FROM "landing"."raw"."stage" AS source
+SELECT "tenant", "key""id", "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current" FROM "landing"."raw"."stage" AS __ingestr_source
 WHERE NOT EXISTS ( SELECT 1 FROM "iceberg"."analytics"."order" AS target
-WHERE target."tenant" = source."tenant" AND target."key""id" = source."key""id" AND target."_scd_is_current" = true )`).WillReturnResult(sqlmock.NewResult(0, 2))
+WHERE target."tenant" = __ingestr_source."tenant" AND target."key""id" = __ingestr_source."key""id" AND target."_scd_is_current" = true )`).WillReturnResult(sqlmock.NewResult(0, 2))
 			opts := destination.SCD2Options{
 				TargetTable: "order", StagingTable: "landing.raw.stage",
 				Columns:     []string{"tenant", `key"id`, "value", "_scd_valid_from", "_scd_valid_to", "_scd_is_current"},

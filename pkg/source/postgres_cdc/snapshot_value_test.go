@@ -134,21 +134,23 @@ func TestSnapshotRowsToBatchStopsAtByteCapAndReturnsLastKey(t *testing.T) {
 		},
 	}
 	snapshot := &Snapshot{tableSchema: &schema.TableSchema{Columns: columns}}
+	arrowSchema := buildArrowSchema(columns)
+	syncedAt := time.Now()
 
-	record, count, lastKey, err := snapshot.rowsToBatch(
-		rows,
-		buildArrowSchema(columns),
-		sourceColumns,
-		1,
-		100,
-		10,
-		"0/1",
-		time.Now(),
-	)
+	// Each row counts 48 bytes: 9 for the id, 13 for the payload and 26 for
+	// offsets, validity and CDC metadata, so a 90-byte cap ends the page
+	// after the second row.
+	record, count, lastKey, err := snapshot.rowsToBatch(rows, arrowSchema, sourceColumns, 1, 100, 90, "0/1", syncedAt)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, count)
 	require.Equal(t, []string{"2"}, lastKey)
 	require.EqualValues(t, 2, record.NumRows())
+	record.Release()
+
+	record, count, lastKey, err = snapshot.rowsToBatch(rows, arrowSchema, sourceColumns, 1, 100, 90, "0/1", syncedAt)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count, "the next page resumes at the first row after the byte cap")
+	require.Equal(t, []string{"3"}, lastKey)
 	record.Release()
 }
 

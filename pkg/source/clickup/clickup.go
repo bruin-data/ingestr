@@ -80,7 +80,7 @@ func parseClickUpURI(uri string) (string, error) {
 
 	rest := strings.TrimPrefix(uri, "clickup://")
 	if rest == "" || rest == "?" {
-		return "", fmt.Errorf("api_key is required in clickup URI")
+		return "", fmt.Errorf("api_token is required in clickup URI")
 	}
 
 	rest = strings.TrimPrefix(rest, "?")
@@ -90,12 +90,16 @@ func parseClickUpURI(uri string) (string, error) {
 		return "", fmt.Errorf("failed to parse clickup URI query: %w", err)
 	}
 
-	apiKey := values.Get("api_key")
-	if apiKey == "" {
-		return "", fmt.Errorf("api_key is required in clickup URI")
+	// api_key is a legacy alias for api_token.
+	token := values.Get("api_token")
+	if token == "" {
+		token = values.Get("api_key")
+	}
+	if token == "" {
+		return "", fmt.Errorf("api_token is required in clickup URI")
 	}
 
-	return apiKey, nil
+	return token, nil
 }
 
 func (s *ClickUpSource) GetTable(ctx context.Context, req source.TableRequest) (source.SourceTable, error) {

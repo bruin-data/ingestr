@@ -60,6 +60,16 @@ duckdb shop.duckdb "SELECT id, name, email, _cdc_deleted FROM public.customers O
 
 Alongside your columns, ingestr adds the CDC metadata columns `_cdc_lsn`, `_cdc_deleted`, and `_cdc_synced_at`.
 
+### How the snapshot and LSN fit together
+
+With `postgres+cdc://`, ingestr handles the initial load and its WAL boundary together: it creates a replication slot, reads a consistent snapshot, and applies changes from the matching LSN. Source writes can continue during the copy. You do not need to look up an LSN or pass `--cdc-start-lsn` for this workflow.
+
+Once the run succeeds, keep both the replication slot on PostgreSQL and ingestr's managed CDC state in the destination. Repeating the same command resumes from those saved checkpoints. The latest `_cdc_lsn` in a data row is not the connector's recovery checkpoint, and `--cdc-start-lsn` cannot rewind an existing connector.
+
+For large tables, [chunked snapshots](/supported-sources/postgres.md#large-initial-snapshots) let ingestr save progress during the initial load. The default snapshot reader may need to restart an interrupted initial copy.
+
+To perform the initial load separately and supply its LSN yourself, follow [Load a PostgreSQL snapshot with ingestr and start CDC](/tutorials/cdc-postgres-snapshot.md). It shows how to obtain a matching snapshot and LSN and load that snapshot using ingestr while source writes continue.
+
 ## 3. Capture ongoing changes
 
 To keep the destination in sync continuously, run the same command with `--stream`. The process snapshots first (if needed) and then tails the WAL, flushing changes on the `--flush-interval`, until you stop it with `Ctrl+C`:

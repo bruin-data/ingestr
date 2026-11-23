@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 
@@ -18,9 +17,10 @@ import (
 // stopping the tracker emits a terminal end event as JSON (the log/interactive
 // displays would not).
 func TestCreateTrackerJSONMode(t *testing.T) {
+	prevOut, prevErr, prevMode := output.Current()
 	var out, errb bytes.Buffer
 	output.Init(&out, &errb, output.ModeJSON)
-	t.Cleanup(func() { output.Init(os.Stdout, os.Stderr, output.ModeText) })
+	t.Cleanup(func() { output.Init(prevOut, prevErr, prevMode) })
 
 	p := New(&config.IngestConfig{Progress: config.ProgressJSON})
 	tr, err := p.createTracker(context.Background())

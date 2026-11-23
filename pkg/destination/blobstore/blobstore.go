@@ -103,7 +103,7 @@ func (d *BlobstoreDestination) Connect(ctx context.Context, uri string) error {
 		config.Debug("[BLOBSTORE] Connected to GCS with layout %s", d.layout)
 
 	case ProviderAzure:
-		client, err := createAzureClient(ctx, parsed)
+		client, err := adlsutil.NewBlobClient(parsed.accountName, parsed.accountKey, parsed.sasToken, parsed.connectionString, parsed.clientCredentials)
 		if err != nil {
 			return fmt.Errorf("failed to create Azure client: %w", err)
 		}
@@ -161,32 +161,6 @@ func createGCSClient(ctx context.Context, parsed *parsedBlobstoreURI) (*storage.
 	}
 
 	return storage.NewClient(ctx, opts...)
-}
-
-func createAzureClient(ctx context.Context, parsed *parsedBlobstoreURI) (*azblob.Client, error) {
-	if parsed.accountName == "" {
-		return nil, fmt.Errorf("account_name is required for Azure Blob Storage")
-	}
-
-	serviceURL := fmt.Sprintf("https://%s.blob.core.windows.net/", parsed.accountName)
-
-	if parsed.accountKey != "" {
-		cred, err := azblob.NewSharedKeyCredential(parsed.accountName, parsed.accountKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create shared key credential: %w", err)
-		}
-		return azblob.NewClientWithSharedKeyCredential(serviceURL, cred, nil)
-	}
-
-	if parsed.sasToken != "" {
-		return azblob.NewClientWithNoCredential(serviceURL+"?"+parsed.sasToken, nil)
-	}
-
-	cred, err := parsed.clientCredentials.NewTokenCredential()
-	if err != nil {
-		return nil, err
-	}
-	return azblob.NewClient(serviceURL, cred, nil)
 }
 
 type azureDatalakeClient struct {
@@ -360,7 +334,7 @@ func (d *BlobstoreDestination) WriteParallel(ctx context.Context, records <-chan
 		if err := d.writeBlob(ctx, bucket, key, buffer.Bytes()); err != nil {
 			return fmt.Errorf("failed to write to blob %s: %w", path, err)
 		}
-		d.markWritten(opts.Table, key)
+		d.markWritten(tableName, key)
 
 		config.Debug("[BLOBSTORE] Wrote %d rows to %s (%d bytes)", rowsInCurrentFile, path, buffer.Len())
 		fileID++
@@ -677,6 +651,7 @@ type parsedBlobstoreURI struct {
 	accountName       string
 	accountKey        string
 	sasToken          string
+	connectionString  string
 	clientCredentials adlsutil.ClientCredentials
 	layout            string
 }
@@ -705,9 +680,12 @@ func parseBlobstoreURI(uri string) (*parsedBlobstoreURI, error) {
 		parsed.credentialsFile = u.Query().Get("credentials_file")
 	case "az", "azure":
 		parsed.provider = ProviderAzure
+		parsed.bucket = u.Host
+		parsed.prefix = strings.Trim(u.Path, "/")
 		parsed.accountName = u.Query().Get("account_name")
 		parsed.accountKey = u.Query().Get("account_key")
 		parsed.sasToken = u.Query().Get("sas_token")
+		parsed.connectionString = u.Query().Get("connection_string")
 		parsed.clientCredentials = adlsutil.ParseClientCredentials(u.Query())
 	case "adls", "adlsgen2", "azdatalake", "abfs", "abfss":
 		parsed.provider = ProviderAzureDatalake

@@ -16,20 +16,21 @@ import (
 	"github.com/bruin-data/ingestr/pkg/source/postgres"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type snapshotChunk struct {
-	Batch    arrow.RecordBatch
 	LastKey  []string
 	UpperKey []string
 	Boundary pglogrepl.LSN
 	Done     bool
+	Rows     int64
+	SlotTime time.Duration
+	ReadTime time.Duration
 }
 
-func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.SourceTableInfo, slotName string, after, upper []string, size int, maxBytes int64, timeout time.Duration) (chunk snapshotChunk, retErr error) {
-	if size <= 0 || maxBytes < 0 || timeout <= 0 {
-		return chunk, fmt.Errorf("snapshot chunk size and timeout must be positive and byte limit must be nonnegative")
+func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.SourceTableInfo, slotName string, after, upper []string, size, pageSize int, maxBytes int64, timeout time.Duration, consume func(arrow.RecordBatch) error) (chunk snapshotChunk, retErr error) {
+	if size <= 0 || pageSize <= 0 || maxBytes < 0 || timeout <= 0 {
+		return chunk, fmt.Errorf("snapshot chunk size, page size and timeout must be positive and byte limit must be nonnegative")
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -42,13 +43,6 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if err := s.validateChunkedTable(ctx, table); err != nil {
 		return chunk, err
 	}
-	defer func() {
-		if retErr != nil && chunk.Batch != nil {
-			chunk.Batch.Release()
-			chunk.Batch = nil
-		}
-	}()
-
 	replConn, err := s.openReplicationConn(ctx)
 	if err != nil {
 		return chunk, err
@@ -64,7 +58,9 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return chunk, fmt.Errorf("failed to name snapshot chunk slot: %w", err)
 	}
+	slotStart := time.Now()
 	created, err := s.createLogicalSlot(ctx, replConn, truncateSlotName(slotName+"_chunk_"+hex.EncodeToString(suffix[:])), true)
+	chunk.SlotTime = time.Since(slotStart)
 	if err != nil {
 		return chunk, fmt.Errorf("failed to create snapshot chunk slot: %w", err)
 	}
@@ -72,6 +68,8 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if err != nil {
 		return chunk, fmt.Errorf("failed to parse snapshot chunk boundary: %w", err)
 	}
+	readStart := time.Now()
+	defer func() { chunk.ReadTime = time.Since(readStart) }()
 
 	conn, err := s.queryPool.Acquire(ctx)
 	if err != nil {
@@ -128,116 +126,32 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	for i := len(columns); i < len(formats); i++ {
 		formats[i] = pgx.TextFormatCode
 	}
-
-	const cursorName = "__ingestr_snapshot_chunk"
-	quotedCursor := quoteIdentifier(cursorName)
-	if _, err := tx.Exec(ctx, "DECLARE "+quotedCursor+" NO SCROLL CURSOR WITHOUT HOLD FOR "+query, args...); err != nil {
-		return chunk, fmt.Errorf("failed to declare snapshot chunk cursor: %w", err)
+	rows, err := tx.Query(ctx, query, append([]any{pgx.QueryExecModeDescribeExec, formats}, args...)...)
+	if err != nil {
+		return chunk, fmt.Errorf("failed to read snapshot chunk: %w", err)
 	}
-	cursorOpen := true
-	closeCursor := func(closeCtx context.Context) error {
-		if !cursorOpen {
-			return nil
-		}
-		if _, err := tx.Exec(closeCtx, "CLOSE "+quotedCursor); err != nil {
-			return err
-		}
-		cursorOpen = false
-		return nil
-	}
-	defer func() {
-		if !cursorOpen {
-			return
-		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cleanupCancel()
-		if err := closeCursor(cleanupCtx); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("failed to close snapshot chunk cursor: %w", err))
-		}
-	}()
-
+	defer rows.Close()
 	snapshot := &Snapshot{tableSchema: table.Schema, typeMap: typeMap}
-	builder := newSnapshotBatchBuilder(
-		snapshot.tableSchema,
-		buildArrowSchema(table.Schema.Columns),
-		columns,
-		len(table.PrimaryKeys),
-		typeMap,
-		FormatLSN(chunk.Boundary),
-		time.Now().UTC(),
-		maxBytes > 0,
-	)
-	defer builder.release()
-
-	previousFetch := 0
-	for builder.rowCount < int64(size) && (maxBytes == 0 || builder.accBytes < maxBytes) {
-		remaining := size - int(builder.rowCount)
-		budget := int64(0)
-		if maxBytes > 0 {
-			budget = maxBytes - builder.accBytes
-		}
-		fetchLimit := snapshotChunkFetchLimit(remaining, budget, builder.widestRow, previousFetch)
-		rows := tx.Conn().PgConn().ExecParams(ctx, fmt.Sprintf("FETCH FORWARD %d FROM %s", fetchLimit, quotedCursor), nil, nil, nil, formats)
-		fetched, err := appendSnapshotChunkRows(rows, builder, maxBytes)
+	arrowSchema := buildArrowSchema(table.Schema.Columns)
+	syncedAt := time.Now().UTC()
+	for {
+		batch, count, last, err := snapshot.rowsToBatch(rows, arrowSchema, columns, len(table.PrimaryKeys), pageSize, maxBytes, FormatLSN(chunk.Boundary), syncedAt)
 		if err != nil {
 			return chunk, err
 		}
-		if fetched == 0 {
+		if batch == nil {
 			break
 		}
-		previousFetch = fetchLimit
-	}
-
-	if err := closeCursor(ctx); err != nil {
-		return chunk, fmt.Errorf("failed to close snapshot chunk cursor: %w", err)
-	}
-	if builder.rowCount > 0 {
-		chunk.Batch = builder.record()
-		chunk.LastKey = builder.lastKey
-	}
-	chunk.Done = builder.rowCount == 0 || slices.Equal(chunk.LastKey, chunk.UpperKey)
-	return chunk, nil
-}
-
-func snapshotChunkFetchLimit(remaining int, budget, widest int64, previous int) int {
-	if remaining <= 0 {
-		return 0
-	}
-	if budget == 0 {
-		return remaining
-	}
-	if previous <= 0 {
-		return 1
-	}
-
-	byBytes := int64(remaining)
-	if widest > 0 {
-		byBytes = (budget-1)/widest + 1
-	}
-	growth := remaining
-	if previous < (remaining+31)/32 {
-		growth = previous * 32
-	}
-	return min(remaining, int(byBytes), growth)
-}
-
-func appendSnapshotChunkRows(rows *pgconn.ResultReader, builder *snapshotBatchBuilder, maxBytes int64) (int, error) {
-	count := 0
-	keep := true
-	for rows.NextRow() {
-		count++
-		if keep {
-			if err := builder.appendRow(rows.Values(), rows.FieldDescriptions()); err != nil {
-				_, _ = rows.Close()
-				return 0, err
-			}
-			keep = maxBytes == 0 || builder.accBytes < maxBytes
+		chunk.Rows += count
+		chunk.LastKey = last
+		err = consume(batch)
+		batch.Release()
+		if err != nil {
+			return chunk, err
 		}
 	}
-	if _, err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("error iterating snapshot chunk rows: %w", err)
-	}
-	return count, nil
+	chunk.Done = chunk.Rows < int64(size) || slices.Equal(chunk.LastKey, chunk.UpperKey)
+	return chunk, nil
 }
 
 func validateSnapshotChunkBounds(keys, after, upper []string) error {
@@ -251,26 +165,9 @@ func validateSnapshotChunkBounds(keys, after, upper []string) error {
 }
 
 func snapshotChunkQuery(columns []string, table string, keys, keyTypes, after, upper []string, size int) (string, []any) {
-	query, args := keyedSnapshotQuery(columns, table, keys, keyTypes, after)
-	orderAt := strings.LastIndex(query, " ORDER BY ")
-	order := query[orderAt:]
-	query = query[:orderAt]
-	quotedKeys, params := make([]string, len(keys)), make([]string, len(keys))
-	for i, key := range keys {
-		quotedKeys[i] = "__ingestr_snapshot." + quoteIdentifier(key)
-		params[i] = fmt.Sprintf("$%d::text::%s", len(args)+i+1, keyTypes[i])
-	}
-	if after == nil {
-		query += " WHERE "
-	} else {
-		query += " AND "
-	}
-	query += fmt.Sprintf("(%s) <= (%s)", strings.Join(quotedKeys, ", "), strings.Join(params, ", "))
-	for _, value := range upper {
-		args = append(args, value)
-	}
+	query, args := boundedSnapshotQuery(columns, table, keys, keyTypes, after, upper)
 	args = append(args, size)
-	return query + order + fmt.Sprintf(" LIMIT $%d", len(args)), args
+	return query + fmt.Sprintf(" LIMIT $%d", len(args)), args
 }
 
 func snapshotUpperKey(ctx context.Context, tx pgx.Tx, table source.SourceTableInfo) ([]string, error) {

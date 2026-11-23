@@ -42,6 +42,19 @@ type WriteOptions struct {
 	Schema      *schema.TableSchema
 	PrimaryKeys []string
 	Parallelism int
+	// CDCSnapshot guarantees complete snapshot row images with unique keys,
+	// without WAL changes, tombstones, or unchanged TOAST markers. Only set
+	// for a CDCSnapshotWriter.
+	CDCSnapshot bool
+	// CDCSnapshotProgress persists a cumulative snapshot cursor only after all
+	// preceding rows are committed and query-visible. It must not acknowledge WAL.
+	CDCSnapshotProgress func(context.Context, source.CDCStateCommitToken) error
+	// CDCSnapshotCommitted reports original Arrow rows and payload bytes from
+	// complete pages after they are committed, query-visible, and any covered
+	// progress is persisted. Each page is counted once, in its final commit
+	// window if it spans windows. Calls are serialized and finish before
+	// WriteParallel returns.
+	CDCSnapshotCommitted func(context.Context, int64, uint64) error
 
 	// Reverse-ETL fields. Strategy names the write behavior (merge/update/
 	// delete/append/replace) so an API destination can pick the right endpoint;
@@ -111,7 +124,17 @@ type MergeOptions struct {
 	// keeping them as _cdc_deleted tombstones. Only set for destinations that
 	// implement CDCHardDeleteCapable.
 	CDCHardDelete bool
-	Parallelism   int
+	// CDCSnapshot guarantees full snapshot row images without WAL or unchanged
+	// TOAST markers. The optional range contains every staged key.
+	CDCSnapshot      bool
+	CDCSnapshotRange *CDCSnapshotRange
+	Parallelism      int
+}
+
+// CDCSnapshotRange describes (After, Last] in PrimaryKeys order.
+type CDCSnapshotRange struct {
+	After []string
+	Last  []string
 }
 
 type CDCAtomicTableMerge struct {
@@ -152,6 +175,9 @@ type DeleteInsertOptions struct {
 	IntervalEnd        interface{}
 	Columns            []string
 	PrimaryKeys        []string
+	// IncrementalPredicate narrows the DELETE to target rows that also match
+	// it; the target is aliased like the merge target (t or target).
+	IncrementalPredicate string
 }
 
 type SwapOptions struct {
@@ -266,6 +292,36 @@ type FixedStrategyDestination interface {
 // pipeline rejects the flag for them.
 type IncrementalPredicateSupport interface {
 	SupportsIncrementalPredicate() bool
+}
+
+// DeleteInsertPredicateSupport is implemented by destinations whose
+// DeleteInsertTable honors DeleteInsertOptions.IncrementalPredicate.
+type DeleteInsertPredicateSupport interface {
+	SupportsDeleteInsertPredicate() bool
+}
+
+func SupportsDeleteInsertPredicate(d Destination) bool {
+	sup, ok := d.(DeleteInsertPredicateSupport)
+	return ok && sup.SupportsDeleteInsertPredicate()
+}
+
+// IntervalDeleteSQL builds the delete+insert DELETE for dialects that accept
+// `DELETE FROM table AS alias`. The alias is only introduced with a predicate,
+// so the unfiltered statement stays unchanged.
+func IntervalDeleteSQL(quotedTable, alias, quotedKey, lower, upper, predicate string) string {
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s >= %s AND %s <= %s", quotedTable, quotedKey, lower, quotedKey, upper)
+	}
+	return fmt.Sprintf("DELETE FROM %s AS %s WHERE %s", quotedTable, alias, IntervalDeleteCondition(alias, quotedKey, lower, upper, predicate))
+}
+
+// IntervalDeleteCondition is the WHERE clause of IntervalDeleteSQL, for
+// dialects that need a different DELETE head to alias the target.
+func IntervalDeleteCondition(alias, quotedKey, lower, upper, predicate string) string {
+	if strings.TrimSpace(predicate) == "" {
+		return fmt.Sprintf("%s >= %s AND %s <= %s", quotedKey, lower, quotedKey, upper)
+	}
+	return MergeJoinCondition(fmt.Sprintf("%s.%s >= %s AND %s.%s <= %s", alias, quotedKey, lower, alias, quotedKey, upper), predicate)
 }
 
 func MergeJoinCondition(condition, incrementalPredicate string) string {

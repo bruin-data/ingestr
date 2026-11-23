@@ -149,6 +149,8 @@ func TestChunkedSnapshotRecoversAcknowledgedDestinationJournal(t *testing.T) {
 		require.NoError(t, result.Err)
 		if result.Truncate {
 			require.True(t, result.CDCSnapshotResumed, "restart reset rows from a durable incomplete snapshot")
+			require.NotEmpty(t, persisted.Identity)
+			require.Equal(t, persisted.Identity, result.CDCChunkedSnapshotIdentity)
 			resumed = true
 		}
 		sink.apply(t, result)

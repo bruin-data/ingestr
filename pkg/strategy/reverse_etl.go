@@ -34,7 +34,7 @@ func executeReverseETL(ctx context.Context, job *IngestionJob, strategyName conf
 	defer cancelRead()
 
 	records, err := job.GetRecords(readCtx, source.ReadOptions{
-		IncrementalKey: job.Config.IncrementalKey,
+		IncrementalKey: sourceIncrementalKeyForRead(job),
 		IntervalStart:  job.Config.IntervalStart,
 		IntervalEnd:    job.Config.IntervalEnd,
 		PageSize:       job.Config.PageSize,

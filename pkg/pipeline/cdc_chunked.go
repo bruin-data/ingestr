@@ -10,11 +10,11 @@ import (
 )
 
 func usesStreamingExecutor(cfg *config.IngestConfig) bool {
-	return cfg.Stream || cfg.CDCChunkedSnapshot
+	return cfg.Stream || cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool
 }
 
 func resolveMultiTableStrategy(cfg *config.IngestConfig, src source.MultiTableSource) config.IncrementalStrategy {
-	if cfg.CDCChunkedSnapshot {
+	if cfg.CDCChunkedSnapshot || cfg.CDCSnapshotSpool {
 		return config.StrategyMerge
 	}
 	resolved := cfg.IncrementalStrategy
@@ -33,6 +33,17 @@ func resolveMultiTableStrategy(cfg *config.IngestConfig, src source.MultiTableSo
 }
 
 func (p *Pipeline) validateCDCChunkedSnapshotSource(ctx context.Context, src any, tables []source.SourceTableInfo) error {
+	if p.config.CDCSnapshotSpool {
+		if _, ok := src.(source.StreamCommitter); !ok {
+			return fmt.Errorf("spooled CDC snapshots require source commit acknowledgments")
+		}
+		for _, table := range tables {
+			if err := strategy.ValidateCDCSnapshotSpoolTable(table.Name, table.Schema, table.PrimaryKeys); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if !p.config.CDCChunkedSnapshot {
 		return nil
 	}

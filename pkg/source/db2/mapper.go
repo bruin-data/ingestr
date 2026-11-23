@@ -48,7 +48,8 @@ func MapDb2ToDataType(db2Type string) (schema.DataType, int, int, schema.DataTyp
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	case "CHAR", "CHARACTER", "VARCHAR", "CHARACTER VARYING", "LONG VARCHAR":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
-	case "GRAPHIC", "VARGRAPHIC", "LONG VARGRAPHIC", "CLOB", "DBCLOB", "XML":
+	case "GRAPHIC", "VARGRAPHIC", "LONG VARGRAPHIC", "CLOB", "DBCLOB", "XML",
+		"VARG": // IBM i's truncated system name for VARGRAPHIC, flagged on issue #3 - unlike TIMESTMP, not yet independently re-confirmed by a fresh catalog query, just added on the same evidenced pattern
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	case "BINARY", "VARBINARY", "CHAR FOR BIT DATA", "VARCHAR FOR BIT DATA", "BLOB", "ROWID":
 		return schema.TypeBinary, 0, 0, schema.TypeUnknown
@@ -56,7 +57,14 @@ func MapDb2ToDataType(db2Type string) (schema.DataType, int, int, schema.DataTyp
 		return schema.TypeDate, 0, 0, schema.TypeUnknown
 	case "TIME":
 		return schema.TypeTime, 0, 0, schema.TypeUnknown
-	case "TIMESTAMP":
+	case "TIMESTAMP", "TIMESTMP":
+		// IBM i's own catalog (QSYS2.SYSCOLUMNS.DATA_TYPE) reports this as
+		// "TIMESTMP" - the 8-character-truncated system name OS/400's
+		// legacy object-naming convention uses, not the full SQL word.
+		// Confirmed on issue #3: this fell through to the TypeString
+		// default, so the column landed as the raw Go time.Time string
+		// representation in a TEXT destination column instead of a real
+		// timestamp.
 		return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
 	case "TIMESTAMP WITH TIME ZONE":
 		return schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown

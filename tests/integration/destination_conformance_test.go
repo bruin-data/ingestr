@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -323,8 +324,10 @@ func destinationCases() []destCase {
 					t.Skip("shared MaxCompute emulator container not available")
 				}
 
+				maxcomputeEmulatorMu.Lock()
 				table := fmt.Sprintf("conformance_%s", uniqueSuffix())
 				cleanup := func() {
+					defer maxcomputeEmulatorMu.Unlock()
 					dest, err := uri.DefaultRegistry.GetDestination(maxcomputeDest.uri)
 					if err != nil {
 						return
@@ -347,15 +350,19 @@ func destinationCases() []destCase {
 					t.Skip("shared mssql destination container not available")
 				}
 
-				table := fmt.Sprintf("dbo.conformance_%s", uniqueSuffix())
+				// Each test gets its own database: catalog reads and DDL from
+				// parallel tests in one database deadlock on its system tables.
+				dbName := fmt.Sprintf("conformance_%s", uniqueSuffix())
+				admin, err := sql.Open("sqlserver", mssqlConnString(mssqlDest.uri))
+				require.NoError(t, err)
+				_, err = admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE [%s]", dbName))
+				require.NoError(t, err)
 				cleanup := func() {
-					db, err := sql.Open("sqlserver", mssqlConnString(mssqlDest.uri))
-					if err == nil {
-						_, _ = db.ExecContext(ctx, fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s", table, quoteTableMSSQL(table)))
-						_ = db.Close()
-					}
+					_, _ = admin.ExecContext(ctx, fmt.Sprintf("ALTER DATABASE [%s] SET SINGLE_USER WITH ROLLBACK IMMEDIATE", dbName))
+					_, _ = admin.ExecContext(ctx, fmt.Sprintf("DROP DATABASE [%s]", dbName))
+					_ = admin.Close()
 				}
-				return mssqlDest.uri, table, cleanup
+				return mssqlURIForDatabase(t, mssqlDest.uri, "mssql", dbName, nil), fmt.Sprintf("dbo.conformance_%s", uniqueSuffix()), cleanup
 			},
 			sqlBackend:             mssqlBackend(),
 			mergeCapable:           true,
@@ -495,6 +502,7 @@ func validateIcebergAppend(t *testing.T, destURI, destTable string) {
 // - replace strategy correctness (existing data overwritten)
 // - destination type mapping correctness (SQL backends)
 func TestDestinations_Replace(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -528,6 +536,7 @@ func TestDestinations_Replace(t *testing.T) {
 }
 
 func TestDestinations_OracleExadataAlias(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -643,6 +652,7 @@ func countRowsViaAthenaRead(t *testing.T, ctx context.Context, athenaURI, athena
 // - merge strategy upsert behavior (update existing rows by PK, insert new)
 // Only destinations that implement MergeTable are tested.
 func TestDestinations_Merge(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -690,6 +700,7 @@ func TestDestinations_Merge(t *testing.T) {
 // - destination supports append
 // - second run adds rows without overwriting
 func TestDestinations_Append(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -742,6 +753,7 @@ func TestDestinations_Append(t *testing.T) {
 // - verify rows in the interval are replaced
 // - verify net-new rows within the interval are inserted (count increases)
 func TestDestinations_DeleteInsert(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -798,6 +810,7 @@ func TestDestinations_DeleteInsert(t *testing.T) {
 //     [3,4] must replace id=3 in place, insert net-new id=4, and leave id=1
 //     and id=2 (outside the interval) untouched — ending at 4 rows.
 func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -876,6 +889,7 @@ func TestDestinations_DeleteInsert_DedupesStagingByPK(t *testing.T) {
 //
 // - Final state: 8 total rows, 4 current, 5 historical
 func TestDestinations_SCD2(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1211,6 +1225,12 @@ func splitSchemaTable(table string, defaultSchema string) (string, string) {
 }
 
 var uniqueCounter atomic.Uint64
+
+// maxcomputeEmulatorMu runs one test at a time against the shared MaxCompute
+// emulator. v0.0.7 keeps storage read sessions in an unsynchronized HashMap and
+// answers a failed read with an empty 200 response, which the source reports
+// as an Arrow EOF.
+var maxcomputeEmulatorMu sync.Mutex
 
 func uniqueSuffix() string {
 	// Collision-safe even when parallel tests race on the same nanosecond. Digits
@@ -2268,6 +2288,7 @@ func normalizeFabricType(fabricType string) string {
 // TestChessSource_ToDestinations tests Chess.com source against all destinations
 // This test fetches 1 month of games data from Chess.com and ingests it into each destination
 func TestChessSource_ToDestinations(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2337,6 +2358,7 @@ const (
 // - Second load: schema evolves to age(string) with values like "UNKNOWN"
 // - Destination table should widen the age column from int to string
 func TestDestinations_SchemaEvolution(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2542,6 +2564,7 @@ func getSchemaEvolutionExpectedTypes(backend *sqlBackend) map[string]string {
 // of "main.users") would leave orphaned _old_ tables because the DROP statement
 // was malformed (e.g., "DROP TABLE IF EXISTS .users_old_123").
 func TestDestinations_SwapTableCleansUpOldTables(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2821,6 +2844,7 @@ func hasPrimaryKey(t *testing.T, backend *sqlBackend, uri, table, column string)
 // constraints; the per-table-schema-map fix recreates the target with full constraints.
 // This test locks that fix in place.
 func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2882,6 +2906,7 @@ func TestDestinations_Replace_PreservesConstraints(t *testing.T) {
 // distinct ids ({1,1,2,3,3}); incremental key = score, so the higher-score row
 // wins.
 func TestDestinations_Replace_DedupesByPK(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -2942,6 +2967,7 @@ func TestDestinations_Replace_DedupesByPK(t *testing.T) {
 // asserts only the collapse and that each survivor is a real source row — not
 // which duplicate wins. Uses the same fixture (5 rows over 3 distinct ids).
 func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -3005,6 +3031,7 @@ func TestDestinations_Replace_DedupesByPK_NoIncrementalKey(t *testing.T) {
 // exceeding the database identifier length limit (e.g., PostgreSQL's 63-byte limit).
 // Two columns that differ only after byte 63 must not collide.
 func TestDestinations_LongColumnNames(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -3095,6 +3122,7 @@ func TestDestinations_LongColumnNames(t *testing.T) {
 }
 
 func TestDestinations_Replace_DedupTiesAndNulls(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}

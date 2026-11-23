@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	numericPrecisionRegex = regexp.MustCompile(`(?i)(?:numeric|bignumeric|decimal)\((\d+)(?:,\s*(\d+))?\)`)
+	numericPrecisionRegex = regexp.MustCompile(`(?i)(?:numeric|bignumeric|decimal(?:256)?)\((\d+)(?:,\s*(\d+))?\)`)
 	arrayTypeRegex        = regexp.MustCompile(`(?i)^ARRAY<(.+)>$`)
 	structTypeRegex       = regexp.MustCompile(`(?i)^STRUCT<.+>$`)
 )
@@ -107,7 +107,24 @@ func MapBigQueryToDataType(bqType string) (schema.DataType, int, int, schema.Dat
 	case "GEOGRAPHY":
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 
+	// Arrow types (from ADBC driver, used by custom queries)
+	case "UTF8", "LARGE_UTF8":
+		return schema.TypeString, 0, 0, schema.TypeUnknown
+	case "BINARY", "LARGE_BINARY":
+		return schema.TypeBinary, 0, 0, schema.TypeUnknown
+	case "DATE32", "DATE64":
+		return schema.TypeDate, 0, 0, schema.TypeUnknown
+
 	default:
+		if strings.HasPrefix(baseType, "TIMESTAMP[") {
+			if strings.Contains(upperType, "TZ=") {
+				return schema.TypeTimestampTZ, 0, 0, schema.TypeUnknown
+			}
+			return schema.TypeTimestamp, 0, 0, schema.TypeUnknown
+		}
+		if strings.HasPrefix(baseType, "TIME32[") || strings.HasPrefix(baseType, "TIME64[") {
+			return schema.TypeTime, 0, 0, schema.TypeUnknown
+		}
 		return schema.TypeString, 0, 0, schema.TypeUnknown
 	}
 }

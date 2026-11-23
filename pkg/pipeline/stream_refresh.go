@@ -58,6 +58,9 @@ func (p *Pipeline) prepareStreamingRefresh(ctx context.Context, manager *strateg
 		return err
 	}
 	p.config.FullRefresh = fresh
+	if isPostgresCDCSource(p.config.SourceURI) {
+		return strategy.ValidateCDCSnapshotSpoolResume(ctx, p.config, manager)
+	}
 	return nil
 }
 

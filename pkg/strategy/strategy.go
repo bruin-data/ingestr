@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/bruin-data/ingestr/internal/annotation"
@@ -64,6 +65,9 @@ type IngestionJob struct {
 	// RunID adds or replaces _ingestr_run_id with one run identifier for the job.
 	RunID *transformer.RunID
 
+	// RowFilter drops rows before SchemaAligner, while columns still have their source types.
+	RowFilter transformer.RecordTransformer
+
 	// SchemaAligner reorders and fills transformed batches to match the write schema.
 	SchemaAligner *transformer.TypeCaster
 
@@ -91,6 +95,27 @@ func (j *IngestionJob) GetRecords(ctx context.Context, opts source.ReadOptions) 
 	return j.ApplyBatchTransformation(ctx, records)
 }
 
+// sourceIncrementalKeyForRead returns the incremental key as the source names it.
+// Config.IncrementalKey carries the destination name after naming conventions.
+func sourceIncrementalKeyForRead(job *IngestionJob) string {
+	if job.Config.IncrementalKey == "" {
+		return ""
+	}
+	sourceKey := job.Config.IncrementalKey
+	if job.SourceSchema != nil && job.SourceSchema.IncrementalKey != "" {
+		sourceKey = job.SourceSchema.IncrementalKey
+	} else if job.ColumnRenamer != nil && job.ColumnRenamer.HasRenames() {
+		for src, dst := range job.ColumnRenamer.Mapping() {
+			if dst == job.Config.IncrementalKey || strings.EqualFold(dst, job.Config.IncrementalKey) {
+				sourceKey = src
+				break
+			}
+		}
+	}
+	sourceKey, _ = resolveSchemaColumn(job.SourceSchema, sourceKey)
+	return sourceKey
+}
+
 // ApplyEvolution applies the pending schema evolution plan to the destination.
 // The destination turns the abstract plan into DDL and executes it; this
 // strategy layer only decides when the plan runs.
@@ -116,7 +141,7 @@ type MultiTableIngestionJob struct {
 	TableDestNames map[string]string // source table → dest table mapping
 	Tracker        progress.Tracker
 	CDCResumeLSNs  map[string]string // Per-table CDC resume LSNs: source table → max LSN already processed
-	// CDCSnapshotResumes lists interrupted snapshots streaming can continue.
+	// CDCSnapshotResumes lists interrupted snapshots the consumer can continue.
 	CDCSnapshotResumes map[string]source.CDCSnapshotProgress
 	EvolutionPlans     map[string]*schemaevolution.EvolutionPlan // Per-table schema evolution plans: source table → plan
 	CDCStateManager    *CDCStateManager
@@ -470,6 +495,10 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 
 	if j.RunID != nil {
 		records = transformer.Wrap(records, j.RunID)
+	}
+
+	if j.RowFilter != nil {
+		records = transformer.Wrap(records, j.RowFilter)
 	}
 
 	if j.SchemaAligner != nil {

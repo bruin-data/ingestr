@@ -2,12 +2,14 @@ package source
 
 import (
 	"context"
+	"database/sql/driver"
 	"math/big"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
 
@@ -155,6 +157,8 @@ func TestValidateExtractPartitionColumn(t *testing.T) {
 			{Name: "event_date", DataType: schema.TypeDate},
 			{Name: "id", DataType: schema.TypeInt64},
 			{Name: "name", DataType: schema.TypeString},
+			{Name: "number_id", DataType: schema.TypeDecimal, Precision: 38},
+			{Name: "amount", DataType: schema.TypeDecimal, Precision: 38, Scale: 2},
 		},
 	}
 
@@ -173,6 +177,12 @@ func TestValidateExtractPartitionColumn(t *testing.T) {
 		t.Fatalf("resolved integer column = %q, want id", got)
 	}
 
+	if _, err := ValidateExtractPartitionColumn(tableSchema, "number_id"); err != nil {
+		t.Fatalf("ValidateExtractPartitionColumn() scale-0 decimal error = %v", err)
+	}
+	if _, err := ValidateExtractPartitionColumn(tableSchema, "amount"); err == nil {
+		t.Fatal("expected error for decimal column with a scale")
+	}
 	if _, err := ValidateExtractPartitionColumn(tableSchema, "name"); err == nil {
 		t.Fatal("expected error for non-time column")
 	}
@@ -938,6 +948,8 @@ func TestSQLIntValueAcceptsFloatAndBigIntValues(t *testing.T) {
 		{name: "float32", value: float32(12), want: 12},
 		{name: "float64", value: float64(42), want: 42},
 		{name: "big int", value: big.NewInt(99), want: 99},
+		{name: "decimal128", value: decimal128.FromI64(-1234567890123), want: -1234567890123},
+		{name: "driver valuer", value: stringValuer("42"), want: 42},
 	}
 
 	for _, tt := range tests {
@@ -997,3 +1009,7 @@ func TestSQLCustomQueryBuilders(t *testing.T) {
 		t.Fatalf("bounds query = %q, want %q", boundsQuery, wantBounds)
 	}
 }
+
+type stringValuer string
+
+func (v stringValuer) Value() (driver.Value, error) { return string(v), nil }

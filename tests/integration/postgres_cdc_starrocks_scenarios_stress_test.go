@@ -749,6 +749,7 @@ func TestPostgresCDC_StarRocksScenarios(t *testing.T) {
 	var finalLSN string
 	require.NoError(t, srcPool.QueryRow(ctx, `SELECT pg_current_wal_insert_lsn()::text`).Scan(&finalLSN))
 	deadline := time.Now().Add(srStressConverge)
+	lastDrainLog := time.Time{}
 	for {
 		select {
 		case <-sinkDone:
@@ -759,6 +760,11 @@ func TestPostgresCDC_StarRocksScenarios(t *testing.T) {
 		require.NoError(t, srcPool.QueryRow(ctx, `SELECT count(*) FROM pg_replication_slots WHERE NOT temporary AND confirmed_flush_lsn >= $1::pg_lsn`, finalLSN).Scan(&caughtUp))
 		if caughtUp >= 1 {
 			break
+		}
+		if time.Since(lastDrainLog) >= 30*time.Second {
+			lastDrainLog = time.Now()
+			t.Logf("draining CDC backlog through %s (%s)", finalLSN, sink.summary())
+			stressDumpReplicationState(t, ctx, srcPool)
 		}
 		if time.Now().After(deadline) {
 			stressDumpReplicationState(t, ctx, srcPool)

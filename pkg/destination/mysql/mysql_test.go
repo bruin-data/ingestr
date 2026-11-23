@@ -1171,3 +1171,14 @@ func TestMySQLVersionAllowsRenameUnderLock(t *testing.T) {
 	assert.False(t, mysqlVersionAllowsRenameUnderLock("11.4.2-MariaDB"))
 	assert.False(t, mysqlVersionAllowsRenameUnderLock("garbage"))
 }
+
+func TestBuildDeleteInsertDeleteSQL(t *testing.T) {
+	if got, want := buildDeleteInsertDeleteSQL("db.events", "updated_at", ""), "DELETE FROM `db`.`events` WHERE `updated_at` >= ? AND `updated_at` <= ?"; got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
+	got := buildDeleteInsertDeleteSQL("db.events", "updated_at", "target.event_date >= '2026-01-01'")
+	want := "DELETE target FROM `db`.`events` AS target WHERE target.`updated_at` >= ? AND target.`updated_at` <= ? AND (target.event_date >= '2026-01-01')"
+	if got != want {
+		t.Fatalf("delete SQL = %q, want %q", got, want)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/bruin-data/ingestr/internal/testutil/quiettc"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgxpool"

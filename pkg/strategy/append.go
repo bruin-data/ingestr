@@ -76,7 +76,7 @@ func (s *AppendStrategy) Execute(ctx context.Context, job *IngestionJob) error {
 	}
 
 	readOpts := source.ReadOptions{
-		IncrementalKey:                  job.Config.IncrementalKey,
+		IncrementalKey:                  sourceIncrementalKeyForRead(job),
 		IntervalStart:                   job.Config.IntervalStart,
 		IntervalEnd:                     job.Config.IntervalEnd,
 		ExtractPartitionBy:              job.Config.ExtractPartitionBy,

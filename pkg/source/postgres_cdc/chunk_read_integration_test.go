@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -90,44 +91,51 @@ func TestSnapshotChunkByteCapBoundsServerExecution(t *testing.T) {
 		`).Scan(&calls))
 		return calls
 	}
-	chunkIDs := func(chunk snapshotChunk) []int64 {
+	readChunk := func(after, upper []string, size int) (snapshotChunk, [][]int64) {
 		t.Helper()
-		require.NotNil(t, chunk.Batch)
-		defer chunk.Batch.Release()
-		indices := chunk.Batch.Schema().FieldIndices("id")
-		require.Len(t, indices, 1)
-		return slices.Clone(chunk.Batch.Column(indices[0]).(*array.Int64).Int64Values())
+		var pages [][]int64
+		chunk, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", after, upper, size, size, 150<<10, time.Minute, func(batch arrow.RecordBatch) error {
+			indices := batch.Schema().FieldIndices("id")
+			require.Len(t, indices, 1)
+			pages = append(pages, slices.Clone(batch.Column(indices[0]).(*array.Int64).Int64Values()))
+			return nil
+		})
+		require.NoError(t, err)
+		return chunk, pages
+	}
+	ids := func(from, to int64) []int64 {
+		var out []int64
+		for id := from; id <= to; id++ {
+			out = append(out, id)
+		}
+		return out
 	}
 
+	// Each 64 KiB row fills over a third of the 150 KiB page cap, so pages
+	// hold three rows. The byte cap must end a page, not the chunk: every
+	// row the chunk executes is emitted and none is executed again.
 	resetCounter()
-	first, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", nil, nil, 100, 150<<10, time.Minute)
-	require.NoError(t, err)
-	require.Equal(t, []int64{1, 2, 3}, chunkIDs(first))
-	require.EqualValues(t, 4, counter(), "the upper-key lookup and three emitted rows should be the only rows executed")
+	first, pages := readChunk(nil, nil, 10)
+	require.Equal(t, [][]int64{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}, {10}}, pages)
+	require.EqualValues(t, 10, first.Rows)
+	require.Equal(t, []string{"10"}, first.LastKey)
+	require.False(t, first.Done)
+	require.EqualValues(t, 11, counter(), "the upper-key lookup and ten emitted rows should be the only rows executed")
 
-	second, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", first.LastKey, first.UpperKey, 100, 150<<10, time.Minute)
-	require.NoError(t, err)
-	require.Equal(t, []int64{4, 5, 6}, chunkIDs(second))
-	require.EqualValues(t, 7, counter(), "the resumed chunk should not execute rows discarded by the previous chunk")
-
-	_, err = pool.Exec(ctx, "UPDATE public.chunk_width_items SET payload = CASE WHEN id = 1 THEN 'x' ELSE repeat('x', 65536) END")
-	require.NoError(t, err)
-	resetCounter()
-	variable, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", nil, nil, 100, 150<<10, time.Minute)
-	require.NoError(t, err)
-	require.Equal(t, []int64{1, 2, 3, 4}, chunkIDs(variable))
-	require.EqualValues(t, 34, counter(), "a width increase may waste one adaptive fetch but must not append its unused rows")
-
-	resumedVariable, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", variable.LastKey, variable.UpperKey, 100, 150<<10, time.Minute)
-	require.NoError(t, err)
-	require.Equal(t, []int64{5, 6, 7}, chunkIDs(resumedVariable))
-	require.EqualValues(t, 37, counter(), "rows cut from the prior fetch must resume without a gap")
+	second, pages := readChunk(first.LastKey, first.UpperKey, 100)
+	require.Equal(t, ids(11, 100), slices.Concat(pages...))
+	for _, page := range pages {
+		require.LessOrEqual(t, len(page), 3)
+	}
+	require.EqualValues(t, 90, second.Rows)
+	require.True(t, second.Done)
+	require.EqualValues(t, 101, counter(), "the resumed chunk should execute only the rows it emits")
 
 	_, err = pool.Exec(ctx, "UPDATE public.chunk_width_items SET payload = 'x'")
 	require.NoError(t, err)
 	resetCounter()
-	narrow, err := src.readSnapshotChunk(ctx, table, "chunk_read_slot", nil, nil, 10, 1<<20, time.Minute)
-	require.NoError(t, err)
-	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, chunkIDs(narrow))
+	narrow, pages := readChunk(nil, nil, 10)
+	require.Equal(t, [][]int64{ids(1, 10)}, pages)
+	require.False(t, narrow.Done)
 	require.EqualValues(t, 11, counter(), "the upper-key lookup and row cap should bound a narrow chunk")
 }

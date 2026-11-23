@@ -30,31 +30,6 @@ func TestSnapshotChunkQueryFirstChunkAndUntrustedKey(t *testing.T) {
 	require.Equal(t, []any{upper, 25}, args)
 }
 
-func TestSnapshotChunkFetchLimit(t *testing.T) {
-	t.Run("no byte cap fetches the remaining row cap", func(t *testing.T) {
-		require.Equal(t, 100000, snapshotChunkFetchLimit(100000, 0, 0, 0))
-	})
-	t.Run("byte capped reads start with one probe row", func(t *testing.T) {
-		require.Equal(t, 1, snapshotChunkFetchLimit(100000, 512<<20, 0, 0))
-	})
-	t.Run("wide rows fetch only the rows that fit", func(t *testing.T) {
-		const (
-			capacity = int64(512 << 20)
-			width    = int64(571 << 10)
-		)
-		second := snapshotChunkFetchLimit(99999, capacity-width, width, 1)
-		require.Equal(t, 32, second)
-		third := snapshotChunkFetchLimit(99999-second, capacity-int64(second+1)*width, width, second)
-		require.Equal(t, 886, third)
-		require.Equal(t, 919, 1+second+third)
-	})
-	t.Run("thin rows grow fetches without authorizing the whole chunk", func(t *testing.T) {
-		require.Equal(t, 32, snapshotChunkFetchLimit(99999, 512<<20, 1, 1))
-		require.Equal(t, 1024, snapshotChunkFetchLimit(99967, 512<<20, 1, 32))
-		require.Equal(t, 32768, snapshotChunkFetchLimit(98943, 512<<20, 1, 1024))
-	})
-}
-
 func TestSnapshotChunkBoundsRejectIncompleteCompositeCursor(t *testing.T) {
 	keys := []string{"tenant", "id"}
 	require.NoError(t, validateSnapshotChunkBounds(keys, nil, nil))
@@ -136,9 +111,9 @@ func TestReadSnapshotChunkRejectsUnboundedReadBeforeConnecting(t *testing.T) {
 		{name: "negative timeout", size: 1, timeout: -time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			chunk, err := src.readSnapshotChunk(context.Background(), source.SourceTableInfo{}, "", nil, nil, tc.size, tc.maxBytes, tc.timeout)
+			chunk, err := src.readSnapshotChunk(context.Background(), source.SourceTableInfo{}, "", nil, nil, tc.size, 1, tc.maxBytes, tc.timeout, nil)
 			require.ErrorContains(t, err, "must be positive")
-			require.Nil(t, chunk.Batch)
+			require.Zero(t, chunk.Rows)
 		})
 	}
 }

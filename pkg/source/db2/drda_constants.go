@@ -43,6 +43,24 @@ const (
 	cpSECMEC    uint16 = 0x11A2
 	cpSECMGR    uint16 = 0x1440
 	cpSECTKN    uint16 = 0x11DC
+)
+
+// queryBlockSize is the QRYBLKSZ this client requests on OPNQRY/CNTQRY.
+// Reported on issue #3 (performance observation, not yet confirmed against
+// a controlled benchmark): the server returned about 64KB per block
+// regardless, suggesting it capped the negotiated value at 65535 - the
+// largest value that fits in a 2-byte field - even though this client
+// already sends QRYBLKSZ in a 4-byte wire field per the DRDA spec. At a
+// measured ~10ms per round trip, a full-table fetch needed roughly 2,650
+// round trips just for 64KB blocks. Raising the requested value gives the
+// server room to actually return bigger blocks if it chooses to; it cannot
+// make things worse than today's 64KB, since a server that cannot or will
+// not honor a larger block simply keeps sending whatever size it already
+// does. MAXBLKEXT is left unchanged at 65535 - already the max representable
+// in its 2-byte field, so it was never the bottleneck.
+const queryBlockSize = 10 * 1024 * 1024
+
+const (
 	cpPASSWORD  uint16 = 0x11A1
 	cpUSRID     uint16 = 0x11A0
 	cpSQLAM     uint16 = 0x2407
@@ -52,6 +70,8 @@ const (
 	cpSRVDGN    uint16 = 0x1153
 	cpSRVNAM    uint16 = 0x116D
 	cpSRVRLSLV  uint16 = 0x115A
+	cpSVRCOD    uint16 = 0x1149
+	cpSECCHKCD  uint16 = 0x11A4
 	cpTYPDEFNAM uint16 = 0x002F
 	cpTYPDEFOVR uint16 = 0x0035
 	cpPKGNAMCSN uint16 = 0x2113
@@ -62,11 +82,27 @@ const (
 	cpSECCHKRM  uint16 = 0x1219
 	cpACCRDBRM  uint16 = 0x2201
 	cpEXTDTA    uint16 = 0x146C
+	// cpPRMNSPRM ("Parameter Not Supported") is a DDM reply message meaning
+	// the server rejected one of the parameters in the preceding command.
+	// Confirmed as 0x1251 via Apache Derby's own DDM implementation
+	// (java/org.apache.derby.server/.../impl/drda/CodePoint.java:
+	// "static final int PRMNSPRM = 0x1251;") - this client previously had no
+	// constant for it, so it fell through parseResponse's default case
+	// silently. Reported on issue #3: every DSCSQLSTT sent by this client
+	// got back a bare 0x1251 reply with no error surfaced.
+	cpPRMNSPRM uint16 = 0x1251
 )
 
 const (
 	secmecUserPassword          = 3
 	secmecEncryptedUserPassword = 9
+	// secmecEUSRIDPWD is not in the public DRDA SECMEC registry. Observed
+	// on a real Db2 for i host: it claims secmecEncryptedUserPassword with
+	// no token, then confirms this value once the client re-proposes
+	// secmecUserPassword. Used as a platform-detection fallback when PRDID
+	// in ACCRDBRM doesn't resolve the platform (see handshake's
+	// secmecDowngradedToEUSRIDPWD).
+	secmecEUSRIDPWD = 8
 )
 
 const (
@@ -94,35 +130,46 @@ const (
 	db2SQLTypeNFloat     = 481
 	db2SQLTypeDecimal    = 484
 	db2SQLTypeNDecimal   = 485
-	db2SQLTypeBigInt     = 492
-	db2SQLTypeNBigInt    = 493
-	db2SQLTypeInteger    = 496
-	db2SQLTypeNInteger   = 497
-	db2SQLTypeSmall      = 500
-	db2SQLTypeNSmall     = 501
-	db2SQLTypeNumeric    = 504
-	db2SQLTypeNNumeric   = 505
-	db2SQLTypeRowID      = 904
-	db2SQLTypeNRowID     = 905
-	db2SQLTypeDecFloat   = 996
-	db2SQLTypeNDecFloat  = 997
-	db2SQLTypeBoolean    = 2436
-	db2SQLTypeNBoolean   = 2437
+	// db2SQLTypeNumeric/NNumeric - confirmed 488/489 on issue #3 via a
+	// real SQLDARD for a zoned decimal NUMERIC(3,0) column (the 504/505
+	// previously here had never been seen on a real server; 488 fits the
+	// same "+4 from the previous type" spacing every other adjacent pair
+	// in this table follows, e.g. DECIMAL 484 -> this -> BIGINT 492).
+	db2SQLTypeNumeric   = 488
+	db2SQLTypeNNumeric  = 489
+	db2SQLTypeBigInt    = 492
+	db2SQLTypeNBigInt   = 493
+	db2SQLTypeInteger   = 496
+	db2SQLTypeNInteger  = 497
+	db2SQLTypeSmall     = 500
+	db2SQLTypeNSmall    = 501
+	db2SQLTypeRowID     = 904
+	db2SQLTypeNRowID    = 905
+	db2SQLTypeDecFloat  = 996
+	db2SQLTypeNDecFloat = 997
+	db2SQLTypeBoolean   = 2436
+	db2SQLTypeNBoolean  = 2437
 )
 
 const (
-	drdaTypeInteger    byte = 0x02
-	drdaTypeNInteger   byte = 0x03
-	drdaTypeSmall      byte = 0x04
-	drdaTypeNSmall     byte = 0x05
-	drdaTypeOneByte    byte = 0x06
-	drdaTypeNOneByte   byte = 0x07
-	drdaTypeFloat8     byte = 0x0A
-	drdaTypeNFloat8    byte = 0x0B
-	drdaTypeFloat4     byte = 0x0C
-	drdaTypeNFloat4    byte = 0x0D
-	drdaTypeDecimal    byte = 0x0E
-	drdaTypeNDecimal   byte = 0x0F
+	drdaTypeInteger  byte = 0x02
+	drdaTypeNInteger byte = 0x03
+	drdaTypeSmall    byte = 0x04
+	drdaTypeNSmall   byte = 0x05
+	drdaTypeOneByte  byte = 0x06
+	drdaTypeNOneByte byte = 0x07
+	drdaTypeFloat8   byte = 0x0A
+	drdaTypeNFloat8  byte = 0x0B
+	drdaTypeFloat4   byte = 0x0C
+	drdaTypeNFloat4  byte = 0x0D
+	drdaTypeDecimal  byte = 0x0E
+	drdaTypeNDecimal byte = 0x0F
+	// drdaTypeZoned (IBM i NUMERIC) - confirmed on issue #3 via a real
+	// QRYDSC: 1 byte per digit (not nibble-packed like drdaTypeDecimal),
+	// low nibble the digit, high nibble the zone (0xF) except the last
+	// byte, whose high nibble is the sign instead. See decodeZonedDecimal.
+	drdaTypeZoned      byte = 0x10
+	drdaTypeNZoned     byte = 0x11
 	drdaTypeInteger8   byte = 0x16
 	drdaTypeNInteger8  byte = 0x17
 	drdaTypeNRowID     byte = 0x1F
@@ -156,4 +203,25 @@ const (
 	drdaTypeNDecFloat  byte = 0xBB
 	drdaTypeNLobBytes  byte = 0xC9
 	drdaTypeNLobCSBCS  byte = 0xCF
+)
+
+// FD:OCA triplet types that can appear in a QRYDSC reply. Confirmed via
+// Apache Derby's client-side FdocaConstants.java (DRDA's own FD:OCA
+// architecture isn't in the public DRDA/DDM spec documents): a QRYDSC is a
+// sequence of one or more length-prefixed triplets, not always a single
+// one. The per-column type list this client needs always lives in the
+// N-GDA triplet; an MDD (metadata descriptor) triplet precedes it when the
+// result set has columns needing extra metadata (observed on issue #3:
+// IBM i sends one ahead of the N-GDA for GRAPHIC/LOB-bearing queries,
+// which a parser assuming a single N-GDA-only triplet misreads as a
+// malformed descriptor).
+const (
+	fdocaTripletTypeNGDA byte = 0x76
+	fdocaTripletTypeMDD  byte = 0x78
+	// fdocaTripletTypeSDA (Self-Defining type) defines a Local IDentifier
+	// (LID) a column's N-GDA type byte can reference instead of a literal
+	// FD:OCA primitive type - confirmed on issue #3 for VARGRAPHIC columns
+	// (CCSID 1200, 2 bytes/char). See sdaDescriptor in drda_parse.go.
+	fdocaTripletTypeSDA byte = 0x70
+	fdocaSQLDTAGRPLID   byte = 0xD0
 )

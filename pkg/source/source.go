@@ -2,7 +2,11 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -123,8 +127,11 @@ type ReadOptions struct {
 	CDCLegacySlotSuffix             string              // Optional: prior auto-slot suffix used only for upgrade resume
 	CDCManagedState                 bool                // Consumer persists CDCStateCommitTokens independently of destination rows
 	CDCChunkedSnapshot              *CDCChunkedSnapshotOptions
-	CDCSnapshotReplace              bool // Consumer can apply a full-snapshot replacement boundary
-	CDCStableDataBatches            bool // Consumer requires source-stable CDC data-write identities
+	CDCSnapshotSpool                *CDCSnapshotSpoolOptions
+	CDCSnapshotReplace              bool                 // Consumer can apply a full-snapshot replacement boundary
+	CDCSnapshotProgress             bool                 // Consumer checkpoints committed snapshot ranges during a finite run
+	CDCSnapshotResume               *CDCSnapshotProgress // Durable range progress for a single-table snapshot
+	CDCStableDataBatches            bool                 // Consumer requires source-stable CDC data-write identities
 	FullRefresh                     bool
 	Columns                         string // Optional: column definitions for schema-less sources (e.g., "id:bigint,name:text")
 	Streaming                       bool   // Continuous mode: never exit on caught-up/idle; attach cumulative CommitTokens
@@ -147,11 +154,22 @@ func RecordBatchBufferSize(opts ReadOptions, defaultSize int) int {
 type DurableID string
 
 type RecordBatchResult struct {
-	CDCFlush  bool // Flush preceding data and acknowledge its commit token before reading further.
-	Batch     arrow.RecordBatch
-	Err       error
-	TableName string // Source table name for multi-table sources (empty for single-table)
-	Truncate  bool   // Empty the destination table before applying subsequent results
+	// Chunk markers enclose page-sized snapshot batches. Only the following
+	// CDCFlush commits the chunk together with its captured WAL.
+	CDCSnapshotChunk    *CDCSnapshotChunk
+	CDCSnapshotChunkEnd *CDCSnapshotChunk
+	CDCChunkTiming      *CDCChunkTiming
+	CDCFlush            bool // Flush preceding data and acknowledge its commit token before reading further.
+	// CDCSnapshot identifies full snapshot row images without WAL changes,
+	// deletes, or unchanged TOAST values. It applies only to Batch.
+	CDCSnapshot bool
+	// CDCSnapshotRangeEnd flushes buffered snapshot requests without requiring
+	// a transaction commit or acknowledging source progress.
+	CDCSnapshotRangeEnd bool
+	Batch               arrow.RecordBatch
+	Err                 error
+	TableName           string // Source table name for multi-table sources (empty for single-table)
+	Truncate            bool   // Empty the destination table before applying subsequent results
 	// CDCWALTruncate distinguishes a replicated source TRUNCATE from the
 	// destination reset emitted before a replacement snapshot.
 	CDCWALTruncate bool
@@ -165,7 +183,11 @@ type RecordBatchResult struct {
 	// durable stay in place, the snapshot resumes after them stamped with a
 	// newer position, and the completion token still names
 	// CDCSnapshotPosition.
-	CDCSnapshotResumed bool
+	CDCSnapshotResumed       bool
+	CDCSnapshotSpoolIdentity string
+	// CDCChunkedSnapshotIdentity carries the persisted source and physical
+	// destination identity on a resumed chunked snapshot marker.
+	CDCChunkedSnapshotIdentity string
 
 	// CommitToken is an opaque, cumulative position marker for streaming mode.
 	// Committing a token via StreamCommitter acknowledges everything emitted up
@@ -229,21 +251,110 @@ type CDCStateCommitToken struct {
 	SnapshotPositions    map[string]string
 	SnapshotIncarnations map[string]string
 	SnapshotSchemas      map[string]string
-	// SnapshotProgress marks how far an in-progress, key-ordered snapshot is
-	// included in all preceding results, so a later run can resume it.
+	// SnapshotProgress contains complete immutable progress vectors covering
+	// all preceding results for each table. A single source coordinator emits
+	// cumulative vectors; consumers may retain only the latest per table.
 	SnapshotProgress map[string]CDCSnapshotProgress
 }
 
-// CDCSnapshotProgress locates a resumable key-ordered snapshot. Boundary is
-// the source position the snapshot replaces the table at; every row whose key
-// sorts at or below Key is durable. Key is a JSON array of the key columns'
-// text values. Incarnation and SchemaFingerprint identify the table shape the
-// snapshot reads, so a later run resumes only an unchanged table.
+// CDCSnapshotRangeProgress covers (After, Upper] in the source key ordering.
+// Nil bounds are open. Key is the last covered key, or nil before any rows.
+// Complete includes exhausted empty ranges; it does not complete the table.
+// Key values are serialized text, compared only in the source's native types.
+type CDCSnapshotRangeProgress struct {
+	ID       string   `json:"id"`
+	After    []string `json:"a,omitempty"`
+	Upper    []string `json:"u,omitempty"`
+	Key      []string `json:"k,omitempty"`
+	Complete bool     `json:"c,omitempty"`
+}
+
+func (r *CDCSnapshotRangeProgress) UnmarshalJSON(data []byte) error {
+	var encoded struct {
+		ID       string          `json:"id"`
+		After    json.RawMessage `json:"a"`
+		Upper    json.RawMessage `json:"u"`
+		Key      json.RawMessage `json:"k"`
+		Complete bool            `json:"c"`
+	}
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		return err
+	}
+	decoded := CDCSnapshotRangeProgress{ID: encoded.ID, Complete: encoded.Complete}
+	for _, tuple := range []struct {
+		encoded json.RawMessage
+		decoded *[]string
+	}{{encoded.After, &decoded.After}, {encoded.Upper, &decoded.Upper}, {encoded.Key, &decoded.Key}} {
+		if len(tuple.encoded) == 0 {
+			continue
+		}
+		value, err := decodeCDCSnapshotKey(tuple.encoded)
+		if err != nil {
+			return fmt.Errorf("invalid snapshot range key: %w", err)
+		}
+		*tuple.decoded = value
+	}
+	*r = decoded
+	return nil
+}
+
+func decodeCDCSnapshotKey(encoded []byte) ([]string, error) {
+	var values []*string
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		return nil, err
+	}
+	if values == nil {
+		return nil, nil
+	}
+	key := make([]string, len(values))
+	for i, value := range values {
+		if value == nil {
+			return nil, fmt.Errorf("snapshot keys cannot contain null")
+		}
+		key[i] = *value
+	}
+	return key, nil
+}
+
+// CDCSnapshotProgress locates a resumable snapshot attempt. Boundary is the
+// original replacement and WAL repair boundary; resumed reads may stamp rows
+// with a newer position. Attempt and range boundaries stay fixed across runs.
+// Incarnation and SchemaFingerprint identify the source table shape. Key is
+// the legacy JSON key array, used only when converting single-cursor progress.
 type CDCSnapshotProgress struct {
 	Boundary          string
 	Key               string
 	Incarnation       string
 	SchemaFingerprint string
+	Attempt           string
+	Ranges            []CDCSnapshotRangeProgress
+}
+
+// Clone gives a progress handoff independent ownership of all key slices.
+func (p CDCSnapshotProgress) Clone() CDCSnapshotProgress {
+	p.Ranges = slices.Clone(p.Ranges)
+	for i := range p.Ranges {
+		p.Ranges[i].After = slices.Clone(p.Ranges[i].After)
+		p.Ranges[i].Upper = slices.Clone(p.Ranges[i].Upper)
+		p.Ranges[i].Key = slices.Clone(p.Ranges[i].Key)
+	}
+	return p
+}
+
+// NormalizeLegacy converts a single durable cursor into a stable full-table
+// range. It never repartitions the completed prefix or changes its boundary.
+func (p CDCSnapshotProgress) NormalizeLegacy() (CDCSnapshotProgress, error) {
+	if len(p.Ranges) > 0 {
+		return p.Clone(), nil
+	}
+	key, err := decodeCDCSnapshotKey([]byte(p.Key))
+	if p.Attempt != "" || err != nil || len(key) == 0 {
+		return CDCSnapshotProgress{}, fmt.Errorf("invalid legacy snapshot progress key %q", p.Key)
+	}
+	identity, _ := json.Marshal([]string{p.Boundary, p.Incarnation, p.SchemaFingerprint})
+	p.Attempt = fmt.Sprintf("legacy-%x", sha256.Sum256(identity))
+	p.Ranges = []CDCSnapshotRangeProgress{{ID: "0", Key: key}}
+	return p, nil
 }
 
 // CDCStateProvider exposes the state produced by a completed batch CDC read.
@@ -378,6 +489,12 @@ type SnapshotResetEmitter interface {
 // IntervalIgnoringTable is implemented by tables that ignore --interval-start/--interval-end.
 type IntervalIgnoringTable interface {
 	IgnoresInterval() bool
+}
+
+// IntervalUnfilteredTable is implemented by tables whose reads are never filtered by the interval.
+// For delete+insert with a non-temporal key, the pipeline drops the interval so the delete uses the data's range.
+type IntervalUnfilteredTable interface {
+	ReadsIgnoreInterval() bool
 }
 
 // PartitionedTable is an optional interface that a SourceTable can implement

@@ -41,8 +41,6 @@ ingestr ingest \
   --dest-table "main.users"
 ```
 
-Quack requires DuckDB 2.0 or newer, and the server must run the same DuckDB release as ingestr's DuckDB driver. Install a matching driver with `dbc install duckdb=<server version>`.
-
 ---
 
 ## DuckLake
