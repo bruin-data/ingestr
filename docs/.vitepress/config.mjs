@@ -280,6 +280,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "Okta", link: "/supported-sources/okta.md" },
               { text: "Paddle", link: "/supported-sources/paddle.md" },
               { text: "Payrails", link: "/supported-sources/payrails.md" },
+              { text: "PeeringDB", link: "/supported-sources/peeringdb.md" },
               { text: "Personio", link: "/supported-sources/personio.md" },
               { text: "PhantomBuster", link: "/supported-sources/phantombuster.md" },
               { text: "Pinterest", link: "/supported-sources/pinterest.md" },
