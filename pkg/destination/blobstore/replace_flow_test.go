@@ -608,6 +608,18 @@ func TestReplaceFlowUnderURIPrefix(t *testing.T) {
 	}
 }
 
+// A write without a table goes to the prepared table, so replace must keep the file it rewrote.
+func TestReplaceKeepsRewrittenFileWhenWriteOmitsTable(t *testing.T) {
+	table := "lake/exports/orders"
+	store := newFakeObjectStore("exports/orders/orders.parquet", "exports/other/keep.txt")
+	d := newFakeObjectDestination(t, ProviderS3, "{table_name}.{ext}", store)
+
+	require.NoError(t, d.PrepareTable(t.Context(), destination.PrepareOptions{Table: table, Schema: flowSchema, DropFirst: true}))
+	require.NoError(t, d.WriteParallel(t.Context(), flowRecords(nil), destination.WriteOptions{}))
+	require.NoError(t, d.FinalizeReplace(t.Context(), table))
+	assert.Equal(t, []string{"exports/orders/orders.parquet", "exports/other/keep.txt"}, store.list())
+}
+
 func TestConcurrentTablesUseTheirOwnSchema(t *testing.T) {
 	store := newFakeObjectStore()
 	d := newFakeObjectDestination(t, ProviderAzure, "{load_id}.{file_id}.{ext}", store)
