@@ -180,7 +180,7 @@ func (s *PeeringDBSource) read(ctx context.Context, table string, opts source.Re
 		config.Debug("[PEERINGDB] reading %s", table)
 		live := intervalParams(opts)
 		if err := s.readIDWindows(ctx, table, live, opts, results); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			sendErr(ctx, results, err)
 			return
 		}
 
@@ -193,11 +193,18 @@ func (s *PeeringDBSource) read(ctx context.Context, table string, opts source.Re
 		}
 		deleted.Set("since", strconv.FormatInt(since, 10))
 		if err := s.readIDWindows(ctx, table, deleted, opts, results); err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			sendErr(ctx, results, err)
 		}
 	}()
 
 	return results
+}
+
+func sendErr(ctx context.Context, results chan<- source.RecordBatchResult, err error) {
+	select {
+	case results <- source.RecordBatchResult{Err: err}:
+	case <-ctx.Done():
+	}
 }
 
 // readIDWindows pages through (lo, hi] id ranges because the API has no sort parameter and its default
@@ -224,10 +231,10 @@ func (s *PeeringDBSource) readIDWindows(ctx context.Context, table string, base 
 				return err
 			}
 		} else {
-			// Hidden rows can only empty this probe if all of the next maxPageSize matching rows are hidden.
+			// No limit here either, so hidden contacts can't make the probe look empty;
+			// it returns only ids, and the next window starts at the first one.
 			probe := maps.Clone(base)
 			probe.Set("id__gt", strconv.FormatInt(hi, 10))
-			probe.Set("limit", strconv.Itoa(maxPageSize))
 			probe.Set("fields", "id")
 			rest, err := s.fetchPage(ctx, "/"+table, probe)
 			if err != nil {
@@ -236,6 +243,11 @@ func (s *PeeringDBSource) readIDWindows(ctx context.Context, table string, base 
 			if len(rest.Data) == 0 {
 				return nil
 			}
+			next, err := minID(rest.Data)
+			if err != nil {
+				return fmt.Errorf("failed to read ids from PeeringDB %s: %w", table, err)
+			}
+			hi = next - 1
 		}
 
 		lo = hi
@@ -246,6 +258,24 @@ func (s *PeeringDBSource) readIDWindows(ctx context.Context, table string, base 
 			width = min(width*2, maxWindowWidth)
 		}
 	}
+}
+
+func minID(items []map[string]interface{}) (int64, error) {
+	var lowest int64
+	for i, item := range items {
+		raw, ok := item["id"].(json.Number)
+		if !ok {
+			return 0, fmt.Errorf("row has no numeric id")
+		}
+		id, err := raw.Int64()
+		if err != nil {
+			return 0, err
+		}
+		if i == 0 || id < lowest {
+			lowest = id
+		}
+	}
+	return lowest, nil
 }
 
 func intervalParams(opts source.ReadOptions) url.Values {

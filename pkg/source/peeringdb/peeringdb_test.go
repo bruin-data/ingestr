@@ -101,6 +101,10 @@ func idRange(from, to int) []int {
 // so the test fails if paging assumes id order, trusts a short limited page, stops early, or repeats rows.
 func TestReadPaginatesLiveAndDeletedRows(t *testing.T) {
 	live := append(append(idRange(1, 2*maxPageSize+3), 50_000, 70_000), idRange(200_000, 200_000+3*maxPageSize)...)
+	for id := 400_000; id <= 400_000+5*maxPageSize; id += 5 { // more than a page of hidden ids before a visible one
+		live = append(live, id)
+	}
+	live = append(live, 500_002) // even, so the fake sorts it after every hidden id
 	deleted := append([]int{3, 4, 90_000}, idRange(300_000, 300_000+maxPageSize+7)...)
 	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
