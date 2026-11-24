@@ -10,6 +10,12 @@ import (
 )
 
 func (d *OracleDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
+	// Booleans are stored as NUMBER(1,0), so an existing flag column reads back as boolean;
+	// whole numbers already fit it, and Oracle rejects values above 9 with ORA-01438.
+	if dest.DataType == schema.TypeBoolean && isWholeNumber(source) {
+		source.DataType, source.Precision, source.Scale = dest.DataType, dest.Precision, dest.Scale
+		return source
+	}
 	// An unbounded source widens a string key to the comparable maximum, never to CLOB.
 	if dest.DataType == schema.TypeString && dest.MaxLength > 0 &&
 		source.DataType == schema.TypeString && source.MaxLength <= 0 {
@@ -48,4 +54,15 @@ func (d *OracleDestination) ApplySchemaEvolution(ctx context.Context, table stri
 // SupportsColumnTypeChanges reports whether this destination can change a column's type.
 func (d *OracleDestination) SupportsColumnTypeChanges() bool {
 	return (&Dialect{}).SupportsAlterType()
+}
+
+func isWholeNumber(col schema.Column) bool {
+	switch col.DataType {
+	case schema.TypeInt8, schema.TypeInt16, schema.TypeInt32, schema.TypeInt64:
+		return true
+	case schema.TypeDecimal:
+		return col.Scale == 0
+	default:
+		return false
+	}
 }

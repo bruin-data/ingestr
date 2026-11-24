@@ -338,6 +338,10 @@ func castArrayToType(ctx context.Context, arr arrow.Array, target arrow.DataType
 		return result, rerr
 	}
 
+	if isDecimalType(arr.DataType()) && target.ID() == arrow.BOOL {
+		return castDecimalToBool(ctx, arr)
+	}
+
 	// arrow-go casts integer strings as raw target-unit values; route them through
 	// dateparse instead so epoch seconds/millis are detected.
 	if target.ID() == arrow.TIMESTAMP && hasIntegerString(arr) {
@@ -941,3 +945,27 @@ func (b *FileBuffer) Stats() BufferStats {
 }
 
 var _ DataBuffer = (*FileBuffer)(nil)
+
+// castDecimalToBool maps 0 and 1 to false and true, as stored in a NUMBER(1,0)
+// flag column; Arrow has no decimal→bool kernel, and other values are rejected.
+func castDecimalToBool(ctx context.Context, arr arrow.Array) (arrow.Array, error) {
+	ints, err := compute.CastArray(ctx, arr, compute.SafeCastOptions(arrow.PrimitiveTypes.Int64))
+	if err != nil {
+		return nil, err
+	}
+	defer ints.Release()
+	values := ints.(*array.Int64)
+	builder := array.NewBooleanBuilder(memory.DefaultAllocator)
+	defer builder.Release()
+	for i := 0; i < values.Len(); i++ {
+		switch {
+		case values.IsNull(i):
+			builder.AppendNull()
+		case values.Value(i) == 0 || values.Value(i) == 1:
+			builder.Append(values.Value(i) == 1)
+		default:
+			return nil, fmt.Errorf("value %d is not a boolean (0 or 1)", values.Value(i))
+		}
+	}
+	return builder.NewArray(), nil
+}

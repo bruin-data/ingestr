@@ -131,3 +131,57 @@ func TestOracleCustomQueryAppendsToTypedTable(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.Equal(t, []string{"ID NUMBER 10,0", "NAME VARCHAR2 16,0", "AMT NUMBER 12,2", "YR NUMBER 4,0", "CODE NUMBER 8,0"}, columns)
 }
+
+// TestOracleNumber1FlagIntoExistingFlagColumn is the #1464 regression: NUMBER(1,0) flags
+// must load into an existing NUMBER(1,0) column, which the destination reads as boolean.
+func TestOracleNumber1FlagIntoExistingFlagColumn(t *testing.T) {
+	t.Parallel()
+	if oracleDest.uri == "" {
+		t.Skip("shared oracle destination container not available")
+	}
+	db, err := sql.Open("oracle", oracleSQLConnString(oracleDest.uri))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, tc := range []struct{ name, columns string }{
+		{name: "inferred"},
+		{name: "bigint override", columns: "FLAG:bigint"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			suffix := strings.ToUpper(uniqueSuffix())
+			src, dst := "FLAG_SRC_"+suffix, "FLAG_DST_"+suffix
+			t.Cleanup(func() {
+				_, _ = db.Exec(fmt.Sprintf(`DROP TABLE "%s" PURGE`, src))
+				_, _ = db.Exec(fmt.Sprintf(`DROP TABLE "%s" PURGE`, dst))
+			})
+			for _, stmt := range []string{
+				fmt.Sprintf(`CREATE TABLE "%s" ("ID" NUMBER(10,0), "FLAG" NUMBER(1,0))`, src),
+				fmt.Sprintf(`INSERT INTO "%s" VALUES (1, 1)`, src),
+				fmt.Sprintf(`INSERT INTO "%s" VALUES (2, 0)`, src),
+				fmt.Sprintf(`INSERT INTO "%s" VALUES (3, NULL)`, src),
+				fmt.Sprintf(`CREATE TABLE "%s" ("ID" NUMBER(10,0), "FLAG" NUMBER(1,0))`, dst),
+			} {
+				_, err := db.ExecContext(t.Context(), stmt)
+				require.NoError(t, err)
+			}
+
+			cfg := config.DefaultConfig()
+			cfg.SourceURI = oracleDest.uri
+			cfg.SourceTable = src
+			cfg.DestURI = oracleDest.uri
+			cfg.DestTable = dst
+			cfg.IncrementalStrategy = config.StrategyAppend
+			cfg.Columns = tc.columns
+			cfg.NoLoadTimestamp = true
+			cfg.NoRunID = true
+			cfg.Yes = true
+			require.NoError(t, cfg.Validate())
+			require.NoError(t, pipeline.New(cfg).Run(t.Context()))
+
+			var got string
+			require.NoError(t, db.QueryRowContext(t.Context(), fmt.Sprintf(
+				`SELECT LISTAGG("ID" || '=' || NVL(TO_CHAR("FLAG"), 'null'), ',') WITHIN GROUP (ORDER BY "ID") FROM "%s"`, dst)).Scan(&got))
+			require.Equal(t, "1=1,2=0,3=null", got)
+		})
+	}
+}
