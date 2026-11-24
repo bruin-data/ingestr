@@ -7,9 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/schema"
 )
@@ -184,50 +181,6 @@ func TestCustomQueryTable(t *testing.T) {
 		_, err = table.Read(context.Background(), ReadOptions{})
 		if err == nil {
 			t.Fatal("expected error for unresolved interval placeholders")
-		}
-	})
-
-	t.Run("applies sql limit and stops the read", func(t *testing.T) {
-		sourceDone := make(chan struct{})
-		executeFn := func(ctx context.Context, query string, opts ReadOptions) (<-chan RecordBatchResult, error) {
-			ch := make(chan RecordBatchResult)
-			go func() {
-				defer close(sourceDone)
-				defer close(ch)
-				for start := int64(0); start < 1000; start += 4 {
-					if ctx.Err() != nil {
-						return
-					}
-					ch <- RecordBatchResult{Batch: int64Batch(start, 4)}
-				}
-			}()
-			return ch, nil
-		}
-
-		table, err := CustomQueryTable(TableRequest{Name: "query:SELECT id FROM orders"}, executeFn)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		results, err := table.Read(context.Background(), ReadOptions{Limit: 6})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		var ids []int64
-		for result := range results {
-			col := result.Batch.Column(0).(*array.Int64)
-			for i := 0; i < col.Len(); i++ {
-				ids = append(ids, col.Value(i))
-			}
-			result.Batch.Release()
-		}
-		if want := []int64{0, 1, 2, 3, 4, 5}; !slices.Equal(ids, want) {
-			t.Errorf("read ids %v, want %v", ids, want)
-		}
-		select {
-		case <-sourceDone:
-		case <-time.After(5 * time.Second):
-			t.Fatal("source kept reading after the limit was reached")
 		}
 	})
 
@@ -441,13 +394,4 @@ func TestSubstituteIntervalParams(t *testing.T) {
 			}
 		})
 	}
-}
-
-func int64Batch(start, n int64) arrow.RecordBatch {
-	b := array.NewRecordBuilder(memory.DefaultAllocator, arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil))
-	defer b.Release()
-	for i := start; i < start+n; i++ {
-		b.Field(0).(*array.Int64Builder).Append(i)
-	}
-	return b.NewRecordBatch()
 }

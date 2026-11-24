@@ -537,6 +537,7 @@ func (s *MSSQLSource) discoverCustomQueryExtractPartitionBounds(ctx context.Cont
 }
 
 func (s *MSSQLSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	query = source.LimitCustomQuery(query, opts.Limit, "SET ROWCOUNT %[2]d; %[1]s; SET ROWCOUNT 0;")
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000

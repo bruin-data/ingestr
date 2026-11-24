@@ -356,6 +356,7 @@ func (s *FabricSource) read(ctx context.Context, table string, tableSchema *sche
 }
 
 func (s *FabricSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	query = source.LimitCustomQuery(query, opts.Limit, "SELECT TOP %[2]d * FROM (%[1]s) ingestr_query")
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000

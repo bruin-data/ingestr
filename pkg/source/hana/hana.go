@@ -269,6 +269,7 @@ func (s *HanaSource) read(ctx context.Context, table string, tableSchema *schema
 }
 
 func (s *HanaSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	query = source.LimitCustomQuery(query, opts.Limit, "SELECT * FROM (%[1]s) ingestr_query LIMIT %[2]d")
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000

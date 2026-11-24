@@ -112,6 +112,7 @@ func (s *CassandraSource) GetTable(ctx context.Context, req source.TableRequest)
 }
 
 func (s *CassandraSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	query = source.LimitCustomQuery(query, opts.Limit, "%[1]s LIMIT %[2]d")
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	if query == "" {
 		return nil, fmt.Errorf("custom query cannot be empty")

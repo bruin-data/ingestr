@@ -191,6 +191,7 @@ func selectRESTFields(fields bigquery.Schema, exclude []string) (bigquery.Schema
 }
 
 func (s *restSource) executeCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	query = source.LimitCustomQuery(query, opts.Limit, "SELECT * FROM (%[1]s) ingestr_query LIMIT %[2]d")
 	config.Debug("[BIGQUERY] REST API custom query: %s", query)
 	it, err := s.runQuery(ctx, query)
 	if err != nil {

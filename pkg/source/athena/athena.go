@@ -274,6 +274,7 @@ func (s *AthenaSource) waitForQuery(ctx context.Context, executionID string) err
 }
 
 func (s *AthenaSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	query = source.LimitCustomQuery(query, opts.Limit, "SELECT * FROM (%[1]s) ingestr_query LIMIT %[2]d")
 	if s.client == nil {
 		return nil, errors.New("athena source not connected")
 	}
