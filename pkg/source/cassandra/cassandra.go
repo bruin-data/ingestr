@@ -112,7 +112,6 @@ func (s *CassandraSource) GetTable(ctx context.Context, req source.TableRequest)
 }
 
 func (s *CassandraSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	query = source.LimitCustomQuery(query, opts.Limit, "%[1]s LIMIT %[2]d")
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	if query == "" {
 		return nil, fmt.Errorf("custom query cannot be empty")
@@ -199,6 +198,10 @@ func (s *CassandraSource) readQuery(ctx context.Context, query string, args []in
 			}
 			items = append(items, normalized)
 
+			// Custom CQL can't be wrapped, so stop paging once --sql-limit rows were read.
+			if opts.Limit > 0 && totalRows+int64(len(items)) >= int64(opts.Limit) {
+				break
+			}
 			if len(items) >= batchSize {
 				if err := flush(); err != nil {
 					results <- source.RecordBatchResult{Err: err}

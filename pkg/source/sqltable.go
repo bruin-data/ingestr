@@ -223,7 +223,8 @@ func LimitCustomQuery(query string, limit int, format string) string {
 	if limit <= 0 {
 		return query
 	}
-	return fmt.Sprintf(format, normalizeCustomQuery(query), limit)
+	// The newline keeps a trailing "--" comment from swallowing the wrapper.
+	return fmt.Sprintf(format, normalizeCustomQuery(query)+"\n", limit)
 }
 
 func SubstituteIntervalParams(query string, intervalStart, intervalEnd *time.Time) string {

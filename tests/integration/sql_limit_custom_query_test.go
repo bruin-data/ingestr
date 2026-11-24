@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSQLLimitAppliesToCustomQueries runs each source's limit syntax around a sorted
-// custom query: the database must accept the wrapped SQL and keep the query's order.
+// TestSQLLimitAppliesToCustomQueries runs each source's limit syntax around a sorted custom
+// query, some ending in a comment: the database must accept it and keep the query's order.
 func TestSQLLimitAppliesToCustomQueries(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -23,10 +23,10 @@ func TestSQLLimitAppliesToCustomQueries(t *testing.T) {
 		query string
 	}{
 		{"postgres", func() string { return pgSource.uri }, "SELECT n FROM generate_series(1, 100) AS g(n) ORDER BY n DESC;"},
-		{"mysql", func() string { return mysqlDest.uri }, "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 100) SELECT n FROM r ORDER BY n DESC"},
-		{"mssql", func() string { return mssqlDest.uri }, "SELECT n FROM (SELECT TOP 100 ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects) s ORDER BY n DESC"},
+		{"mysql", func() string { return mysqlDest.uri }, "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 100) SELECT n FROM r ORDER BY n DESC -- top rows"},
+		{"mssql", func() string { return mssqlDest.uri }, "SELECT n FROM (SELECT TOP 100 ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects) s ORDER BY n DESC -- top rows"},
 		{"oracle", func() string { return oracleDest.uri }, "SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 100 ORDER BY n DESC"},
-		{"clickhouse", func() string { return chDest.uri }, "SELECT number + 1 AS n FROM numbers(100) ORDER BY n DESC"},
+		{"clickhouse", func() string { return chDest.uri }, "SELECT number + 1 AS n FROM numbers(100) ORDER BY n DESC -- top rows"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
