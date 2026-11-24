@@ -145,7 +145,7 @@ func TestOracleNumber1FlagIntoExistingFlagColumn(t *testing.T) {
 
 	for _, tc := range []struct{ name, columns string }{
 		{name: "inferred"},
-		{name: "bigint override", columns: "FLAG:bigint"},
+		{name: "boolean override", columns: "FLAG:boolean"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			suffix := strings.ToUpper(uniqueSuffix())
