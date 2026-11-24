@@ -21,19 +21,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// SchemaFunc reads the schema of schemaName.tableName over conn. It lets a
+// source that speaks the Postgres wire protocol but has its own catalog, such
+// as Redshift, replace the information_schema and pg_catalog queries.
+type SchemaFunc func(ctx context.Context, conn *pgx.Conn, schemaName, tableName string) (*schema.TableSchema, error)
+
 type PostgresSource struct {
-	pool            *pgxpool.Pool
-	uri             string
-	snapshot        string
-	primaryKeyQuery string
+	pool       *pgxpool.Pool
+	uri        string
+	snapshot   string
+	schemaFunc SchemaFunc
 }
 
 func NewPostgresSource() *PostgresSource {
 	return &PostgresSource{}
 }
 
-func NewPostgresSourceWithPrimaryKeyQuery(query string) *PostgresSource {
-	return &PostgresSource{primaryKeyQuery: query}
+func NewPostgresSourceWithSchemaFunc(fn SchemaFunc) *PostgresSource {
+	return &PostgresSource{schemaFunc: fn}
 }
 
 func (s *PostgresSource) Schemes() []string {
@@ -138,9 +143,17 @@ func (s *PostgresSource) GetTable(ctx context.Context, req source.TableRequest) 
 func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.TableSchema, error) {
 	schemaName, tableName := parseTableName(table)
 
-	primaryKeyQuery := s.primaryKeyQuery
-	if primaryKeyQuery == "" {
-		primaryKeyQuery = `
+	if s.schemaFunc != nil {
+		conn, release, err := s.acquireReadConnection(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		return s.schemaFunc(ctx, conn.Conn(), schemaName, tableName)
+	}
+
+	query := `
+		WITH primary_keys AS (
 			SELECT attr.attname AS column_name, key_column.ordinality AS ordinal_position
 			FROM pg_catalog.pg_constraint con
 			JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid
@@ -151,11 +164,6 @@ func (s *PostgresSource) getSchema(ctx context.Context, table string) (*schema.T
 			WHERE con.contype = 'p'
 				AND nsp.nspname = $1
 				AND rel.relname = $2
-		`
-	}
-
-	query := `
-		WITH primary_keys AS (` + primaryKeyQuery + `
 		)
 		SELECT
 			c.column_name,
