@@ -136,7 +136,9 @@ func CustomQueryTable(
 			if strings.Contains(query, ":interval_start") || strings.Contains(query, ":interval_end") {
 				return nil, fmt.Errorf("custom query contains unresolved interval placeholders; provide --interval-start and --interval-end")
 			}
-			return executeFn(ctx, query, opts)
+			return readWithLimit(ctx, opts, func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
+				return executeFn(ctx, query, opts)
+			})
 		},
 	}, nil
 }
@@ -197,7 +199,9 @@ func PartitionedCustomQueryTable(
 				return nil, err
 			}
 			if !opts.ExtractPartitioningEnabled() {
-				return executeFn(ctx, query, opts)
+				return readWithLimit(ctx, opts, func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error) {
+					return executeFn(ctx, query, opts)
+				})
 			}
 
 			read := func(ctx context.Context, readOpts ReadOptions) (<-chan RecordBatchResult, error) {
@@ -215,6 +219,59 @@ func PartitionedCustomQueryTable(
 			return ReadExtractPartitions(ctx, opts, partitionSchema, read, discover)
 		},
 	}, nil
+}
+
+// readWithLimit applies --sql-limit to a custom query, whose SQL ingestr cannot rewrite
+// portably; it stops the read once limit rows were emitted.
+func readWithLimit(
+	ctx context.Context,
+	opts ReadOptions,
+	read func(ctx context.Context, opts ReadOptions) (<-chan RecordBatchResult, error),
+) (<-chan RecordBatchResult, error) {
+	if opts.Limit <= 0 {
+		return read(ctx, opts)
+	}
+	readCtx, cancel := context.WithCancel(ctx)
+	in, err := read(readCtx, opts)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	out := make(chan RecordBatchResult)
+	go func() {
+		defer close(out)
+		defer func() {
+			cancel()
+			for result := range in {
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
+			}
+		}()
+		remaining := int64(opts.Limit)
+		for result := range in {
+			if result.Batch != nil && result.Batch.NumRows() > remaining {
+				sliced := result.Batch.NewSlice(0, remaining)
+				result.Batch.Release()
+				result.Batch = sliced
+			}
+			if result.Batch != nil {
+				remaining -= result.Batch.NumRows()
+			}
+			select {
+			case out <- result:
+			case <-ctx.Done():
+				if result.Batch != nil {
+					result.Batch.Release()
+				}
+				return
+			}
+			if remaining <= 0 || result.Err != nil {
+				return
+			}
+		}
+	}()
+	return out, nil
 }
 
 func SubstituteIntervalParams(query string, intervalStart, intervalEnd *time.Time) string {
