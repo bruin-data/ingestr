@@ -22,6 +22,7 @@ import (
 )
 
 const (
+	oracleInsertChunkRows      = 5000
 	defaultOracleStagingSchema = "_bruin_staging"
 	cdcEqualLSNDeleteMarker    = "__ingestr_has_equal_lsn_delete"
 )
@@ -380,17 +381,28 @@ func (d *OracleDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	}
 	defer func() { _ = stmt.Close() }()
 
-	values := make([]interface{}, numCols)
-	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
-		for colIdx := 0; colIdx < numCols; colIdx++ {
-			values[colIdx] = extractValue(record.Column(colIdx), int(rowIdx))
+	// go-ora sends slice arguments as one array-bound INSERT, one round trip per chunk.
+	values := make([][]interface{}, numCols)
+	args := make([]interface{}, numCols)
+	for start := int64(0); start < numRows; {
+		end := min(start+oracleInsertChunkRows, numRows)
+		for colIdx := range values {
+			values[colIdx] = values[colIdx][:0]
+			for rowIdx := start; rowIdx < end; rowIdx++ {
+				values[colIdx] = append(values[colIdx], extractValue(record.Column(colIdx), int(rowIdx)))
+			}
 		}
-
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+		n := arrayBindPrefix(values)
+		end = start + int64(n)
+		for colIdx := range values {
+			args[colIdx] = values[colIdx][:n]
+		}
+		if _, err := stmt.ExecContext(ctx, args...); err != nil {
 			config.LogFailedQuery(insertSQL, err)
 			_ = tx.Rollback()
-			return rowIdx, fmt.Errorf("failed to insert row %d: %w", rowIdx, err)
+			return 0, fmt.Errorf("failed to insert rows %d to %d: %w", start, end-1, err)
 		}
+		start = end
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1693,6 +1705,49 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return extractValue(a.Storage(), idx)
 	default:
 		return fmt.Sprintf("%v", arr)
+	}
+}
+
+// arrayBindPrefix returns how many leading rows bind safely as one array: go-ora types a column by its
+// last non-empty value and binds values over 4000 (or 32767) bytes as LONG, so each must end on its largest.
+func arrayBindPrefix(columns [][]interface{}) int {
+	n := len(columns[0])
+	for {
+		shrunk := false
+		for _, col := range columns {
+			maxClass, lastMax, lastSet := 0, -1, -1
+			for i, v := range col[:n] {
+				size := 0
+				switch v := v.(type) {
+				case nil:
+					continue
+				case string:
+					if v == "" {
+						continue
+					}
+					size = len(v)
+				case []byte:
+					size = len(v)
+				}
+				class := 0
+				if size > 32767 {
+					class = 2
+				} else if size > 4000 {
+					class = 1
+				}
+				if class >= maxClass {
+					maxClass, lastMax = class, i
+				}
+				lastSet = i
+			}
+			if maxClass > 0 && lastMax != lastSet {
+				n = lastMax + 1
+				shrunk = true
+			}
+		}
+		if !shrunk {
+			return n
+		}
 	}
 }
 
