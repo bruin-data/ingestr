@@ -11,9 +11,15 @@ import (
 
 func (d *OracleDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
 	// An unbounded source widens a string key to the comparable maximum, never to CLOB.
-	if dest.IsPrimaryKey && dest.DataType == schema.TypeString && dest.MaxLength > 0 &&
+	if dest.DataType == schema.TypeString && dest.MaxLength > 0 &&
 		source.DataType == schema.TypeString && source.MaxLength <= 0 {
-		source.MaxLength = max(dest.MaxLength, oracleDefaultComparableStringLength)
+		if dest.IsPrimaryKey {
+			source.MaxLength = max(dest.MaxLength, oracleDefaultComparableStringLength)
+		} else {
+			// Oracle cannot alter VARCHAR2 to CLOB, so an unknown length, as from a custom
+			// query, keeps the existing column; longer values fail with ORA-12899.
+			source.MaxLength = dest.MaxLength
+		}
 	}
 	return source
 }

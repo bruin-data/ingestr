@@ -917,7 +917,7 @@ func TestOracleSchemaEvolutionWidensUnboundedPrimaryKey(t *testing.T) {
 	assert.Equal(t, 200, got.MaxLength)
 	key.IsPrimaryKey = false
 	got = dest.NormalizeSchemaEvolutionSourceColumn(schema.Column{Name: "ID", DataType: schema.TypeString}, key)
-	assert.Zero(t, got.MaxLength)
+	assert.Equal(t, 100, got.MaxLength)
 }
 
 func TestOracleApplySchemaEvolutionRejectsNonStringTypeChanges(t *testing.T) {
