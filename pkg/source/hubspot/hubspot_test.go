@@ -382,6 +382,63 @@ func TestReadCampaignMetrics(t *testing.T) {
 	}
 }
 
+func TestReadCustomObjectIncludesArchived(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/crm/v3/schemas":
+			_, _ = fmt.Fprint(w, `{"results":[{"name":"product_engagement_events","objectTypeId":"2-123","labels":{"plural":"Product Engagement Events"}}]}`)
+		case "/crm/v3/properties/2-123":
+			_, _ = fmt.Fprint(w, `{"results":[{"name":"hs_object_id"},{"name":"event_name"}]}`)
+		case "/crm/v3/objects/2-123/search":
+			_, _ = fmt.Fprint(w, `{"results":[{"id":"1","properties":{"hs_object_id":"1","event_name":"open"}}]}`)
+		case "/crm/v3/objects/2-123":
+			if r.URL.Query().Get("archived") != "true" {
+				t.Errorf("archived list called without archived=true: %s", r.URL.RawQuery)
+			}
+			_, _ = fmt.Fprint(w, `{"results":[{"id":"2","archivedAt":"2026-11-20T10:00:00Z"}]}`)
+		case "/crm/v3/objects/2-123/batch/read":
+			_, _ = fmt.Fprint(w, `{"results":[{"id":"2","properties":{"hs_object_id":"2","event_name":"click"},"archived":true}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := httpclient.New(httpclient.WithBaseURL(srv.URL))
+	s := &Hubspotsource{client: c, searchClient: c}
+	results := make(chan source.RecordBatchResult, 8)
+	if err := s.readCustomObject(context.Background(), "custom:product_engagement_events", source.ReadOptions{}, results); err != nil {
+		t.Fatal(err)
+	}
+	close(results)
+
+	got := map[string]any{}
+	for res := range results {
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		archivedIdx := res.Batch.Schema().FieldIndices(archivedAtColumn)
+		if len(archivedIdx) == 0 {
+			t.Fatalf("missing column %s", archivedAtColumn)
+		}
+		for row := 0; row < int(res.Batch.NumRows()); row++ {
+			id := fmt.Sprint(unknownValue(t, res.Batch, "hs_object_id", row))
+			if res.Batch.Column(archivedIdx[0]).IsNull(row) {
+				got[id] = nil
+			} else {
+				got[id] = unknownValue(t, res.Batch, archivedAtColumn, row)
+			}
+		}
+		res.Batch.Release()
+	}
+
+	want := map[string]any{"1": nil, "2": "2026-11-20T10:00:00Z"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 func TestCampaignMetricsFallbackSchema(t *testing.T) {
 	table, err := (&Hubspotsource{}).GetTable(context.Background(), source.TableRequest{Name: "campaign_metrics"})
 	if err != nil {

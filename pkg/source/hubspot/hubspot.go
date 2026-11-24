@@ -1155,7 +1155,11 @@ func (s *Hubspotsource) readCustomObject(ctx context.Context, table string, opts
 		startMs = fmt.Sprintf("%d", epochStart.UnixMilli())
 	}
 
-	return s.searchCRMObjects(ctx, cfg, properties, startMs, opts, results)
+	if err := s.searchCRMObjects(ctx, cfg, properties, startMs, opts, results); err != nil {
+		return err
+	}
+
+	return s.sweepArchivedCRMObjects(ctx, cfg, properties, opts, results)
 }
 
 func (s *Hubspotsource) readCustomObjectHistory(ctx context.Context, table string, historyProps []string, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
