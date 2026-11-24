@@ -381,10 +381,10 @@ func (d *OracleDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	}
 	defer func() { _ = stmt.Close() }()
 
-	// go-ora sends slice arguments as one array-bound INSERT, one round trip per chunk.
+	// go-ora sends slice arguments as one array-bound INSERT, one round trip per group.
 	values := make([][]interface{}, numCols)
 	args := make([]interface{}, numCols)
-	for start := int64(0); start < numRows; {
+	for start := int64(0); start < numRows; start += oracleInsertChunkRows {
 		end := min(start+oracleInsertChunkRows, numRows)
 		for colIdx := range values {
 			values[colIdx] = values[colIdx][:0]
@@ -392,17 +392,25 @@ func (d *OracleDestination) writeRecordBatch(ctx context.Context, record arrow.R
 				values[colIdx] = append(values[colIdx], extractValue(record.Column(colIdx), int(rowIdx)))
 			}
 		}
-		n := arrayBindPrefix(values)
-		end = start + int64(n)
-		for colIdx := range values {
-			args[colIdx] = values[colIdx][:n]
+		groups := arrayBindGroups(values)
+		for _, rows := range groups {
+			for colIdx, col := range values {
+				if len(groups) == 1 {
+					args[colIdx] = col
+					continue
+				}
+				groupValues := make([]interface{}, len(rows))
+				for i, row := range rows {
+					groupValues[i] = col[row]
+				}
+				args[colIdx] = groupValues
+			}
+			if _, err := stmt.ExecContext(ctx, args...); err != nil {
+				config.LogFailedQuery(insertSQL, err)
+				_ = tx.Rollback()
+				return 0, fmt.Errorf("failed to insert %d rows from rows %d to %d: %w", len(rows), start, end-1, err)
+			}
 		}
-		if _, err := stmt.ExecContext(ctx, args...); err != nil {
-			config.LogFailedQuery(insertSQL, err)
-			_ = tx.Rollback()
-			return 0, fmt.Errorf("failed to insert rows %d to %d: %w", start, end-1, err)
-		}
-		start = end
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1708,46 +1716,44 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 	}
 }
 
-// arrayBindPrefix returns how many leading rows bind safely as one array: go-ora types a column by its
-// last non-empty value and binds values over 4000 (or 32767) bytes as LONG, so each must end on its largest.
-func arrayBindPrefix(columns [][]interface{}) int {
-	n := len(columns[0])
-	for {
-		shrunk := false
-		for _, col := range columns {
-			maxClass, lastMax, lastSet := 0, -1, -1
-			for i, v := range col[:n] {
-				size := 0
-				switch v := v.(type) {
-				case nil:
-					continue
-				case string:
-					if v == "" {
-						continue
-					}
-					size = len(v)
-				case []byte:
-					size = len(v)
-				}
-				class := 0
-				if size > 32767 {
-					class = 2
-				} else if size > 4000 {
-					class = 1
-				}
-				if class >= maxClass {
-					maxClass, lastMax = class, i
-				}
-				lastSet = i
-			}
-			if maxClass > 0 && lastMax != lastSet {
-				n = lastMax + 1
-				shrunk = true
-			}
+// arrayBindGroups splits rows into groups that each bind safely as one array. go-ora types an
+// array column by its last value and binds long strings as LONG, so each group has one size class per column.
+func arrayBindGroups(columns [][]interface{}) [][]int {
+	index := map[string]int{}
+	var groups [][]int
+	key := make([]byte, len(columns))
+	for row := range columns[0] {
+		for c, col := range columns {
+			key[c] = bindSizeClass(col[row])
 		}
-		if !shrunk {
-			return n
+		g, ok := index[string(key)]
+		if !ok {
+			g = len(groups)
+			index[string(key)] = g
+			groups = append(groups, nil)
 		}
+		groups[g] = append(groups[g], row)
+	}
+	return groups
+}
+
+// bindSizeClass mirrors go-ora's string and RAW bind limits: 4000 bytes, or 32767 on servers
+// with extended strings, above which a value is bound as LONG or LONG RAW.
+func bindSizeClass(v interface{}) byte {
+	size := 0
+	switch v := v.(type) {
+	case string:
+		size = len(v)
+	case []byte:
+		size = len(v)
+	}
+	switch {
+	case size > 32767:
+		return 2
+	case size > 4000:
+		return 1
+	default:
+		return 0
 	}
 }
 

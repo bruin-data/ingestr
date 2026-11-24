@@ -1000,3 +1000,27 @@ func TestBuildDeleteInsertDeleteSQL(t *testing.T) {
 		t.Fatalf("delete SQL = %q, want %q", got, want)
 	}
 }
+
+func TestArrayBindGroupsSplitsBySizeClass(t *testing.T) {
+	big := strings.Repeat("x", 40000)
+	plain := [][]interface{}{{1, 2, 3}, {"a", nil, "c"}}
+	assert.Equal(t, [][]int{{0, 1, 2}}, arrayBindGroups(plain))
+
+	const rows = 5000
+	left, right := make([]interface{}, rows), make([]interface{}, rows)
+	for i := range rows {
+		left[i], right[i] = "short", big
+		if i%2 == 0 {
+			left[i], right[i] = big, "short"
+		}
+	}
+	groups := arrayBindGroups([][]interface{}{left, right})
+	require.Len(t, groups, 2)
+	for _, group := range groups {
+		assert.Len(t, group, rows/2)
+		for _, row := range group {
+			assert.Equal(t, bindSizeClass(left[group[0]]), bindSizeClass(left[row]))
+			assert.Equal(t, bindSizeClass(right[group[0]]), bindSizeClass(right[row]))
+		}
+	}
+}
