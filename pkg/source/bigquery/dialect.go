@@ -47,6 +47,12 @@ func (d *Dialect) Schemes() []string {
 	return []string{"bigquery"}
 }
 
+// WrapCustomQueryLimit is safe because BigQuery keeps the inner ORDER BY under the
+// outer LIMIT; the newline keeps a trailing "--" comment from swallowing the wrapper.
+func (d *Dialect) WrapCustomQueryLimit(query string, limit int) string {
+	return fmt.Sprintf("SELECT * FROM (%s\n) ingestr_query LIMIT %d", strings.TrimRight(strings.TrimSpace(query), "; \t\n"), limit)
+}
+
 func (d *Dialect) DriverName() string {
 	return "bigquery"
 }
