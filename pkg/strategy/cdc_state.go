@@ -907,6 +907,23 @@ func (m *CDCStateManager) resumePosition(ctx context.Context, sourceTable string
 	return position, err
 }
 
+// CertifiedInRun reports whether this run durably recorded the snapshot and
+// destination state that evaluateGeneration accepts for sourceTable, so a
+// later run resumes from this generation however far the destination got.
+func (m *CDCStateManager) CertifiedInRun(sourceTable string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.started || m.incarnation == nil || (m.refresh != nil && !m.refresh.complete) {
+		return false
+	}
+	snapshot := m.states[cdcStateKey{runID: m.runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
+	destinationState := m.states[cdcStateKey{runID: m.runID, sourceTable: sourceTable, kind: cdcStateKindDestination}]
+	return snapshot.complete && snapshot.generation == m.generation &&
+		destinationState.complete && destinationState.generation == m.generation &&
+		destinationState.snapshotEpoch == snapshot.snapshotEpoch &&
+		compareCDCPositions(destinationState.position, snapshot.position) == 0
+}
+
 func (m *CDCStateManager) evaluateGeneration(
 	ctx context.Context,
 	sourceTable string,
@@ -1359,6 +1376,7 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 	if err := m.writeStateEvents(ctx, events); err != nil {
 		return err
 	}
+	config.Debug("[CDC STATE] Persisted generation %d checkpoint %q for %d tables", m.generation, token.Position, len(tables))
 	if err := source.ConnectorLeaseLoss(ctx); err != nil {
 		return err
 	}

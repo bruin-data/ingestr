@@ -128,7 +128,12 @@ type MergeOptions struct {
 	// TOAST markers. The optional range contains every staged key.
 	CDCSnapshot      bool
 	CDCSnapshotRange *CDCSnapshotRange
-	Parallelism      int
+	// CDCRunCertified reports that this run durably certified the table's
+	// managed CDC state. A later run then replays from that certificate, so a
+	// merge interrupted between statements is repaired by keyed replay and
+	// may span several statements.
+	CDCRunCertified bool
+	Parallelism     int
 }
 
 // CDCSnapshotRange describes (After, Last] in PrimaryKeys order.

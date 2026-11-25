@@ -131,11 +131,19 @@ type srStressSink struct {
 	// dockerNetwork runs each ingestr process as a container on this network
 	// (bin must then be a Linux build); signals go through docker kill.
 	dockerNetwork string
+	// kill delivers targeted signals to the running process; the exit counts
+	// as expected, like a chaos kill.
+	kill chan syscall.Signal
+	// pause freezes the running process with SIGSTOP for the duration.
+	pause chan time.Duration
+
+	started time.Time
 
 	mu                sync.Mutex
 	logs              []string
 	runs              int
 	sigkills, sigterm int
+	pauses            int
 	restartRequests   int
 	transientExits    int
 	fatal             error
@@ -147,6 +155,19 @@ func (s *srStressSink) record(update func()) {
 	update()
 }
 
+func (s *srStressSink) logPaths() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.logs...)
+}
+
+// runAge reports how long the current ingestr process has been running.
+func (s *srStressSink) runAge() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Since(s.started)
+}
+
 func (s *srStressSink) fatalErr() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -156,7 +177,7 @@ func (s *srStressSink) fatalErr() error {
 func (s *srStressSink) summary() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return fmt.Sprintf("runs=%d sigkill=%d sigterm=%d restart-required=%d transient-exits=%d", s.runs, s.sigkills, s.sigterm, s.restartRequests, s.transientExits)
+	return fmt.Sprintf("runs=%d sigkill=%d sigterm=%d pauses=%d restart-required=%d transient-exits=%d", s.runs, s.sigkills, s.sigterm, s.pauses, s.restartRequests, s.transientExits)
 }
 
 func srStressTail(path string, lines int) string {
@@ -187,6 +208,7 @@ func (s *srStressSink) run(ctx context.Context) {
 	for {
 		s.mu.Lock()
 		s.runs++
+		s.started = time.Now()
 		logPath := filepath.Join(s.logDir, fmt.Sprintf("ingestr-%03d.log", s.runs))
 		s.logs = append(s.logs, logPath)
 		s.mu.Unlock()
@@ -208,8 +230,13 @@ func (s *srStressSink) run(ctx context.Context) {
 			signal = func(sig syscall.Signal) {
 				name := name
 				flag := "TERM"
-				if sig == syscall.SIGKILL {
+				switch sig {
+				case syscall.SIGKILL:
 					flag = "KILL"
+				case syscall.SIGSTOP:
+					flag = "STOP"
+				case syscall.SIGCONT:
+					flag = "CONT"
 				}
 				_ = exec.Command("docker", "kill", "--signal", flag, name).Run()
 			}
@@ -222,6 +249,7 @@ func (s *srStressSink) run(ctx context.Context) {
 		}
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
+		runDone := make(chan struct{})
 		killAfter := time.Duration(float64(srStressKillEvery) * (0.5 + rng.Float64()))
 		killTimer := time.NewTimer(killAfter)
 		expected, stopping := false, false
@@ -231,6 +259,29 @@ func (s *srStressSink) run(ctx context.Context) {
 			select {
 			case exitErr = <-done:
 				break wait
+			case sig := <-s.kill:
+				expected = true
+				s.record(func() {
+					if sig == syscall.SIGKILL {
+						s.sigkills++
+					} else {
+						s.sigterm++
+					}
+				})
+				if sig != syscall.SIGKILL {
+					signal(syscall.SIGCONT)
+				}
+				signal(sig)
+			case d := <-s.pause:
+				s.record(func() { s.pauses++ })
+				signal(syscall.SIGSTOP)
+				go func() {
+					select {
+					case <-time.After(d):
+						signal(syscall.SIGCONT)
+					case <-runDone:
+					}
+				}()
 			case <-killTimer.C:
 				if !s.chaos.Load() {
 					killTimer.Reset(5 * time.Second)
@@ -244,14 +295,19 @@ func (s *srStressSink) run(ctx context.Context) {
 				} else {
 					s.record(func() { s.sigterm++ })
 					s.t.Logf("chaos: SIGTERM ingestr run %d", s.runs)
+					signal(syscall.SIGCONT)
 					signal(syscall.SIGTERM)
 					go func() {
-						time.Sleep(90 * time.Second)
-						signal(syscall.SIGKILL)
+						select {
+						case <-time.After(90 * time.Second):
+							signal(syscall.SIGKILL)
+						case <-runDone:
+						}
 					}()
 				}
 			case <-ctx.Done():
 				expected, stopping = true, true
+				signal(syscall.SIGCONT)
 				signal(syscall.SIGTERM)
 				select {
 				case exitErr = <-done:
@@ -263,6 +319,7 @@ func (s *srStressSink) run(ctx context.Context) {
 				break wait
 			}
 		}
+		close(runDone)
 		killTimer.Stop()
 		_ = logFile.Close()
 		if stopping {
