@@ -531,6 +531,11 @@ type streamTableState struct {
 	snapshotBytes               uint64
 	snapshotWindowOpen          bool
 	snapshotWindowAfter         []string
+	// stagedUnmerged is WAL already copied into the staging table by a finite
+	// batch catch-up. It is merged and cleared by the next publishing flush.
+	stagedUnmerged bool
+	stagedRows     int64
+	stagedBytes    uint64
 }
 
 // pendingSoftReplace is a snapshot replacement applied without emptying the
@@ -574,6 +579,9 @@ type flushLoop struct {
 
 	cycles      int64
 	chunkTiming *source.CDCChunkTiming
+	// stagingOnly copies pending batches into the staging table and returns
+	// without merging or acknowledging the source.
+	stagingOnly bool
 }
 
 func newFlushLoop(dest destination.Destination, cfg *config.IngestConfig, opts StreamingOptions, tables map[string]*streamTableState) *flushLoop {
@@ -700,6 +708,12 @@ func (l *flushLoop) processResult(ctx context.Context, res source.RecordBatchRes
 			return err
 		}
 	}
+	if res.CDCStageWithoutMerge {
+		if err := l.stageWithoutMerge(ctx, res); err != nil {
+			return err
+		}
+		return nil
+	}
 	if err := l.handleResult(ctx, res); err != nil {
 		return err
 	}
@@ -724,7 +738,7 @@ func (l *flushLoop) invalidateSnapshot(ctx context.Context, invalidation source.
 	if l.opts.StateManager == nil {
 		return fmt.Errorf("source requested snapshot invalidation for %q without destination-managed CDC state", invalidation.TableName)
 	}
-	if l.buffered > 0 || l.tokenDirty {
+	if l.buffered > 0 || l.tokenDirty || l.hasStagedWAL() {
 		if err := l.flush(ctx); err != nil {
 			return fmt.Errorf("failed to flush before snapshot invalidation for table %s: %w", invalidation.TableName, err)
 		}
@@ -764,7 +778,7 @@ func (l *flushLoop) handleResult(ctx context.Context, res source.RecordBatchResu
 		return nil
 	}
 
-	if l.buffered > 0 || l.tokenDirty {
+	if l.buffered > 0 || l.tokenDirty || l.hasStagedWAL() {
 		if err := l.flush(ctx); err != nil {
 			return fmt.Errorf("failed to flush before source truncate: %w", err)
 		}
@@ -1143,6 +1157,30 @@ func sameColumnNullability(left, right *schema.TableSchema) bool {
 	return true
 }
 
+func (l *flushLoop) hasStagedWAL() bool {
+	for _, st := range l.tables {
+		if st.stagedUnmerged {
+			return true
+		}
+	}
+	return false
+}
+
+// stageWithoutMerge copies one batch catch-up page into the staging table.
+// The publishing flush that follows the barrier merges every staged page once.
+func (l *flushLoop) stageWithoutMerge(ctx context.Context, res source.RecordBatchResult) error {
+	if res.Batch == nil {
+		return nil
+	}
+	l.buffer(res)
+	if l.buffered == 0 {
+		return nil
+	}
+	l.stagingOnly = true
+	defer func() { l.stagingOnly = false }()
+	return l.flush(ctx)
+}
+
 func (l *flushLoop) buffer(res source.RecordBatchResult) {
 	if res.CommitToken != nil {
 		l.lastToken = res.CommitToken
@@ -1257,18 +1295,22 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		name string
 		st   *streamTableState
 
-		batches  []arrow.RecordBatch
-		rows     int64
-		bytes    uint64
-		snapshot bool
+		batches     []arrow.RecordBatch
+		rows        int64
+		bytes       uint64
+		snapshot    bool
+		mergeStaged bool
 	}
 
 	var work []flushWork
 	for name, st := range l.tables {
-		if st.pendingRows == 0 {
+		if st.pendingRows == 0 && (l.stagingOnly || !st.stagedUnmerged) {
 			continue
 		}
-		work = append(work, flushWork{name: name, st: st, batches: st.pending, rows: st.pendingRows, snapshot: st.pendingSnapshot})
+		work = append(work, flushWork{
+			name: name, st: st, batches: st.pending, rows: st.pendingRows,
+			snapshot: st.pendingSnapshot, mergeStaged: st.stagedUnmerged,
+		})
 		l.buffered -= st.pendingRows
 		st.pending = nil
 		st.pendingRows = 0
@@ -1328,46 +1370,54 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			writeOpts.CDCExpectedIncarnation = ""
 		}
 
-		if err := connectorLeaseLoss(ctx); err != nil {
-			for _, batch := range w.batches {
-				batch.Release()
-			}
-			return err
-		}
-		records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
-		if directSnapshot {
-			writeOpts.CDCSnapshot = true
-			writeOpts.PrimaryKeys = st.primaryKeys
-			writeOpts.SkipCDCResume = true
-		} else if st.stagingDeferred {
-			if err := l.prepareDeferredStaging(ctx, st); err != nil {
-				drainAndRelease(records)
+		if len(w.batches) > 0 {
+			if err := connectorLeaseLoss(ctx); err != nil {
+				for _, batch := range w.batches {
+					batch.Release()
+				}
 				return err
 			}
-		}
-		if col, ok := loadTimestampColumn(st.schema); ok {
-			records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
-		}
-		if col, ok := runIDColumn(st.schema); ok {
-			records = transformer.Wrap(records, transformer.NewRunID(col, runID))
-		}
-		var bytes uint64
-		records = countRecordBatchBytes(records, &bytes)
-		loadStart := time.Now()
-		writeErr := l.dest.WriteParallel(ctx, records, writeOpts)
-		if l.chunkTiming != nil {
-			l.chunkTiming.LoadNanos.Add(int64(time.Since(loadStart)))
-		}
-		if writeErr != nil {
-			drainAndRelease(records)
-			return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, writeErr)
-		}
-		w.bytes = bytes
-		if err := connectorLeaseLoss(ctx); err != nil {
-			return err
+			records := (<-chan source.RecordBatchResult)(prefilledBatchChannel(w.batches))
+			if directSnapshot {
+				writeOpts.CDCSnapshot = true
+				writeOpts.PrimaryKeys = st.primaryKeys
+				writeOpts.SkipCDCResume = true
+			} else if st.stagingDeferred {
+				if err := l.prepareDeferredStaging(ctx, st); err != nil {
+					drainAndRelease(records)
+					return err
+				}
+			}
+			if col, ok := loadTimestampColumn(st.schema); ok {
+				records = transformer.Wrap(records, transformer.NewLoadTimestamp(col, loadTimestamp))
+			}
+			if col, ok := runIDColumn(st.schema); ok {
+				records = transformer.Wrap(records, transformer.NewRunID(col, runID))
+			}
+			var bytes uint64
+			records = countRecordBatchBytes(records, &bytes)
+			loadStart := time.Now()
+			writeErr := l.dest.WriteParallel(ctx, records, writeOpts)
+			if l.chunkTiming != nil {
+				l.chunkTiming.LoadNanos.Add(int64(time.Since(loadStart)))
+			}
+			if writeErr != nil {
+				drainAndRelease(records)
+				return fmt.Errorf("streaming flush: failed to write %d rows for table %s: %w", w.rows, displayName, writeErr)
+			}
+			w.bytes = bytes
+			if err := connectorLeaseLoss(ctx); err != nil {
+				return err
+			}
+			if l.stagingOnly {
+				st.stagedUnmerged = true
+				st.stagedRows += w.rows
+				st.stagedBytes += w.bytes
+				return nil
+			}
 		}
 
-		if st.stagingTable != "" && !directSnapshot {
+		if !l.stagingOnly && st.stagingTable != "" && !directSnapshot && (len(w.batches) > 0 || w.mergeStaged) {
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
@@ -1395,6 +1445,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			if err := l.resetStaging(ctx, st); err != nil {
 				return fmt.Errorf("streaming flush: failed to reset staging table %s: %w", st.stagingTable, err)
 			}
+			st.stagedUnmerged = false
 			if err := connectorLeaseLoss(ctx); err != nil {
 				return err
 			}
@@ -1426,6 +1477,9 @@ func (l *flushLoop) flush(ctx context.Context) error {
 	}
 	if flushErr != nil {
 		return flushErr
+	}
+	if l.stagingOnly {
+		return nil
 	}
 	for sourceTable, st := range keylessSnapshots {
 		if l.pendingState.SnapshotPositions == nil {
@@ -1501,7 +1555,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		perTable[name] = metrics.SyncStats{Rows: w.rows, Bytes: w.bytes}
 	}
 	for name, st := range l.tables {
-		if st.snapshotRows == 0 {
+		if st.snapshotRows == 0 && (st.stagedRows == 0 || st.stagedUnmerged) {
 			continue
 		}
 		if name == "" {
@@ -1510,6 +1564,12 @@ func (l *flushLoop) flush(ctx context.Context) error {
 		stats := perTable[name]
 		stats.Rows += st.snapshotRows
 		stats.Bytes += st.snapshotBytes
+		if !st.stagedUnmerged {
+			stats.Rows += st.stagedRows
+			stats.Bytes += st.stagedBytes
+			flushedRows += st.stagedRows
+			st.stagedRows, st.stagedBytes = 0, 0
+		}
 		perTable[name] = stats
 		flushedRows += st.snapshotRows
 		st.snapshotRows, st.snapshotBytes = 0, 0
