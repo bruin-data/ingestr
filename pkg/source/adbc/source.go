@@ -368,6 +368,9 @@ func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, catalog, schemaName, 
 }
 
 func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	if wrapper, ok := s.dialect.(CustomQueryLimitWrapper); ok && opts.Limit > 0 {
+		query = wrapper.WrapCustomQueryLimit(query, opts.Limit)
+	}
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000

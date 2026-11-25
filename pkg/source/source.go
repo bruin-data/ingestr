@@ -434,6 +434,12 @@ type TableExistenceChecker interface {
 	TableExists(ctx context.Context, table string) (bool, error)
 }
 
+// CustomQueryLimiter marks a source that applies --sql-limit to custom queries;
+// for every other source the pipeline ignores the limit and warns.
+type CustomQueryLimiter interface {
+	LimitsCustomQueries()
+}
+
 // TableRequest contains user-provided configuration for table instantiation.
 // The source uses this to resolve final values for the SourceTable.
 type TableRequest struct {

@@ -61,6 +61,12 @@ type Dialect interface {
 	ParsePrimaryKeyResult(rawValue interface{}) []string
 }
 
+// CustomQueryLimitWrapper applies --sql-limit to a custom query in the dialect's
+// SQL. Dialects without it never receive a limit for custom queries.
+type CustomQueryLimitWrapper interface {
+	WrapCustomQueryLimit(query string, limit int) string
+}
+
 // CustomQueryIdentifierQuoter preserves identifiers returned by custom-query
 // metadata when a dialect's normal identifier rules canonicalize names.
 type CustomQueryIdentifierQuoter interface {
