@@ -2404,3 +2404,42 @@ func TestCastRecordToSchema_UnknownJSONTextToJSON(t *testing.T) {
 	assert.Equal(t, `"[{\"a\":1}]"`, quoted.Value(0))
 	assert.Equal(t, `"null"`, quoted.Value(3))
 }
+
+func TestCastRecordToSchema_DecimalToBool(t *testing.T) {
+	srcType := &arrow.Decimal128Type{Precision: 1, Scale: 0}
+	decimalRecord := func(values ...int64) arrow.RecordBatch {
+		b := array.NewDecimal128Builder(memory.DefaultAllocator, srcType)
+		defer b.Release()
+		for _, v := range values {
+			if v < 0 {
+				b.AppendNull()
+				continue
+			}
+			b.Append(decimal128.FromI64(v))
+		}
+		arr := b.NewArray()
+		defer arr.Release()
+		return array.NewRecordBatch(
+			arrow.NewSchema([]arrow.Field{{Name: "flag", Type: srcType, Nullable: true}}, nil),
+			[]arrow.Array{arr}, int64(arr.Len()),
+		)
+	}
+	tgt := arrow.NewSchema([]arrow.Field{{Name: "flag", Type: arrow.FixedWidthTypes.Boolean, Nullable: true}}, nil)
+
+	record := decimalRecord(1, 0, -1, 1)
+	defer record.Release()
+	casted, err := CastRecordToSchema(record, tgt, true)
+	require.NoError(t, err)
+	defer casted.Release()
+	col := casted.Column(0).(*array.Boolean)
+	assert.True(t, col.Value(0))
+	assert.False(t, col.Value(1))
+	assert.True(t, col.IsNull(2))
+	assert.True(t, col.Value(3))
+
+	bad := decimalRecord(0, 5)
+	defer bad.Release()
+	_, err = CastRecordToSchema(bad, tgt, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "value 5 is not a boolean")
+}

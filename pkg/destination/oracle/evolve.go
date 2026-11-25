@@ -10,6 +10,12 @@ import (
 )
 
 func (d *OracleDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
+	// Booleans are stored as NUMBER(1,0), so an existing flag column reads back as boolean;
+	// a scale-0 decimal such as a source NUMBER(1,0) fits it and casts strictly from 0 and 1.
+	if dest.DataType == schema.TypeBoolean && source.DataType == schema.TypeDecimal && source.Scale == 0 {
+		source.DataType, source.Precision, source.Scale = dest.DataType, dest.Precision, dest.Scale
+		return source
+	}
 	// An unbounded source widens a string key to the comparable maximum, never to CLOB.
 	if dest.DataType == schema.TypeString && dest.MaxLength > 0 &&
 		source.DataType == schema.TypeString && source.MaxLength <= 0 {
