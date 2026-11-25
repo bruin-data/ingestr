@@ -348,7 +348,17 @@ func (d *OracleDestination) WriteParallel(ctx context.Context, records <-chan so
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for result := range records {
+			for {
+				var result source.RecordBatchResult
+				select {
+				case <-ctx.Done():
+					return
+				case r, ok := <-records:
+					if !ok {
+						return
+					}
+					result = r
+				}
 				if result.Err != nil {
 					if result.Batch != nil {
 						result.Batch.Release()
@@ -385,6 +395,10 @@ func (d *OracleDestination) WriteParallel(ctx context.Context, records <-chan so
 
 	if firstErr != nil {
 		return firstErr
+	}
+	// A canceled caller can stop the workers between batches; never report that as success.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	config.Debug("[ORACLE] Total: %d rows written in %v", totalRows, time.Since(startTime))
 	return nil
