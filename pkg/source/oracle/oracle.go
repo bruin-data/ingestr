@@ -431,6 +431,10 @@ func (s *OracleSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 		columns := make([]schema.Column, len(colTypes))
 		for i, ct := range colTypes {
 			dt, precision, scale, arrayType := MapOracleToDataType(ct.DatabaseTypeName())
+			// Expressions and unconstrained NUMBERs report an out-of-range scale; keep the default for them.
+			if p, s, ok := ct.DecimalSize(); ok && dt == schema.TypeDecimal && p > 0 && s >= 0 && s <= p {
+				precision, scale = int(p), int(s)
+			}
 			nullable, _ := ct.Nullable()
 			columns[i] = schema.Column{
 				Name:      ct.Name(),
