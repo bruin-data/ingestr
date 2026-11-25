@@ -19,7 +19,9 @@
 //
 // Reuse running containers with BENCH_PG_URI, INGESTR_TEST_STARROCKS_DSN,
 // INGESTR_TEST_STARROCKS_URI and BENCH_SR_CONTAINER (the docker name whose
-// fe.audit.log is read). Run with e.g.:
+// fe.audit.log is read). A reused PostgreSQL server is wiped (every slot,
+// publication and public table), so BENCH_PG_URI also requires
+// BENCH_PG_DESTRUCTIVE_RESET=1. Run with e.g.:
 //
 //	make build && BENCH_RESULTS_DIR=.context/bench go test -tags stress -count=1 -v -timeout 120m \
 //	  -run '^TestPostgresCDC_StarRocksMergeBench$' ./tests/integration/
@@ -729,6 +731,9 @@ func benchStarRocks(t *testing.T, ctx context.Context) (dsn, uri, container stri
 func benchPostgres(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	if uri := os.Getenv("BENCH_PG_URI"); uri != "" {
+		if os.Getenv("BENCH_PG_DESTRUCTIVE_RESET") != "1" {
+			t.Fatal("BENCH_PG_URI drops every replication slot, publication and public table on that server; set BENCH_PG_DESTRUCTIVE_RESET=1 to confirm it is a throwaway instance")
+		}
 		return uri
 	}
 	_, uri := stressSourceContainer(t, ctx)
