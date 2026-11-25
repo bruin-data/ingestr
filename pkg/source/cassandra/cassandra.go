@@ -198,10 +198,6 @@ func (s *CassandraSource) readQuery(ctx context.Context, query string, args []in
 			}
 			items = append(items, normalized)
 
-			// Custom CQL can't be wrapped, so stop paging once --sql-limit rows were read.
-			if opts.Limit > 0 && totalRows+int64(len(items)) >= int64(opts.Limit) {
-				break
-			}
 			if len(items) >= batchSize {
 				if err := flush(); err != nil {
 					results <- source.RecordBatchResult{Err: err}

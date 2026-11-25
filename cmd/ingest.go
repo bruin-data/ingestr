@@ -245,7 +245,7 @@ func IngestCommand() *cli.Command {
 			},
 			&cli.IntFlag{
 				Name:    "sql-limit",
-				Usage:   "The limit to use when fetching data from the source",
+				Usage:   "The limit to use when fetching data from the source; ignored for custom queries (query:...)",
 				Sources: cli.EnvVars("SQL_LIMIT", "INGESTR_SQL_LIMIT"),
 			},
 			&cli.StringSliceFlag{

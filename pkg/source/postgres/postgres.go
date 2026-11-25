@@ -442,7 +442,6 @@ func (s *PostgresSource) discoverCustomQueryExtractPartitionBounds(ctx context.C
 }
 
 func (s *PostgresSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	query = source.LimitCustomQuery(query, opts.Limit, "SELECT * FROM (%[1]s) ingestr_query LIMIT %[2]d")
 	if s.snapshot != "" {
 		query = source.SQLCustomQuerySelectQuery(query, source.ReadOptions{}, quoteIdentifier, source.DefaultSQLTimeFormat)
 	}

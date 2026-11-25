@@ -366,21 +366,13 @@ func (s *FabricSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 	go func() {
 		defer close(results)
 
-		// Fabric rejects ORDER BY inside a TOP wrapper and has no SET ROWCOUNT, so
-		// --sql-limit stops the read and cancels the query instead.
-		queryCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
 		config.Debug("[SOURCE] Executing custom query: %s", query)
-		rows, err := s.db.QueryContext(queryCtx, query)
+		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
 			results <- source.RecordBatchResult{Err: fmt.Errorf("failed to execute custom query: %w", err)}
 			return
 		}
-		defer func() {
-			cancel()
-			_ = rows.Close()
-		}()
+		defer func() { _ = rows.Close() }()
 
 		colTypes, err := rows.ColumnTypes()
 		if err != nil {
@@ -403,13 +395,8 @@ func (s *FabricSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 		}
 		arrowSchema := buildArrowSchema(columns)
 
-		remaining := int64(opts.Limit)
 		for {
-			size := batchSize
-			if opts.Limit > 0 && remaining < int64(size) {
-				size = int(remaining)
-			}
-			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, size, opts.MaxBatchBytes)
+			record, count, err := rowsToArrowRecordBatch(rows, arrowSchema, columns, batchSize, opts.MaxBatchBytes)
 			if err != nil {
 				results <- source.RecordBatchResult{Err: err}
 				return
@@ -418,11 +405,6 @@ func (s *FabricSource) ExecuteCustomQuery(ctx context.Context, query string, opt
 				break
 			}
 			results <- source.RecordBatchResult{Batch: record}
-			if opts.Limit > 0 {
-				if remaining -= count; remaining <= 0 {
-					break
-				}
-			}
 		}
 	}()
 

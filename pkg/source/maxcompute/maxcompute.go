@@ -167,7 +167,6 @@ func (s *MaxComputeSource) read(ctx context.Context, table string, tableSchema *
 }
 
 func (s *MaxComputeSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
-	query = source.LimitCustomQuery(query, opts.Limit, "SELECT * FROM (%[1]s) ingestr_query LIMIT %[2]d")
 	if s.opts.StorageAPI {
 		return nil, fmt.Errorf("custom MaxCompute queries are not supported by the emulator Storage API path")
 	}

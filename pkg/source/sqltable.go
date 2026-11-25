@@ -217,16 +217,6 @@ func PartitionedCustomQueryTable(
 	}, nil
 }
 
-// LimitCustomQuery applies --sql-limit to a custom query in the database: format wraps the
-// query as %[1]s with the limit as %[2]d, in the source's own limit syntax.
-func LimitCustomQuery(query string, limit int, format string) string {
-	if limit <= 0 {
-		return query
-	}
-	// The newline keeps a trailing "--" comment from swallowing the wrapper.
-	return fmt.Sprintf(format, normalizeCustomQuery(query)+"\n", limit)
-}
-
 func SubstituteIntervalParams(query string, intervalStart, intervalEnd *time.Time) string {
 	if intervalStart != nil {
 		query = strings.ReplaceAll(query, ":interval_start",
