@@ -92,8 +92,11 @@ func (s *Source) HandlesIncrementality() bool {
 	return false
 }
 
+func (s *Source) LimitsCustomQueries() {}
+
 var (
-	_ source.Source = (*Source)(nil)
-	_ source.Source = (*adbc.ADBCSource)(nil)
-	_ source.Source = (*restSource)(nil)
+	_ source.Source             = (*Source)(nil)
+	_ source.CustomQueryLimiter = (*Source)(nil)
+	_ source.Source             = (*adbc.ADBCSource)(nil)
+	_ source.Source             = (*restSource)(nil)
 )

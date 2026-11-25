@@ -368,6 +368,11 @@ func (s *ADBCSource) fetchPrimaryKeys(ctx context.Context, catalog, schemaName, 
 }
 
 func (s *ADBCSource) ExecuteCustomQuery(ctx context.Context, query string, opts source.ReadOptions) (<-chan source.RecordBatchResult, error) {
+	// Only BigQuery (a source.CustomQueryLimiter) receives a limit here; the newline
+	// keeps a trailing "--" comment from swallowing the wrapper.
+	if opts.Limit > 0 {
+		query = fmt.Sprintf("SELECT * FROM (%s\n) ingestr_query LIMIT %d", strings.TrimRight(strings.TrimSpace(query), "; \t\n"), opts.Limit)
+	}
 	batchSize := opts.PageSize
 	if batchSize <= 0 {
 		batchSize = 100000
