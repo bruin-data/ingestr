@@ -239,7 +239,7 @@ func (d *BlobstoreDestination) PrepareTable(ctx context.Context, opts destinatio
 
 	bucketName, basePath, uriIgnored := d.resolveLocation(opts.Table)
 	if uriIgnored {
-		output.Warnf("[BLOBSTORE] table %s is written to %s/%s; the URI's bucket and path are only used for table names without a \"/\"\n", opts.Table, bucketName, basePath)
+		output.Warnf("[BLOBSTORE] Warning: table %s is written to %s/%s; the URI's bucket and path are only used for table names without a \"/\"\n", opts.Table, bucketName, basePath)
 	}
 	d.bucketName = bucketName
 	d.basePath = basePath

@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -22,6 +24,7 @@ import (
 )
 
 const (
+	oracleInsertChunkRows      = 5000
 	defaultOracleStagingSchema = "_bruin_staging"
 	cdcEqualLSNDeleteMarker    = "__ingestr_has_equal_lsn_delete"
 )
@@ -312,37 +315,91 @@ func (d *OracleDestination) Write(ctx context.Context, records <-chan source.Rec
 }
 
 func (d *OracleDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	startTime := time.Now()
-	var totalRows int64
-	var batchNum int
-
-	config.Debug("[ORACLE] Starting write to %s", opts.Table)
-
-	for result := range records {
-		if result.Err != nil {
-			if result.Batch != nil {
-				result.Batch.Release()
-			}
-			return result.Err
-		}
-		if result.Batch == nil {
-			continue
-		}
-
-		batchNum++
-		startBatch := time.Now()
-
-		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
-		if err != nil {
-			result.Batch.Release()
-			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
-		}
-		result.Batch.Release()
-
-		totalRows += rows
-		config.Debug("[ORACLE] Batch %d: %d rows in %v (total: %d)", batchNum, rows, time.Since(startBatch), totalRows)
+	// Only staging tables get several writers: a failed worker then never leaves a
+	// partly loaded target. Workers beyond the 10-connection pool wait for one.
+	workers := 1
+	if opts.StagingTable && opts.Parallelism > 1 {
+		workers = opts.Parallelism
 	}
 
+	startTime := time.Now()
+	config.Debug("[ORACLE] Starting write to %s with %d worker(s)", opts.Table, workers)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		firstErr  error
+		totalRows int64
+		batchNum  atomic.Int64
+	)
+	fail := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		mu.Unlock()
+		cancel()
+	}
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				var result source.RecordBatchResult
+				select {
+				case <-ctx.Done():
+					return
+				case r, ok := <-records:
+					if !ok {
+						return
+					}
+					result = r
+				}
+				if result.Err != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
+					fail(result.Err)
+					return
+				}
+				if result.Batch == nil {
+					continue
+				}
+				if ctx.Err() != nil {
+					result.Batch.Release()
+					return
+				}
+
+				n := batchNum.Add(1)
+				startBatch := time.Now()
+				rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
+				result.Batch.Release()
+				if err != nil {
+					fail(fmt.Errorf("failed to write batch %d: %w", n, err))
+					return
+				}
+
+				mu.Lock()
+				totalRows += rows
+				total := totalRows
+				mu.Unlock()
+				config.Debug("[ORACLE] Batch %d: %d rows in %v (total: %d)", n, rows, time.Since(startBatch), total)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+	// A canceled caller can stop the workers between batches; never report that as success.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	config.Debug("[ORACLE] Total: %d rows written in %v", totalRows, time.Since(startTime))
 	return nil
 }
@@ -380,16 +437,35 @@ func (d *OracleDestination) writeRecordBatch(ctx context.Context, record arrow.R
 	}
 	defer func() { _ = stmt.Close() }()
 
-	values := make([]interface{}, numCols)
-	for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
-		for colIdx := 0; colIdx < numCols; colIdx++ {
-			values[colIdx] = extractValue(record.Column(colIdx), int(rowIdx))
+	// go-ora sends slice arguments as one array-bound INSERT, one round trip per group.
+	values := make([][]interface{}, numCols)
+	args := make([]interface{}, numCols)
+	for start := int64(0); start < numRows; start += oracleInsertChunkRows {
+		end := min(start+oracleInsertChunkRows, numRows)
+		for colIdx := range values {
+			values[colIdx] = values[colIdx][:0]
+			for rowIdx := start; rowIdx < end; rowIdx++ {
+				values[colIdx] = append(values[colIdx], extractValue(record.Column(colIdx), int(rowIdx)))
+			}
 		}
-
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
-			config.LogFailedQuery(insertSQL, err)
-			_ = tx.Rollback()
-			return rowIdx, fmt.Errorf("failed to insert row %d: %w", rowIdx, err)
+		groups := arrayBindGroups(values)
+		for _, rows := range groups {
+			for colIdx, col := range values {
+				if len(groups) == 1 {
+					args[colIdx] = col
+					continue
+				}
+				groupValues := make([]interface{}, len(rows))
+				for i, row := range rows {
+					groupValues[i] = col[row]
+				}
+				args[colIdx] = groupValues
+			}
+			if _, err := stmt.ExecContext(ctx, args...); err != nil {
+				config.LogFailedQuery(insertSQL, err)
+				_ = tx.Rollback()
+				return 0, fmt.Errorf("failed to insert %d rows from rows %d to %d: %w", len(rows), start, end-1, err)
+			}
 		}
 	}
 
@@ -1693,6 +1769,47 @@ func extractValue(arr arrow.Array, idx int) interface{} {
 		return extractValue(a.Storage(), idx)
 	default:
 		return fmt.Sprintf("%v", arr)
+	}
+}
+
+// arrayBindGroups splits rows into groups that each bind safely as one array. go-ora types an
+// array column by its last value and binds long strings as LONG, so each group has one size class per column.
+func arrayBindGroups(columns [][]interface{}) [][]int {
+	index := map[string]int{}
+	var groups [][]int
+	key := make([]byte, len(columns))
+	for row := range columns[0] {
+		for c, col := range columns {
+			key[c] = bindSizeClass(col[row])
+		}
+		g, ok := index[string(key)]
+		if !ok {
+			g = len(groups)
+			index[string(key)] = g
+			groups = append(groups, nil)
+		}
+		groups[g] = append(groups[g], row)
+	}
+	return groups
+}
+
+// bindSizeClass mirrors go-ora's string and RAW bind limits: 4000 bytes, or 32767 on servers
+// with extended strings, above which a value is bound as LONG or LONG RAW.
+func bindSizeClass(v interface{}) byte {
+	size := 0
+	switch v := v.(type) {
+	case string:
+		size = len(v)
+	case []byte:
+		size = len(v)
+	}
+	switch {
+	case size > 32767:
+		return 2
+	case size > 4000:
+		return 1
+	default:
+		return 0
 	}
 }
 

@@ -140,7 +140,7 @@ func (s *DeleteInsertStrategy) Execute(ctx context.Context, job *IngestionJob) e
 		return fmt.Errorf("failed to write to staging: %w", err)
 	}
 	if n := filter.dropped.Load(); n > 0 {
-		output.Warnf("Skipped %d rows whose %q is outside --interval-start/--interval-end\n", n, destinationIncrementalKey)
+		output.Warnf("Warning: skipped %d rows whose %q is outside --interval-start/--interval-end\n", n, destinationIncrementalKey)
 	}
 
 	intervalStart := resolveIntervalBound(job.Config.IntervalStart, intervalTracker.Min)

@@ -452,6 +452,11 @@ func (p *Pipeline) Run(ctx context.Context) (retErr error) {
 	}
 
 	if table.Name() == source.CustomQueryTableName {
+		_, isQuery := source.IsCustomQuery(p.config.SourceTable)
+		if _, limits := src.(source.CustomQueryLimiter); isQuery && p.config.SQLLimit > 0 && !limits {
+			output.Warnf("Warning: --sql-limit is ignored for custom queries; add a limit to the query itself (e.g. LIMIT %d or FETCH FIRST %d ROWS ONLY)\n", p.config.SQLLimit, p.config.SQLLimit)
+			p.config.SQLLimit = 0
+		}
 		if p.config.DestTable == p.config.SourceTable {
 			p.config.DestTable = source.CustomQueryTableName
 		}
