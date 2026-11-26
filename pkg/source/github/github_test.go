@@ -276,6 +276,12 @@ func (f *fakeCommitsRepo) read(start, end time.Time) []string {
 	return shas
 }
 
+func forcePush(ts, before, after string) map[string]string {
+	a := activity(ts, before, after)
+	a["activity_type"] = "force_push"
+	return a
+}
+
 func activity(ts, before, after string) map[string]string {
 	return map[string]string{"timestamp": ts, "before": before, "after": after, "activity_type": "pr_merge", "ref": "refs/heads/main"}
 }
@@ -399,6 +405,18 @@ func TestGithubReadCommitsActivityEdgeCases(t *testing.T) {
 			totals:   map[string]int{"s0...s1": 10000},
 			byDate:   map[string][]string{"sha=s1": {"old", "s0", "s1"}},
 			want:     "[old s0 s1]",
+		},
+		{
+			name:     "force push back to the head before the window",
+			activity: []map[string]string{forcePush("2026-11-13T12:00:00Z", "B", "A"), activity("2026-11-13T06:00:00Z", "A", "B"), activity("2024-01-01T00:00:00Z", "0000000000000000000000000000000000000000", "A")},
+			compare:  map[string][]string{"A...A": {}, "A...B": {"b1", "B"}, "B...A": {}},
+			want:     "[B b1]",
+		},
+		{
+			name:     "force push replacing pushed commits",
+			activity: []map[string]string{forcePush("2026-11-13T12:00:00Z", "B", "C"), activity("2026-11-13T06:00:00Z", "A", "B"), activity("2024-01-01T00:00:00Z", "0000000000000000000000000000000000000000", "A")},
+			compare:  map[string][]string{"A...C": {"C"}, "A...B": {"b1", "B"}, "B...C": {"C"}},
+			want:     "[B C b1]",
 		},
 	}
 	for _, c := range cases {

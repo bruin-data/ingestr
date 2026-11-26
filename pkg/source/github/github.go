@@ -1348,7 +1348,7 @@ func (s *GithubSource) readRepoCommitsByDate(ctx context.Context, opts source.Re
 func (s *GithubSource) readRepoCommitsByActivity(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName string, seen map[string]bool, branch string, start time.Time, end *time.Time) (int, error) {
 	var base string
 	var states []string
-	chained := false
+	chained, forced := false, false
 	params := url.Values{"ref": {branch}, "per_page": {strconv.Itoa(maxPageSize)}}
 	for nextURL := repoPath(fullName) + "/activity?" + params.Encode(); nextURL != "" && !chained; {
 		var page []branchActivity
@@ -1368,6 +1368,7 @@ func (s *GithubSource) readRepoCommitsByActivity(ctx context.Context, opts sourc
 			if !isZeroSHA(a.After) {
 				states = append(states, a.After)
 			}
+			forced = forced || a.ActivityType == "force_push"
 			base = a.Before
 		}
 	}
@@ -1376,7 +1377,24 @@ func (s *GithubSource) readRepoCommitsByActivity(ctx context.Context, opts sourc
 		return 0, nil
 	}
 	slices.Reverse(states)
-	return s.readCommitRange(ctx, opts, results, fullName, seen, base, states)
+	if !forced {
+		return s.readCommitRange(ctx, opts, results, fullName, seen, base, states)
+	}
+	// A force push can drop commits from the final head, so read each push from the previous head.
+	sent := 0
+	for _, head := range states {
+		stepOpts := opts
+		if opts.Limit > 0 {
+			stepOpts.Limit = opts.Limit - sent
+		}
+		n, err := s.readCommitRange(ctx, stepOpts, results, fullName, seen, base, []string{head})
+		sent += n
+		if err != nil || (opts.Limit > 0 && sent >= opts.Limit) {
+			return sent, err
+		}
+		base = head
+	}
+	return sent, nil
 }
 
 // compareCommitCap is the most commits GitHub's compare API lists; it reports total_commits as the cap.
@@ -1449,9 +1467,10 @@ func (s *GithubSource) firstBranchActivity(ctx context.Context, fullName string)
 }
 
 type branchActivity struct {
-	Before    string    `json:"before"`
-	After     string    `json:"after"`
-	Timestamp time.Time `json:"timestamp"`
+	Before       string    `json:"before"`
+	After        string    `json:"after"`
+	Timestamp    time.Time `json:"timestamp"`
+	ActivityType string    `json:"activity_type"`
 }
 
 func isZeroSHA(sha string) bool {
