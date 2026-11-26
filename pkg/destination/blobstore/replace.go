@@ -44,7 +44,7 @@ func (d *BlobstoreDestination) prepareReplace(ctx context.Context, table string)
 	bucket, basePath, _ := d.resolveLocation(table)
 	listPrefix, recursive, pattern := replaceScope(d.renderLayout(table, loadIDToken, fileIDToken), basePath)
 	if strings.Trim(listPrefix, "/") == "" {
-		output.Warnf("[BLOBSTORE] replace keeps existing files for %s: its files go directly into the root of bucket %s, which is never cleared\n", table, bucket)
+		output.Warnf("[BLOBSTORE] Warning: replace keeps existing files for %s: its files go directly into the root of bucket %s, which is never cleared\n", table, bucket)
 		return nil
 	}
 

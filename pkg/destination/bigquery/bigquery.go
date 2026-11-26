@@ -1885,7 +1885,7 @@ func (d *BigQueryDestination) startQueryJobWithRetry(ctx context.Context, sql st
 			}
 			return job, recErr
 		}
-		output.Warnf("[%s] job %s start failed (attempt %d/%d): %v; retrying\n", opLabel, jobID, attempt, queryJobStartMaxAttempts, err)
+		output.Warnf("[%s] Warning: job %s start failed (attempt %d/%d): %v; retrying\n", opLabel, jobID, attempt, queryJobStartMaxAttempts, err)
 		if sleepErr := sleepWithContextForLoadJob(ctx, retryDelayForQueryJob(min(attempt, queryJobMaxAttempts), err)); sleepErr != nil {
 			return d.reconcileAmbiguousBigQueryJob(ctx, jobID)
 		}
