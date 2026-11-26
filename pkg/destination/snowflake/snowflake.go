@@ -126,7 +126,7 @@ func (d *SnowflakeDestination) PrepareTable(ctx context.Context, opts destinatio
 	clusterBy, missing := splitClusterByColumns(opts.Schema.Columns, opts.ClusterBy)
 	if len(missing) > 0 {
 		d.clusterByWarning.Do(func() {
-			output.Warnf("Snowflake: skipped cluster_by columns that are not in the table: %s\n", strings.Join(missing, ", "))
+			output.Warnf("Warning: Snowflake: skipped cluster_by columns that are not in the table: %s\n", strings.Join(missing, ", "))
 		})
 	}
 
@@ -1432,7 +1432,7 @@ func warnRewriteDropsTableProperties(tableFQN string, clusteringDropped bool) {
 	if clusteringDropped {
 		props = append(props, "clustering keys")
 	}
-	output.Warnf("Snowflake: changing an incompatible column type on %s recreated the table via CREATE OR REPLACE. These are dropped and must be re-applied: %s. Any Streams on the table become stale.\n",
+	output.Warnf("Warning: Snowflake: changing an incompatible column type on %s recreated the table via CREATE OR REPLACE. These are dropped and must be re-applied: %s. Any Streams on the table become stale.\n",
 		tableFQN, strings.Join(props, ", "))
 }
 

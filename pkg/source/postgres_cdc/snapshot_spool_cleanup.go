@@ -56,7 +56,7 @@ func (r *snapshotSpoolReader) cleanupRetiredSpools(ctx context.Context) error {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, source.ErrConnectorLeaseLost) {
 				return err
 			}
-			output.Warnf("[CDC] Could not clean up retired snapshot WAL epoch %s; keeping it for a later retry: %v\n", retired.Epoch, err)
+			output.Warnf("[CDC] Warning: Could not clean up retired snapshot WAL epoch %s; keeping it for a later retry: %v\n", retired.Epoch, err)
 			pending = append(pending, retired)
 		}
 	}

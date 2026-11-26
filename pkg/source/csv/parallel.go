@@ -339,12 +339,12 @@ func (p *segmentParser) parse(seg csvSegment) []source.RecordBatchResult {
 		if p.opts.IncrementalKey != "" && p.startTime != nil {
 			incValue, ok := lastNonEmptyValue(record, p.incIdx)
 			if !ok {
-				output.Warnf("[CSV] Row %d: skipping row with empty incremental key '%s'\n", recordNum, p.opts.IncrementalKey)
+				output.Warnf("[CSV] Warning: Row %d: skipping row with empty incremental key '%s'\n", recordNum, p.opts.IncrementalKey)
 				continue
 			}
 			incTime, err := dateparse.ParseAny(incValue)
 			if err != nil {
-				output.Warnf("[CSV] Row %d: skipping row with unparseable incremental key value '%s'\n", recordNum, incValue)
+				output.Warnf("[CSV] Warning: Row %d: skipping row with unparseable incremental key value '%s'\n", recordNum, incValue)
 				continue
 			}
 			if incTime.Before(*p.startTime) {

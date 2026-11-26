@@ -42,7 +42,7 @@ func (s *PostgresCDCSource) createLogicalSlot(ctx context.Context, conn *pgconn.
 func (s *PostgresCDCSource) warnStandbySlotWait() {
 	if s.standby {
 		s.standbySlotHint.Do(func() {
-			output.Warnf("[CDC] Creating replication slots on a PostgreSQL standby can wait for the primary to log a running-transactions record; chunked snapshots repeat this wait for each chunk. Run SELECT pg_log_standby_snapshot(); on the primary (for example, every second with pg_cron) to reduce these waits.\n")
+			output.Warnf("[CDC] Warning: Creating replication slots on a PostgreSQL standby can wait for the primary to log a running-transactions record; chunked snapshots repeat this wait for each chunk. Run SELECT pg_log_standby_snapshot(); on the primary (for example, every second with pg_cron) to reduce these waits.\n")
 		})
 	}
 }

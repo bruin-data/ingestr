@@ -297,12 +297,12 @@ func Read(ctx context.Context, reader io.Reader, opts source.ReadOptions, result
 		if incrementalKey != "" && startTime != nil {
 			incValue, ok := lastNonEmptyValue(record, incIdx)
 			if !ok {
-				output.Warnf("[CSV] Row %d: skipping row with empty incremental key '%s'\n", lineNum, incrementalKey)
+				output.Warnf("[CSV] Warning: Row %d: skipping row with empty incremental key '%s'\n", lineNum, incrementalKey)
 				continue
 			}
 			incTime, err := dateparse.ParseAny(incValue)
 			if err != nil {
-				output.Warnf("[CSV] Row %d: skipping row with unparseable incremental key value '%s'\n", lineNum, incValue)
+				output.Warnf("[CSV] Warning: Row %d: skipping row with unparseable incremental key value '%s'\n", lineNum, incValue)
 				continue
 			}
 			if incTime.Before(*startTime) {

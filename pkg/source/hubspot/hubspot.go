@@ -727,7 +727,7 @@ func (s *Hubspotsource) readPipelines(ctx context.Context, opts source.ReadOptio
 	}
 
 	if len(scopeSkipped) > 0 {
-		output.Warnf("\n[HUBSPOT] pipelines skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
+		output.Warnf("\n[HUBSPOT] Warning: pipelines skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
 	}
 
 	if len(rows) == 0 {
@@ -798,7 +798,7 @@ func (s *Hubspotsource) readPipelineStages(ctx context.Context, opts source.Read
 	}
 
 	if len(scopeSkipped) > 0 {
-		output.Warnf("\n[HUBSPOT] pipeline_stages skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
+		output.Warnf("\n[HUBSPOT] Warning: pipeline_stages skipped (insufficient scopes): %s\n", strings.Join(scopeSkipped, ", "))
 	}
 
 	if len(rows) == 0 {
