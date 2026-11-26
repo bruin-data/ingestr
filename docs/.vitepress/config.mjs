@@ -225,6 +225,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
               { text: "BallDontLie FIFA", link: "/supported-sources/balldontlie.md" },
               { text: "BambooHR", link: "/supported-sources/bamboohr.md" },
               { text: "Braze", link: "/supported-sources/braze.md" },
+              { text: "Brevo", link: "/supported-sources/brevo.md" },
               { text: "Breezy HR", link: "/supported-sources/breezyhr.md" },
               { text: "Bruin", link: "/supported-sources/bruin.md" },
               { text: "Chargebee", link: "/supported-sources/chargebee.md" },

@@ -12,6 +12,7 @@ Use this page to browse platforms by category. The sidebar keeps the full alphab
 - [Applovin](/supported-sources/applovin.md)
 - [Applovin Max](/supported-sources/applovin_max.md)
 - [Braze](/supported-sources/braze.md)
+- [Brevo](/supported-sources/brevo.md)
 - [Facebook Ads](/supported-sources/facebook-ads.md)
 - [Google Ads](/supported-sources/google-ads.md)
 - [Klaviyo](/supported-sources/klaviyo.md)
