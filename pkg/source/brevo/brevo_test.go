@@ -316,3 +316,73 @@ func TestDecodeItemsBareArray(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, items, 2)
 }
+
+func TestRetryWaitReachesHourlyReset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-sib-ratelimit-reset", "3540")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	resp, err := httpclient.New(httpclient.WithBaseURL(srv.URL), httpclient.WithDisableRetry()).R(context.Background()).Get("/")
+	require.NoError(t, err)
+
+	wait, err := brevoRetryStrategy(resp, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 3541*time.Second, wait)
+	assert.GreaterOrEqual(t, retryMaxWait, wait, "resty caps each wait at retryMaxWait, so a reset 59 minutes away must fit")
+}
+
+func TestModifiedSinceTablesDropRowsAfterIntervalEnd(t *testing.T) {
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		offsets = append(offsets, q.Get("offset"))
+		assert.Equal(t, "2026-11-01T00:00:00.000Z", q.Get("modifiedSince"))
+		if q.Get("offset") == "0" {
+			_, _ = w.Write([]byte(`{"contacts":[{"id":1,"modifiedAt":"2026-11-20T10:00:00.000+01:00"},{"id":2,"modifiedAt":"2026-11-20T09:00:00.001Z"}]}`))
+			return
+		}
+		if q.Get("offset") == "2" {
+			_, _ = w.Write([]byte(`{"contacts":[{"id":3,"modifiedAt":"2026-11-20T08:59:59.999Z"},{"id":4}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"contacts":[]}`))
+	}))
+	defer srv.Close()
+
+	cfg := tableConfigs["contacts"]
+	cfg.pageSize = 2
+	s := &BrevoSource{clients: map[rateGroup]*httpclient.Client{groupContacts: httpclient.New(httpclient.WithBaseURL(srv.URL))}}
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	results := make(chan source.RecordBatchResult, 10)
+	require.NoError(t, s.paginateAndSend(context.Background(), "contacts", cfg, map[string]string{"modifiedSince": start.Format(modifiedSinceLayout)}, nil, source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}, results))
+	close(results)
+
+	var ids []string
+	for r := range results {
+		require.NoError(t, r.Err)
+		col := r.Batch.Column(r.Batch.Schema().FieldIndices("id")[0]).(array.ExtensionArray).Storage().(*array.String)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+	}
+	assert.Equal(t, []string{"0", "2", "4"}, offsets, "a page that is fully filtered out still leads to the next page")
+	assert.Equal(t, []string{"1", "3", "4"}, ids, "id 1 is exactly at the end (09:00 UTC) and kept; id 2 is 1ms after and dropped")
+}
+
+func TestSendItemsStopsWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	results := make(chan source.RecordBatchResult)
+	done := make(chan error, 1)
+	go func() {
+		done <- sendItems(ctx, []map[string]interface{}{{"id": 1}, {"id": 2}}, source.ReadOptions{MaxBatchBytes: 1}, results)
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendItems stayed blocked on an unread channel after cancellation")
+	}
+}

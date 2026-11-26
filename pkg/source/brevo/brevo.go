@@ -33,8 +33,9 @@ const (
 	otherRateLimit      = 100 * 0.8 / 3600.0
 	otherRateLimitBurst = 3
 
-	retryCount   = 3
-	retryMaxWait = 10 * time.Minute
+	retryCount = 3
+	// Hourly groups can report a reset close to an hour away; the wait must be allowed to reach it.
+	retryMaxWait = time.Hour + time.Minute
 
 	modifiedSinceLayout = "2006-01-02T15:04:05.000Z"
 	dayLayout           = "2006-01-02"
@@ -448,7 +449,10 @@ func (s *BrevoSource) read(ctx context.Context, table string, opts source.ReadOp
 		}
 
 		if err != nil {
-			results <- source.RecordBatchResult{Err: err}
+			select {
+			case results <- source.RecordBatchResult{Err: err}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 
@@ -637,6 +641,9 @@ func (s *BrevoSource) paginateAndSend(ctx context.Context, table string, cfg tab
 		}
 
 		pageLen := len(items)
+		if cfg.modifiedSince && opts.IntervalEnd != nil {
+			items = dropChangedAfter(items, cfg.incrementalKey, *opts.IntervalEnd)
+		}
 		if seen != nil {
 			unique := items[:0]
 			for _, item := range items {
@@ -649,7 +656,10 @@ func (s *BrevoSource) paginateAndSend(ctx context.Context, table string, cfg tab
 			items = unique
 		}
 
-		if err := sendItems(items, opts, results); err != nil {
+		if err := sendItems(ctx, items, opts, results); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("failed to convert %s to Arrow: %w", table, err)
 		}
 		config.Debug("[Brevo] %s offset %d: sent %d records", table, offset, len(items))
@@ -661,7 +671,22 @@ func (s *BrevoSource) paginateAndSend(ctx context.Context, table string, cfg tab
 	}
 }
 
-func sendItems(items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
+// dropChangedAfter removes rows whose key is after end, since modifiedSince has no upper bound.
+// Rows without a parseable key are kept.
+func dropChangedAfter(items []map[string]interface{}, key string, end time.Time) []map[string]interface{} {
+	kept := items[:0]
+	for _, item := range items {
+		if v, ok := item[key].(string); ok {
+			if t, err := time.Parse(time.RFC3339Nano, v); err == nil && t.After(end) {
+				continue
+			}
+		}
+		kept = append(kept, item)
+	}
+	return kept
+}
+
+func sendItems(ctx context.Context, items []map[string]interface{}, opts source.ReadOptions, results chan<- source.RecordBatchResult) error {
 	var batch []map[string]interface{}
 	var accBytes int64
 	flush := func() error {
@@ -672,7 +697,12 @@ func sendItems(items []map[string]interface{}, opts source.ReadOptions, results 
 		if err != nil {
 			return err
 		}
-		results <- source.RecordBatchResult{Batch: record}
+		select {
+		case results <- source.RecordBatchResult{Batch: record}:
+		case <-ctx.Done():
+			record.Release()
+			return ctx.Err()
+		}
 		batch = nil
 		accBytes = 0
 		return nil
