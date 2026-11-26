@@ -191,6 +191,9 @@ type fakeCommitsRepo struct {
 	pageSize int
 	limit    int
 	requests []string
+
+	activityStatus      int
+	activityPagesStatus int
 }
 
 func (f *fakeCommitsRepo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +214,10 @@ func (f *fakeCommitsRepo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/repos/o/r/activity":
 		if q.Get("ref") != "main" {
 			f.t.Errorf("activity ref=%q want main", q.Get("ref"))
+		}
+		if f.activityStatus != 0 || (f.activityPagesStatus != 0 && q.Get("direction") != "asc") {
+			writeStatus(w, max(f.activityStatus, f.activityPagesStatus))
+			return
 		}
 		list := f.activity
 		if q.Get("direction") == "asc" && len(list) > 0 {
@@ -245,6 +252,10 @@ func (f *fakeCommitsRepo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			key = "sha=" + q.Get("sha")
 		}
 		shas, ok := f.byDate[key]
+		if !ok && q.Has("sha") {
+			writeStatus(w, http.StatusNotFound)
+			return
+		}
 		if !ok {
 			f.t.Errorf("unexpected commit listing %s", r.URL.RawQuery)
 		}
@@ -424,6 +435,60 @@ func TestGithubReadCommitsActivityEdgeCases(t *testing.T) {
 			f := &fakeCommitsRepo{t: t, activity: c.activity, compare: c.compare, totals: c.totals, byDate: c.byDate}
 			if got := fmt.Sprint(f.read(start, end)); got != c.want {
 				t.Fatalf("shas=%s want %s (requests %v)", got, c.want, f.requests)
+			}
+		})
+	}
+}
+
+func TestGithubReadCommitsHeadNoLongerExists(t *testing.T) {
+	logs := captureOutput(t)
+	f := &fakeCommitsRepo{
+		t: t,
+		activity: []map[string]string{
+			activity("2026-11-14T09:00:00Z", "gone", "s2"),
+			activity("2026-11-13T09:00:00Z", "s0", "gone"),
+			activity("2024-01-01T00:00:00Z", "0000000000000000000000000000000000000000", "s0"),
+		},
+		byDate: map[string][]string{"sha=s2": {"s0", "s1", "s2"}},
+	}
+	day := func(d int) time.Time { return time.Date(2026, 11, d, 0, 0, 0, 0, time.UTC) }
+	if got := f.read(day(13), day(14)); len(got) != 0 {
+		t.Fatalf("shas=%v want none", got)
+	}
+	want := "Warning: GitHub no longer has commit gone of o/r, the head after a push in 2026-11-13T00:00:00Z to 2026-11-14T00:00:00Z; no more commits of that window are loaded"
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("missing %q in output: %q", want, logs.String())
+	}
+	if got := fmt.Sprint(f.read(day(14), day(15))); got != "[s0 s1 s2]" {
+		t.Fatalf("next window shas=%s want [s0 s1 s2]", got)
+	}
+}
+
+func TestGithubReadCommitsActivityUnreadable(t *testing.T) {
+	for _, c := range []struct {
+		name                        string
+		activityStatus, pagesStatus int
+		answer                      string
+	}{
+		{name: "first activity request", activityStatus: http.StatusForbidden, answer: "403"},
+		{name: "activity pages", pagesStatus: http.StatusNotFound, answer: "404"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logs := captureOutput(t)
+			f := &fakeCommitsRepo{
+				t:                   t,
+				activity:            []map[string]string{activity("2024-01-01T00:00:00Z", "0000000000000000000000000000000000000000", "s0")},
+				byDate:              map[string][]string{"2026-11-13T00:00:00Z..2026-11-14T00:00:00Z": {"d1", "d2"}},
+				activityStatus:      c.activityStatus,
+				activityPagesStatus: c.pagesStatus,
+			}
+			got := f.read(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC))
+			if fmt.Sprint(got) != "[d1 d2]" {
+				t.Fatalf("shas=%v want [d1 d2]", got)
+			}
+			want := "Warning: GitHub answered " + c.answer + " to the push activity of o/r, so commits of 2026-11-13T00:00:00Z to 2026-11-14T00:00:00Z are filtered by commit date"
+			if !strings.Contains(logs.String(), want) {
+				t.Fatalf("missing %q in output: %q", want, logs.String())
 			}
 		})
 	}
@@ -2034,7 +2099,7 @@ func TestGithubCommitsAllReposSkipsUnreadableRepos(t *testing.T) {
 	}
 }
 
-func TestGithubCommitsAllReposWithIntervalSkipsReposWithoutActivityAccess(t *testing.T) {
+func TestGithubCommitsAllReposWithIntervalReadsReposWithoutActivityAccessByDate(t *testing.T) {
 	logs := captureOutput(t)
 	f := newCommitsFake(t)
 	f.activityBlocked["o/ingestr"] = http.StatusNotFound
@@ -2046,12 +2111,12 @@ func TestGithubCommitsAllReposWithIntervalSkipsReposWithoutActivityAccess(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprint(rows); got != "[{o/r r1} {o/old o1}]" {
+	if got := fmt.Sprint(rows); got != "[{o/r r1} {o/ingestr i1} {o/ingestr i2} {o/old o1} {o/Bruin b1} {o/Bruin b2}]" {
 		t.Fatalf("rows=%s", got)
 	}
 	for _, want := range []string{
-		"Warning: skipping the commits of o/ingestr, GitHub answered 404",
-		"Warning: skipping the commits of o/Bruin, GitHub answered 403",
+		"Warning: GitHub answered 404 to the push activity of o/ingestr",
+		"Warning: GitHub answered 403 to the push activity of o/Bruin",
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("missing %q in output: %q", want, logs.String())

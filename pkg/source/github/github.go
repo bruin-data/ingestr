@@ -1298,9 +1298,13 @@ func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOpti
 		return s.readRepoCommitsByDate(ctx, opts, results, fullName, nil, nil, opts.IntervalEnd)
 	}
 
-	branch, recordedFrom, err := s.firstBranchActivity(ctx, fullName)
+	branch, err := s.defaultBranch(ctx, fullName)
 	if err != nil {
 		return 0, err
+	}
+	recordedFrom, err := s.firstBranchActivity(ctx, fullName, branch)
+	if err != nil {
+		return s.readCommitsWithoutActivity(ctx, opts, results, fullName, nil, *opts.IntervalStart, opts.IntervalEnd, err)
 	}
 	end := opts.IntervalEnd
 	if recordedFrom.IsZero() || (end != nil && end.Before(recordedFrom)) {
@@ -1354,7 +1358,7 @@ func (s *GithubSource) readRepoCommitsByActivity(ctx context.Context, opts sourc
 		var page []branchActivity
 		resp, err := s.getRepoJSON(ctx, nextURL, fullName, "activity", &page)
 		if err != nil {
-			return 0, err
+			return s.readCommitsWithoutActivity(ctx, opts, results, fullName, seen, start, end, err)
 		}
 		nextURL = extractNextPageURL(resp.Header().Get("Link"))
 		for _, a := range page {
@@ -1377,6 +1381,39 @@ func (s *GithubSource) readRepoCommitsByActivity(ctx context.Context, opts sourc
 		return 0, nil
 	}
 	slices.Reverse(states)
+	n, err := s.readPushes(ctx, opts, results, fullName, seen, base, states, forced)
+	var missing missingCommitError
+	if errors.As(err, &missing) {
+		output.Warnf("\nWarning: GitHub no longer has commit %s of %s, the head after a push in %s; no more commits of that window are loaded\n", missing.sha, fullName, windowText(start, end))
+		return n, nil
+	}
+	return n, err
+}
+
+// readCommitsWithoutActivity lists a window by committer date when GitHub won't show the branch's pushes.
+func (s *GithubSource) readCommitsWithoutActivity(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName string, seen map[string]bool, start time.Time, end *time.Time, err error) (int, error) {
+	var unavailable unavailableRepoError
+	if !errors.As(err, &unavailable) {
+		return 0, err
+	}
+	output.Warnf("\nWarning: GitHub answered %s to the push activity of %s, so commits of %s are filtered by commit date and can miss commits merged after their date\n", unavailable.answer, fullName, windowText(start, end))
+	return s.readRepoCommitsByDate(ctx, opts, results, fullName, seen, &start, end)
+}
+
+func windowText(start time.Time, end *time.Time) string {
+	to := "now"
+	if end != nil {
+		to = end.UTC().Format(time.RFC3339)
+	}
+	return start.UTC().Format(time.RFC3339) + " to " + to
+}
+
+// missingCommitError is a branch head GitHub no longer serves, e.g. one a force push dropped that was later deleted.
+type missingCommitError struct{ sha string }
+
+func (e missingCommitError) Error() string { return "commit " + e.sha + " not found" }
+
+func (s *GithubSource) readPushes(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName string, seen map[string]bool, base string, states []string, forced bool) (int, error) {
 	if !forced {
 		return s.readCommitRange(ctx, opts, results, fullName, seen, base, states)
 	}
@@ -1415,7 +1452,12 @@ func (s *GithubSource) readCommitRange(ctx context.Context, opts source.ReadOpti
 	head := states[len(states)-1]
 	perPage := "?per_page=" + strconv.Itoa(maxPageSize)
 	listHead := func() (int, error) {
-		return s.paginateCommits(ctx, opts, results, fullName, seen, repoPath(fullName)+"/commits"+perPage+"&sha="+url.QueryEscape(head), "")
+		n, err := s.paginateCommits(ctx, opts, results, fullName, seen, repoPath(fullName)+"/commits"+perPage+"&sha="+url.QueryEscape(head), "")
+		var unavailable unavailableRepoError
+		if n == 0 && errors.As(err, &unavailable) && unavailable.answer == "404" {
+			return 0, missingCommitError{head}
+		}
+		return n, err
 	}
 	if isZeroSHA(base) {
 		return listHead()
@@ -1448,22 +1490,24 @@ func (s *GithubSource) readCommitRange(ctx context.Context, opts source.ReadOpti
 	return n + m, err
 }
 
-func (s *GithubSource) firstBranchActivity(ctx context.Context, fullName string) (string, time.Time, error) {
+func (s *GithubSource) defaultBranch(ctx context.Context, fullName string) (string, error) {
 	var repo struct {
 		DefaultBranch string `json:"default_branch"`
 	}
-	if _, err := s.getRepoJSON(ctx, repoPath(fullName), fullName, "repository", &repo); err != nil {
-		return "", time.Time{}, err
-	}
-	params := url.Values{"ref": {repo.DefaultBranch}, "direction": {"asc"}, "per_page": {"1"}}
+	_, err := s.getRepoJSON(ctx, repoPath(fullName), fullName, "repository", &repo)
+	return repo.DefaultBranch, err
+}
+
+func (s *GithubSource) firstBranchActivity(ctx context.Context, fullName, branch string) (time.Time, error) {
+	params := url.Values{"ref": {branch}, "direction": {"asc"}, "per_page": {"1"}}
 	var first []branchActivity
 	if _, err := s.getRepoJSON(ctx, repoPath(fullName)+"/activity?"+params.Encode(), fullName, "activity", &first); err != nil {
-		return "", time.Time{}, err
+		return time.Time{}, err
 	}
 	if len(first) == 0 {
-		return repo.DefaultBranch, time.Time{}, nil
+		return time.Time{}, nil
 	}
-	return repo.DefaultBranch, first[0].Timestamp, nil
+	return first[0].Timestamp, nil
 }
 
 type branchActivity struct {
