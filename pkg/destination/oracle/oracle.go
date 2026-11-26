@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -313,37 +315,91 @@ func (d *OracleDestination) Write(ctx context.Context, records <-chan source.Rec
 }
 
 func (d *OracleDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
-	startTime := time.Now()
-	var totalRows int64
-	var batchNum int
-
-	config.Debug("[ORACLE] Starting write to %s", opts.Table)
-
-	for result := range records {
-		if result.Err != nil {
-			if result.Batch != nil {
-				result.Batch.Release()
-			}
-			return result.Err
-		}
-		if result.Batch == nil {
-			continue
-		}
-
-		batchNum++
-		startBatch := time.Now()
-
-		rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
-		if err != nil {
-			result.Batch.Release()
-			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
-		}
-		result.Batch.Release()
-
-		totalRows += rows
-		config.Debug("[ORACLE] Batch %d: %d rows in %v (total: %d)", batchNum, rows, time.Since(startBatch), totalRows)
+	// Only staging tables get several writers: a failed worker then never leaves a
+	// partly loaded target. Workers beyond the 10-connection pool wait for one.
+	workers := 1
+	if opts.StagingTable && opts.Parallelism > 1 {
+		workers = opts.Parallelism
 	}
 
+	startTime := time.Now()
+	config.Debug("[ORACLE] Starting write to %s with %d worker(s)", opts.Table, workers)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		firstErr  error
+		totalRows int64
+		batchNum  atomic.Int64
+	)
+	fail := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		mu.Unlock()
+		cancel()
+	}
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				var result source.RecordBatchResult
+				select {
+				case <-ctx.Done():
+					return
+				case r, ok := <-records:
+					if !ok {
+						return
+					}
+					result = r
+				}
+				if result.Err != nil {
+					if result.Batch != nil {
+						result.Batch.Release()
+					}
+					fail(result.Err)
+					return
+				}
+				if result.Batch == nil {
+					continue
+				}
+				if ctx.Err() != nil {
+					result.Batch.Release()
+					return
+				}
+
+				n := batchNum.Add(1)
+				startBatch := time.Now()
+				rows, err := d.writeRecordBatch(ctx, result.Batch, opts.Table)
+				result.Batch.Release()
+				if err != nil {
+					fail(fmt.Errorf("failed to write batch %d: %w", n, err))
+					return
+				}
+
+				mu.Lock()
+				totalRows += rows
+				total := totalRows
+				mu.Unlock()
+				config.Debug("[ORACLE] Batch %d: %d rows in %v (total: %d)", n, rows, time.Since(startBatch), total)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+	// A canceled caller can stop the workers between batches; never report that as success.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	config.Debug("[ORACLE] Total: %d rows written in %v", totalRows, time.Since(startTime))
 	return nil
 }
