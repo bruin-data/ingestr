@@ -65,9 +65,6 @@ type IngestionJob struct {
 	// RunID adds or replaces _ingestr_run_id with one run identifier for the job.
 	RunID *transformer.RunID
 
-	// RowFilter drops rows before SchemaAligner, while columns still have their source types.
-	RowFilter transformer.RecordTransformer
-
 	// SchemaAligner reorders and fills transformed batches to match the write schema.
 	SchemaAligner *transformer.TypeCaster
 
@@ -495,10 +492,6 @@ func (j *IngestionJob) ApplyBatchTransformation(ctx context.Context, records <-c
 
 	if j.RunID != nil {
 		records = transformer.Wrap(records, j.RunID)
-	}
-
-	if j.RowFilter != nil {
-		records = transformer.Wrap(records, j.RowFilter)
 	}
 
 	if j.SchemaAligner != nil {
