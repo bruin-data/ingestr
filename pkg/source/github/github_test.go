@@ -191,6 +191,7 @@ type fakeCommitsRepo struct {
 	pageSize int
 	limit    int
 	requests []string
+	branches map[string]interface{}
 
 	activityStatus      int
 	activityPagesStatus int
@@ -276,10 +277,13 @@ func (f *fakeCommitsRepo) read(start, end time.Time) []string {
 	}
 	close(results)
 	var shas []string
+	f.branches = map[string]interface{}{}
 	for res := range results {
 		col := res.Batch.Column(res.Batch.Schema().FieldIndices("sha")[0]).(*array.String)
+		branch := res.Batch.Column(res.Batch.Schema().FieldIndices("branch")[0]).(*array.String)
 		for i := 0; i < col.Len(); i++ {
 			shas = append(shas, col.Value(i))
+			f.branches[col.Value(i)] = branch.GetOneForMarshal(i)
 		}
 		res.Batch.Release()
 	}
@@ -526,9 +530,13 @@ func TestGithubReadCommitsBeforeRecordedActivity(t *testing.T) {
 		}
 	})
 	t.Run("window across the first activity", func(t *testing.T) {
-		got := newRepo().read(time.Date(2023, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2023, 3, 15, 0, 0, 0, 0, time.UTC))
+		f := newRepo()
+		got := f.read(time.Date(2023, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2023, 3, 15, 0, 0, 0, 0, time.UTC))
 		if fmt.Sprint(got) != "[c0 c1 c2 c3 pr1]" {
 			t.Fatalf("shas=%v want [c0 c1 c2 c3 pr1]", got)
+		}
+		if b := fmt.Sprint(f.branches); b != "map[c0:main c1:main c2:main c3:main pr1:main]" {
+			t.Fatalf("branches=%s, want main on rows read by date and by activity", b)
 		}
 	})
 }
@@ -970,7 +978,7 @@ func TestGithubRESTQuotaRunsOutMidRun(t *testing.T) {
 	s, srv := connectToFake(t, f)
 	page2 := srv.URL + "/repos/o/r/commits?page=2&per_page=100"
 	f.rest = []cannedResponse{
-		repoOR,
+		repoOR, repoOR,
 		{200, map[string]string{"Link": "<" + page2 + `>; rel="next"`}, `[{"sha":"a","commit":{"committer":{"date":"2026-01-02T00:00:00Z"}}}]`},
 		restQuotaSpent(),
 		{200, nil, `[{"sha":"b","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
@@ -980,7 +988,7 @@ func TestGithubRESTQuotaRunsOutMidRun(t *testing.T) {
 	if err != nil || rows != 2 {
 		t.Fatalf("rows=%d err=%v, want both commits", rows, err)
 	}
-	if len(f.restPaths) != 4 || f.restPaths[2] != f.restPaths[3] {
+	if len(f.restPaths) != 5 || f.restPaths[3] != f.restPaths[4] {
 		t.Fatalf("rest requests=%q, want page 2 retried", f.restPaths)
 	}
 	if !strings.Contains(logs.String(), "Warning: GitHub rate limit exceeded for o/r") {
@@ -1043,7 +1051,7 @@ func TestGithubRateLimitRetriesRunOut(t *testing.T) {
 func TestGithubRetryAfter429KeepsTheMinimumWait(t *testing.T) {
 	logs := captureOutput(t)
 	f := &fakeGitHub{rest: []cannedResponse{
-		repoOR,
+		repoOR, repoOR,
 		{429, map[string]string{"Retry-After": "0"}, `{"message":"You have exceeded a secondary rate limit."}`},
 		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
 	}}
@@ -1066,7 +1074,7 @@ func TestGithubRetryAfter429KeepsTheMinimumWait(t *testing.T) {
 func TestGithubRetryAfter503IsLogged(t *testing.T) {
 	logs := captureOutput(t)
 	f := &fakeGitHub{rest: []cannedResponse{
-		repoOR,
+		repoOR, repoOR,
 		{503, map[string]string{"Retry-After": "0"}, `{"message":"Service unavailable"}`},
 		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
 	}}
@@ -1137,7 +1145,7 @@ func TestGithubSecondaryLimitWaitDoubles(t *testing.T) {
 	logs := captureOutput(t)
 	secondary := cannedResponse{403, nil, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`}
 	f := &fakeGitHub{rest: []cannedResponse{
-		repoOR,
+		repoOR, repoOR,
 		secondary, secondary, secondary,
 		{200, nil, `[{"sha":"a","commit":{"committer":{"date":"2026-01-01T00:00:00Z"}}}]`},
 	}}
@@ -1935,8 +1943,8 @@ func TestGithubCommitsSingleRepo(t *testing.T) {
 			if fmt.Sprint(rows) != "[{o/r r1}]" {
 				t.Fatalf("rows=%v, want GitHub's name in repo", rows)
 			}
-			if got := fmt.Sprint(f.paths); got != "[/repos/O/"+uriRepo+" /repos/o/r/commits]" {
-				t.Fatalf("requests=%s, want one lookup and the commits", got)
+			if got := fmt.Sprint(f.paths); got != "[/repos/O/"+uriRepo+" /repos/o/r /repos/o/r/commits]" {
+				t.Fatalf("requests=%s, want the lookups and the commits", got)
 			}
 		})
 	}

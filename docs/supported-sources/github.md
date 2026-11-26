@@ -80,7 +80,7 @@ This is a sample command that will copy the data from the GitHub source to DuckD
 GitHub source allows ingesting the following sources into separate tables:
 | Table           | PK | Inc Key | Inc Strategy | Details                                                                                                                                        |
 | --------------- | ----------- | --------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `commits`       | `sha` (single repository) or `repo`, `sha` (list and all modes) | `committed_at` | merge | Retrieves commits on the default branch of one, several or all repositories of `owner` (see [Reading commits from several repositories](#reading-commits-from-several-repositories)), with the repository in `repo`, including signature verification (`commit.verification`). `--interval-start`/`--interval-end` select the commits that reached the default branch in the interval, using GitHub's [repository activity](https://docs.github.com/en/rest/repos/repos#list-repository-activities): a pull request merged in the interval brings all its commits, even those dated earlier, so `committed_at` (the committer date) can be before `--interval-start`. GitHub records activity from early March 2023 at the earliest; before a repository's first recorded push, the interval filters on the committer date instead. |
+| `commits`       | `sha` (single repository) or `repo`, `sha` (list and all modes) | `committed_at` | merge | Retrieves commits on the default branch of one, several or all repositories of `owner` (see [Reading commits from several repositories](#reading-commits-from-several-repositories)), with the repository in `repo`, the default branch in `branch`, and signature verification (`commit.verification`). With `--interval-start`/`--interval-end`, it loads the commits that reached the default branch in the interval; see [Commits](#commits). |
 | `issues`        | - | –                | replace               | Retrieves GitHub issues along with their comments and reactions. Full reload on each run.                                        |
 | `pull_requests` | - | –                | replace               | Retrieves pull requests with comments and reactions. Full reload on each run.                                                    |
 | `pull_request_commits` | `repo`, `pr_number`, `sha` | `pr_updated_at` | merge | Retrieves every commit of every pull request (open, closed and merged) of one, several or all repositories of `owner`, including the commits of versions replaced by force pushes, with signature verification. See [Pull request commits](#pull-request-commits). |
@@ -90,6 +90,22 @@ GitHub source allows ingesting the following sources into separate tables:
 
 
 Use these as `--source-table` parameter in the `ingestr ingest` command.
+
+## Commits
+
+With `--interval-start`/`--interval-end`, `commits` loads the commits that reached the default branch during the interval, that is, when they were pushed or merged, not when they were written. A pull request merged in the interval brings all its commits, including ones written days earlier, so `committed_at` can be earlier than `--interval-start`.
+
+GitHub keeps push records from about March 2023, or from the repository's creation if it is newer. Intervals before that are loaded by commit date (`committed_at`) instead.
+
+`branch` is the name of the repository's default branch when the row was loaded. Rows are merged on `sha`, so reloading a commit after the default branch changed updates its `branch`. Existing tables get the column on the next run; rows loaded before stay empty until reloaded.
+
+A fine-grained token needs **Contents: Read-only** for this table. If GitHub refuses a repository's push records, ingestr prints a warning and loads that interval by commit date.
+
+Limitations:
+
+- **Renamed or switched default branch:** push records are read for the current default branch only. Intervals before a rename or switch are loaded from that branch's records, or by commit date before it existed, and the interval with a rename can load the branch's whole history.
+- **Force pushes:** commits a force push removed from the default branch stay in the table. If GitHub no longer has a commit the branch pointed to, ingestr prints a warning and loads nothing more for that interval.
+- **Backfills:** loading old intervals costs more API requests the further back they are.
 
 ## Reading commits from several repositories
 
