@@ -172,6 +172,46 @@ func TestReadEventsPagesWindowsAndLiftsEventDate(t *testing.T) {
 	assert.Equal(t, []string{"2026-01-01", "2026-01-02"}, dates, "event_date keeps the day as Brevo reports it")
 }
 
+func TestReadReportsMakesOneRequestPerWindow(t *testing.T) {
+	var windows []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/account" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		q := r.URL.Query()
+		windows = append(windows, q.Get("startDate")+"/"+q.Get("endDate"))
+		if len(windows) > 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		// Like Brevo, return every day of the window whatever limit and offset say.
+		start, _ := time.Parse(dayLayout, q.Get("startDate"))
+		end, _ := time.Parse(dayLayout, q.Get("endDate"))
+		var reports []map[string]interface{}
+		for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+			reports = append(reports, map[string]interface{}{"date": d.Format(dayLayout), "requests": 1})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"reports": reports})
+	}))
+	defer srv.Close()
+
+	client := httpclient.New(httpclient.WithBaseURL(srv.URL))
+	s := &BrevoSource{clients: map[rateGroup]*httpclient.Client{groupSMTP: client, groupOther: client}}
+	start, end := day("2026-01-01"), day("2026-02-04")
+	results := make(chan source.RecordBatchResult, 10)
+	require.NoError(t, s.readDayWindows(context.Background(), "transactional_email_reports", tableConfigs["transactional_email_reports"], source.ReadOptions{IntervalStart: &start, IntervalEnd: &end}, results))
+	close(results)
+
+	assert.Equal(t, []string{"2026-01-01/2026-01-30", "2026-01-31/2026-02-04"}, windows)
+	rows := 0
+	for r := range results {
+		require.NoError(t, r.Err)
+		rows += int(r.Batch.NumRows())
+	}
+	assert.Equal(t, 35, rows)
+}
+
 func TestReadReturnsErrorOnHTTPFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/account" {

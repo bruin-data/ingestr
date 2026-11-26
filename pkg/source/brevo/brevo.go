@@ -70,6 +70,8 @@ type tableConfig struct {
 	modifiedSince bool
 	// pageNumbers pages with page=1,2,... instead of offset (only /companies).
 	pageNumbers bool
+	// singlePage reads one response per request window: the endpoint ignores limit and offset.
+	singlePage bool
 	// liftModifiedAt copies attributes.<name> to a top-level modifiedAt for CRM objects.
 	liftModifiedAt string
 	// eventDate lifts the day of the event's date into a DATE-like event_date column.
@@ -173,6 +175,7 @@ var tableConfigs = map[string]tableConfig{
 		strategy:       config.StrategyDeleteInsert,
 		params:         map[string]string{"sort": "asc"},
 		maxWindowDays:  30,
+		singlePage:     true,
 	},
 	"blocked_contacts": {
 		endpoint:    "/smtp/blockedContacts",
@@ -664,7 +667,7 @@ func (s *BrevoSource) paginateAndSend(ctx context.Context, table string, cfg tab
 		}
 		config.Debug("[Brevo] %s offset %d: sent %d records", table, offset, len(items))
 
-		if cfg.pageSize == 0 || pageLen < cfg.pageSize {
+		if cfg.pageSize == 0 || cfg.singlePage || pageLen < cfg.pageSize {
 			return nil
 		}
 		offset += cfg.pageSize
