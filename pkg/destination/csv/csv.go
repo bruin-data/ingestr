@@ -3,6 +3,7 @@ package csv
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -21,6 +22,7 @@ import (
 
 type CSVDestination struct {
 	filePath string
+	tempPath string
 	file     *os.File
 	writer   *csv.Writer
 	mu       sync.Mutex
@@ -50,16 +52,27 @@ func (d *CSVDestination) Close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	var err error
 	if d.writer != nil {
 		d.writer.Flush()
+		err = d.writer.Error()
+		d.writer = nil
 	}
 	if d.file != nil {
-		return d.file.Close()
+		err = errors.Join(err, d.file.Close())
+		d.file = nil
 	}
-	return nil
+	if d.tempPath != "" {
+		err = errors.Join(err, os.Remove(d.tempPath))
+		d.tempPath = ""
+	}
+	return err
 }
 
 func (d *CSVDestination) PrepareTable(ctx context.Context, opts destination.PrepareOptions) error {
+	if err := d.Close(ctx); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -71,17 +84,13 @@ func (d *CSVDestination) PrepareTable(ctx context.Context, opts destination.Prep
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// For DropFirst, we truncate/create a new file
+	// Publish replacements only after the complete stream has been written.
 	if opts.DropFirst {
-		if d.file != nil {
-			d.writer.Flush()
-			_ = d.file.Close()
-		}
-
-		file, err := os.Create(d.filePath)
+		file, err := destination.CreateReplacementFile(d.filePath)
 		if err != nil {
 			return fmt.Errorf("failed to create CSV file: %w", err)
 		}
+		d.tempPath = file.Name()
 		d.file = file
 		d.writer = csv.NewWriter(file)
 
@@ -121,7 +130,12 @@ func (d *CSVDestination) Write(ctx context.Context, records <-chan source.Record
 	return d.WriteParallel(ctx, records, opts)
 }
 
-func (d *CSVDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) error {
+func (d *CSVDestination) WriteParallel(ctx context.Context, records <-chan source.RecordBatchResult, opts destination.WriteOptions) (err error) {
+	defer func() {
+		if err != nil {
+			_ = d.Close(ctx)
+		}
+	}()
 	startTime := time.Now()
 	var totalRows int64
 	var batchNum int
@@ -137,6 +151,7 @@ func (d *CSVDestination) WriteParallel(ctx context.Context, records <-chan sourc
 		startBatch := time.Now()
 
 		rows, err := d.writeRecordBatch(result.Batch)
+		result.Batch.Release()
 		if err != nil {
 			return fmt.Errorf("failed to write batch %d: %w", batchNum, err)
 		}
@@ -144,14 +159,31 @@ func (d *CSVDestination) WriteParallel(ctx context.Context, records <-chan sourc
 		totalRows += rows
 		config.Debug("[CSV] Batch %d: %d rows in %v (total: %d)", batchNum, rows, time.Since(startBatch), totalRows)
 
-		result.Batch.Release()
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.writer != nil {
 		d.writer.Flush()
+		if err := d.writer.Error(); err != nil {
+			return fmt.Errorf("failed to flush CSV writer: %w", err)
+		}
 	}
-	d.mu.Unlock()
+	if d.tempPath != "" {
+		err := d.file.Close()
+		d.file = nil
+		d.writer = nil
+		if err != nil {
+			return fmt.Errorf("failed to close CSV file: %w", err)
+		}
+		if err := os.Rename(d.tempPath, d.filePath); err != nil {
+			return fmt.Errorf("failed to finalize CSV replacement: %w", err)
+		}
+		d.tempPath = ""
+	}
 
 	config.Debug("[CSV] Total: %d rows written in %v", totalRows, time.Since(startTime))
 	return nil
@@ -263,7 +295,7 @@ func (d *CSVDestination) SupportsDeleteInsertStrategy() bool { return false }
 // SupportsSCD2Strategy returns false as CSV does not support the SCD2 strategy.
 func (d *CSVDestination) SupportsSCD2Strategy() bool { return false }
 
-// SupportsAtomicSwap returns false as CSV writes directly to the target file.
+// SupportsAtomicSwap returns false because file publication is handled by Write.
 func (d *CSVDestination) SupportsAtomicSwap() bool { return false }
 
 func (d *CSVDestination) GetScheme() string { return "csv" }
