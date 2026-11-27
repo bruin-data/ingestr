@@ -224,7 +224,7 @@ func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
 	require.Empty(t, itemsResume)
 	require.NoError(t, run2.BeginRun(ctx, false))
 
-	require.NoError(t, run2.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, func() error {
+	require.NoError(t, run2.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, true, func() error {
 		dest.incarnations["raw.items"] = "incarnation:raw.items:v2"
 		return nil
 	}))
@@ -250,16 +250,51 @@ func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
 	require.Equal(t, "1002", itemsID.LastCertifiedSource)
 	require.Equal(t, compactSchemaFingerprint("fp-items-v1"), itemsID.LastCertifiedSchema)
 
+	// Simulate crash after startup evolution changed raw.items (v1 -> v2) and
+	// before checkpointResnapshot saved a new checkpoint. On restart, evolution
+	// does not run again, yet TableIdentities recovers the durable evolution
+	// intent so reconciliation still sees PreEvolutionIdentity == v1.
+	run2Restart, err := NewCDCStateManager(dest, "chunk-table-identities", "raw.anchor", "")
+	require.NoError(t, err)
+	require.NoError(t, run2Restart.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
+	require.NoError(t, run2Restart.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v2"))
+	require.NoError(t, run2Restart.BeginRun(ctx, false))
+	restartIdentities, err := run2Restart.ChunkStore().(source.CDCChunkTableIdentityProvider).TableIdentities(ctx)
+	require.NoError(t, err)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:v2"), restartIdentities["public.items"].PhysicalIdentity)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:v1"), restartIdentities["public.items"].PreEvolutionIdentity)
+
+	// If an external actor replaces raw.items AFTER the interrupted evolution,
+	// PostIdentity no longer matches the live destination, so the durable
+	// intent is ignored and PreEvolutionIdentity reports the external table.
+	dest.incarnations["raw.items"] = "incarnation:raw.items:external-after-evolve"
+	afterExternalIdentities, err := run2Restart.ChunkStore().(source.CDCChunkTableIdentityProvider).TableIdentities(ctx)
+	require.NoError(t, err)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:external-after-evolve"), afterExternalIdentities["public.items"].PreEvolutionIdentity)
+	require.NotEqual(t, afterExternalIdentities["public.items"].LastCertifiedPhysical, afterExternalIdentities["public.items"].PreEvolutionIdentity)
+
+	// Chained startup evolution (v1 -> v2 crash, then v2 -> v3) preserves the
+	// original pre-evolution identity (v1).
+	dest.incarnations["raw.items"] = "incarnation:raw.items:v2"
+	require.NoError(t, run2Restart.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, true, func() error {
+		dest.incarnations["raw.items"] = "incarnation:raw.items:v3"
+		return nil
+	}))
+	chainedIdentities, err := run2Restart.ChunkStore().(source.CDCChunkTableIdentityProvider).TableIdentities(ctx)
+	require.NoError(t, err)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:v3"), chainedIdentities["public.items"].PhysicalIdentity)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:v1"), chainedIdentities["public.items"].PreEvolutionIdentity)
+
 	// External replacement before startup evolution must report the external
 	// pre-evolution incarnation rather than the previously certified one.
 	dest.incarnations["raw.items"] = "incarnation:raw.items:external"
 	run3, err := NewCDCStateManager(dest, "chunk-table-identities", "raw.anchor", "")
 	require.NoError(t, err)
 	require.NoError(t, run3.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
-	require.NoError(t, run3.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v3"))
+	require.NoError(t, run3.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v4"))
 	require.NoError(t, run3.BeginRun(ctx, false))
-	require.NoError(t, run3.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, func() error {
-		dest.incarnations["raw.items"] = "incarnation:raw.items:v3"
+	require.NoError(t, run3.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, true, func() error {
+		dest.incarnations["raw.items"] = "incarnation:raw.items:v4"
 		return nil
 	}))
 	identities3, err := run3.ChunkStore().(source.CDCChunkTableIdentityProvider).TableIdentities(ctx)

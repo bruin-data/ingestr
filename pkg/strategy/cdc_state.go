@@ -606,8 +606,11 @@ func (m *CDCStateManager) destinationIncarnationForTable(ctx context.Context, de
 // ApplyStartupEvolution runs startup schema evolution for a registered CDC
 // table while capturing its pre-evolution physical destination identity so
 // chunked snapshot reconciliation can distinguish evolution-induced table
-// recreation from an external destination replacement.
-func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable, destTable string, hasChanges bool, apply func() error) error {
+// recreation from an external destination replacement. When persistIntent is
+// true and evolution changes the physical destination identity, a durable
+// evolution intent is stored in the chunk store so a crash before
+// checkpointResnapshot still recovers on restart without a full refresh.
+func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable, destTable string, hasChanges, persistIntent bool, apply func() error) error {
 	if !hasChanges {
 		return apply()
 	}
@@ -629,22 +632,36 @@ func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable
 		return err
 	}
 
+	if !preExists || preDigest == "" {
+		return nil
+	}
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if preExists && preDigest != "" {
-		if m.preEvolutionDestinations == nil {
-			m.preEvolutionDestinations = make(map[string]string)
-		}
-		m.preEvolutionDestinations[sourceTable] = preDigest
-		if m.knownDestinations[sourceTable] == preDigest {
-			_, postDigest, postExists, err := m.destinationIncarnationForTable(ctx, destTable)
-			if err != nil {
-				return err
-			}
-			if !postExists || postDigest == "" {
-				return fmt.Errorf("CDC destination table %q disappeared during schema evolution", destTable)
-			}
-			m.knownDestinations[sourceTable] = postDigest
+	_, postDigest, postExists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	if !postExists || postDigest == "" {
+		m.mu.Unlock()
+		return fmt.Errorf("CDC destination table %q disappeared during schema evolution", destTable)
+	}
+	if m.preEvolutionDestinations == nil {
+		m.preEvolutionDestinations = make(map[string]string)
+	}
+	originPre := preDigest
+	if existingPre := m.preEvolutionDestinations[sourceTable]; existingPre != "" {
+		originPre = existingPre
+	}
+	m.preEvolutionDestinations[sourceTable] = originPre
+	if m.knownDestinations[sourceTable] == preDigest {
+		m.knownDestinations[sourceTable] = postDigest
+	}
+	m.mu.Unlock()
+
+	if persistIntent && postDigest != preDigest {
+		if err := m.recordEvolutionIntent(ctx, sourceTable, destTable, originPre, postDigest); err != nil {
+			return err
 		}
 	}
 	return nil

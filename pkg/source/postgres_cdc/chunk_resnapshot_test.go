@@ -338,12 +338,77 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 		require.ErrorContains(t, err, "--full-refresh")
 	})
 
+	t.Run("fails closed when unfinished legacy table lacks identity proof alongside changed table", func(t *testing.T) {
+		state := &chunkBootstrapState{
+			Version: 1, Epoch: "epoch-legacy-unfinished", Identity: "old-identity",
+			Slot: "slot", Mode: "inmemory", Execution: "parallel",
+			Applied: 100,
+			Tables: map[string]*chunkTableState{
+				"public.anchor": {Boundary: FormatLSN(100), Done: true},
+				"public.items":  {Boundary: FormatLSN(100), Done: false, Initialized: true, After: []string{"500"}},
+			},
+		}
+		// Table A (public.anchor) changed schema and has a completed certificate,
+		// while unfinished legacy table B (public.items) has no DestIdentity and no
+		// completed certificate (its destination was externally replaced).
+		identities := map[string]source.CDCChunkTableIdentity{
+			"public.anchor": {
+				DestTable:             "raw.anchor",
+				PhysicalIdentity:      "dest-anchor-v1",
+				PreEvolutionIdentity:  "dest-anchor-v1",
+				LastCertifiedDest:     "raw.anchor",
+				LastCertifiedPhysical: "dest-anchor-v1",
+				LastCertifiedSource:   "1001",
+				LastCertifiedSchema:   anchorFP[:18],
+			},
+			"public.items": {
+				DestTable:            "raw.items",
+				PhysicalIdentity:     "dest-items-empty-replacement",
+				PreEvolutionIdentity: "dest-items-empty-replacement",
+			},
+		}
+		changedTables := []source.SourceTableInfo{
+			makeChunkTestTable("public.anchor", "1001", itemsNewFP),
+			makeChunkTestTable("public.items", "1002", itemsOldFP),
+		}
+
+		_, err := reconcileChunkState(state, changedTables, "new-identity", "parallel", nil, identities)
+		require.ErrorContains(t, err, "lacks per-table identity proof for public.items")
+		require.ErrorContains(t, err, "--full-refresh")
+	})
+
 	t.Run("fails closed when legacy checkpoint has no identity provider", func(t *testing.T) {
 		state := legacyState()
 		_, err := reconcileChunkState(state, tables, "new-identity", "serial", nil, nil)
 		require.ErrorContains(t, err, "source or destination changed")
 		require.ErrorContains(t, err, "--full-refresh")
 	})
+}
+
+func TestReconcileChunkStateAllowsStaleEvolutionIntentAfterCheckpointUpdated(t *testing.T) {
+	// If a crash happened right after checkpointResnapshot saved DestIdentity=v2
+	// and before the durable evolution-intent key was deleted, TableIdentities
+	// may still report PreEvolutionIdentity=v1 alongside PhysicalIdentity=v2.
+	// The updated checkpoint already matches PhysicalIdentity=v2 and must resume
+	// cleanly without resnapshotting or failing closed.
+	state := completedMultiTableChunkState("new-identity")
+	state.Tables["public.items"].DestIdentity = "dest-items-v2-evolved"
+	state.Tables["public.items"].SchemaFingerprint = "fp-items-v2"
+
+	tables := []source.SourceTableInfo{
+		makeChunkTestTable("public.anchor", "1001", "fp-anchor-v1"),
+		makeChunkTestTable("public.items", "1002", "fp-items-v2"),
+	}
+	identities := defaultTableIdentities()
+	identities["public.items"] = source.CDCChunkTableIdentity{
+		DestTable:            "raw.items",
+		PhysicalIdentity:     "dest-items-v2-evolved",
+		PreEvolutionIdentity: "dest-items-v1",
+	}
+
+	reconciled, err := reconcileChunkState(state, tables, "new-identity", "serial", nil, identities)
+	require.NoError(t, err)
+	require.Empty(t, reconciled.resnapshot)
 }
 
 func TestChunkResnapshotEndToEndUpdatesCheckpointAndSkipsStaleWAL(t *testing.T) {

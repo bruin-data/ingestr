@@ -198,6 +198,7 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 		if err := r.checkpoint(ctx, r.state.Applied, nil); err != nil {
 			return err
 		}
+		r.clearEvolutionIntent(ctx)
 	}
 	if r.journal != nil && r.state.complete() {
 		if err := r.journal.replay(ctx, r.state.Consumed, func(groups []DecodedChanges) error { return r.apply(ctx, groups) }); err != nil {
@@ -701,7 +702,27 @@ func (r *chunkReader) checkpointResnapshot(ctx context.Context, snapshots map[st
 		return ctx.Err()
 	}
 	r.state.Identity = commit.state.Identity
+	r.clearEvolutionIntent(ctx)
 	return nil
+}
+
+func (r *chunkReader) clearEvolutionIntent(ctx context.Context) {
+	if r.options == nil || r.options.Store == nil {
+		return
+	}
+	hasIntent := false
+	for _, ti := range r.tableIdentities {
+		if ti.PreEvolutionIdentity != "" && ti.PhysicalIdentity != "" && ti.PreEvolutionIdentity != ti.PhysicalIdentity {
+			hasIntent = true
+			break
+		}
+	}
+	if !hasIntent {
+		return
+	}
+	if err := r.options.Store.Delete(ctx, source.CDCChunkEvolutionIntentKey); err != nil {
+		config.Debug("[CDC] Failed to clear chunk evolution intent: %v", err)
+	}
 }
 
 func (r *chunkReader) checkpoint(ctx context.Context, position pglogrepl.LSN, snapshots map[string]string, timings ...*source.CDCChunkTiming) error {

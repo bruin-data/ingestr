@@ -172,6 +172,8 @@ func reconcileChunkState(
 		}
 	}
 
+	identityChanged := state.Identity != "" && state.Identity != identity
+
 	type metadataUpdate struct {
 		name      string
 		table     source.SourceTableInfo
@@ -197,36 +199,51 @@ func reconcileChunkState(
 			return chunkReconcileResult{}, fmt.Errorf("primary keys for %s changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
 		}
 
-		if hasTI {
-			savedDest := saved.DestTable
-			if savedDest == "" {
-				savedDest = ti.LastCertifiedDest
-			}
-			if savedDest != "" && ti.DestTable != "" && savedDest != ti.DestTable {
-				return chunkReconcileResult{}, fmt.Errorf("destination table for %s changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
-			}
-			savedDestID := saved.DestIdentity
-			if savedDestID == "" {
-				savedDestID = ti.LastCertifiedPhysical
-			}
-			expectedPre := ti.PreEvolutionIdentity
-			if expectedPre == "" {
-				expectedPre = ti.PhysicalIdentity
-			}
-			if savedDestID != "" && expectedPre != "" && savedDestID != expectedPre {
-				return chunkReconcileResult{}, fmt.Errorf("destination table for %s was replaced since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
-			}
+		savedDest := saved.DestTable
+		if savedDest == "" && hasTI {
+			savedDest = ti.LastCertifiedDest
 		}
-
+		savedDestID := saved.DestIdentity
+		if savedDestID == "" && hasTI {
+			savedDestID = ti.LastCertifiedPhysical
+		}
 		prevIncarnation := saved.Incarnation
 		prevSchema := saved.SchemaFingerprint
 		if prevIncarnation == "" && prevSchema == "" && hasTI {
 			prevIncarnation = ti.LastCertifiedSource
 			prevSchema = ti.LastCertifiedSchema
 		}
+
+		// When the aggregate identity changed, every retained table that has
+		// already copied rows (Done or Initialized) must have verifiable source
+		// and physical destination identity proof so an unfinished legacy
+		// table cannot resume its cursor against an unchecked replacement.
+		if identityChanged && (saved.Done || saved.Initialized) {
+			if tableIdentities != nil {
+				if !hasTI || savedDestID == "" || ti.PhysicalIdentity == "" || (prevIncarnation == "" && prevSchema == "") {
+					return chunkReconcileResult{}, fmt.Errorf("chunked snapshot checkpoint lacks per-table identity proof for %s; use --full-refresh to establish a new baseline", table.Name)
+				}
+			} else if sameSelection {
+				return chunkReconcileResult{}, fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
+			}
+		}
+
+		destRecreatedByEvolution := false
+		if hasTI {
+			if savedDest != "" && ti.DestTable != "" && savedDest != ti.DestTable {
+				return chunkReconcileResult{}, fmt.Errorf("destination table for %s changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
+			}
+			if savedDestID != "" && ti.PhysicalIdentity != "" && savedDestID != ti.PhysicalIdentity {
+				if ti.PreEvolutionIdentity != "" && savedDestID == ti.PreEvolutionIdentity {
+					destRecreatedByEvolution = true
+				} else {
+					return chunkReconcileResult{}, fmt.Errorf("destination table for %s was replaced since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
+				}
+			}
+		}
+
 		oidChanged := prevIncarnation != "" && table.Incarnation != "" && prevIncarnation != table.Incarnation
 		schemaChanged := prevSchema != "" && table.SchemaFingerprint != "" && !schemaFingerprintMatches(prevSchema, table.SchemaFingerprint)
-		destRecreatedByEvolution := hasTI && ti.PhysicalIdentity != "" && ti.PreEvolutionIdentity != "" && ti.PhysicalIdentity != ti.PreEvolutionIdentity
 
 		if oidChanged || schemaChanged || destRecreatedByEvolution {
 			if saved.Done || saved.Initialized {
@@ -257,7 +274,7 @@ func reconcileChunkState(
 			break
 		}
 	}
-	if sameSelection && state.Identity != "" && state.Identity != identity && len(result.resnapshot) == 0 && !unstartedChanged {
+	if sameSelection && identityChanged && len(result.resnapshot) == 0 && !unstartedChanged {
 		return chunkReconcileResult{}, fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
 	}
 

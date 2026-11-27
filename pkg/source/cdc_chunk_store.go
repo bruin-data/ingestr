@@ -2,6 +2,11 @@ package source
 
 import "context"
 
+// CDCChunkEvolutionIntentKey stores durable proof of startup schema evolution
+// destination table recreations until the resulting per-table resnapshot
+// checkpoint is persisted.
+const CDCChunkEvolutionIntentKey = "evolution-intent"
+
 // CDCChunkStore persists resumable snapshot checkpoints and captured changes.
 // Load returns nil when the key is absent or deleted. Identity binds a
 // checkpoint to the registered source tables and physical destination tables.
