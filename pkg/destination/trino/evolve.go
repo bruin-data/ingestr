@@ -4,8 +4,51 @@ import (
 	"context"
 
 	"github.com/bruin-data/ingestr/pkg/destination"
+	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
 )
+
+func (d *TrinoDestination) NormalizeSchemaEvolutionSourceColumn(source, dest schema.Column) schema.Column {
+	if d.jsonType.normalized() != jsonTypeVariant {
+		if source.DataType == schema.TypeJSON && dest.DataType == schema.TypeString {
+			source.DataType = schema.TypeString
+			source.MaxLength = 0
+			return source
+		}
+		if source.DataType == schema.TypeArray && source.ArrayType == schema.TypeJSON &&
+			dest.DataType == schema.TypeArray && dest.ArrayType == schema.TypeString {
+			source.ArrayType = schema.TypeString
+			source.MaxLength = 0
+			return source
+		}
+	}
+
+	if source.DataType == schema.TypeInterval && dest.DataType == schema.TypeString {
+		source.DataType = schema.TypeString
+		source.MaxLength = 0
+		return source
+	}
+	if source.DataType == schema.TypeArray && source.ArrayType == schema.TypeInterval &&
+		dest.DataType == schema.TypeArray && dest.ArrayType == schema.TypeString {
+		source.ArrayType = schema.TypeString
+		source.MaxLength = 0
+		return source
+	}
+
+	if source.DataType == schema.TypeDecimal && source.Precision <= 0 && dest.DataType == schema.TypeDecimal {
+		source.Precision = 38
+		source.Scale = 9
+		return source
+	}
+	if source.DataType == schema.TypeArray && source.ArrayType == schema.TypeDecimal &&
+		source.Precision <= 0 && dest.DataType == schema.TypeArray && dest.ArrayType == schema.TypeDecimal {
+		source.Precision = 38
+		source.Scale = 9
+		return source
+	}
+
+	return source
+}
 
 func (d *TrinoDestination) MaxDecimalPrecision() int {
 	return 38
