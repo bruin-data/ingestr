@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -145,6 +146,7 @@ var commitFields = []schema.Column{
 	{Name: "sha", DataType: schema.TypeString, Nullable: false},
 	{Name: "repo", DataType: schema.TypeString, Nullable: false},
 	{Name: "committed_at", DataType: schema.TypeTimestampTZ, Nullable: true},
+	{Name: "branch", DataType: schema.TypeString, Nullable: true},
 	{Name: "node_id", DataType: schema.TypeString, Nullable: true},
 	{Name: "commit", DataType: schema.TypeJSON, Nullable: true},
 	{Name: "url", DataType: schema.TypeString, Nullable: true},
@@ -1289,32 +1291,272 @@ func (s *GithubSource) readSelectedRepos(ctx context.Context, opts source.ReadOp
 	return nil
 }
 
-// readRepoCommits lists one repository's default-branch commits. GitHub applies since/until to
-// the committer date.
+// readRepoCommits lists the commits that reached the default branch in the interval, via repository
+// activity; before the first recorded activity (early March 2023 at the earliest) it filters by committer date.
 func (s *GithubSource) readRepoCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName string) (int, error) {
 	config.Debug("[GITHUB] Reading commits for %s", fullName)
+	branch, err := s.defaultBranch(ctx, fullName)
+	if err != nil {
+		return 0, err
+	}
+	if opts.IntervalStart == nil {
+		return s.readRepoCommitsByDate(ctx, opts, results, fullName, branch, nil, nil, opts.IntervalEnd)
+	}
 
+	recordedFrom, err := s.firstBranchActivity(ctx, fullName, branch)
+	if err != nil {
+		return s.readCommitsWithoutActivity(ctx, opts, results, fullName, branch, nil, *opts.IntervalStart, opts.IntervalEnd, err)
+	}
+	end := opts.IntervalEnd
+	if recordedFrom.IsZero() || (end != nil && end.Before(recordedFrom)) {
+		return s.readRepoCommitsByDate(ctx, opts, results, fullName, branch, nil, opts.IntervalStart, end)
+	}
+
+	start := *opts.IntervalStart
+	sent := 0
+	seen := map[string]bool{}
+	if start.Before(recordedFrom) {
+		n, err := s.readRepoCommitsByDate(ctx, opts, results, fullName, branch, seen, &start, &recordedFrom)
+		sent += n
+		if err != nil || (opts.Limit > 0 && sent >= opts.Limit) {
+			return sent, err
+		}
+		start = recordedFrom
+	}
+	activityOpts := opts
+	if opts.Limit > 0 {
+		activityOpts.Limit = opts.Limit - sent
+	}
+	n, err := s.readRepoCommitsByActivity(ctx, activityOpts, results, fullName, branch, seen, start, end)
+	return sent + n, err
+}
+
+func (s *GithubSource) readRepoCommitsByDate(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName, branch string, seen map[string]bool, start, end *time.Time) (int, error) {
 	params := url.Values{}
 	params.Set("per_page", strconv.Itoa(maxPageSize))
-	if opts.IntervalStart != nil {
-		params.Set("since", opts.IntervalStart.UTC().Format(time.RFC3339))
+	if start != nil {
+		params.Set("since", start.UTC().Format(time.RFC3339))
 	}
-	if opts.IntervalEnd != nil {
-		params.Set("until", opts.IntervalEnd.UTC().Format(time.RFC3339))
+	if end != nil {
+		params.Set("until", end.UTC().Format(time.RFC3339))
 	}
-
-	owner, name, _ := strings.Cut(fullName, "/")
-	path := fmt.Sprintf("/repos/%s/%s/commits?%s", url.PathEscape(owner), url.PathEscape(name), params.Encode())
-	n, err := s.paginateREST(ctx, opts, results, path, "", "commits", commitFields, func(c map[string]interface{}) bool {
-		c["committed_at"] = committerDate(c)
-		c["repo"] = fullName
-		return true
-	})
+	n, err := s.paginateCommits(ctx, opts, results, fullName, branch, seen, repoPath(fullName)+"/commits?"+params.Encode(), "")
 	if errors.Is(err, errEmptyRepository) {
 		config.Debug("[GITHUB] %s has no commits yet", fullName)
 		return n, nil
 	}
 	return n, err
+}
+
+// readRepoCommitsByActivity compares the branch after the last push before start with after the last push
+// in [start, end], so a push GitHub didn't record is read by the next window with a recorded push.
+func (s *GithubSource) readRepoCommitsByActivity(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName, branch string, seen map[string]bool, start time.Time, end *time.Time) (int, error) {
+	var base string
+	var states []string
+	chained, forced := false, false
+	params := url.Values{"ref": {branch}, "per_page": {strconv.Itoa(maxPageSize)}}
+	for nextURL := repoPath(fullName) + "/activity?" + params.Encode(); nextURL != "" && !chained; {
+		var page []branchActivity
+		resp, err := s.getRepoJSON(ctx, nextURL, fullName, "activity", &page)
+		if err != nil {
+			return s.readCommitsWithoutActivity(ctx, opts, results, fullName, branch, seen, start, end, err)
+		}
+		nextURL = extractNextPageURL(resp.Header().Get("Link"))
+		for _, a := range page {
+			if end != nil && a.Timestamp.After(*end) {
+				continue
+			}
+			if a.Timestamp.Before(start) {
+				base, chained = a.After, true
+				break
+			}
+			if !isZeroSHA(a.After) {
+				states = append(states, a.After)
+			}
+			forced = forced || a.ActivityType == "force_push"
+			base = a.Before
+		}
+	}
+	if len(states) == 0 {
+		config.Debug("[GITHUB] %s had no pushes to %s in the interval", fullName, branch)
+		return 0, nil
+	}
+	slices.Reverse(states)
+	n, err := s.readPushes(ctx, opts, results, fullName, branch, seen, base, states, forced)
+	var missing missingCommitError
+	if errors.As(err, &missing) {
+		output.Warnf("\nWarning: GitHub no longer has commit %s of %s, the head after a push in %s; no more commits of that window are loaded\n", missing.sha, fullName, windowText(start, end))
+		return n, nil
+	}
+	return n, err
+}
+
+// readCommitsWithoutActivity lists a window by committer date when GitHub won't show the branch's pushes.
+func (s *GithubSource) readCommitsWithoutActivity(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName, branch string, seen map[string]bool, start time.Time, end *time.Time, err error) (int, error) {
+	var unavailable unavailableRepoError
+	if !errors.As(err, &unavailable) {
+		return 0, err
+	}
+	output.Warnf("\nWarning: GitHub answered %s to the push activity of %s, so commits of %s are filtered by commit date and can miss commits merged after their date\n", unavailable.answer, fullName, windowText(start, end))
+	return s.readRepoCommitsByDate(ctx, opts, results, fullName, branch, seen, &start, end)
+}
+
+func windowText(start time.Time, end *time.Time) string {
+	to := "now"
+	if end != nil {
+		to = end.UTC().Format(time.RFC3339)
+	}
+	return start.UTC().Format(time.RFC3339) + " to " + to
+}
+
+// missingCommitError is a branch head GitHub no longer serves, e.g. one a force push dropped that was later deleted.
+type missingCommitError struct{ sha string }
+
+func (e missingCommitError) Error() string { return "commit " + e.sha + " not found" }
+
+func (s *GithubSource) readPushes(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName, branch string, seen map[string]bool, base string, states []string, forced bool) (int, error) {
+	if !forced {
+		return s.readCommitRange(ctx, opts, results, fullName, branch, seen, base, states)
+	}
+	// A force push can drop commits from the final head, so read each push from the previous head.
+	sent := 0
+	for _, head := range states {
+		stepOpts := opts
+		if opts.Limit > 0 {
+			stepOpts.Limit = opts.Limit - sent
+		}
+		n, err := s.readCommitRange(ctx, stepOpts, results, fullName, branch, seen, base, []string{head})
+		sent += n
+		if err != nil || (opts.Limit > 0 && sent >= opts.Limit) {
+			return sent, err
+		}
+		base = head
+	}
+	return sent, nil
+}
+
+// compareCommitCap is the most commits GitHub's compare API lists; it reports total_commits as the cap.
+const compareCommitCap = 10000
+
+var errCompareCapped = errors.New("comparison has more commits than GitHub lists")
+
+func compareCapped(body []byte) bool {
+	var cmp struct {
+		TotalCommits int `json:"total_commits"`
+	}
+	return json.Unmarshal(body, &cmp) == nil && cmp.TotalCommits >= compareCommitCap
+}
+
+// readCommitRange lists the commits between base and the last of states, the branch heads after each push
+// in order. Over the compare cap it splits at the middle push; histories compare can't relate are listed whole.
+func (s *GithubSource) readCommitRange(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName, branch string, seen map[string]bool, base string, states []string) (int, error) {
+	head := states[len(states)-1]
+	perPage := "?per_page=" + strconv.Itoa(maxPageSize)
+	listHead := func() (int, error) {
+		n, err := s.paginateCommits(ctx, opts, results, fullName, branch, seen, repoPath(fullName)+"/commits"+perPage+"&sha="+url.QueryEscape(head), "")
+		var unavailable unavailableRepoError
+		if n == 0 && errors.As(err, &unavailable) && unavailable.answer == "404" {
+			return 0, missingCommitError{head}
+		}
+		return n, err
+	}
+	if isZeroSHA(base) {
+		return listHead()
+	}
+
+	comparePath := repoPath(fullName) + "/compare/" + url.PathEscape(base+"..."+head)
+	n, err := s.paginateCommits(ctx, opts, results, fullName, branch, seen, comparePath+perPage, "commits")
+	var unavailable unavailableRepoError
+	if n == 0 && errors.As(err, &unavailable) && unavailable.answer == "404" {
+		config.Debug("[GITHUB] %s can't compare %s...%s, listing the history of %s", fullName, base, head, head)
+		return listHead()
+	}
+	if !errors.Is(err, errCompareCapped) {
+		return n, err
+	}
+	if len(states) == 1 {
+		output.Warnf("\nWarning: more than %d commits reached %s in one push, listing the whole history of %s\n", compareCommitCap, fullName, head)
+		return listHead()
+	}
+
+	mid := len(states) / 2
+	n, err = s.readCommitRange(ctx, opts, results, fullName, branch, seen, base, states[:mid])
+	if err != nil || (opts.Limit > 0 && n >= opts.Limit) {
+		return n, err
+	}
+	if opts.Limit > 0 {
+		opts.Limit -= n
+	}
+	m, err := s.readCommitRange(ctx, opts, results, fullName, branch, seen, states[mid-1], states[mid:])
+	return n + m, err
+}
+
+func (s *GithubSource) defaultBranch(ctx context.Context, fullName string) (string, error) {
+	var repo struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	_, err := s.getRepoJSON(ctx, repoPath(fullName), fullName, "repository", &repo)
+	return repo.DefaultBranch, err
+}
+
+func (s *GithubSource) firstBranchActivity(ctx context.Context, fullName, branch string) (time.Time, error) {
+	params := url.Values{"ref": {branch}, "direction": {"asc"}, "per_page": {"1"}}
+	var first []branchActivity
+	if _, err := s.getRepoJSON(ctx, repoPath(fullName)+"/activity?"+params.Encode(), fullName, "activity", &first); err != nil {
+		return time.Time{}, err
+	}
+	if len(first) == 0 {
+		return time.Time{}, nil
+	}
+	return first[0].Timestamp, nil
+}
+
+type branchActivity struct {
+	Before       string    `json:"before"`
+	After        string    `json:"after"`
+	Timestamp    time.Time `json:"timestamp"`
+	ActivityType string    `json:"activity_type"`
+}
+
+func isZeroSHA(sha string) bool {
+	return strings.Trim(sha, "0") == ""
+}
+
+func repoPath(fullName string) string {
+	owner, name, _ := strings.Cut(fullName, "/")
+	return fmt.Sprintf("/repos/%s/%s", url.PathEscape(owner), url.PathEscape(name))
+}
+
+func (s *GithubSource) getRepoJSON(ctx context.Context, path, fullName, what string, out interface{}) (*ingestrhttp.Response, error) {
+	resp, err := s.restClient.R(ctx).SetResult(out).Get(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch the %s of %s: %w", what, fullName, err)
+	}
+	if !resp.IsSuccess() {
+		err := fmt.Errorf("failed to fetch the %s of %s with status %d: %s", what, fullName, resp.StatusCode(), resp.String())
+		if repoUnavailable(resp) {
+			return nil, unavailableRepoError{err, strconv.Itoa(resp.StatusCode())}
+		}
+		return nil, err
+	}
+	return resp, nil
+}
+
+// paginateCommits skips commits already in seen, when given, so a repeat doesn't count toward the limit.
+func (s *GithubSource) paginateCommits(ctx context.Context, opts source.ReadOptions, results chan<- source.RecordBatchResult, fullName, branch string, seen map[string]bool, path, itemsKey string) (int, error) {
+	return s.paginateREST(ctx, opts, results, path, itemsKey, "commits", commitFields, func(c map[string]interface{}) bool {
+		if seen != nil {
+			sha, _ := c["sha"].(string)
+			if seen[sha] {
+				return false
+			}
+			seen[sha] = true
+		}
+		c["committed_at"] = committerDate(c)
+		c["repo"] = fullName
+		c["branch"] = nullIfEmpty(branch)
+		return true
+	})
 }
 
 // commitRepo is a repository to read commits from. explicit is false when it was found through an
@@ -1665,6 +1907,9 @@ func (s *GithubSource) paginateREST(
 				return totalSent, unavailableRepoError{err, strconv.Itoa(httpResp.StatusCode())}
 			}
 			return totalSent, err
+		}
+		if table == "commits" && itemsKey == "commits" && compareCapped(httpResp.Body()) {
+			return totalSent, errCompareCapped
 		}
 
 		items, err := decodeRESTItems(httpResp.Body(), itemsKey)
