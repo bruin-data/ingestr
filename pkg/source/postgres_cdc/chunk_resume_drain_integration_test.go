@@ -101,7 +101,11 @@ func testParallelChunkResumeDrain(t *testing.T, snapshotComplete, hardDelete boo
 		require.Equal(t, before.Tables[serialSnapshotTable].After, checkpoint.state.Tables[serialSnapshotTable].After,
 			"catch-up must acknowledge WAL before advancing the current chunk cursor")
 		require.Greater(t, checkpoint.state.Applied, before.Applied)
-		require.Less(t, checkpoint.state.Applied, final, "the first acknowledgement must precede the end of the backlog")
+		if snapshotComplete {
+			require.GreaterOrEqual(t, checkpoint.state.Applied, final, "a finished snapshot catches up in one batch and acknowledges the barrier")
+		} else {
+			require.Less(t, checkpoint.state.Applied, final, "the first acknowledgement must precede the end of the backlog")
+		}
 		persisted, err := loadChunkState(f.ctx, f.store)
 		require.NoError(t, err)
 		require.Equal(t, before.Applied, persisted.Applied, "unacknowledged progress must not become durable")

@@ -376,3 +376,42 @@ func TestStreamingSerialSnapshotDeferredChunkIsNotAcknowledgedWhenSourceEnds(t *
 	require.Equal(t, int64(1), loop.tables["public.items"].snapshotRows)
 	mem.AssertSize(t, 0)
 }
+
+func TestBatchCatchUpMergesStagedWALOnce(t *testing.T) {
+	loop, dest, _, committer := snapshotChunkTestLoop(t)
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { mem.AssertSize(t, 0) })
+	var writes int
+	dest.write = func(_ context.Context, records <-chan source.RecordBatchResult, _ destination.WriteOptions) error {
+		writes++
+		for result := range records {
+			if result.Batch != nil {
+				result.Batch.Release()
+			}
+		}
+		return nil
+	}
+	var merges int
+	dest.merge = func(context.Context, destination.MergeOptions) error {
+		merges++
+		return nil
+	}
+	for _, id := range []int64{1, 2} {
+		require.NoError(t, loop.processResult(t.Context(), source.RecordBatchResult{
+			TableName: "public.items", CDCStageWithoutMerge: true, Batch: snapshotChunkTestBatch(mem, id),
+		}))
+	}
+	require.Equal(t, 2, writes)
+	require.Zero(t, merges)
+	require.Empty(t, committer.committed())
+	require.True(t, loop.tables["public.items"].stagedUnmerged)
+
+	require.NoError(t, loop.processResult(t.Context(), source.RecordBatchResult{
+		CDCFlush:    true,
+		CommitToken: source.CDCStateCommitToken{Position: "00000000/00000030", SourceCommitToken: "barrier"},
+	}))
+	require.Equal(t, 2, writes)
+	require.Equal(t, 1, merges)
+	require.Len(t, committer.committed(), 1)
+	require.False(t, loop.tables["public.items"].stagedUnmerged)
+}

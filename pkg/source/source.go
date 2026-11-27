@@ -160,6 +160,11 @@ type RecordBatchResult struct {
 	CDCSnapshotChunkEnd *CDCSnapshotChunk
 	CDCChunkTiming      *CDCChunkTiming
 	CDCFlush            bool // Flush preceding data and acknowledge its commit token before reading further.
+	// CDCStageWithoutMerge writes Batch into the CDC staging table and releases
+	// it. The next CDCFlush merges those rows and acknowledges the slot. A
+	// finite chunked run uses this for WAL once it is no longer copying a
+	// snapshot, so that catch-up follows batch mode.
+	CDCStageWithoutMerge bool
 	// CDCSnapshot identifies full snapshot row images without WAL changes,
 	// deletes, or unchanged TOAST values. It applies only to Batch.
 	CDCSnapshot bool

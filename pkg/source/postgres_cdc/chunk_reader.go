@@ -60,6 +60,9 @@ type chunkReader struct {
 	prefetch         *chunkPrefetch
 	serialWindowRows int64
 	walRange         *chunkWALRange
+	// stageCatchUp marks WAL emitted by a finite run that is not inside a
+	// snapshot chunk. Those pages are staged and merged once at the barrier.
+	stageCatchUp bool
 }
 
 func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.SourceTableInfo, slot string, resumes map[string]string, opts source.ReadOptions, multi bool) (<-chan source.RecordBatchResult, error) {
@@ -240,6 +243,9 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 func (r *chunkReader) emit(ctx context.Context, result source.RecordBatchResult) error {
 	if !r.multi {
 		result.TableName = ""
+	}
+	if r.stageCatchUp && result.Batch != nil {
+		result.CDCStageWithoutMerge = true
 	}
 	return sendResult(ctx, r.results, result)
 }
@@ -425,7 +431,7 @@ func (r *chunkReader) flushAll(ctx context.Context) error {
 }
 
 func (r *chunkReader) withAccumulatorResults(ctx context.Context, flush func(chan<- source.RecordBatchResult) error) error {
-	if r.multi {
+	if r.multi && !r.stageCatchUp {
 		return flush(r.results)
 	}
 	// Accumulators key by native table identity; single-table consumers use
@@ -447,6 +453,14 @@ func (r *chunkReader) withAccumulatorResults(ctx context.Context, flush func(cha
 }
 
 func (r *chunkReader) catchUp(ctx context.Context, timing *source.CDCChunkTiming) error {
+	// A finite run that is not inside a snapshot chunk follows batch mode: read
+	// to the barrier and let the caller's single checkpoint merge and confirm.
+	// Catch-up while a chunk is open, and --stream, keep the interval commits.
+	batch := timing == nil && !r.options.Continuous
+	if batch {
+		r.stageCatchUp = true
+		defer func() { r.stageCatchUp = false }()
+	}
 	barrier, err := r.source.beginBatchBarrier(ctx)
 	if err != nil {
 		return err
@@ -463,6 +477,9 @@ func (r *chunkReader) catchUp(ctx context.Context, timing *source.CDCChunkTiming
 			return err
 		}
 		if !r.repl.BarrierReached() {
+			if batch {
+				continue
+			}
 			for _, group := range groups {
 				pendingRows += len(group.Changes)
 			}
