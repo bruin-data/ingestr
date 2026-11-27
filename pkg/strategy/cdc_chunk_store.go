@@ -326,12 +326,50 @@ func (s *cdcChunkStore) save(ctx context.Context, key string, data []byte, delet
 	return source.ConnectorLeaseLoss(ctx)
 }
 
+var _ source.CDCChunkTableIdentityProvider = (*cdcChunkStore)(nil)
+
 func (s *cdcChunkStore) Identity(ctx context.Context) (string, error) {
 	m := s.manager
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	identity, _, err := m.chunkSnapshotIdentity(ctx, "")
 	return identity, err
+}
+
+func (s *cdcChunkStore) TableIdentities(ctx context.Context) (map[string]source.CDCChunkTableIdentity, error) {
+	m := s.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.destTables) == 0 {
+		return nil, fmt.Errorf("CDC snapshot identity requires registered tables")
+	}
+	identities := make(map[string]source.CDCChunkTableIdentity, len(m.destTables))
+	for table, destTable := range m.destTables {
+		_, physical, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+		if err != nil {
+			return nil, err
+		}
+		if !exists || physical == "" {
+			return nil, fmt.Errorf("CDC snapshot destination %q has no physical identity", destTable)
+		}
+		preEvolution := m.preEvolutionDestinations[table]
+		if preEvolution == "" {
+			preEvolution = physical
+		}
+		info := source.CDCChunkTableIdentity{
+			DestTable:            destTable,
+			PhysicalIdentity:     physical,
+			PreEvolutionIdentity: preEvolution,
+		}
+		if certDest, certPhysical, certSource, certSchema, ok := m.lastCompletedTableState(table); ok {
+			info.LastCertifiedDest = certDest
+			info.LastCertifiedPhysical = certPhysical
+			info.LastCertifiedSource = certSource
+			info.LastCertifiedSchema = certSchema
+		}
+		identities[table] = info
+	}
+	return identities, nil
 }
 
 // ResumeChunkedSnapshot binds a resumed snapshot to the physical target covered

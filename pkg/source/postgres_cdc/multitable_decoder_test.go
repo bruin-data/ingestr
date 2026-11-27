@@ -455,3 +455,181 @@ func TestMultiTableDecoderStampsCommitLSN(t *testing.T) {
 	require.Len(t, groups, 1)
 	assert.Equal(t, pglogrepl.LSN(400), groups[0].LSN)
 }
+
+func pgoRelationMsgCols(relID uint32, ns, name string, cols ...struct {
+	name string
+	oid  uint32
+},
+) []byte {
+	var b []byte
+	b = append(b, 'R')
+	b = binary.BigEndian.AppendUint32(b, relID)
+	b = append(b, ns...)
+	b = append(b, 0)
+	b = append(b, name...)
+	b = append(b, 0)
+	b = append(b, 'd')
+	b = binary.BigEndian.AppendUint16(b, uint16(len(cols)))
+	for i, col := range cols {
+		var flags byte
+		if i == 0 {
+			flags = 1
+		}
+		b = append(b, flags)
+		b = append(b, col.name...)
+		b = append(b, 0)
+		b = binary.BigEndian.AppendUint32(b, col.oid)
+		b = binary.BigEndian.AppendUint32(b, 0xffffffff)
+	}
+	return b
+}
+
+func pgoInsertValuesMsg(relID uint32, vals ...string) []byte {
+	var b []byte
+	b = append(b, 'I')
+	b = binary.BigEndian.AppendUint32(b, relID)
+	b = append(b, 'N')
+	b = binary.BigEndian.AppendUint16(b, uint16(len(vals)))
+	for _, val := range vals {
+		b = append(b, 't')
+		b = binary.BigEndian.AppendUint32(b, uint32(len(val)))
+		b = append(b, val...)
+	}
+	return b
+}
+
+func TestMultiTableDecoderAllowsStalePreSnapshotRelations(t *testing.T) {
+	// Live schema after DROP COLUMN legacy (only id remains).
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Schema:      "public",
+		PrimaryKeys: []string{"id"},
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt32}},
+	})
+	d := NewMultiTableDecoder([]source.SourceTableInfo{{
+		Name:        "public.items",
+		Schema:      tableSchema,
+		Incarnation: "20",
+	}})
+	d.AllowStaleRelationsBefore(map[string]pglogrepl.LSN{"public.items": 140})
+
+	// Pre-snapshot transaction (commit LSN 120 < 140) with dropped column "legacy":
+	// must be marked stale instead of raising SchemaChangedError.
+	preDDLRel := pgoRelationMsgCols(20, "public", "items",
+		struct {
+			name string
+			oid  uint32
+		}{"id", 23},
+		struct {
+			name string
+			oid  uint32
+		}{"legacy", 25},
+	)
+	groups := decodeAll(t, d, [][]byte{
+		pgoBeginMsg(120),
+		preDDLRel,
+		pgoInsertValuesMsg(20, "1", "old"),
+		pgoCommitMsg(120),
+	}, 110)
+	assert.Empty(t, groups)
+	require.True(t, d.relations[20].Stale)
+
+	// Pre-snapshot transaction with an unrecorded intermediate OID (15 != 20)
+	// at commit LSN 130 < 140 is also marked stale.
+	groups = decodeAll(t, d, [][]byte{
+		pgoBeginMsg(130),
+		pgoRelationMsg(15, "public", "items"),
+		pgoInsertMsg(15, "9"),
+		pgoCommitMsg(130),
+	}, 125)
+	assert.Empty(t, groups)
+	require.True(t, d.relations[15].Stale)
+
+	// Post-snapshot transaction (commit LSN 160 >= 140) resends the post-DDL
+	// relation: stale state is cleared and tuples decode cleanly.
+	groups = decodeAll(t, d, [][]byte{
+		pgoBeginMsg(160),
+		pgoRelationMsg(20, "public", "items"),
+		pgoInsertMsg(20, "2"),
+		pgoCommitMsg(160),
+	}, 150)
+	require.Len(t, groups, 1)
+	require.Len(t, groups[0].Changes, 1)
+	assert.Equal(t, int32(2), groups[0].Changes[0].Values[0])
+	assert.False(t, d.relations[20].Stale)
+
+	// A schema change AT OR AFTER snapshot LSN (180 >= 140) must still error.
+	_, err := d.Decode(pgoBeginMsg(180), 170)
+	require.NoError(t, err)
+	postDDLAddedCol := pgoRelationMsgCols(20, "public", "items",
+		struct {
+			name string
+			oid  uint32
+		}{"id", 23},
+		struct {
+			name string
+			oid  uint32
+		}{"extra", 25},
+	)
+	_, err = d.Decode(postDDLAddedCol, 175)
+	var schemaErr *SchemaChangedError
+	require.ErrorAs(t, err, &schemaErr)
+
+	// A reincarnation AT OR AFTER snapshot LSN must still error.
+	_, err = d.Decode(pgoBeginMsg(190), 185)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoRelationMsg(25, "public", "items"), 186)
+	var reincErr *TableReincarnatedError
+	require.ErrorAs(t, err, &reincErr)
+}
+
+func TestMultiTableDecoderDoesNotMarkValidPreSnapshotRelationStale(t *testing.T) {
+	// If pgoutput emits a relation at LSN < snapshotLSN that already matches the
+	// live schema, it will NOT resend that relation for post-snapshot tuples.
+	// It must remain non-stale so post-snapshot tuples decode cleanly.
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Schema:      "public",
+		PrimaryKeys: []string{"id"},
+		Columns: []schema.Column{
+			{Name: "id", DataType: schema.TypeInt32},
+			{Name: "note", DataType: schema.TypeString},
+		},
+	})
+	d := NewMultiTableDecoder([]source.SourceTableInfo{{
+		Name:        "public.items",
+		Schema:      tableSchema,
+		Incarnation: "20",
+	}})
+	d.AllowStaleRelationsBefore(map[string]pglogrepl.LSN{"public.items": 140})
+
+	validRel := pgoRelationMsgCols(20, "public", "items",
+		struct {
+			name string
+			oid  uint32
+		}{"id", 23},
+		struct {
+			name string
+			oid  uint32
+		}{"note", 25},
+	)
+	groups := decodeAll(t, d, [][]byte{
+		pgoBeginMsg(120),
+		validRel,
+		pgoInsertValuesMsg(20, "1", "before"),
+		pgoCommitMsg(120),
+	}, 110)
+	require.Len(t, groups, 1)
+	assert.False(t, d.relations[20].Stale)
+
+	// Post-snapshot transaction reuses cached relation without another 'R' message.
+	groups = decodeAll(t, d, [][]byte{
+		pgoBeginMsg(160),
+		pgoInsertValuesMsg(20, "2", "after"),
+		pgoCommitMsg(160),
+	}, 150)
+	require.Len(t, groups, 1)
+	require.Len(t, groups[0].Changes, 1)
+	assert.Equal(t, int32(2), groups[0].Changes[0].Values[0])
+	assert.Equal(t, "after", groups[0].Changes[0].Values[1])
+}

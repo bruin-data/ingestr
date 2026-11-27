@@ -11,3 +11,22 @@ type CDCChunkStore interface {
 	Delete(context.Context, string) error
 	Identity(context.Context) (string, error)
 }
+
+// CDCChunkTableIdentity describes a table's current physical destination target
+// and any previously certified CDC state, allowing chunked snapshots to
+// distinguish source schema/OID changes from destination table replacements.
+type CDCChunkTableIdentity struct {
+	DestTable             string
+	PhysicalIdentity      string
+	PreEvolutionIdentity  string
+	LastCertifiedDest     string
+	LastCertifiedPhysical string
+	LastCertifiedSource   string
+	LastCertifiedSchema   string
+}
+
+// CDCChunkTableIdentityProvider optionally exposes per-table physical
+// destination identities for chunked snapshot reconciliation.
+type CDCChunkTableIdentityProvider interface {
+	TableIdentities(context.Context) (map[string]CDCChunkTableIdentity, error)
+}

@@ -44,9 +44,11 @@ type MultiTableDecoder struct {
 	committed        *changeSpool[streamedChange]
 	committedLSN     pglogrepl.LSN
 	currentTxLSN     pglogrepl.LSN
+	inTx             bool
 	typeMap          *pgtype.Map
 	allowedUnknown   map[string]map[string]struct{}
 	historicalIDs    map[string]map[uint32]struct{}
+	staleBeforeLSN   map[string]pglogrepl.LSN
 	memoryBudget     *byteBudget
 
 	// Protocol v2 streaming state. Between Stream Start and Stream Stop,
@@ -316,8 +318,10 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 	}
 
 	if tableName != "" {
+		beforeLSN := d.staleBeforeLSN[tableName]
+		isPreSnapshot := beforeLSN > 0 && d.relationLSN() < beforeLSN
 		if expected := d.expectedRelIDs[tableName]; expected != 0 && rel.RelationID != expected {
-			if _, historical := d.historicalIDs[tableName][rel.RelationID]; historical {
+			if _, historical := d.historicalIDs[tableName][rel.RelationID]; historical || isPreSnapshot {
 				rel.Stale = true
 				d.targetRelIDs[rel.RelationID] = tableName
 				d.relations[rel.RelationID] = rel
@@ -333,13 +337,26 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 		config.Debug("[CDC] Found target relation: %s (ID: %d)", tableName, rel.RelationID)
 		if tableSchema := d.tableSchemas[tableName]; tableSchema != nil {
 			prev := d.relations[rel.RelationID]
+			if prev != nil && prev.Stale {
+				prev = nil
+			}
 			if err := mapRelationToSchema(rel, prev, tableSchema, tableName, d.allowedUnknown[tableName]); err != nil {
+				if isPreSnapshot {
+					rel.Stale = true
+					d.relations[rel.RelationID] = rel
+					return nil
+				}
 				// Do not store rel on error: a rebuilt stream must retry against the
 				// last accepted relation so schema-change detection remains stable.
 				return err
 			}
 		}
 		if err := validateGeneratedRelation(rel, d.generatedColumns[tableName]); err != nil {
+			if isPreSnapshot {
+				rel.Stale = true
+				d.relations[rel.RelationID] = rel
+				return nil
+			}
 			return err
 		}
 	}
@@ -348,12 +365,23 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 	return nil
 }
 
+func (d *MultiTableDecoder) relationLSN() pglogrepl.LSN {
+	if !d.inStream && d.inTx && d.currentTxLSN > 0 {
+		return d.currentTxLSN
+	}
+	return d.walStart
+}
+
 func (d *MultiTableDecoder) AllowUnknownRelationColumns(columns map[string]map[string]struct{}) {
 	d.allowedUnknown = columns
 }
 
 func (d *MultiTableDecoder) AllowHistoricalRelationIDs(ids map[string]map[uint32]struct{}) {
 	d.historicalIDs = ids
+}
+
+func (d *MultiTableDecoder) AllowStaleRelationsBefore(lsns map[string]pglogrepl.LSN) {
+	d.staleBeforeLSN = lsns
 }
 
 // handleBegin stamps the transaction with the commit ("final") LSN carried in
@@ -377,6 +405,7 @@ func (d *MultiTableDecoder) handleBegin(data []byte) error {
 	if len(data) < 8 {
 		return fmt.Errorf("begin message too short")
 	}
+	d.inTx = true
 	d.currentTxLSN = pglogrepl.LSN(binary.BigEndian.Uint64(data[:8]))
 	return nil
 }
@@ -392,6 +421,7 @@ func (d *MultiTableDecoder) InFlightTxLSN() (pglogrepl.LSN, bool) {
 }
 
 func (d *MultiTableDecoder) handleCommit() ([]DecodedChanges, error) {
+	d.inTx = false
 	if d.pendingChanges == nil || d.pendingChanges.Len() == 0 {
 		return nil, nil
 	}

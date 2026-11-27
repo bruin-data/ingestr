@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -23,6 +24,17 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 	if err != nil {
 		return 0, false, err
 	}
+	r.targetIdentity = identity
+	var tableIdentities map[string]source.CDCChunkTableIdentity
+	if provider, ok := r.options.Store.(source.CDCChunkTableIdentityProvider); ok {
+		tableIdentities, err = provider.TableIdentities(ctx)
+		if err != nil {
+			return 0, false, err
+		}
+	}
+	r.tableIdentities = tableIdentities
+	r.resnapshotTables = nil
+	r.resnapshotOldRelIDs = nil
 	state, err := loadChunkState(ctx, r.options.Store)
 	if err != nil {
 		return 0, false, err
@@ -84,18 +96,24 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 			}
 		}
 		for _, table := range r.tables {
-			state.Tables[table.Name] = &chunkTableState{
+			entry := &chunkTableState{
 				Boundary: FormatLSN(state.Applied), Done: resumes[table.Name] != "", ReplayFrom: resumes[table.Name],
 			}
+			ti, hasTI := tableIdentities[table.Name]
+			populateChunkTableMetadata(entry, table, ti, hasTI)
+			state.Tables[table.Name] = entry
 		}
 		state.SnapshotComplete = execution == "serial" && state.complete()
 	} else {
 		if state.Slot != slot || state.Mode != r.options.WALStaging || checkpointExecution(state.Execution) != execution {
 			return 0, false, fmt.Errorf("chunked snapshot slot, execution, or WAL staging mode changed; keep the original configuration or use --full-refresh")
 		}
-		if err := adoptChunkTableSelection(state, r.tables, identity, execution, resumes); err != nil {
+		reconciled, err := reconcileChunkState(state, r.tables, identity, execution, resumes, tableIdentities)
+		if err != nil {
 			return 0, false, err
 		}
+		r.resnapshotTables = reconciled.resnapshot
+		r.resnapshotOldRelIDs = reconciled.oldRelIDs
 	}
 	r.state = state
 	start := state.Applied
@@ -113,11 +131,30 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 	return start, fresh, nil
 }
 
+type chunkReconcileResult struct {
+	resnapshot []source.SourceTableInfo
+	oldRelIDs  map[string]uint32
+}
+
 // adoptChunkTableSelection keeps finished checkpoints when the publication
 // gains or loses tables, and leaves new tables to be copied in chunks.
-// The stored identity is one hash of every table, so a schema or destination
-// change with the same table names still needs a full refresh.
 func adoptChunkTableSelection(state *chunkBootstrapState, tables []source.SourceTableInfo, identity, execution string, resumes map[string]string) error {
+	_, err := reconcileChunkState(state, tables, identity, execution, resumes, nil)
+	return err
+}
+
+// reconcileChunkState validates retained tables against the saved checkpoint,
+// routes tables whose source OID or schema fingerprint changed (or whose
+// destination was recreated by startup schema evolution) into per-table
+// resnapshot, and fails closed when primary keys or physical destination
+// identities changed unexpectedly.
+func reconcileChunkState(
+	state *chunkBootstrapState,
+	tables []source.SourceTableInfo,
+	identity, execution string,
+	resumes map[string]string,
+	tableIdentities map[string]source.CDCChunkTableIdentity,
+) (chunkReconcileResult, error) {
 	if state.Tables == nil {
 		state.Tables = make(map[string]*chunkTableState)
 	}
@@ -125,54 +162,198 @@ func adoptChunkTableSelection(state *chunkBootstrapState, tables []source.Source
 	for _, table := range tables {
 		selected[table.Name] = struct{}{}
 	}
-	same := len(state.Tables) == len(selected)
-	if same {
+	sameSelection := len(state.Tables) == len(selected)
+	if sameSelection {
 		for name := range state.Tables {
 			if _, ok := selected[name]; !ok {
-				same = false
+				sameSelection = false
 				break
 			}
 		}
 	}
-	if same {
-		if state.Identity != identity {
-			return fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
-		}
-		for _, table := range tables {
-			if state.Tables[table.Name] == nil {
-				return fmt.Errorf("chunked snapshot has no checkpoint for %s", table.Name)
-			}
-		}
-		return nil
+
+	type metadataUpdate struct {
+		name      string
+		table     source.SourceTableInfo
+		ti        source.CDCChunkTableIdentity
+		hasTI     bool
+		unstarted bool
 	}
-	for name, table := range state.Tables {
-		if _, ok := selected[name]; !ok {
-			delete(state.Tables, name)
+	var result chunkReconcileResult
+	var updates []metadataUpdate
+
+	for _, table := range tables {
+		saved, retained := state.Tables[table.Name]
+		if !retained {
 			continue
 		}
-		if table == nil {
-			return fmt.Errorf("chunked snapshot has no checkpoint for %s", name)
+		if saved == nil {
+			return chunkReconcileResult{}, fmt.Errorf("chunked snapshot has no checkpoint for %s", table.Name)
+		}
+		ti, hasTI := tableIdentities[table.Name]
+
+		currentPKs := tablePrimaryKeys(table)
+		if len(saved.PrimaryKeys) > 0 && !slices.Equal(saved.PrimaryKeys, currentPKs) {
+			return chunkReconcileResult{}, fmt.Errorf("primary keys for %s changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
+		}
+
+		if hasTI {
+			savedDest := saved.DestTable
+			if savedDest == "" {
+				savedDest = ti.LastCertifiedDest
+			}
+			if savedDest != "" && ti.DestTable != "" && savedDest != ti.DestTable {
+				return chunkReconcileResult{}, fmt.Errorf("destination table for %s changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
+			}
+			savedDestID := saved.DestIdentity
+			if savedDestID == "" {
+				savedDestID = ti.LastCertifiedPhysical
+			}
+			expectedPre := ti.PreEvolutionIdentity
+			if expectedPre == "" {
+				expectedPre = ti.PhysicalIdentity
+			}
+			if savedDestID != "" && expectedPre != "" && savedDestID != expectedPre {
+				return chunkReconcileResult{}, fmt.Errorf("destination table for %s was replaced since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
+			}
+		}
+
+		prevIncarnation := saved.Incarnation
+		prevSchema := saved.SchemaFingerprint
+		if prevIncarnation == "" && prevSchema == "" && hasTI {
+			prevIncarnation = ti.LastCertifiedSource
+			prevSchema = ti.LastCertifiedSchema
+		}
+		oidChanged := prevIncarnation != "" && table.Incarnation != "" && prevIncarnation != table.Incarnation
+		schemaChanged := prevSchema != "" && table.SchemaFingerprint != "" && !schemaFingerprintMatches(prevSchema, table.SchemaFingerprint)
+		destRecreatedByEvolution := hasTI && ti.PhysicalIdentity != "" && ti.PreEvolutionIdentity != "" && ti.PhysicalIdentity != ti.PreEvolutionIdentity
+
+		if oidChanged || schemaChanged || destRecreatedByEvolution {
+			if saved.Done || saved.Initialized {
+				result.resnapshot = append(result.resnapshot, table)
+				if oidChanged {
+					if oldID, ok := parseIncarnationOID(prevIncarnation); ok {
+						if result.oldRelIDs == nil {
+							result.oldRelIDs = make(map[string]uint32)
+						}
+						result.oldRelIDs[table.Name] = oldID
+					}
+				}
+			} else {
+				updates = append(updates, metadataUpdate{name: table.Name, table: table, ti: ti, hasTI: hasTI, unstarted: true})
+			}
+			continue
+		}
+
+		if saved.Incarnation == "" || saved.SchemaFingerprint == "" || len(saved.PrimaryKeys) == 0 || (hasTI && (saved.DestTable == "" || saved.DestIdentity == "")) {
+			updates = append(updates, metadataUpdate{name: table.Name, table: table, ti: ti, hasTI: hasTI})
 		}
 	}
+
+	unstartedChanged := false
+	for _, upd := range updates {
+		if upd.unstarted {
+			unstartedChanged = true
+			break
+		}
+	}
+	if sameSelection && state.Identity != "" && state.Identity != identity && len(result.resnapshot) == 0 && !unstartedChanged {
+		return chunkReconcileResult{}, fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
+	}
+
 	for _, table := range tables {
 		if _, ok := state.Tables[table.Name]; ok {
 			continue
 		}
-		position := resumes[table.Name]
-		if position != "" {
+		if position := resumes[table.Name]; position != "" {
 			if _, err := parseStoredPostgresLSN(position); err != nil {
-				return err
+				return chunkReconcileResult{}, err
 			}
 		}
-		state.Tables[table.Name] = &chunkTableState{
-			Boundary: FormatLSN(state.Applied), Done: position != "", ReplayFrom: position,
+	}
+
+	for _, upd := range updates {
+		populateChunkTableMetadata(state.Tables[upd.name], upd.table, upd.ti, upd.hasTI)
+	}
+
+	if !sameSelection {
+		for name := range state.Tables {
+			if _, ok := selected[name]; !ok {
+				delete(state.Tables, name)
+			}
+		}
+		for _, table := range tables {
+			if _, ok := state.Tables[table.Name]; ok {
+				continue
+			}
+			position := resumes[table.Name]
+			entry := &chunkTableState{
+				Boundary: FormatLSN(state.Applied), Done: position != "", ReplayFrom: position,
+			}
+			ti, hasTI := tableIdentities[table.Name]
+			populateChunkTableMetadata(entry, table, ti, hasTI)
+			state.Tables[table.Name] = entry
+		}
+		if len(result.resnapshot) == 0 {
+			state.Identity = identity
+		}
+		if execution == "serial" && state.complete() {
+			state.SnapshotComplete = true
+		}
+	} else if len(result.resnapshot) == 0 && state.Identity != identity {
+		state.Identity = identity
+	}
+
+	return result, nil
+}
+
+func populateChunkTableMetadata(entry *chunkTableState, table source.SourceTableInfo, ti source.CDCChunkTableIdentity, hasTI bool) {
+	if table.Incarnation != "" {
+		entry.Incarnation = table.Incarnation
+	}
+	if table.SchemaFingerprint != "" {
+		entry.SchemaFingerprint = table.SchemaFingerprint
+	}
+	if pks := tablePrimaryKeys(table); len(pks) > 0 {
+		entry.PrimaryKeys = append([]string(nil), pks...)
+	}
+	if hasTI {
+		if ti.DestTable != "" {
+			entry.DestTable = ti.DestTable
+		}
+		if ti.PhysicalIdentity != "" {
+			entry.DestIdentity = ti.PhysicalIdentity
 		}
 	}
-	state.Identity = identity
-	if execution == "serial" && state.complete() {
-		state.SnapshotComplete = true
+}
+
+func tablePrimaryKeys(table source.SourceTableInfo) []string {
+	if len(table.PrimaryKeys) > 0 {
+		return table.PrimaryKeys
+	}
+	if table.Schema != nil && len(table.Schema.PrimaryKeys) > 0 {
+		return table.Schema.PrimaryKeys
 	}
 	return nil
+}
+
+func parseIncarnationOID(incarnation string) (uint32, bool) {
+	if incarnation == "" {
+		return 0, false
+	}
+	oid, err := strconv.ParseUint(incarnation, 10, 32)
+	if err != nil || oid == 0 {
+		return 0, false
+	}
+	return uint32(oid), true
+}
+
+func schemaFingerprintMatches(stored, current string) bool {
+	if stored == current {
+		return true
+	}
+	// Legacy cdc_state entries store 18-character compact SHA256 prefixes.
+	return len(stored) == 18 && len(current) > 18 && current[:18] == stored
 }
 
 func chunkExecution(execution string) string {

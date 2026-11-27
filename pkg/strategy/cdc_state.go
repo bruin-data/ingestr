@@ -108,37 +108,38 @@ type CDCStateManager struct {
 	targetTable        string
 	chunkTableIdentity string
 
-	mu                   sync.Mutex
-	prepared             bool
-	targetPrepared       bool
-	loaded               bool
-	started              bool
-	neverSnapshot        bool
-	generation           int64
-	runID                string
-	runEventID           string
-	runs                 map[string]struct{}
-	states               map[cdcStateKey]reducedCDCState
-	destTables           map[string]string
-	knownComplete        map[string]string
-	keyedResumes         map[string]bool
-	currentIncarnations  map[string]string
-	currentSchemas       map[string]string
-	knownIncarnations    map[string]string
-	knownSchemas         map[string]string
-	knownDestinations    map[string]string
-	boundDestinations    map[string]string
-	boundRawDestinations map[string]string
-	lateTargetModes      map[string]lateTargetMode
-	lateTargetRaw        map[string]string
-	snapshotEpochs       map[string]uint64
-	progressSequence     int64
-	progressGeneration   int64
-	entries              []destination.CDCStateEntry
-	generations          []int64
-	generationRuns       map[int64]map[string]struct{}
-	generationStates     map[int64]map[cdcStateKey]reducedCDCState
-	cleanupDue           bool
+	mu                       sync.Mutex
+	prepared                 bool
+	targetPrepared           bool
+	loaded                   bool
+	started                  bool
+	neverSnapshot            bool
+	generation               int64
+	runID                    string
+	runEventID               string
+	runs                     map[string]struct{}
+	states                   map[cdcStateKey]reducedCDCState
+	destTables               map[string]string
+	knownComplete            map[string]string
+	keyedResumes             map[string]bool
+	currentIncarnations      map[string]string
+	currentSchemas           map[string]string
+	knownIncarnations        map[string]string
+	knownSchemas             map[string]string
+	knownDestinations        map[string]string
+	preEvolutionDestinations map[string]string
+	boundDestinations        map[string]string
+	boundRawDestinations     map[string]string
+	lateTargetModes          map[string]lateTargetMode
+	lateTargetRaw            map[string]string
+	snapshotEpochs           map[string]uint64
+	progressSequence         int64
+	progressGeneration       int64
+	entries                  []destination.CDCStateEntry
+	generations              []int64
+	generationRuns           map[int64]map[string]struct{}
+	generationStates         map[int64]map[cdcStateKey]reducedCDCState
+	cleanupDue               bool
 }
 
 type lateTargetMode uint8
@@ -186,30 +187,31 @@ func newCDCStateManager(dest destination.Destination, connectorID, stateTable st
 		}
 	}
 	return &CDCStateManager{
-		dest:                 dest,
-		reader:               reader,
-		fenceReader:          fenceReader,
-		pruner:               pruner,
-		incarnation:          destinationIncarnationProvider(dest),
-		initializer:          destinationIncarnationInitializer(dest),
-		pruneBatchSize:       pruneBatchSize,
-		connectorID:          connectorID,
-		stateTable:           stateTable,
-		runs:                 make(map[string]struct{}),
-		states:               make(map[cdcStateKey]reducedCDCState),
-		destTables:           make(map[string]string),
-		knownComplete:        make(map[string]string),
-		keyedResumes:         make(map[string]bool),
-		currentIncarnations:  make(map[string]string),
-		currentSchemas:       make(map[string]string),
-		knownIncarnations:    make(map[string]string),
-		knownSchemas:         make(map[string]string),
-		knownDestinations:    make(map[string]string),
-		boundDestinations:    make(map[string]string),
-		boundRawDestinations: make(map[string]string),
-		lateTargetModes:      make(map[string]lateTargetMode),
-		lateTargetRaw:        make(map[string]string),
-		snapshotEpochs:       make(map[string]uint64),
+		dest:                     dest,
+		reader:                   reader,
+		fenceReader:              fenceReader,
+		pruner:                   pruner,
+		incarnation:              destinationIncarnationProvider(dest),
+		initializer:              destinationIncarnationInitializer(dest),
+		pruneBatchSize:           pruneBatchSize,
+		connectorID:              connectorID,
+		stateTable:               stateTable,
+		runs:                     make(map[string]struct{}),
+		states:                   make(map[cdcStateKey]reducedCDCState),
+		destTables:               make(map[string]string),
+		knownComplete:            make(map[string]string),
+		keyedResumes:             make(map[string]bool),
+		currentIncarnations:      make(map[string]string),
+		currentSchemas:           make(map[string]string),
+		knownIncarnations:        make(map[string]string),
+		knownSchemas:             make(map[string]string),
+		knownDestinations:        make(map[string]string),
+		preEvolutionDestinations: make(map[string]string),
+		boundDestinations:        make(map[string]string),
+		boundRawDestinations:     make(map[string]string),
+		lateTargetModes:          make(map[string]lateTargetMode),
+		lateTargetRaw:            make(map[string]string),
+		snapshotEpochs:           make(map[string]uint64),
 	}, nil
 }
 
@@ -599,6 +601,87 @@ func (m *CDCStateManager) destinationIncarnationForTable(ctx context.Context, de
 		return "", "", false, nil
 	}
 	return "", "", true, nil
+}
+
+// ApplyStartupEvolution runs startup schema evolution for a registered CDC
+// table while capturing its pre-evolution physical destination identity so
+// chunked snapshot reconciliation can distinguish evolution-induced table
+// recreation from an external destination replacement.
+func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable, destTable string, hasChanges bool, apply func() error) error {
+	if !hasChanges {
+		return apply()
+	}
+	m.mu.Lock()
+	_, preDigest, preExists, err := m.destinationIncarnationForTable(ctx, destTable)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	if preExists && preDigest != "" {
+		if known := m.knownDestinations[sourceTable]; known != "" && preDigest != known {
+			m.mu.Unlock()
+			return fmt.Errorf("CDC destination table %q was replaced after its completed snapshot", destTable)
+		}
+	}
+	m.mu.Unlock()
+
+	if err := apply(); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if preExists && preDigest != "" {
+		if m.preEvolutionDestinations == nil {
+			m.preEvolutionDestinations = make(map[string]string)
+		}
+		m.preEvolutionDestinations[sourceTable] = preDigest
+		if m.knownDestinations[sourceTable] == preDigest {
+			_, postDigest, postExists, err := m.destinationIncarnationForTable(ctx, destTable)
+			if err != nil {
+				return err
+			}
+			if !postExists || postDigest == "" {
+				return fmt.Errorf("CDC destination table %q disappeared during schema evolution", destTable)
+			}
+			m.knownDestinations[sourceTable] = postDigest
+		}
+	}
+	return nil
+}
+
+// lastCompletedTableState returns the newest certified snapshot and destination
+// state for sourceTable from any generation prior to the current run.
+// Caller holds m.mu.
+func (m *CDCStateManager) lastCompletedTableState(sourceTable string) (destTable, physical, sourceIncarnation, schemaFingerprint string, ok bool) {
+	for _, generation := range m.generationsDescending() {
+		if m.started && generation >= m.generation {
+			continue
+		}
+		if m.refresh != nil && generation < m.refresh.Generation {
+			break
+		}
+		runs, states := m.reducedGeneration(generation)
+		if len(runs) != 1 {
+			return "", "", "", "", false
+		}
+		runID := onlyCDCStateRun(runs)
+		snapshot := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
+		destState := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindDestination}]
+		if !snapshot.complete || !destState.complete {
+			if snapshot.resuming && snapshot.snapshotEpoch == 0 {
+				continue
+			}
+			return "", "", "", "", false
+		}
+		if snapshot.destTable != destState.destTable ||
+			snapshot.snapshotEpoch != destState.snapshotEpoch ||
+			compareCDCPositions(snapshot.position, destState.position) != 0 {
+			return "", "", "", "", false
+		}
+		return snapshot.destTable, destState.incarnation, snapshot.incarnation, snapshot.schemaFingerprint, true
+	}
+	return "", "", "", "", false
 }
 
 func (m *CDCStateManager) hasCompletedTargetAuthorization(

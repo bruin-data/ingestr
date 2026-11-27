@@ -175,3 +175,95 @@ func TestCDCChunkedSnapshotResumeKeepsPhysicalBinding(t *testing.T) {
 		})
 	}
 }
+
+func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
+	ctx := t.Context()
+	dest := &softReplaceDestination{
+		orderedCDCStateDestination: &orderedCDCStateDestination{cdcStateDestination: newCDCStateDestination()},
+		soft:                       true,
+	}
+	dest.incarnations["raw.anchor"] = "incarnation:raw.anchor:v1"
+	dest.incarnations["raw.items"] = "incarnation:raw.items:v1"
+
+	// Run 1: complete snapshots for both public.anchor and public.items.
+	run1, err := NewCDCStateManager(dest, "chunk-table-identities", "raw.anchor", "")
+	require.NoError(t, err)
+	require.NoError(t, run1.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
+	require.NoError(t, run1.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v1"))
+	require.NoError(t, run1.BeginRun(ctx, false))
+	require.NoError(t, run1.InvalidateSnapshot(ctx, "public.anchor", "raw.anchor", "1001"))
+	require.NoError(t, run1.BindDestinationIncarnation(ctx, "public.anchor", "raw.anchor"))
+	require.NoError(t, run1.InvalidateSnapshot(ctx, "public.items", "raw.items", "1002"))
+	require.NoError(t, run1.BindDestinationIncarnation(ctx, "public.items", "raw.items"))
+	require.NoError(t, run1.Persist(ctx, source.CDCStateCommitToken{
+		Position: softCheckpoint,
+		SnapshotPositions: map[string]string{
+			"public.anchor": softSnapshotBoundary,
+			"public.items":  softSnapshotBoundary,
+		},
+		SnapshotIncarnations: map[string]string{
+			"public.anchor": "1001",
+			"public.items":  "1002",
+		},
+		SnapshotSchemas: map[string]string{
+			"public.anchor": "fp-anchor-v1",
+			"public.items":  "fp-items-v1",
+		},
+	}))
+
+	// Run 2: public.items changes schema and startup schema evolution recreates raw.items.
+	run2, err := NewCDCStateManager(dest, "chunk-table-identities", "raw.anchor", "")
+	require.NoError(t, err)
+	require.NoError(t, run2.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
+	require.NoError(t, run2.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v2"))
+	anchorResume, err := run2.ResumePositionForKeyedMerge(ctx, "public.anchor")
+	require.NoError(t, err)
+	require.Equal(t, softCheckpoint, anchorResume)
+	itemsResume, err := run2.ResumePositionForKeyedMerge(ctx, "public.items")
+	require.NoError(t, err)
+	require.Empty(t, itemsResume)
+	require.NoError(t, run2.BeginRun(ctx, false))
+
+	require.NoError(t, run2.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, func() error {
+		dest.incarnations["raw.items"] = "incarnation:raw.items:v2"
+		return nil
+	}))
+
+	provider, ok := run2.ChunkStore().(source.CDCChunkTableIdentityProvider)
+	require.True(t, ok)
+	identities, err := provider.TableIdentities(ctx)
+	require.NoError(t, err)
+
+	anchorID := identities["public.anchor"]
+	require.Equal(t, "raw.anchor", anchorID.DestTable)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.anchor:v1"), anchorID.PhysicalIdentity)
+	require.Equal(t, anchorID.PhysicalIdentity, anchorID.PreEvolutionIdentity)
+	require.Equal(t, anchorID.PhysicalIdentity, anchorID.LastCertifiedPhysical)
+	require.Equal(t, "1001", anchorID.LastCertifiedSource)
+	require.Equal(t, compactSchemaFingerprint("fp-anchor-v1"), anchorID.LastCertifiedSchema)
+
+	itemsID := identities["public.items"]
+	require.Equal(t, "raw.items", itemsID.DestTable)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:v2"), itemsID.PhysicalIdentity)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:v1"), itemsID.PreEvolutionIdentity)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:v1"), itemsID.LastCertifiedPhysical)
+	require.Equal(t, "1002", itemsID.LastCertifiedSource)
+	require.Equal(t, compactSchemaFingerprint("fp-items-v1"), itemsID.LastCertifiedSchema)
+
+	// External replacement before startup evolution must report the external
+	// pre-evolution incarnation rather than the previously certified one.
+	dest.incarnations["raw.items"] = "incarnation:raw.items:external"
+	run3, err := NewCDCStateManager(dest, "chunk-table-identities", "raw.anchor", "")
+	require.NoError(t, err)
+	require.NoError(t, run3.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
+	require.NoError(t, run3.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v3"))
+	require.NoError(t, run3.BeginRun(ctx, false))
+	require.NoError(t, run3.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, func() error {
+		dest.incarnations["raw.items"] = "incarnation:raw.items:v3"
+		return nil
+	}))
+	identities3, err := run3.ChunkStore().(source.CDCChunkTableIdentityProvider).TableIdentities(ctx)
+	require.NoError(t, err)
+	require.Equal(t, cdcDestinationIncarnationDigest("incarnation:raw.items:external"), identities3["public.items"].PreEvolutionIdentity)
+	require.NotEqual(t, identities3["public.items"].LastCertifiedPhysical, identities3["public.items"].PreEvolutionIdentity)
+}
