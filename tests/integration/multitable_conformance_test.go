@@ -20,9 +20,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/internal/registry"
+	postgresdest "github.com/bruin-data/ingestr/pkg/destination/postgres"
 	"github.com/bruin-data/ingestr/pkg/pipeline"
 	"github.com/bruin-data/ingestr/pkg/schema"
 	"github.com/bruin-data/ingestr/pkg/source"
+	"github.com/bruin-data/ingestr/pkg/strategy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -592,6 +594,240 @@ func TestDestinations_MultiTable_Replace(t *testing.T) {
 			var productsCount int
 			require.NoError(t, db.QueryRow(tc.sqlBackend.countQuery(productsTable)).Scan(&productsCount))
 			assert.Equal(t, multiTableProductsRows, productsCount, "products table should have correct row count")
+		})
+	}
+}
+
+func TestPostgresMultiTableFullRefreshPreservesIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	sourceContainer, sourceURI := setupPostgresCDCContainer(t, ctx)
+	defer func() { _ = sourceContainer.Terminate(ctx) }()
+	sourceDB, err := sql.Open("pgx", sourceURI)
+	require.NoError(t, err)
+	defer func() { _ = sourceDB.Close() }()
+	_, err = sourceDB.ExecContext(ctx, "CREATE PUBLICATION refresh_pub FOR ALL TABLES")
+	require.NoError(t, err)
+	destURI := sharedPostgresURI(t, "dest")
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	for _, tc := range []struct{ withView, hardDelete bool }{{false, false}, {true, false}, {false, true}} {
+		withView := tc.withView
+		t.Run(fmt.Sprintf("view=%t/hard_delete=%t", tc.withView, tc.hardDelete), func(t *testing.T) {
+			destSchema := uniqueSchemaName(t, "refresh")
+			ensurePostgresSchema(t, ctx, destURI, destSchema)
+			ensurePostgresSchema(t, ctx, sourceURI, destSchema)
+			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+			tables := make([]string, 0, 3)
+			oids := make(map[string]int64)
+			for _, name := range []string{"users", "orders", "events"} {
+				table := pqTable(destSchema, name)
+				_, err := sourceDB.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (7, '"+name+"')")
+				require.NoError(t, err)
+				_, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (99, 'stale'); GRANT SELECT ON "+table+" TO PUBLIC")
+				require.NoError(t, err)
+				if name == "users" {
+					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" DROP CONSTRAINT users_pkey, ADD PRIMARY KEY (id, name)")
+					require.NoError(t, err)
+				}
+				if name == "orders" {
+					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" DROP CONSTRAINT orders_pkey; INSERT INTO "+table+" VALUES (99, 'duplicate stale row')")
+					require.NoError(t, err)
+				}
+				if name == "events" {
+					// The target key includes a column the source no longer has,
+					// and the source gained a column the target lacks.
+					_, err = sourceDB.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN email text; UPDATE "+table+" SET email = 'new@example.com'")
+					require.NoError(t, err)
+					_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN legacy_id bigint NOT NULL DEFAULT 0, DROP CONSTRAINT events_pkey, ADD PRIMARY KEY (id, legacy_id); ALTER TABLE "+table+" ALTER COLUMN legacy_id DROP DEFAULT")
+					require.NoError(t, err)
+				}
+				if withView {
+					_, err = db.ExecContext(ctx, "CREATE VIEW "+pqTable(destSchema, name+"_view")+" AS SELECT id, name FROM "+table)
+					require.NoError(t, err)
+				}
+				var oid int64
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
+				oids[name] = oid
+				tables = append(tables, destSchema+"."+name)
+			}
+			cfg := &config.IngestConfig{
+				SourceURI:    strings.Replace(sourceURI, "postgres://", "postgres+cdc://", 1) + "&publication=refresh_pub&mode=batch",
+				SourceTables: tables, DestURI: destURI,
+				IncrementalStrategy: config.StrategyMerge, FullRefresh: true,
+				NoLoadTimestamp: true, NoRunID: true,
+			}
+			if tc.hardDelete {
+				cfg.CDCDeleteBehavior = config.CDCDeleteHard
+			}
+			require.NoError(t, pipeline.New(cfg).Run(ctx))
+			var email string
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT email FROM "+pqTable(destSchema, "events")+" WHERE id = 7").Scan(&email))
+			assert.Equal(t, "new@example.com", email, "columns added at the source must be added before the replacement")
+			for _, name := range []string{"users", "orders", "events"} {
+				table := pqTable(destSchema, name)
+				var oid int64
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
+				assert.Equal(t, oids[name], oid, "table identity must survive full refresh")
+				var granted bool
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_class, LATERAL aclexplode(relacl) acl WHERE oid = $1::regclass AND acl.grantee = 0 AND acl.privilege_type = 'SELECT')`, table).Scan(&granted))
+				assert.True(t, granted, "explicit PUBLIC SELECT grant must survive full refresh")
+				var hasPrimaryKey bool
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p')`, table).Scan(&hasPrimaryKey))
+				assert.True(t, hasPrimaryKey, "missing primary keys must be added after stale rows are removed")
+				var keys string
+				require.NoError(t, db.QueryRowContext(ctx, `SELECT string_agg(a.attname::text, ',' ORDER BY a.attnum) FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) WHERE c.conrelid = $1::regclass AND c.contype = 'p'`, table).Scan(&keys))
+				assert.Equal(t, "id", keys, "full refresh must replace a primary key that drifted from the source")
+				if withView {
+					table = pqTable(destSchema, name+"_view")
+				}
+				var count, id int64
+				var value string
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*), min(id), min(name) FROM "+table).Scan(&count, &id, &value))
+				assert.Equal(t, int64(1), count, "replacement must remove stale rows, including through views")
+				assert.Equal(t, int64(7), id)
+				assert.Equal(t, name, value)
+			}
+			_, err = sourceDB.ExecContext(ctx, "UPDATE "+pqTable(destSchema, "users")+" SET name = 'resumed' WHERE id = 7")
+			require.NoError(t, err)
+			cfg.FullRefresh = false
+			require.NoError(t, pipeline.New(cfg).Run(ctx), "CDC must resume against the preserved table identity")
+			var resumed string
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT name FROM "+pqTable(destSchema, "users")+" WHERE id = 7").Scan(&resumed))
+			assert.Equal(t, "resumed", resumed)
+		})
+	}
+}
+
+func TestPostgresMultiTableRefreshReadFailurePreservesTargetKeys(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	destURI := sharedPostgresURI(t, "dest")
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			destSchema := uniqueSchemaName(t, "failed_refresh")
+			ensurePostgresSchema(t, ctx, destURI, destSchema)
+			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+			table := pqTable(destSchema, "orders")
+			var originalOID int64
+			if existing {
+				_, err := db.ExecContext(ctx, "CREATE TABLE "+table+" (id bigint); INSERT INTO "+table+" VALUES (99), (99)")
+				require.NoError(t, err)
+				require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&originalOID))
+			}
+			dest := postgresdest.NewPostgresDestination()
+			require.NoError(t, dest.Connect(ctx, destURI))
+			defer func() { _ = dest.Close(ctx) }()
+			src := newMockMultiTableSource()
+			src.tables["orders"] = filepath.Join(t.TempDir(), "missing.jsonl")
+			job := &strategy.MultiTableIngestionJob{
+				Config: &config.IngestConfig{FullRefresh: true}, Source: src, Destination: dest,
+				Tables: []source.SourceTableInfo{{Name: "orders", PrimaryKeys: []string{"id"}, Schema: &schema.TableSchema{
+					Columns: []schema.Column{{Name: "id", DataType: schema.TypeInt64, Nullable: true}},
+				}}},
+				TableDestNames: map[string]string{"orders": destSchema + ".orders"},
+			}
+			err = (&strategy.ReplaceStrategy{}).ExecuteMultiTable(ctx, job)
+			require.ErrorContains(t, err, "missing.jsonl")
+			var count, oid int64
+			var hasPrimaryKey bool
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&count))
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT $1::regclass::oid", table).Scan(&oid))
+			require.NoError(t, db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p')`, table).Scan(&hasPrimaryKey))
+			if existing {
+				require.Equal(t, originalOID, oid)
+				require.Equal(t, int64(2), count)
+				require.False(t, hasPrimaryKey, "CREATE IF NOT EXISTS must not add constraints to a target that already exists")
+			} else {
+				require.Zero(t, count)
+				require.True(t, hasPrimaryKey, "a new target must be keyed even if extraction fails")
+			}
+		})
+	}
+}
+
+func TestPostgresMultiTableCDCRefreshKeepsLatestChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+	ctx := context.Background()
+	destURI := sharedPostgresURI(t, "dest")
+	db, err := sql.Open("pgx", destURI)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	// A snapshot followed by streamed changes, as MySQL and MSSQL CDC full
+	// refreshes produce, with the rows for one key out of LSN order.
+	changes := strings.Join([]string{
+		`{"_cdc_deleted":false,"_cdc_lsn":"0001","_cdc_synced_at":"s","id":1,"name":"snapshot"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0003","_cdc_synced_at":"s","id":1,"name":"updated"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0002","_cdc_synced_at":"s","id":1,"name":"older update"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0001","_cdc_synced_at":"s","id":2,"name":"snapshot"}`,
+		`{"_cdc_deleted":true,"_cdc_lsn":"0004","_cdc_synced_at":"s","id":2,"name":"snapshot"}`,
+		`{"_cdc_deleted":false,"_cdc_lsn":"0001","_cdc_synced_at":"s","id":3,"name":"snapshot"}`,
+	}, "\n")
+	for _, hardDelete := range []bool{false, true} {
+		t.Run(fmt.Sprintf("hard_delete=%t", hardDelete), func(t *testing.T) {
+			destSchema := uniqueSchemaName(t, "cdc_refresh")
+			ensurePostgresSchema(t, ctx, destURI, destSchema)
+			t.Cleanup(func() { dropPostgresSchema(t, ctx, destURI, destSchema) })
+			table := pqTable(destSchema, "orders")
+			_, err := db.ExecContext(ctx, "CREATE TABLE "+table+" (_cdc_deleted boolean, _cdc_lsn text, _cdc_synced_at text, id bigint PRIMARY KEY, name text); INSERT INTO "+table+" VALUES (false, '0000', 's', 99, 'stale')")
+			require.NoError(t, err)
+			path := filepath.Join(t.TempDir(), "orders.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(changes), 0o600))
+
+			dest := postgresdest.NewPostgresDestination()
+			require.NoError(t, dest.Connect(ctx, destURI))
+			defer func() { _ = dest.Close(ctx) }()
+			src := newMockMultiTableSource()
+			src.tables["orders"] = path
+			cfg := &config.IngestConfig{FullRefresh: true}
+			if hardDelete {
+				cfg.CDCDeleteBehavior = config.CDCDeleteHard
+			}
+			job := &strategy.MultiTableIngestionJob{
+				Config: cfg, Source: src, Destination: dest,
+				Tables: []source.SourceTableInfo{{Name: "orders", PrimaryKeys: []string{"id"}, Schema: &schema.TableSchema{
+					Columns: []schema.Column{
+						{Name: "_cdc_deleted", DataType: schema.TypeBoolean, Nullable: true},
+						{Name: "_cdc_lsn", DataType: schema.TypeString, Nullable: true},
+						{Name: "_cdc_synced_at", DataType: schema.TypeString, Nullable: true},
+						{Name: "id", DataType: schema.TypeInt64},
+						{Name: "name", DataType: schema.TypeString, Nullable: true},
+					},
+				}}},
+				TableDestNames: map[string]string{"orders": destSchema + ".orders"},
+			}
+			require.NoError(t, (&strategy.ReplaceStrategy{}).ExecuteMultiTable(ctx, job))
+
+			rows, err := db.QueryContext(ctx, "SELECT id, name, _cdc_deleted FROM "+table+" ORDER BY id")
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			got := map[int64]string{}
+			for rows.Next() {
+				var id int64
+				var name string
+				var deleted bool
+				require.NoError(t, rows.Scan(&id, &name, &deleted))
+				got[id] = fmt.Sprintf("%s deleted=%t", name, deleted)
+			}
+			require.NoError(t, rows.Err())
+			want := map[int64]string{1: "updated deleted=false", 2: "snapshot deleted=true", 3: "snapshot deleted=false"}
+			if hardDelete {
+				delete(want, 2)
+			}
+			assert.Equal(t, want, got)
 		})
 	}
 }

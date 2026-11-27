@@ -17,21 +17,22 @@ import (
 const ManagedStagingTTL = 24 * time.Hour
 
 type PrepareOptions struct {
-	Table                  string
-	TargetTable            string // Final destination table when Table is a staging table; used to resolve the target's location.
-	Schema                 *schema.TableSchema
-	DropFirst              bool
-	PrimaryKeys            []string
-	DeferredPrimaryKeys    []string // PK columns whose constraint is created after loading.
-	PartitionBy            string   // Destination partition specification.
-	ClusterBy              []string // Destination clustering or sort columns.
-	CDCMode                bool     // If true, make non-PK columns nullable for CDC delete handling.
-	CDCKeys                []string // CDC keys kept non-nullable without declaring a table constraint.
-	RequirePrimaryKeyMatch bool     // Require the physical target PK to match PrimaryKeys for CDC merge safety.
-	ExpiresAfter           time.Duration
-	PreserveExistingLayout bool // Leave an existing table's properties, partition spec, and sort order unchanged.
-	TableProperties        map[string]string
-	OwnershipToken         string
+	Table                   string
+	TargetTable             string // Final destination table when Table is a staging table; used to resolve the target's location.
+	Schema                  *schema.TableSchema
+	DropFirst               bool
+	PrimaryKeys             []string
+	PrimaryKeysOnlyOnCreate bool     // PostgreSQL: do not add keys to an already-existing target during preparation.
+	DeferredPrimaryKeys     []string // PK columns whose constraint is created after loading.
+	PartitionBy             string   // Destination partition specification.
+	ClusterBy               []string // Destination clustering or sort columns.
+	CDCMode                 bool     // If true, make non-PK columns nullable for CDC delete handling.
+	CDCKeys                 []string // CDC keys kept non-nullable without declaring a table constraint.
+	RequirePrimaryKeyMatch  bool     // Require the physical target PK to match PrimaryKeys for CDC merge safety.
+	ExpiresAfter            time.Duration
+	PreserveExistingLayout  bool // Leave an existing table's properties, partition spec, and sort order unchanged.
+	TableProperties         map[string]string
+	OwnershipToken          string
 	// Strategy names the write behavior so reverse-ETL destinations can validate the
 	// dest-table up front and SQL destinations can skip key constraints on append.
 	Strategy string
@@ -155,6 +156,10 @@ type TruncateInsertFromStagingOptions struct {
 	StagingPrimaryKeysUnique bool
 	Columns                  []string
 	IncrementalKey           string
+	CDCExpectedIncarnation   string
+	// ReplacePrimaryKey replaces an existing target primary key that differs
+	// from PrimaryKeys, so a full refresh rekeys the table like a swap would.
+	ReplacePrimaryKey bool
 }
 
 // InsertFromStagingOptions configures a keyless insert from a populated

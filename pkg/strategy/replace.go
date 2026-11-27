@@ -535,7 +535,9 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		return nil
 	}
 
-	useStaging := job.Destination.SupportsAtomicSwap()
+	atomicWriter, supportsInPlace := job.Destination.(destination.AtomicTruncateInsertStagingWriter)
+	useInPlace := job.Destination.GetScheme() == "postgres" && supportsInPlace
+	useStaging := useInPlace || job.Destination.SupportsAtomicSwap()
 	directDedup := !useStaging && supportsDirectReplaceDeduplication(job.Destination)
 	config.Debug("[STRATEGY] Multi-table replace with %d tables, staging=%v", len(job.Tables), useStaging)
 
@@ -574,6 +576,16 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 			if err := job.Destination.PrepareTable(ctx, prepareOpts); err != nil {
 				errChan <- fmt.Errorf("failed to prepare table %s: %w", ti.Name, err)
 				return
+			}
+			if useInPlace {
+				if err := job.Destination.PrepareTable(ctx, destination.PrepareOptions{
+					Table: destTable, Schema: destination.DestinationTableSchema(ti.Schema),
+					PrimaryKeys: ti.PrimaryKeys, PrimaryKeysOnlyOnCreate: true,
+					CDCMode: prepareOpts.CDCMode, CDCKeys: prepareOpts.CDCKeys,
+				}); err != nil {
+					errChan <- fmt.Errorf("failed to prepare destination table %s: %w", ti.Name, err)
+					return
+				}
 			}
 			expectedTarget, err := bindCDCReplaceTarget(ctx, job.CDCStateManager, job.Destination, ti.Name, destTable)
 			if err != nil {
@@ -661,6 +673,10 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		}
 	}
 
+	if useInPlace {
+		return finalizeMultiTableInPlaceReplace(ctx, job, atomicWriter, stagingTables, expectedTargetIncarnations)
+	}
+
 	if useStaging {
 		for _, tableInfo := range job.Tables {
 			destTable := job.GetDestTableName(tableInfo.Name)
@@ -698,5 +714,74 @@ func (s *ReplaceStrategy) ExecuteMultiTable(ctx context.Context, job *MultiTable
 		}
 	}
 
+	return nil
+}
+
+// finalizeMultiTableInPlaceReplace replaces each target from its staging table
+// in one transaction per table, keeping the target relation so dependent views
+// and grants survive. Staging tables of tables not yet finalized are dropped if
+// a table fails.
+func finalizeMultiTableInPlaceReplace(ctx context.Context, job *MultiTableIngestionJob, writer destination.AtomicTruncateInsertStagingWriter, stagingTables, expectedTargetIncarnations map[string]string) error {
+	pending := make(map[string]string, len(stagingTables))
+	for name, table := range stagingTables {
+		pending[name] = table
+	}
+	defer func() {
+		if job.Config.KeepStaging || len(pending) == 0 {
+			return
+		}
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancelCleanup()
+		for _, stagingTable := range pending {
+			if err := job.Destination.DropTable(cleanupCtx, stagingTable); err != nil {
+				config.Debug("[REPLACE] Warning: failed to drop staging table %s: %v", stagingTable, err)
+			}
+		}
+	}()
+
+	for _, tableInfo := range job.Tables {
+		destTable := job.GetDestTableName(tableInfo.Name)
+		stagingTable := stagingTables[tableInfo.Name]
+		expectedTarget := expectedTargetIncarnations[tableInfo.Name]
+		if _, err := applyEvolutionPlanIfIncarnation(ctx, job.Destination, job.EvolutionPlans[tableInfo.Name], expectedTarget); err != nil {
+			return fmt.Errorf("failed to evolve table %s before in-place replace: %w", tableInfo.Name, err)
+		}
+
+		columns := tableInfo.Schema.ColumnNames()
+		stagingPrimaryKeysUnique := false
+		// CDC staging can hold several changes per key, so pick the latest one
+		// by LSN through the CDC merge rather than DISTINCT ON alone.
+		if hasCDCColumns(tableInfo.Schema) && len(tableInfo.PrimaryKeys) > 0 {
+			normalised, err := deduplicateStaging(ctx, job.Destination, stagingTable, destTable,
+				job.Config.StagingDataset, tableInfo.Schema.IncrementalKey, tableInfo.Schema, tableInfo.PrimaryKeys, "", nil, job.Config.RunID, job.Config.HardDeletesCDC())
+			if err != nil {
+				delete(pending, tableInfo.Name)
+				return fmt.Errorf("failed to deduplicate table %s: %w", tableInfo.Name, err)
+			}
+			stagingTable = normalised
+			pending[tableInfo.Name] = normalised
+			stagingPrimaryKeysUnique = true
+			columns = destination.DestinationTableSchema(tableInfo.Schema).ColumnNames()
+		}
+
+		if err := writer.TruncateInsertFromStaging(ctx, destination.TruncateInsertFromStagingOptions{
+			StagingTable:             stagingTable,
+			TargetTable:              destTable,
+			PrimaryKeys:              tableInfo.PrimaryKeys,
+			StagingPrimaryKeysUnique: stagingPrimaryKeysUnique,
+			Columns:                  columns,
+			IncrementalKey:           tableInfo.Schema.IncrementalKey,
+			CDCExpectedIncarnation:   expectedTarget,
+			ReplacePrimaryKey:        true,
+		}); err != nil {
+			return fmt.Errorf("failed to replace table %s in place: %w", tableInfo.Name, err)
+		}
+		delete(pending, tableInfo.Name)
+		if !job.Config.KeepStaging {
+			if err := job.Destination.DropTable(ctx, stagingTable); err != nil {
+				config.Debug("[REPLACE] Warning: failed to drop staging table %s: %v", stagingTable, err)
+			}
+		}
+	}
 	return nil
 }
