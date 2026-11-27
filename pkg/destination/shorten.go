@@ -34,6 +34,7 @@ var maxIdentifierLengths = map[string]int{
 	"clickhouse":          255, // no engine-side limit; bounded by filesystem filename length (ext4/xfs 255 bytes)
 	"databricks":          255, // Unity Catalog / Spark identifier
 	"duckdb":              1024,
+	"starrocks":           1024,
 }
 
 func MaxIdentifierLength(scheme string) int {

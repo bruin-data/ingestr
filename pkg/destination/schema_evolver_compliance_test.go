@@ -18,6 +18,7 @@ import (
 	"github.com/bruin-data/ingestr/pkg/destination/redshift"
 	"github.com/bruin-data/ingestr/pkg/destination/snowflake"
 	"github.com/bruin-data/ingestr/pkg/destination/sqlite"
+	"github.com/bruin-data/ingestr/pkg/destination/starrocks"
 	"github.com/bruin-data/ingestr/pkg/destination/synapse"
 	"github.com/bruin-data/ingestr/pkg/destination/trino"
 	"github.com/bruin-data/ingestr/pkg/schemaevolution"
@@ -46,6 +47,7 @@ var (
 	_ schemaevolution.SchemaEvolver = (*redshift.RedshiftDestination)(nil)
 	_ schemaevolution.SchemaEvolver = (*snowflake.SnowflakeDestination)(nil)
 	_ schemaevolution.SchemaEvolver = (*sqlite.SQLiteDestination)(nil)
+	_ schemaevolution.SchemaEvolver = (*starrocks.StarRocksDestination)(nil)
 	_ schemaevolution.SchemaEvolver = (*synapse.SynapseDestination)(nil)
 	_ schemaevolution.SchemaEvolver = (*trino.TrinoDestination)(nil)
 )

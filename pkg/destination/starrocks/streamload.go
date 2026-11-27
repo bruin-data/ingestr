@@ -62,6 +62,7 @@ type streamLoadResponse struct {
 
 type streamLoadOptions struct {
 	columns        string
+	jsonpaths      string
 	mergeCondition string
 }
 
@@ -150,6 +151,9 @@ func (s *streamLoader) put(ctx context.Context, url, label string, opts streamLo
 	req.Header.Set("max_filter_ratio", "0")
 	if opts.columns != "" {
 		req.Header.Set("columns", opts.columns)
+	}
+	if opts.jsonpaths != "" {
+		req.Header.Set("jsonpaths", opts.jsonpaths)
 	}
 	if opts.mergeCondition != "" {
 		req.Header.Set("merge_condition", opts.mergeCondition)
