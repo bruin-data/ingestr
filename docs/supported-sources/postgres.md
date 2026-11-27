@@ -182,7 +182,7 @@ Tables created on the source after CDC has been set up are picked up automatical
 - **Without `--stream`**: the next run detects tables that have no state in the destination, snapshots their existing rows through a temporary replication slot (the main slot's position is untouched), and then streams their changes alongside the other tables.
 - **With `--stream`**: the running stream re-checks the source every `discover_interval`. When a new eligible table appears, the stream exits before changing destination data and reports that a restart is required. On restart, the table is included in the normal snapshot-and-stream path while the replication slot retains intervening WAL.
 
-With `--cdc-snapshot-chunked`, the saved checkpoint fixes the selected table set. Adding tables requires `--full-refresh` to establish a new snapshot; an ordinary restart rejects the changed table set.
+With `--cdc-snapshot-chunked`, an ordinary restart keeps the checkpoint for tables that are still selected and copies only tables that were added. Removing a table drops it from the checkpoint. A schema or destination change for the same table set still stops the run; use `--full-refresh` to establish a new baseline.
 
 With a user-managed publication (`publication=` supplied), ingestr never alters the publication: a new table is picked up after you run `ALTER PUBLICATION ... ADD TABLE` yourself (or immediately, if the publication was created `FOR ALL TABLES`).
 

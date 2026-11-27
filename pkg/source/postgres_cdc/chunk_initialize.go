@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/bruin-data/ingestr/internal/config"
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/jackc/pglogrepl"
 )
 
@@ -32,9 +33,6 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 	}
 	if refresh != nil {
 		clear(resumes)
-	}
-	if state != nil && state.Identity != identity {
-		return 0, false, fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
 	}
 	fresh := state == nil
 	if fresh {
@@ -95,13 +93,8 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 		if state.Slot != slot || state.Mode != r.options.WALStaging || checkpointExecution(state.Execution) != execution {
 			return 0, false, fmt.Errorf("chunked snapshot slot, execution, or WAL staging mode changed; keep the original configuration or use --full-refresh")
 		}
-		if len(state.Tables) != len(r.tables) {
-			return 0, false, fmt.Errorf("chunked snapshot table selection changed")
-		}
-		for _, table := range r.tables {
-			if state.Tables[table.Name] == nil {
-				return 0, false, fmt.Errorf("chunked snapshot has no checkpoint for %s", table.Name)
-			}
+		if err := adoptChunkTableSelection(state, r.tables, identity, execution, resumes); err != nil {
+			return 0, false, err
 		}
 	}
 	r.state = state
@@ -118,6 +111,68 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 	}
 	r.source.setWALRetentionSlot(state.Slot)
 	return start, fresh, nil
+}
+
+// adoptChunkTableSelection keeps finished checkpoints when the publication
+// gains or loses tables, and leaves new tables to be copied in chunks.
+// The stored identity is one hash of every table, so a schema or destination
+// change with the same table names still needs a full refresh.
+func adoptChunkTableSelection(state *chunkBootstrapState, tables []source.SourceTableInfo, identity, execution string, resumes map[string]string) error {
+	if state.Tables == nil {
+		state.Tables = make(map[string]*chunkTableState)
+	}
+	selected := make(map[string]struct{}, len(tables))
+	for _, table := range tables {
+		selected[table.Name] = struct{}{}
+	}
+	same := len(state.Tables) == len(selected)
+	if same {
+		for name := range state.Tables {
+			if _, ok := selected[name]; !ok {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		if state.Identity != identity {
+			return fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
+		}
+		for _, table := range tables {
+			if state.Tables[table.Name] == nil {
+				return fmt.Errorf("chunked snapshot has no checkpoint for %s", table.Name)
+			}
+		}
+		return nil
+	}
+	for name, table := range state.Tables {
+		if _, ok := selected[name]; !ok {
+			delete(state.Tables, name)
+			continue
+		}
+		if table == nil {
+			return fmt.Errorf("chunked snapshot has no checkpoint for %s", name)
+		}
+	}
+	for _, table := range tables {
+		if _, ok := state.Tables[table.Name]; ok {
+			continue
+		}
+		position := resumes[table.Name]
+		if position != "" {
+			if _, err := parseStoredPostgresLSN(position); err != nil {
+				return err
+			}
+		}
+		state.Tables[table.Name] = &chunkTableState{
+			Boundary: FormatLSN(state.Applied), Done: position != "", ReplayFrom: position,
+		}
+	}
+	state.Identity = identity
+	if execution == "serial" && state.complete() {
+		state.SnapshotComplete = true
+	}
+	return nil
 }
 
 func chunkExecution(execution string) string {
