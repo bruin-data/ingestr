@@ -47,7 +47,13 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 	if err != nil {
 		return chunk, err
 	}
-	defer func() { retErr = errors.Join(retErr, replConn.Close(ctx)) }()
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if err := replConn.Close(cleanupCtx); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to close snapshot chunk replication connection: %w", err))
+		}
+	}()
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return chunk, fmt.Errorf("failed to name snapshot chunk slot: %w", err)
@@ -75,8 +81,10 @@ func (s *PostgresCDCSource) readSnapshotChunk(ctx context.Context, table source.
 		return chunk, fmt.Errorf("failed to begin snapshot chunk transaction: %w", err)
 	}
 	defer func() {
-		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-			retErr = errors.Join(retErr, err)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if err := tx.Rollback(cleanupCtx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to roll back snapshot chunk transaction: %w", err))
 		}
 	}()
 	if _, err := tx.Exec(ctx, "SET TRANSACTION SNAPSHOT '"+strings.ReplaceAll(created.SnapshotName, "'", "''")+"'"); err != nil {
