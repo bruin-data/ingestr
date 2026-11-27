@@ -168,6 +168,68 @@ func TestChunkRefreshRejectsCorruptIntent(t *testing.T) {
 	require.ErrorContains(t, err, "invalid chunked snapshot refresh intent")
 }
 
+func TestChunkInitializeRejectsSameSelectionIdentityChange(t *testing.T) {
+	store := newChunkTestStore()
+	previous := chunkTestState("previous-identity")
+	data, err := json.Marshal(previous)
+	require.NoError(t, err)
+	store.values[chunkStateKey] = data
+	store.identity = "new-identity"
+	reader := chunkRefreshTestReader(store, "", false)
+	_, _, err = reader.initialize(t.Context(), "slot", nil)
+	require.ErrorContains(t, err, "source or destination changed")
+	loaded, err := loadChunkState(t.Context(), store)
+	require.NoError(t, err)
+	require.Equal(t, "previous-identity", loaded.Identity)
+	require.Equal(t, []string{"5"}, loaded.Tables["public.items"].After)
+}
+
+func TestAdoptChunkTableSelectionCopiesOnlyNewTables(t *testing.T) {
+	state := chunkTestState("old-identity")
+	state.Mode, state.Execution = "inmemory", "serial"
+	state.SnapshotComplete = true
+	state.Tables["public.items"].Done = true
+	tables := []source.SourceTableInfo{{Name: "public.items"}, {Name: "public.orders"}}
+	require.NoError(t, adoptChunkTableSelection(state, tables, "new-identity", "serial", nil))
+	require.Equal(t, "new-identity", state.Identity)
+	require.Equal(t, []string{"5"}, state.Tables["public.items"].After)
+	require.True(t, state.Tables["public.items"].Done)
+	require.True(t, state.SnapshotComplete)
+	added := state.Tables["public.orders"]
+	require.NotNil(t, added)
+	require.False(t, added.Done)
+	require.Empty(t, added.ReplayFrom)
+	require.False(t, added.Initialized)
+	require.Equal(t, FormatLSN(state.Applied), added.Boundary)
+}
+
+func TestAdoptChunkTableSelectionDropsRemovedTables(t *testing.T) {
+	state := chunkTestState("old-identity")
+	state.Execution = "serial"
+	state.Tables["public.items"].Done = true
+	state.Tables["public.gone"] = &chunkTableState{Boundary: FormatLSN(20), Done: false, Initialized: true}
+	tables := []source.SourceTableInfo{{Name: "public.items"}}
+	require.NoError(t, adoptChunkTableSelection(state, tables, "new-identity", "serial", nil))
+	require.NotContains(t, state.Tables, "public.gone")
+	require.True(t, state.SnapshotComplete)
+	require.Equal(t, "new-identity", state.Identity)
+}
+
+func TestAdoptChunkTableSelectionKeepsResumeForNewTable(t *testing.T) {
+	state := chunkTestState("old-identity")
+	tables := []source.SourceTableInfo{{Name: "public.items"}, {Name: "public.orders"}}
+	require.NoError(t, adoptChunkTableSelection(state, tables, "new-identity", "parallel", map[string]string{
+		"public.orders": FormatLSN(50),
+	}))
+	added := state.Tables["public.orders"]
+	require.True(t, added.Done)
+	require.Equal(t, FormatLSN(50), added.ReplayFrom)
+	require.False(t, added.Initialized)
+	require.Error(t, adoptChunkTableSelection(chunkTestState("old-identity"), tables, "new-identity", "parallel", map[string]string{
+		"public.orders": "not-an-lsn",
+	}))
+}
+
 func TestChunkInitializeRejectsChangedExecutionBeforeSlotAccess(t *testing.T) {
 	store := newChunkTestStore()
 	previous := chunkTestState(store.identity)
