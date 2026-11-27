@@ -41,6 +41,11 @@ type StarRocksDestination struct {
 	legacyLoadMetadata atomic.Bool
 	snapshotLimits     *snapshotWriteLimits
 
+	insertPartialMu      sync.Mutex
+	insertPartialChecked bool
+	insertPartialUpdates bool
+	insertPartialHint    string
+
 	swapMu sync.Mutex
 	// preparedSwaps maps cross-database staging tables to the copies that
 	// CDCConditionalSwapIncarnations placed in the target database.

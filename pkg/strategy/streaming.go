@@ -1382,6 +1382,7 @@ func (l *flushLoop) flush(ctx context.Context) error {
 			mergeStart := time.Now()
 			mergeOpts := mergeStagingOptions(l.dest, st.stagingTable, st.destTable, st.primaryKeys, st.schema, st.incrementalKey, st.incrementalPredicate, expectedIncarnation, l.hardDeletesCDC())
 			mergeOpts.CDCSnapshot = w.snapshot && destination.SupportsDirectCDCSnapshot(l.dest)
+			mergeOpts.CDCRunCertified = l.opts.StateManager != nil && l.opts.StateManager.CertifiedInRun(boundSourceTables[w.name])
 			mergeErr := l.dest.MergeTable(ctx, mergeOpts)
 			if l.chunkTiming != nil {
 				l.chunkTiming.MergeNanos.Add(int64(time.Since(mergeStart)))

@@ -2604,3 +2604,44 @@ func TestCDCStateUsesDestinationTableLayout(t *testing.T) {
 	require.Equal(t, manager.stateTable, dest.preparedTable)
 	require.Same(t, cdcStateSchema, dest.preparedSchema)
 }
+
+// A merge split across statements may leave the destination ahead of every
+// certificate when the process dies. Before the run certifies the table, the
+// next run then cannot resume and re-snapshots; once certified, it replays
+// from this run's certificate. CertifiedInRun must only report the latter.
+func TestCDCStateCertifiedInRunGatesMergesThatOutrunTheCertificate(t *testing.T) {
+	dest := newCDCStateDestination()
+	tables := map[string]string{"public.orders": "raw.orders"}
+	dest.maxLSNs["raw.orders"] = "00000000/00000020"
+	completeCDCStateRun(t, dest, "certified-split-merge", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+
+	uncertified := restartedCDCStateManager(t, dest, "certified-split-merge", tables)
+	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, uncertified, "public.orders"))
+	require.NoError(t, uncertified.BeginRun(t.Context(), false))
+	require.False(t, uncertified.CertifiedInRun("public.orders"))
+	dest.maxLSNs["raw.orders"] = "00000000/00000030"
+	afterUncertified := restartedCDCStateManager(t, dest, "certified-split-merge", tables)
+	require.Empty(t, mustKeyedResumePosition(t, afterUncertified, "public.orders"), "a run killed before certifying with the destination ahead must re-snapshot")
+
+	dest.maxLSNs["raw.orders"] = "00000000/00000020"
+	completeCDCStateRun(t, dest, "certified-split-merge", tables, "00000000/00000020", map[string]string{"public.orders": "00000000/00000010"})
+	certified := restartedCDCStateManager(t, dest, "certified-split-merge", tables)
+	require.Equal(t, "00000000/00000020", mustKeyedResumePosition(t, certified, "public.orders"))
+	require.NoError(t, certified.BeginRun(t.Context(), false))
+	require.NoError(t, certified.Persist(t.Context(), source.CDCStateCommitToken{Position: "00000000/00000040"}))
+	require.True(t, certified.CertifiedInRun("public.orders"))
+	require.False(t, certified.CertifiedInRun("public.unknown"))
+
+	dest.maxLSNs["raw.orders"] = "00000000/00000060"
+	afterCertified := restartedCDCStateManager(t, dest, "certified-split-merge", tables)
+	require.Equal(t, "00000000/00000040", mustKeyedResumePosition(t, afterCertified, "public.orders"), "a certified run replays from its own checkpoint")
+
+	require.NoError(t, certified.InvalidateSnapshot(t.Context(), "public.orders", "raw.orders", ""))
+	require.False(t, certified.CertifiedInRun("public.orders"), "an invalidated snapshot is no longer certified")
+}
+
+func TestCDCStateCertifiedInRunRequiresStartedRun(t *testing.T) {
+	dest := newCDCStateDestination()
+	manager := restartedCDCStateManager(t, dest, "certified-not-started", map[string]string{"public.orders": "raw.orders"})
+	require.False(t, manager.CertifiedInRun("public.orders"))
+}

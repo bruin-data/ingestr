@@ -10,6 +10,7 @@ import (
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/destination"
 	"github.com/bruin-data/ingestr/pkg/schema"
+	"github.com/bruin-data/ingestr/pkg/source"
 )
 
 func (d *StarRocksDestination) SupportsCDCMerge() bool         { return true }
@@ -29,10 +30,13 @@ func (d *StarRocksDestination) mergeCDC(ctx context.Context, opts destination.Me
 	if err := d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation); err != nil {
 		return err
 	}
-	if err := d.insertVisibleWithHint(ctx, opts.TargetTable, cdcMergeHint, d.buildCDCMergeSQL(opts)); err != nil {
-		return fmt.Errorf("merge StarRocks CDC changes: %w", err)
+	if err := d.mergeCDCChanges(ctx, opts); err != nil {
+		return err
 	}
 	if opts.CDCHardDelete && !opts.CDCSnapshot {
+		if err := source.ConnectorLeaseLoss(ctx); err != nil {
+			return err
+		}
 		query := d.buildCDCHardDeleteSQL(opts)
 		if err := d.deleteVisible(ctx, opts.TargetTable, query); err != nil {
 			config.LogFailedQuery(query, err)
@@ -40,6 +44,55 @@ func (d *StarRocksDestination) mergeCDC(ctx context.Context, opts destination.Me
 		}
 	}
 	return d.checkCDCIncarnation(ctx, opts.TargetTable, opts.CDCExpectedIncarnation)
+}
+
+// mergeCDCChanges publishes the batch's upserts and tombstones. A batch newer
+// than every target row needs no stale-change guard: keys with only complete
+// row images are written from staging, and only keys with a change that
+// carries values forward read the target, in one INSERT. Once the run has
+// certified the table, those keys are instead written as partial-update
+// upserts that read nothing; a crash between them is repaired by keyed replay
+// from that certificate. Any other batch runs the guarded merge.
+func (d *StarRocksDestination) mergeCDCChanges(ctx context.Context, opts destination.MergeOptions) error {
+	mode := cdcMergeModeFromEnv()
+	if mode == cdcMergeLegacy || opts.CDCSnapshot {
+		return d.runCDCMerge(ctx, opts, d.buildCDCMergeSQL(opts))
+	}
+	fresh, err := d.cdcBatchIsFresh(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if !fresh {
+		config.Debug("[STARROCKS] CDC merge %s: guarded", opts.TargetTable)
+		return d.runCDCMerge(ctx, opts, d.buildCDCSingleReadMergeSQL(opts))
+	}
+	skipDeleteCarry, err := d.cdcHardDeleteCanSkipCarry(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if mode == cdcMergeAuto && opts.CDCRunCertified {
+		upserts, err := d.mergeCDCPartial(ctx, opts, skipDeleteCarry)
+		if upserts > 0 || err != nil {
+			config.Debug("[STARROCKS] CDC merge %s: partial (%d upserts)", opts.TargetTable, upserts)
+			return err
+		}
+	}
+	filter, err := d.stagedKeyFilter(ctx, opts, cdcCarryForwardCondition(opts, skipDeleteCarry))
+	if err != nil {
+		return err
+	}
+	config.Debug("[STARROCKS] CDC merge %s: fresh", opts.TargetTable)
+	return d.runCDCMerge(ctx, opts, d.buildCDCFreshMergeSQL(opts, filter, skipDeleteCarry))
+}
+
+func (d *StarRocksDestination) runCDCMerge(ctx context.Context, opts destination.MergeOptions, body string) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
+	if err := d.insertVisibleWithHint(ctx, opts.TargetTable, cdcMergeHint, body); err != nil {
+		return fmt.Errorf("merge StarRocks CDC changes: %w", err)
+	}
+	return nil
 }
 
 // buildCDCHardDeleteSQL removes the tombstones the preceding merge published
@@ -77,6 +130,17 @@ func sqlString(value string) string {
 // one flush retain the most recent materialized value, including explicit NULL.
 // Publish payload and tombstone metadata together in a single INSERT SELECT.
 func (d *StarRocksDestination) buildCDCMergeSQL(opts destination.MergeOptions) string {
+	return d.buildCDCMergeSQLReading(opts, false)
+}
+
+// buildCDCSingleReadMergeSQL is the guarded merge reading the target once:
+// only target rows sharing a staged key, materialized for both the change
+// filter and the history.
+func (d *StarRocksDestination) buildCDCSingleReadMergeSQL(opts destination.MergeOptions) string {
+	return d.buildCDCMergeSQLReading(opts, true)
+}
+
+func (d *StarRocksDestination) buildCDCMergeSQLReading(opts destination.MergeOptions, singleRead bool) string {
 	cols := destination.DestinationColumns(opts.Columns)
 	keys := strings.Join(quoteColumns(opts.PrimaryKeys), ", ")
 	keySet := map[string]bool{}
@@ -115,14 +179,20 @@ func (d *StarRocksDestination) buildCDCMergeSQL(opts destination.MergeOptions) s
 		}
 	}
 	lsn, deleted := quoteColumn(destination.CDCLSNColumn), quoteColumn(destination.CDCDeletedColumn)
-	ctes := []string{
+	var ctes []string
+	if singleRead && !opts.CDCSnapshot {
+		ctes = append(ctes, fmt.Sprintf("__ingestr_tgt AS (SELECT %s FROM %s __ingestr_f WHERE EXISTS (SELECT 1 FROM %s __ingestr_k WHERE %s))",
+			prefixed("__ingestr_f"), target, stage, join("__ingestr_k", "__ingestr_f")))
+		target = "__ingestr_tgt"
+	}
+	ctes = append(ctes,
 		fmt.Sprintf(`changes AS (
  SELECT %s, %s AS %s FROM %s __ingestr_s LEFT JOIN %s __ingestr_t ON %s
  WHERE __ingestr_t.%s IS NULL OR __ingestr_t.%s IS NULL OR __ingestr_s.%s > __ingestr_t.%s
  OR (__ingestr_s.%s = __ingestr_t.%s AND COALESCE(__ingestr_t.%s, FALSE) = FALSE
      AND EXISTS (SELECT 1 FROM %s __ingestr_tombstone WHERE %s AND __ingestr_tombstone.%s = __ingestr_s.%s AND __ingestr_tombstone.%s = TRUE))
 )`, prefixed("__ingestr_s"), unchanged, quoteColumn(destination.CDCUnchangedColsColumn), stage, target, join("__ingestr_s", "__ingestr_t"), quoteColumn(opts.PrimaryKeys[0]), lsn, lsn, lsn, lsn, lsn, deleted, stage, join("__ingestr_s", "__ingestr_tombstone"), lsn, lsn, deleted),
-	}
+	)
 	if opts.CDCSnapshot {
 		ctes = append(ctes, fmt.Sprintf("latest AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s DESC, %s DESC) AS %s FROM changes)", keys, lsn, deleted, rank))
 		return fmt.Sprintf("(%s) WITH %s SELECT %s FROM latest __ingestr_l WHERE __ingestr_l.%s = 1", strings.Join(quoteColumns(cols), ", "), strings.Join(ctes, ",\n"), prefixed("__ingestr_l"), rank)

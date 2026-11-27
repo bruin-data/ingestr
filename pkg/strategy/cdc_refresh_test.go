@@ -55,6 +55,7 @@ func TestRefreshResumesCompletedTablesAndRetriesInterruptedSnapshots(t *testing.
 	require.NoError(t, m.Persist(t.Context(), source.CDCStateCommitToken{
 		SnapshotPositions: map[string]string{"a": "00000000/00000020"},
 	}))
+	require.False(t, m.CertifiedInRun("a"), "an unfinished refresh does not certify its tables")
 	require.NoError(t, m.InvalidateSnapshot(t.Context(), "b", "raw.b", ""))
 	require.False(t, m.refresh.complete)
 
@@ -73,6 +74,7 @@ func TestRefreshResumesCompletedTablesAndRetriesInterruptedSnapshots(t *testing.
 		Position: "00000000/00000030", SnapshotPositions: map[string]string{"b": "00000000/00000030"},
 	}))
 	require.True(t, m.refresh.complete)
+	require.True(t, m.CertifiedInRun("b"), "a completed refresh certifies the tables it snapshotted")
 
 	m = refreshTestManager(t, dest)
 	fresh, err = m.PrepareRefresh(t.Context(), "refresh:1", "scope", "", "")

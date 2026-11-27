@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bruin-data/ingestr/pkg/source"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -59,6 +60,9 @@ func (d *StarRocksDestination) insertVisible(ctx context.Context, table, body st
 // insertVisibleWithHint is insertVisible with an optimizer hint placed after
 // INSERT, where StarRocks applies it to the whole statement.
 func (d *StarRocksDestination) insertVisibleWithHint(ctx context.Context, table, hint, body string) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	database, name := d.tableParts(table)
 	label := d.nextLabel(name)
 	if hint != "" {
@@ -78,6 +82,9 @@ func (d *StarRocksDestination) insertVisibleWithHint(ctx context.Context, table,
 // has no DELETE ... WITH LABEL; it labels the load delete_<query id>, so the
 // label is recovered from last_query_id() on the same connection.
 func (d *StarRocksDestination) deleteVisible(ctx context.Context, table, query string) error {
+	if err := source.ConnectorLeaseLoss(ctx); err != nil {
+		return err
+	}
 	conn, err := d.db.Conn(ctx)
 	if err != nil {
 		return err
