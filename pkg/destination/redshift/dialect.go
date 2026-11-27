@@ -51,7 +51,9 @@ func (d *Dialect) TypeName(col schema.Column) string {
 		return "DOUBLE PRECISION"
 	case schema.TypeDecimal:
 		if col.Precision > 0 {
-			return fmt.Sprintf("DECIMAL(%d,%d)", col.Precision, col.Scale)
+			prec := min(col.Precision, 38)
+			scale := min(max(col.Scale, 0), prec)
+			return fmt.Sprintf("DECIMAL(%d,%d)", prec, scale)
 		}
 		return "DECIMAL(38,9)"
 	case schema.TypeString:
