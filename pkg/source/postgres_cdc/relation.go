@@ -78,8 +78,11 @@ type RelationInfo struct {
 	// column). Nil means no mapping was built and tuples decode positionally.
 	SchemaIndex []int
 	// Stale marks historical pre-DDL relation metadata replayed after the table
-	// was resnapshotted at a newer shape.
-	Stale bool
+	// was resnapshotted at a newer shape. StaleErr carries the suppressed error
+	// for non-historical pre-snapshot relations so a post-snapshot tuple reusing
+	// this cached relation fails loudly instead of silently dropping rows.
+	Stale    bool
+	StaleErr error
 	// MissingFromRelation marks schema columns with no value in this relation.
 	MissingFromRelation []bool
 }

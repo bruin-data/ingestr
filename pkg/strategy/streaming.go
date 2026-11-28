@@ -81,7 +81,13 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 			return err
 		}
 	}
-	if err := job.ApplyEvolution(ctx); err != nil {
+	if chunked != nil && !job.Config.FullRefresh && e.opts.StateManager != nil && job.EvolutionPlan != nil && job.EvolutionPlan.HasChanges() {
+		if err := e.opts.StateManager.ApplyStartupEvolution(ctx, job.Config.SourceTable, job.Config.DestTable, func() error {
+			return job.ApplyEvolution(ctx)
+		}); err != nil {
+			return fmt.Errorf("failed to apply schema evolution: %w", err)
+		}
+	} else if err := job.ApplyEvolution(ctx); err != nil {
 		return fmt.Errorf("failed to apply schema evolution: %w", err)
 	}
 
@@ -196,7 +202,14 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 			schemaFingerprint: ti.SchemaFingerprint,
 		}
 
-		if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
+		plan := job.EvolutionPlans[ti.Name]
+		if chunked != nil && !job.Config.FullRefresh && e.opts.StateManager != nil && plan != nil && plan.HasChanges() {
+			if err := e.opts.StateManager.ApplyStartupEvolution(ctx, ti.Name, st.destTable, func() error {
+				return job.ApplyEvolutionFor(ctx, ti.Name)
+			}); err != nil {
+				return fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
+			}
+		} else if err := job.ApplyEvolutionFor(ctx, ti.Name); err != nil {
 			return fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)
 		}
 		if err := e.prepareTable(ctx, job.Destination, job.Config, st); err != nil {

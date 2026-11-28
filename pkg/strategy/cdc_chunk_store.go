@@ -326,12 +326,122 @@ func (s *cdcChunkStore) save(ctx context.Context, key string, data []byte, delet
 	return source.ConnectorLeaseLoss(ctx)
 }
 
+var _ source.CDCChunkTableIdentityProvider = (*cdcChunkStore)(nil)
+
 func (s *cdcChunkStore) Identity(ctx context.Context) (string, error) {
 	m := s.manager
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	identity, _, err := m.chunkSnapshotIdentity(ctx, "")
 	return identity, err
+}
+
+type cdcEvolutionIntent struct {
+	Version int                             `json:"version"`
+	Tables  map[string]cdcEvolutionTableLog `json:"tables"`
+}
+
+type cdcEvolutionTableLog struct {
+	DestTable    string `json:"dest_table"`
+	PreIdentity  string `json:"pre_identity"`
+	PostIdentity string `json:"post_identity"`
+}
+
+func (s *cdcChunkStore) loadEvolutionIntentLocked(ctx context.Context) (*cdcEvolutionIntent, error) {
+	entries, err := s.entries(ctx, source.CDCChunkEvolutionIntentKey)
+	if err != nil {
+		return nil, err
+	}
+	data, err := decodeCDCChunk(entries)
+	if err != nil || data == nil {
+		return nil, err
+	}
+	var intent cdcEvolutionIntent
+	if err := json.Unmarshal(data, &intent); err != nil {
+		return nil, fmt.Errorf("invalid CDC evolution intent: %w", err)
+	}
+	if intent.Version != 1 {
+		return nil, fmt.Errorf("unsupported CDC evolution intent version %d", intent.Version)
+	}
+	return &intent, nil
+}
+
+func (m *CDCStateManager) recordEvolutionIntent(ctx context.Context, sourceTable, destTable, preIdentity, postIdentity string) error {
+	store := m.ChunkStore()
+	raw, err := store.Load(ctx, source.CDCChunkEvolutionIntentKey)
+	if err != nil {
+		return err
+	}
+	intent := cdcEvolutionIntent{Version: 1, Tables: make(map[string]cdcEvolutionTableLog)}
+	if raw != nil {
+		if err := json.Unmarshal(raw, &intent); err != nil {
+			return fmt.Errorf("invalid CDC evolution intent: %w", err)
+		}
+		if intent.Version != 1 {
+			return fmt.Errorf("unsupported CDC evolution intent version %d", intent.Version)
+		}
+		if intent.Tables == nil {
+			intent.Tables = make(map[string]cdcEvolutionTableLog)
+		}
+	}
+	intent.Tables[sourceTable] = cdcEvolutionTableLog{
+		DestTable:    destTable,
+		PreIdentity:  preIdentity,
+		PostIdentity: postIdentity,
+	}
+	encoded, err := json.Marshal(intent)
+	if err != nil {
+		return fmt.Errorf("failed to encode CDC evolution intent: %w", err)
+	}
+	return store.Save(ctx, source.CDCChunkEvolutionIntentKey, encoded)
+}
+
+func (s *cdcChunkStore) TableIdentities(ctx context.Context) (map[string]source.CDCChunkTableIdentity, error) {
+	m := s.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.destTables) == 0 {
+		return nil, fmt.Errorf("CDC snapshot identity requires registered tables")
+	}
+	intent, err := s.loadEvolutionIntentLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	identities := make(map[string]source.CDCChunkTableIdentity, len(m.destTables))
+	for table, destTable := range m.destTables {
+		_, physical, exists, err := m.destinationIncarnationForTable(ctx, destTable)
+		if err != nil {
+			return nil, err
+		}
+		if !exists || physical == "" {
+			return nil, fmt.Errorf("CDC snapshot destination %q has no physical identity", destTable)
+		}
+		preEvolution := ""
+		if entry, ok := m.preEvolutionDestinations[table]; ok && entry.DestTable == destTable && entry.PostIdentity == physical && entry.PreIdentity != "" {
+			preEvolution = entry.PreIdentity
+		}
+		if preEvolution == "" && intent != nil {
+			if entry, ok := intent.Tables[table]; ok && entry.DestTable == destTable && entry.PostIdentity == physical && entry.PreIdentity != "" {
+				preEvolution = entry.PreIdentity
+			}
+		}
+		if preEvolution == "" {
+			preEvolution = physical
+		}
+		info := source.CDCChunkTableIdentity{
+			DestTable:            destTable,
+			PhysicalIdentity:     physical,
+			PreEvolutionIdentity: preEvolution,
+		}
+		if certDest, certPhysical, certSource, certSchema, ok := m.lastCompletedTableState(table); ok {
+			info.LastCertifiedDest = certDest
+			info.LastCertifiedPhysical = certPhysical
+			info.LastCertifiedSource = certSource
+			info.LastCertifiedSchema = certSchema
+		}
+		identities[table] = info
+	}
+	return identities, nil
 }
 
 // ResumeChunkedSnapshot binds a resumed snapshot to the physical target covered

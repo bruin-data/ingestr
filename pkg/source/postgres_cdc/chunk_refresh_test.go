@@ -189,18 +189,27 @@ func TestAdoptChunkTableSelectionCopiesOnlyNewTables(t *testing.T) {
 	state.Mode, state.Execution = "inmemory", "serial"
 	state.SnapshotComplete = true
 	state.Tables["public.items"].Done = true
+	state.Tables["public.items"].Initialized = true
 	tables := []source.SourceTableInfo{{Name: "public.items"}, {Name: "public.orders"}}
 	require.NoError(t, adoptChunkTableSelection(state, tables, "new-identity", "serial", nil))
 	require.Equal(t, "new-identity", state.Identity)
 	require.Equal(t, []string{"5"}, state.Tables["public.items"].After)
 	require.True(t, state.Tables["public.items"].Done)
-	require.True(t, state.SnapshotComplete)
+	require.False(t, state.Tables["public.items"].Initialized, "already-certified retained table must not be re-initialized or re-certified")
+	require.False(t, state.SnapshotComplete, "adding an uncopied table in serial mode must clear SnapshotComplete so the persisted checkpoint stays valid")
 	added := state.Tables["public.orders"]
 	require.NotNil(t, added)
 	require.False(t, added.Done)
 	require.Empty(t, added.ReplayFrom)
 	require.False(t, added.Initialized)
 	require.Equal(t, FormatLSN(state.Applied), added.Boundary)
+
+	store := newChunkTestStore()
+	store.identity = "new-identity"
+	require.NoError(t, (&chunkedCommit{store: store, state: state.clone()}).persist(t.Context()))
+	loaded, err := loadChunkState(t.Context(), store)
+	require.NoError(t, err)
+	require.False(t, loaded.SnapshotComplete)
 }
 
 func TestAdoptChunkTableSelectionDropsRemovedTables(t *testing.T) {
