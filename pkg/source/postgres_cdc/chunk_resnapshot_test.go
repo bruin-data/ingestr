@@ -101,12 +101,11 @@ func TestReconcileChunkStateSchemaChangeRoutesOnlyChangedTable(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reconciled.resnapshot, 1)
 	require.Equal(t, "public.items", reconciled.resnapshot[0].Name)
-	require.Empty(t, reconciled.oldRelIDs)
 	require.True(t, state.Tables["public.anchor"].Done)
 	require.Equal(t, "old-identity", state.Identity, "identity must not update until resnapshot commits")
 }
 
-func TestReconcileChunkStateOIDChangeRecordsHistoricalRelID(t *testing.T) {
+func TestReconcileChunkStateOIDChangeRoutesToResnapshot(t *testing.T) {
 	state := completedMultiTableChunkState("old-identity")
 	tables := []source.SourceTableInfo{
 		makeChunkTestTable("public.anchor", "1001", "fp-anchor-v1"),
@@ -117,7 +116,23 @@ func TestReconcileChunkStateOIDChangeRecordsHistoricalRelID(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reconciled.resnapshot, 1)
 	require.Equal(t, "public.items", reconciled.resnapshot[0].Name)
-	require.Equal(t, uint32(1002), reconciled.oldRelIDs["public.items"])
+}
+
+func TestReconcileChunkStateUnstartedTableSchemaChangeRoutesToResnapshot(t *testing.T) {
+	state := completedMultiTableChunkState("old-identity")
+	state.Execution = "parallel"
+	state.SnapshotComplete = false
+	state.Tables["public.items"].Done = false
+	state.Tables["public.items"].Initialized = false
+	tables := []source.SourceTableInfo{
+		makeChunkTestTable("public.anchor", "1001", "fp-anchor-v1"),
+		makeChunkTestTable("public.items", "1002", "fp-items-v2"),
+	}
+
+	reconciled, err := reconcileChunkState(state, tables, "new-identity", "parallel", nil, defaultTableIdentities())
+	require.NoError(t, err)
+	require.Len(t, reconciled.resnapshot, 1)
+	require.Equal(t, "public.items", reconciled.resnapshot[0].Name)
 }
 
 func TestReconcileChunkStateFailsClosedOnDestinationReplacement(t *testing.T) {
@@ -303,7 +318,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 		require.NoError(t, err)
 		require.Len(t, reconciled.resnapshot, 1)
 		require.Equal(t, "public.items", reconciled.resnapshot[0].Name)
-		require.Equal(t, uint32(1002), reconciled.oldRelIDs["public.items"])
 		// Unchanged legacy table metadata is backfilled.
 		require.Equal(t, "1001", state.Tables["public.anchor"].Incarnation)
 		require.Equal(t, anchorFP, state.Tables["public.anchor"].SchemaFingerprint)
@@ -516,7 +530,6 @@ func TestChunkResnapshotEndToEndUpdatesCheckpointAndSkipsStaleWAL(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, reconciled.resnapshot, 1)
 	require.Equal(t, "public.items", reconciled.resnapshot[0].Name)
-	require.Equal(t, uint32(1002), reconciled.oldRelIDs["public.items"])
 
 	results := make(chan source.RecordBatchResult, 16)
 	schemas := map[string]*schema.TableSchema{
@@ -524,17 +537,16 @@ func TestChunkResnapshotEndToEndUpdatesCheckpointAndSkipsStaleWAL(t *testing.T) 
 		"public.items":  tables[1].Schema,
 	}
 	reader := &chunkReader{
-		tables:              tables,
-		options:             &source.CDCChunkedSnapshotOptions{Store: store, WALStaging: "destination", Execution: "parallel", ChunkSize: 100, WALBufferBytes: 1 << 20},
-		state:               initial,
-		journal:             journal,
-		accum:               newBatchAccumulator(100, schemas),
-		results:             results,
-		multi:               true,
-		targetIdentity:      store.identity,
-		tableIdentities:     store.identities,
-		resnapshotTables:    reconciled.resnapshot,
-		resnapshotOldRelIDs: reconciled.oldRelIDs,
+		tables:           tables,
+		options:          &source.CDCChunkedSnapshotOptions{Store: store, WALStaging: "destination", Execution: "parallel", ChunkSize: 100, WALBufferBytes: 1 << 20},
+		state:            initial,
+		journal:          journal,
+		accum:            newBatchAccumulator(100, schemas),
+		results:          results,
+		multi:            true,
+		targetIdentity:   store.identity,
+		tableIdentities:  store.identities,
+		resnapshotTables: reconciled.resnapshot,
 	}
 	reader.accum.durable = func() pglogrepl.LSN { return reader.state.Applied }
 	defer func() { _ = reader.accum.toast.close() }()
@@ -596,17 +608,15 @@ func TestChunkResnapshotEndToEndUpdatesCheckpointAndSkipsStaleWAL(t *testing.T) 
 	require.Equal(t, pglogrepl.LSN(100), midState.Applied)
 	require.Equal(t, uint64(0), midState.Consumed, "unplayed journal pages must not be pruned during resnapshot checkpoint")
 	require.Equal(t, FormatLSN(140), midState.Tables["public.items"].ReplayFrom)
-	require.Equal(t, []uint32{1002}, midState.Tables["public.items"].HistoricalRelIDs)
 	require.True(t, midState.Tables["public.items"].Done)
 	require.False(t, midState.Tables["public.items"].Initialized)
 
 	// A crash-recovery restart must NOT resnapshot public.items again, while
-	// still preserving ReplayFrom and HistoricalRelIDs.
+	// still preserving ReplayFrom.
 	recoveryReconciled, err := reconcileChunkState(midState.clone(), tables, store.identity, "parallel", nil, store.identities)
 	require.NoError(t, err)
 	require.Empty(t, recoveryReconciled.resnapshot)
 	require.Equal(t, map[string]string{"public.items": FormatLSN(140)}, midState.replayPositions())
-	require.Equal(t, map[string]map[uint32]struct{}{"public.items": {1002: {}}}, midState.historicalRelationIDs())
 	require.Equal(t, map[string]pglogrepl.LSN{"public.items": 140}, midState.staleRelationsBefore())
 
 	// Replay the staged journal: pre-DDL TRUNCATE on public.items at LSN 120 (< 140)
@@ -623,7 +633,7 @@ func TestChunkResnapshotEndToEndUpdatesCheckpointAndSkipsStaleWAL(t *testing.T) 
 		},
 	}))
 
-	// Final catch-up checkpoint at LSN 160 (>= 140) clears ReplayFrom and HistoricalRelIDs.
+	// Final catch-up checkpoint at LSN 160 (>= 140) clears ReplayFrom.
 	require.NoError(t, reader.checkpoint(ctx, 160, nil))
 	close(results)
 	require.NoError(t, <-consumerDone)
@@ -638,7 +648,6 @@ func TestChunkResnapshotEndToEndUpdatesCheckpointAndSkipsStaleWAL(t *testing.T) 
 	require.Equal(t, pglogrepl.LSN(160), finalState.Applied)
 	require.Equal(t, uint64(1), finalState.Consumed)
 	require.Empty(t, finalState.Tables["public.items"].ReplayFrom)
-	require.Empty(t, finalState.Tables["public.items"].HistoricalRelIDs)
 
 	// Next run with identical tables and schemas must resume cleanly without resnapshotting.
 	nextRun, err := reconcileChunkState(finalState.clone(), tables, store.identity, "parallel", nil, store.identities)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"time"
 
@@ -69,7 +68,6 @@ type chunkReader struct {
 	tableIdentities        map[string]source.CDCChunkTableIdentity
 	evolutionIntentCleared bool
 	resnapshotTables       []source.SourceTableInfo
-	resnapshotOldRelIDs    map[string]uint32
 	resnapshotFn           func(ctx context.Context, slot string, tables []source.SourceTableInfo) (map[string]pglogrepl.LSN, error)
 }
 
@@ -161,9 +159,6 @@ func (r *chunkReader) run(ctx context.Context, slot string, resumes map[string]s
 	r.repl, err = NewMultiTableReplicator(r.source, r.tables, cfg, start, &chunkResumeFilter{positions: filterPositions}, true, batchBarrier{})
 	if err != nil {
 		return err
-	}
-	if historical := r.state.historicalRelationIDs(); len(historical) > 0 {
-		r.repl.decoder.AllowHistoricalRelationIDs(historical)
 	}
 	if staleBefore := r.state.staleRelationsBefore(); len(staleBefore) > 0 {
 		r.repl.decoder.AllowStaleRelationsBefore(staleBefore)
@@ -583,14 +578,6 @@ func (r *chunkReader) resnapshotChangedTables(ctx context.Context, slot string) 
 			state = &chunkTableState{}
 			r.state.Tables[table.Name] = state
 		}
-		if oldID, ok := parseIncarnationOID(state.Incarnation); ok && state.Incarnation != table.Incarnation {
-			if !slices.Contains(state.HistoricalRelIDs, oldID) {
-				state.HistoricalRelIDs = append(state.HistoricalRelIDs, oldID)
-			}
-		}
-		if oldID, ok := r.resnapshotOldRelIDs[table.Name]; ok && !slices.Contains(state.HistoricalRelIDs, oldID) {
-			state.HistoricalRelIDs = append(state.HistoricalRelIDs, oldID)
-		}
 		pos := FormatLSN(snapshotLSN)
 		state.After = nil
 		state.Upper = nil
@@ -742,7 +729,6 @@ func (r *chunkReader) checkpoint(ctx context.Context, position pglogrepl.LSN, sn
 	r.state.Applied = max(r.state.Applied, position)
 	r.state.pruneReachedReplayFilters()
 	if r.repl != nil && r.repl.decoder != nil {
-		r.repl.decoder.AllowHistoricalRelationIDs(r.state.historicalRelationIDs())
 		r.repl.decoder.AllowStaleRelationsBefore(r.state.staleRelationsBefore())
 	}
 	if r.journal != nil {

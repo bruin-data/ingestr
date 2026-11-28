@@ -28,7 +28,6 @@ type chunkTableState struct {
 	PrimaryKeys       []string `json:"primary_keys,omitempty"`
 	DestTable         string   `json:"dest_table,omitempty"`
 	DestIdentity      string   `json:"dest_identity,omitempty"`
-	HistoricalRelIDs  []uint32 `json:"historical_rel_ids,omitempty"`
 }
 
 type chunkBootstrapState struct {
@@ -69,21 +68,6 @@ func (s *chunkBootstrapState) replayPositions() map[string]string {
 	return positions
 }
 
-func (s *chunkBootstrapState) historicalRelationIDs() map[string]map[uint32]struct{} {
-	ids := make(map[string]map[uint32]struct{})
-	for name, table := range s.Tables {
-		if len(table.HistoricalRelIDs) == 0 {
-			continue
-		}
-		set := make(map[uint32]struct{}, len(table.HistoricalRelIDs))
-		for _, id := range table.HistoricalRelIDs {
-			set[id] = struct{}{}
-		}
-		ids[name] = set
-	}
-	return ids
-}
-
 func (s *chunkBootstrapState) staleRelationsBefore() map[string]pglogrepl.LSN {
 	lsns := make(map[string]pglogrepl.LSN)
 	for name, table := range s.Tables {
@@ -99,16 +83,11 @@ func (s *chunkBootstrapState) staleRelationsBefore() map[string]pglogrepl.LSN {
 
 func (s *chunkBootstrapState) pruneReachedReplayFilters() {
 	for _, table := range s.Tables {
-		if table == nil {
-			continue
-		}
-		if table.ReplayFrom == "" {
-			table.HistoricalRelIDs = nil
+		if table == nil || table.ReplayFrom == "" {
 			continue
 		}
 		if pos, err := parseStoredPostgresLSN(table.ReplayFrom); err == nil && s.Applied >= pos {
 			table.ReplayFrom = ""
-			table.HistoricalRelIDs = nil
 		}
 	}
 }
@@ -193,7 +172,6 @@ func (s *chunkBootstrapState) clone() *chunkBootstrapState {
 		table.After = append([]string(nil), state.After...)
 		table.Upper = append([]string(nil), state.Upper...)
 		table.PrimaryKeys = append([]string(nil), state.PrimaryKeys...)
-		table.HistoricalRelIDs = append([]uint32(nil), state.HistoricalRelIDs...)
 		cloned.Tables[name] = &table
 	}
 	return &cloned

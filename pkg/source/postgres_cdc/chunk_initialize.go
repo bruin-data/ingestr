@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strconv"
 
 	"github.com/bruin-data/ingestr/internal/config"
 	"github.com/bruin-data/ingestr/pkg/source"
@@ -35,7 +34,6 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 	r.tableIdentities = tableIdentities
 	r.evolutionIntentCleared = false
 	r.resnapshotTables = nil
-	r.resnapshotOldRelIDs = nil
 	state, err := loadChunkState(ctx, r.options.Store)
 	if err != nil {
 		return 0, false, err
@@ -114,7 +112,6 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 			return 0, false, err
 		}
 		r.resnapshotTables = reconciled.resnapshot
-		r.resnapshotOldRelIDs = reconciled.oldRelIDs
 	}
 	r.state = state
 	start := state.Applied
@@ -134,7 +131,6 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 
 type chunkReconcileResult struct {
 	resnapshot []source.SourceTableInfo
-	oldRelIDs  map[string]uint32
 }
 
 // adoptChunkTableSelection keeps finished checkpoints when the publication
@@ -176,11 +172,10 @@ func reconcileChunkState(
 	identityChanged := state.Identity != identity
 
 	type metadataUpdate struct {
-		name      string
-		table     source.SourceTableInfo
-		ti        source.CDCChunkTableIdentity
-		hasTI     bool
-		unstarted bool
+		name  string
+		table source.SourceTableInfo
+		ti    source.CDCChunkTableIdentity
+		hasTI bool
 	}
 	var result chunkReconcileResult
 	var updates []metadataUpdate
@@ -249,19 +244,7 @@ func reconcileChunkState(
 		schemaChanged := prevSchema != "" && table.SchemaFingerprint != "" && !schemaFingerprintMatches(prevSchema, table.SchemaFingerprint)
 
 		if oidChanged || schemaChanged || destRecreatedByEvolution {
-			if saved.Done || saved.Initialized {
-				result.resnapshot = append(result.resnapshot, table)
-				if oidChanged {
-					if oldID, ok := parseIncarnationOID(prevIncarnation); ok {
-						if result.oldRelIDs == nil {
-							result.oldRelIDs = make(map[string]uint32)
-						}
-						result.oldRelIDs[table.Name] = oldID
-					}
-				}
-			} else {
-				updates = append(updates, metadataUpdate{name: table.Name, table: table, ti: ti, hasTI: hasTI, unstarted: true})
-			}
+			result.resnapshot = append(result.resnapshot, table)
 			continue
 		}
 
@@ -270,14 +253,7 @@ func reconcileChunkState(
 		}
 	}
 
-	unstartedChanged := false
-	for _, upd := range updates {
-		if upd.unstarted {
-			unstartedChanged = true
-			break
-		}
-	}
-	if sameSelection && identityChanged && len(result.resnapshot) == 0 && !unstartedChanged {
+	if sameSelection && identityChanged && len(result.resnapshot) == 0 {
 		return chunkReconcileResult{}, fmt.Errorf("source or destination changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline")
 	}
 
@@ -366,17 +342,6 @@ func tablePrimaryKeys(table source.SourceTableInfo) []string {
 		return table.Schema.PrimaryKeys
 	}
 	return nil
-}
-
-func parseIncarnationOID(incarnation string) (uint32, bool) {
-	if incarnation == "" {
-		return 0, false
-	}
-	oid, err := strconv.ParseUint(incarnation, 10, 32)
-	if err != nil || oid == 0 {
-		return 0, false
-	}
-	return uint32(oid), true
 }
 
 func schemaFingerprintMatches(stored, current string) bool {
