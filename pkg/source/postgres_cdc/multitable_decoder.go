@@ -49,6 +49,7 @@ type MultiTableDecoder struct {
 	allowedUnknown   map[string]map[string]struct{}
 	historicalIDs    map[string]map[uint32]struct{}
 	staleBeforeLSN   map[string]pglogrepl.LSN
+	staleStreamErrs  map[uint32]map[string]staleStreamRelation
 	memoryBudget     *byteBudget
 
 	// Protocol v2 streaming state. Between Stream Start and Stream Stop,
@@ -173,6 +174,9 @@ func (d *MultiTableDecoder) handleTruncate(data []byte) error {
 			continue
 		}
 		if rel := d.relations[relID]; rel != nil && rel.Stale {
+			if err := d.checkStaleTuple(rel); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := d.appendChange(TableChange{TableName: tableName, Change: Change{
@@ -208,6 +212,17 @@ func (d *MultiTableDecoder) handleStreamCommit(data []byte) ([]DecodedChanges, e
 	buffered := d.streamed[xid]
 	delete(d.streamed, xid)
 	delete(d.streamedLow, xid)
+	if staleEntries := d.staleStreamErrs[xid]; len(staleEntries) > 0 {
+		delete(d.staleStreamErrs, xid)
+		for _, entry := range staleEntries {
+			if entry.beforeLSN == 0 || commitLSN >= entry.beforeLSN {
+				if buffered != nil {
+					_ = buffered.Close()
+				}
+				return nil, entry.err
+			}
+		}
+	}
 	if buffered == nil {
 		return nil, nil
 	}
@@ -240,6 +255,7 @@ func (d *MultiTableDecoder) handleStreamAbort(data []byte) error {
 		}
 		delete(d.streamed, xid)
 		delete(d.streamedLow, xid)
+		delete(d.staleStreamErrs, xid)
 		return nil
 	}
 
@@ -321,17 +337,28 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 		beforeLSN := d.staleBeforeLSN[tableName]
 		isPreSnapshot := beforeLSN > 0 && d.relationLSN() < beforeLSN
 		if expected := d.expectedRelIDs[tableName]; expected != 0 && rel.RelationID != expected {
-			if _, historical := d.historicalIDs[tableName][rel.RelationID]; historical || isPreSnapshot {
+			if _, historical := d.historicalIDs[tableName][rel.RelationID]; historical {
 				rel.Stale = true
 				d.targetRelIDs[rel.RelationID] = tableName
 				d.relations[rel.RelationID] = rel
 				return nil
 			}
-			return &TableReincarnatedError{
+			reincErr := &TableReincarnatedError{
 				Table:    tableName,
 				Previous: strconv.FormatUint(uint64(expected), 10),
 				Current:  strconv.FormatUint(uint64(rel.RelationID), 10),
 			}
+			if isPreSnapshot {
+				rel.Stale = true
+				rel.StaleErr = reincErr
+				d.targetRelIDs[rel.RelationID] = tableName
+				d.relations[rel.RelationID] = rel
+				if d.inStream {
+					d.recordStaleStream(tableName, beforeLSN, reincErr)
+				}
+				return nil
+			}
+			return reincErr
 		}
 		d.targetRelIDs[rel.RelationID] = tableName
 		config.Debug("[CDC] Found target relation: %s (ID: %d)", tableName, rel.RelationID)
@@ -343,7 +370,11 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 			if err := mapRelationToSchema(rel, prev, tableSchema, tableName, d.allowedUnknown[tableName]); err != nil {
 				if isPreSnapshot {
 					rel.Stale = true
+					rel.StaleErr = err
 					d.relations[rel.RelationID] = rel
+					if d.inStream {
+						d.recordStaleStream(tableName, beforeLSN, err)
+					}
 					return nil
 				}
 				// Do not store rel on error: a rebuilt stream must retry against the
@@ -354,7 +385,11 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 		if err := validateGeneratedRelation(rel, d.generatedColumns[tableName]); err != nil {
 			if isPreSnapshot {
 				rel.Stale = true
+				rel.StaleErr = err
 				d.relations[rel.RelationID] = rel
+				if d.inStream {
+					d.recordStaleStream(tableName, beforeLSN, err)
+				}
 				return nil
 			}
 			return err
@@ -362,6 +397,41 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 	}
 
 	d.relations[rel.RelationID] = rel
+	return nil
+}
+
+type staleStreamRelation struct {
+	beforeLSN pglogrepl.LSN
+	err       error
+}
+
+func (d *MultiTableDecoder) recordStaleStream(tableName string, beforeLSN pglogrepl.LSN, err error) {
+	if d.staleStreamErrs == nil {
+		d.staleStreamErrs = make(map[uint32]map[string]staleStreamRelation)
+	}
+	perTx := d.staleStreamErrs[d.streamXid]
+	if perTx == nil {
+		perTx = make(map[string]staleStreamRelation)
+		d.staleStreamErrs[d.streamXid] = perTx
+	}
+	if _, exists := perTx[tableName]; !exists {
+		perTx[tableName] = staleStreamRelation{beforeLSN: beforeLSN, err: err}
+	}
+}
+
+func (d *MultiTableDecoder) checkStaleTuple(rel *RelationInfo) error {
+	if rel.StaleErr == nil {
+		return nil
+	}
+	tableName := d.targetRelIDs[rel.RelationID]
+	beforeLSN := d.staleBeforeLSN[tableName]
+	if d.inStream {
+		d.recordStaleStream(tableName, beforeLSN, rel.StaleErr)
+		return nil
+	}
+	if beforeLSN == 0 || d.relationLSN() >= beforeLSN {
+		return rel.StaleErr
+	}
 	return nil
 }
 
@@ -507,7 +577,7 @@ func (d *MultiTableDecoder) handleInsert(data []byte) error {
 		return fmt.Errorf("unknown relation ID: %d", relID)
 	}
 	if rel.Stale {
-		return nil
+		return d.checkStaleTuple(rel)
 	}
 
 	tableSchema := d.tableSchemas[tableName]
@@ -554,7 +624,7 @@ func (d *MultiTableDecoder) handleUpdate(data []byte) error {
 		return fmt.Errorf("unknown relation ID: %d", relID)
 	}
 	if rel.Stale {
-		return nil
+		return d.checkStaleTuple(rel)
 	}
 
 	tableSchema := d.tableSchemas[tableName]
@@ -616,7 +686,7 @@ func (d *MultiTableDecoder) handleDelete(data []byte) error {
 		return fmt.Errorf("unknown relation ID: %d", relID)
 	}
 	if rel.Stale {
-		return nil
+		return d.checkStaleTuple(rel)
 	}
 
 	tableSchema := d.tableSchemas[tableName]

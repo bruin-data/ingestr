@@ -33,6 +33,7 @@ func (r *chunkReader) initialize(ctx context.Context, slot string, resumes map[s
 		}
 	}
 	r.tableIdentities = tableIdentities
+	r.evolutionIntentCleared = false
 	r.resnapshotTables = nil
 	r.resnapshotOldRelIDs = nil
 	state, err := loadChunkState(ctx, r.options.Store)
@@ -172,7 +173,7 @@ func reconcileChunkState(
 		}
 	}
 
-	identityChanged := state.Identity != "" && state.Identity != identity
+	identityChanged := state.Identity != identity
 
 	type metadataUpdate struct {
 		name      string
@@ -195,7 +196,11 @@ func reconcileChunkState(
 		ti, hasTI := tableIdentities[table.Name]
 
 		currentPKs := tablePrimaryKeys(table)
-		if len(saved.PrimaryKeys) > 0 && !slices.Equal(saved.PrimaryKeys, currentPKs) {
+		savedPKs := saved.PrimaryKeys
+		if len(savedPKs) == 0 && hasTI {
+			savedPKs = ti.DestPrimaryKeys
+		}
+		if len(savedPKs) > 0 && !slices.Equal(savedPKs, currentPKs) {
 			return chunkReconcileResult{}, fmt.Errorf("primary keys for %s changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
 		}
 
@@ -216,11 +221,14 @@ func reconcileChunkState(
 
 		// When the aggregate identity changed, every retained table that has
 		// already copied rows (Done or Initialized) must have verifiable source
-		// and physical destination identity proof so an unfinished legacy
-		// table cannot resume its cursor against an unchecked replacement.
+		// OID, schema, primary-key, and physical destination identity proof so
+		// neither an unfinished legacy table nor a partially proven table can
+		// skip change detection or resume against an unchecked replacement.
 		if identityChanged && (saved.Done || saved.Initialized) {
 			if tableIdentities != nil {
-				if !hasTI || savedDestID == "" || ti.PhysicalIdentity == "" || (prevIncarnation == "" && prevSchema == "") {
+				if !hasTI || savedDestID == "" || ti.PhysicalIdentity == "" ||
+					prevIncarnation == "" || prevSchema == "" ||
+					(len(currentPKs) > 0 && len(savedPKs) == 0) {
 					return chunkReconcileResult{}, fmt.Errorf("chunked snapshot checkpoint lacks per-table identity proof for %s; use --full-refresh to establish a new baseline", table.Name)
 				}
 			} else if sameSelection {
@@ -314,8 +322,19 @@ func reconcileChunkState(
 		if len(result.resnapshot) == 0 {
 			state.Identity = identity
 		}
-		if execution == "serial" && state.complete() {
-			state.SnapshotComplete = true
+		if execution == "serial" {
+			if state.complete() {
+				state.SnapshotComplete = true
+			} else {
+				if state.SnapshotComplete {
+					for _, entry := range state.Tables {
+						if entry != nil && entry.Done {
+							entry.Initialized = false
+						}
+					}
+				}
+				state.SnapshotComplete = false
+			}
 		}
 	} else if len(result.resnapshot) == 0 && state.Identity != identity {
 		state.Identity = identity

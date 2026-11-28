@@ -633,3 +633,143 @@ func TestMultiTableDecoderDoesNotMarkValidPreSnapshotRelationStale(t *testing.T)
 	assert.Equal(t, int32(2), groups[0].Changes[0].Values[0])
 	assert.Equal(t, "after", groups[0].Changes[0].Values[1])
 }
+
+func TestMultiTableDecoderFailsWhenStaleRelationReusedAfterSnapshotBoundary(t *testing.T) {
+	// A stale relation cached before beforeLSN must NOT silently drop tuples
+	// belonging to a transaction whose commit LSN is at or after beforeLSN.
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Schema:      "public",
+		PrimaryKeys: []string{"id"},
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt32}},
+	})
+	d := NewMultiTableDecoder([]source.SourceTableInfo{{
+		Name:        "public.items",
+		Schema:      tableSchema,
+		Incarnation: "20",
+	}})
+	d.AllowStaleRelationsBefore(map[string]pglogrepl.LSN{"public.items": 140})
+
+	staleRel := pgoRelationMsgCols(20, "public", "items",
+		struct {
+			name string
+			oid  uint32
+		}{"id", 23},
+		struct {
+			name string
+			oid  uint32
+		}{"legacy", 25},
+	)
+	// Pre-snapshot transaction caches stale relation and skips its tuples cleanly.
+	groups := decodeAll(t, d, [][]byte{
+		pgoBeginMsg(120),
+		staleRel,
+		pgoInsertValuesMsg(20, "1", "old"),
+		pgoCommitMsg(120),
+	}, 110)
+	require.Empty(t, groups)
+	require.True(t, d.relations[20].Stale)
+
+	// Post-snapshot transaction reusing the cached stale relation must error.
+	_, err := d.Decode(pgoBeginMsg(160), 150)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoInsertValuesMsg(20, "2", "after"), 155)
+	var schemaErr *SchemaChangedError
+	require.ErrorAs(t, err, &schemaErr)
+}
+
+func TestMultiTableDecoderStreamedStaleRelationEnforcesCommitLSN(t *testing.T) {
+	// Protocol v2 streamed transactions may emit RelationMessage before
+	// beforeLSN while committing at or after beforeLSN; StreamCommit must fail
+	// closed rather than silently dropping the committed transaction.
+	pgoStreamedRelationMsg := func(xid, relID uint32, ns, name string, cols ...struct {
+		name string
+		oid  uint32
+	},
+	) []byte {
+		base := pgoRelationMsgCols(relID, ns, name, cols...)
+		out := make([]byte, 0, len(base)+4)
+		out = append(out, base[0])
+		out = binary.BigEndian.AppendUint32(out, xid)
+		out = append(out, base[1:]...)
+		return out
+	}
+	pgoStreamedInsertValuesMsg := func(xid, relID uint32, vals ...string) []byte {
+		base := pgoInsertValuesMsg(relID, vals...)
+		out := make([]byte, 0, len(base)+4)
+		out = append(out, base[0])
+		out = binary.BigEndian.AppendUint32(out, xid)
+		out = append(out, base[1:]...)
+		return out
+	}
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Schema:      "public",
+		PrimaryKeys: []string{"id"},
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt32}},
+	})
+	newDecoder := func() *MultiTableDecoder {
+		d := NewMultiTableDecoder([]source.SourceTableInfo{{
+			Name:        "public.items",
+			Schema:      tableSchema,
+			Incarnation: "20",
+		}})
+		d.AllowStaleRelationsBefore(map[string]pglogrepl.LSN{"public.items": 140})
+		return d
+	}
+
+	staleCols := []struct {
+		name string
+		oid  uint32
+	}{
+		{"id", 23},
+		{"legacy", 25},
+	}
+
+	t.Run("fails when streamed tx commits at or after snapshot boundary", func(t *testing.T) {
+		d := newDecoder()
+		for _, msg := range [][]byte{
+			pgoStreamStartMsg(42, true),
+			pgoStreamedRelationMsg(42, 20, "public", "items", staleCols...),
+			pgoStreamedInsertValuesMsg(42, 20, "1", "old"),
+			pgoStreamStopMsg(),
+		} {
+			_, err := d.Decode(msg, 110)
+			require.NoError(t, err)
+		}
+		_, err := d.Decode(pgoStreamCommitMsg(42, 160), 160)
+		var schemaErr *SchemaChangedError
+		require.ErrorAs(t, err, &schemaErr)
+	})
+
+	t.Run("skips streamed tx that commits strictly before snapshot boundary", func(t *testing.T) {
+		d := newDecoder()
+		for _, msg := range [][]byte{
+			pgoStreamStartMsg(43, true),
+			pgoStreamedRelationMsg(43, 20, "public", "items", staleCols...),
+			pgoStreamedInsertValuesMsg(43, 20, "1", "old"),
+			pgoStreamStopMsg(),
+		} {
+			_, err := d.Decode(msg, 110)
+			require.NoError(t, err)
+		}
+		groups, err := d.Decode(pgoStreamCommitMsg(43, 130), 130)
+		require.NoError(t, err)
+		require.Empty(t, groups)
+	})
+
+	t.Run("stream abort clears stale tracking", func(t *testing.T) {
+		d := newDecoder()
+		for _, msg := range [][]byte{
+			pgoStreamStartMsg(44, true),
+			pgoStreamedRelationMsg(44, 20, "public", "items", staleCols...),
+			pgoStreamedInsertValuesMsg(44, 20, "1", "old"),
+			pgoStreamStopMsg(),
+			pgoStreamAbortMsg(44, 44),
+		} {
+			_, err := d.Decode(msg, 110)
+			require.NoError(t, err)
+		}
+		require.Empty(t, d.staleStreamErrs)
+	})
+}

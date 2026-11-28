@@ -127,7 +127,7 @@ type CDCStateManager struct {
 	knownIncarnations        map[string]string
 	knownSchemas             map[string]string
 	knownDestinations        map[string]string
-	preEvolutionDestinations map[string]string
+	preEvolutionDestinations map[string]cdcEvolutionTableLog
 	boundDestinations        map[string]string
 	boundRawDestinations     map[string]string
 	lateTargetModes          map[string]lateTargetMode
@@ -206,7 +206,7 @@ func newCDCStateManager(dest destination.Destination, connectorID, stateTable st
 		knownIncarnations:        make(map[string]string),
 		knownSchemas:             make(map[string]string),
 		knownDestinations:        make(map[string]string),
-		preEvolutionDestinations: make(map[string]string),
+		preEvolutionDestinations: make(map[string]cdcEvolutionTableLog),
 		boundDestinations:        make(map[string]string),
 		boundRawDestinations:     make(map[string]string),
 		lateTargetModes:          make(map[string]lateTargetMode),
@@ -604,12 +604,11 @@ func (m *CDCStateManager) destinationIncarnationForTable(ctx context.Context, de
 }
 
 // ApplyStartupEvolution runs startup schema evolution for a registered CDC
-// table while capturing its pre-evolution physical destination identity so
-// chunked snapshot reconciliation can distinguish evolution-induced table
-// recreation from an external destination replacement. When persistIntent is
-// true and evolution changes the physical destination identity, a durable
-// evolution intent is stored in the chunk store so a crash before
-// checkpointResnapshot still recovers on restart without a full refresh.
+// table while validating the pre-evolution physical destination identity and
+// recording any evolution-induced table recreation. When persistIntent is true
+// and evolution changes the physical destination identity, a durable evolution
+// intent is stored in the chunk store so a crash before checkpointResnapshot
+// still recovers on restart without a full refresh.
 func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable, destTable string, hasChanges, persistIntent bool, apply func() error) error {
 	if !hasChanges {
 		return apply()
@@ -620,8 +619,35 @@ func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable
 		m.mu.Unlock()
 		return err
 	}
+	effectivePre := preDigest
 	if preExists && preDigest != "" {
-		if known := m.knownDestinations[sourceTable]; known != "" && preDigest != known {
+		if prev, ok := m.preEvolutionDestinations[sourceTable]; ok && prev.DestTable == destTable && prev.PostIdentity == preDigest && prev.PreIdentity != "" {
+			effectivePre = prev.PreIdentity
+		} else if persistIntent {
+			store := &cdcChunkStore{manager: m, table: m.chunkTableName()}
+			intent, err := store.loadEvolutionIntentLocked(ctx)
+			if err != nil {
+				m.mu.Unlock()
+				return err
+			}
+			if intent != nil {
+				if prev, ok := intent.Tables[sourceTable]; ok && prev.DestTable == destTable && prev.PostIdentity == preDigest && prev.PreIdentity != "" {
+					effectivePre = prev.PreIdentity
+				}
+			}
+		}
+
+		expectedDest := m.knownDestinations[sourceTable]
+		if expectedDest == "" {
+			if certDest, certPhysical, _, _, ok := m.lastCompletedTableState(sourceTable); ok && certPhysical != "" {
+				if certDest != "" && certDest != destTable {
+					m.mu.Unlock()
+					return fmt.Errorf("CDC destination table %q does not match previously certified table %q", destTable, certDest)
+				}
+				expectedDest = certPhysical
+			}
+		}
+		if expectedDest != "" && effectivePre != expectedDest {
 			m.mu.Unlock()
 			return fmt.Errorf("CDC destination table %q was replaced after its completed snapshot", destTable)
 		}
@@ -646,21 +672,24 @@ func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable
 		m.mu.Unlock()
 		return fmt.Errorf("CDC destination table %q disappeared during schema evolution", destTable)
 	}
+	if postDigest == preDigest {
+		m.mu.Unlock()
+		return nil
+	}
 	if m.preEvolutionDestinations == nil {
-		m.preEvolutionDestinations = make(map[string]string)
+		m.preEvolutionDestinations = make(map[string]cdcEvolutionTableLog)
 	}
-	originPre := preDigest
-	if existingPre := m.preEvolutionDestinations[sourceTable]; existingPre != "" {
-		originPre = existingPre
+	m.preEvolutionDestinations[sourceTable] = cdcEvolutionTableLog{
+		DestTable:    destTable,
+		PreIdentity:  effectivePre,
+		PostIdentity: postDigest,
 	}
-	m.preEvolutionDestinations[sourceTable] = originPre
-	if m.knownDestinations[sourceTable] == preDigest {
-		m.knownDestinations[sourceTable] = postDigest
-	}
+	delete(m.knownComplete, sourceTable)
+	delete(m.knownDestinations, sourceTable)
 	m.mu.Unlock()
 
-	if persistIntent && postDigest != preDigest {
-		if err := m.recordEvolutionIntent(ctx, sourceTable, destTable, originPre, postDigest); err != nil {
+	if persistIntent {
+		if err := m.recordEvolutionIntent(ctx, sourceTable, destTable, effectivePre, postDigest); err != nil {
 			return err
 		}
 	}
@@ -686,7 +715,10 @@ func (m *CDCStateManager) lastCompletedTableState(sourceTable string) (destTable
 		snapshot := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindSnapshot}]
 		destState := states[cdcStateKey{runID: runID, sourceTable: sourceTable, kind: cdcStateKindDestination}]
 		if !snapshot.complete || !destState.complete {
-			if snapshot.resuming && snapshot.snapshotEpoch == 0 {
+			// Skip interrupted generations that never invalidated or replaced
+			// the table's previous certified snapshot (BeginRun writes an
+			// uninvalidated epoch-0 marker before any destination mutation).
+			if snapshot.snapshotEpoch == 0 && !snapshot.complete && !destState.complete {
 				continue
 			}
 			return "", "", "", "", false

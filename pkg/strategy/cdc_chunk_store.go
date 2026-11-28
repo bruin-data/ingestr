@@ -377,13 +377,23 @@ func (m *CDCStateManager) recordEvolutionIntent(ctx context.Context, sourceTable
 		if err := json.Unmarshal(raw, &intent); err != nil {
 			return fmt.Errorf("invalid CDC evolution intent: %w", err)
 		}
+		if intent.Version != 1 {
+			return fmt.Errorf("unsupported CDC evolution intent version %d", intent.Version)
+		}
 		if intent.Tables == nil {
 			intent.Tables = make(map[string]cdcEvolutionTableLog)
 		}
 		if prev, ok := intent.Tables[sourceTable]; ok && prev.DestTable == destTable && prev.PostIdentity == preIdentity && prev.PreIdentity != "" {
 			preIdentity = prev.PreIdentity
 			m.mu.Lock()
-			m.preEvolutionDestinations[sourceTable] = preIdentity
+			if m.preEvolutionDestinations == nil {
+				m.preEvolutionDestinations = make(map[string]cdcEvolutionTableLog)
+			}
+			m.preEvolutionDestinations[sourceTable] = cdcEvolutionTableLog{
+				DestTable:    destTable,
+				PreIdentity:  preIdentity,
+				PostIdentity: postIdentity,
+			}
 			m.mu.Unlock()
 		}
 	}
@@ -419,7 +429,10 @@ func (s *cdcChunkStore) TableIdentities(ctx context.Context) (map[string]source.
 		if !exists || physical == "" {
 			return nil, fmt.Errorf("CDC snapshot destination %q has no physical identity", destTable)
 		}
-		preEvolution := m.preEvolutionDestinations[table]
+		preEvolution := ""
+		if entry, ok := m.preEvolutionDestinations[table]; ok && entry.DestTable == destTable && entry.PostIdentity == physical && entry.PreIdentity != "" {
+			preEvolution = entry.PreIdentity
+		}
 		if preEvolution == "" && intent != nil {
 			if entry, ok := intent.Tables[table]; ok && entry.DestTable == destTable && entry.PostIdentity == physical && entry.PreIdentity != "" {
 				preEvolution = entry.PreIdentity
@@ -428,10 +441,17 @@ func (s *cdcChunkStore) TableIdentities(ctx context.Context) (map[string]source.
 		if preEvolution == "" {
 			preEvolution = physical
 		}
+		var destPKs []string
+		if m.dest != nil {
+			if destSchema, err := m.dest.GetTableSchema(ctx, destTable); err == nil && destSchema != nil && len(destSchema.PrimaryKeys) > 0 {
+				destPKs = append([]string(nil), destSchema.PrimaryKeys...)
+			}
+		}
 		info := source.CDCChunkTableIdentity{
 			DestTable:            destTable,
 			PhysicalIdentity:     physical,
 			PreEvolutionIdentity: preEvolution,
+			DestPrimaryKeys:      destPKs,
 		}
 		if certDest, certPhysical, certSource, certSchema, ok := m.lastCompletedTableState(table); ok {
 			info.LastCertifiedDest = certDest

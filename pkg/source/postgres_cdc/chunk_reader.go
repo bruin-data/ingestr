@@ -64,12 +64,13 @@ type chunkReader struct {
 	walRange         *chunkWALRange
 	// stageCatchUp marks WAL emitted by a finite run that is not inside a
 	// snapshot chunk. Those pages are staged and merged once at the barrier.
-	stageCatchUp        bool
-	targetIdentity      string
-	tableIdentities     map[string]source.CDCChunkTableIdentity
-	resnapshotTables    []source.SourceTableInfo
-	resnapshotOldRelIDs map[string]uint32
-	resnapshotFn        func(ctx context.Context, slot string, tables []source.SourceTableInfo) (map[string]pglogrepl.LSN, error)
+	stageCatchUp           bool
+	targetIdentity         string
+	tableIdentities        map[string]source.CDCChunkTableIdentity
+	evolutionIntentCleared bool
+	resnapshotTables       []source.SourceTableInfo
+	resnapshotOldRelIDs    map[string]uint32
+	resnapshotFn           func(ctx context.Context, slot string, tables []source.SourceTableInfo) (map[string]pglogrepl.LSN, error)
 }
 
 func (s *PostgresCDCSource) readChunked(ctx context.Context, tables []source.SourceTableInfo, slot string, resumes map[string]string, opts source.ReadOptions, multi bool) (<-chan source.RecordBatchResult, error) {
@@ -601,7 +602,11 @@ func (r *chunkReader) resnapshotChangedTables(ctx context.Context, slot string) 
 		populateChunkTableMetadata(state, table, ti, hasTI)
 		snapshotPositions[table.Name] = pos
 	}
-	return r.checkpointResnapshot(ctx, snapshotPositions)
+	if err := r.checkpointResnapshot(ctx, snapshotPositions); err != nil {
+		return err
+	}
+	r.resnapshotTables = nil
+	return nil
 }
 
 func (r *chunkReader) exportAndCopyResnapshotTables(ctx context.Context, slot string, tables []source.SourceTableInfo) (map[string]pglogrepl.LSN, error) {
@@ -707,7 +712,7 @@ func (r *chunkReader) checkpointResnapshot(ctx context.Context, snapshots map[st
 }
 
 func (r *chunkReader) clearEvolutionIntent(ctx context.Context) {
-	if r.options == nil || r.options.Store == nil {
+	if r.evolutionIntentCleared || r.options == nil || r.options.Store == nil {
 		return
 	}
 	hasIntent := false
@@ -718,11 +723,14 @@ func (r *chunkReader) clearEvolutionIntent(ctx context.Context) {
 		}
 	}
 	if !hasIntent {
+		r.evolutionIntentCleared = true
 		return
 	}
 	if err := r.options.Store.Delete(ctx, source.CDCChunkEvolutionIntentKey); err != nil {
 		config.Debug("[CDC] Failed to clear chunk evolution intent: %v", err)
+		return
 	}
+	r.evolutionIntentCleared = true
 }
 
 func (r *chunkReader) checkpoint(ctx context.Context, position pglogrepl.LSN, snapshots map[string]string, timings ...*source.CDCChunkTiming) error {
@@ -760,6 +768,9 @@ func (r *chunkReader) checkpoint(ctx context.Context, position pglogrepl.LSN, sn
 		return ctx.Err()
 	}
 	r.state.Identity = commit.state.Identity
+	if len(r.resnapshotTables) == 0 {
+		r.clearEvolutionIntent(ctx)
+	}
 	if err := r.cleanupRetiredEpochs(ctx); err != nil {
 		return fmt.Errorf("failed to retire replaced snapshot WAL: %w", err)
 	}

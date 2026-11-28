@@ -283,6 +283,7 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.anchor",
 				PhysicalIdentity:      "dest-anchor-v1",
 				PreEvolutionIdentity:  "dest-anchor-v1",
+				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.anchor",
 				LastCertifiedPhysical: "dest-anchor-v1",
 				LastCertifiedSource:   "1001",
@@ -292,6 +293,7 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.items",
 				PhysicalIdentity:      "dest-items-v1",
 				PreEvolutionIdentity:  "dest-items-v1",
+				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.items",
 				LastCertifiedPhysical: "dest-items-v1",
 				LastCertifiedSource:   "1002",
@@ -308,6 +310,7 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 		require.Equal(t, "1001", state.Tables["public.anchor"].Incarnation)
 		require.Equal(t, anchorFP, state.Tables["public.anchor"].SchemaFingerprint)
 		require.Equal(t, "dest-anchor-v1", state.Tables["public.anchor"].DestIdentity)
+		require.Equal(t, []string{"id"}, state.Tables["public.anchor"].PrimaryKeys)
 	})
 
 	t.Run("fails closed when legacy destination was replaced", func(t *testing.T) {
@@ -317,6 +320,7 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.anchor",
 				PhysicalIdentity:      "dest-anchor-v1",
 				PreEvolutionIdentity:  "dest-anchor-v1",
+				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.anchor",
 				LastCertifiedPhysical: "dest-anchor-v1",
 				LastCertifiedSource:   "1001",
@@ -326,6 +330,7 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.items",
 				PhysicalIdentity:      "dest-items-replaced",
 				PreEvolutionIdentity:  "dest-items-replaced",
+				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.items",
 				LastCertifiedPhysical: "dest-items-v1",
 				LastCertifiedSource:   "1002",
@@ -356,6 +361,7 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.anchor",
 				PhysicalIdentity:      "dest-anchor-v1",
 				PreEvolutionIdentity:  "dest-anchor-v1",
+				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.anchor",
 				LastCertifiedPhysical: "dest-anchor-v1",
 				LastCertifiedSource:   "1001",
@@ -375,6 +381,77 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 		_, err := reconcileChunkState(state, changedTables, "new-identity", "parallel", nil, identities)
 		require.ErrorContains(t, err, "lacks per-table identity proof for public.items")
 		require.ErrorContains(t, err, "--full-refresh")
+	})
+
+	t.Run("fails closed when legacy proof omits source OID, schema, or primary keys", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			mutate  func(ti *source.CDCChunkTableIdentity)
+			wantErr string
+		}{
+			{
+				name:    "missing LastCertifiedSource",
+				mutate:  func(ti *source.CDCChunkTableIdentity) { ti.LastCertifiedSource = "" },
+				wantErr: "lacks per-table identity proof for public.anchor",
+			},
+			{
+				name:    "missing LastCertifiedSchema",
+				mutate:  func(ti *source.CDCChunkTableIdentity) { ti.LastCertifiedSchema = "" },
+				wantErr: "lacks per-table identity proof for public.anchor",
+			},
+			{
+				name:    "missing DestPrimaryKeys",
+				mutate:  func(ti *source.CDCChunkTableIdentity) { ti.DestPrimaryKeys = nil },
+				wantErr: "lacks per-table identity proof for public.anchor",
+			},
+			{
+				name:    "mismatched DestPrimaryKeys",
+				mutate:  func(ti *source.CDCChunkTableIdentity) { ti.DestPrimaryKeys = []string{"other_id"} },
+				wantErr: "primary keys for public.anchor changed",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				state := legacyState()
+				anchorTI := source.CDCChunkTableIdentity{
+					DestTable:             "raw.anchor",
+					PhysicalIdentity:      "dest-anchor-v1",
+					PreEvolutionIdentity:  "dest-anchor-v1",
+					DestPrimaryKeys:       []string{"id"},
+					LastCertifiedDest:     "raw.anchor",
+					LastCertifiedPhysical: "dest-anchor-v1",
+					LastCertifiedSource:   "1001",
+					LastCertifiedSchema:   anchorFP[:18],
+				}
+				tc.mutate(&anchorTI)
+				identities := map[string]source.CDCChunkTableIdentity{
+					"public.anchor": anchorTI,
+					"public.items": {
+						DestTable:             "raw.items",
+						PhysicalIdentity:      "dest-items-v1",
+						PreEvolutionIdentity:  "dest-items-v1",
+						DestPrimaryKeys:       []string{"id"},
+						LastCertifiedDest:     "raw.items",
+						LastCertifiedPhysical: "dest-items-v1",
+						LastCertifiedSource:   "1002",
+						LastCertifiedSchema:   itemsOldFP[:18],
+					},
+				}
+				_, err := reconcileChunkState(state, tables, "new-identity", "serial", nil, identities)
+				require.ErrorContains(t, err, tc.wantErr)
+				require.ErrorContains(t, err, "--full-refresh")
+			})
+		}
+	})
+
+	t.Run("fails closed when checkpoint Identity is empty", func(t *testing.T) {
+		state := completedMultiTableChunkState("")
+		tablesUnchanged := []source.SourceTableInfo{
+			makeChunkTestTable("public.anchor", "1001", "fp-anchor-v1"),
+			makeChunkTestTable("public.items", "1002", "fp-items-v1"),
+		}
+		_, err := reconcileChunkState(state, tablesUnchanged, "new-identity", "serial", nil, defaultTableIdentities())
+		require.ErrorContains(t, err, "source or destination changed")
 	})
 
 	t.Run("fails closed when legacy checkpoint has no identity provider", func(t *testing.T) {
@@ -568,7 +645,7 @@ func TestChunkResnapshotEndToEndUpdatesCheckpointAndSkipsStaleWAL(t *testing.T) 
 	close(results)
 	require.NoError(t, <-consumerDone)
 
-	require.Equal(t, []emittedBatch{
+	require.ElementsMatch(t, []emittedBatch{
 		{table: "public.anchor", rows: 1},
 		{table: "public.items", rows: 1},
 	}, batches)
@@ -612,4 +689,71 @@ func TestChunkInitializeFailsClosedOnSlotOrModeChangeEvenWithSchemaChange(t *tes
 	_, _, err = reader.initialize(t.Context(), "other-slot", nil)
 	require.ErrorContains(t, err, "slot, execution, or WAL staging mode changed")
 	require.ErrorContains(t, err, "--full-refresh")
+}
+
+func TestChunkCheckpointClearsOrphanedEvolutionIntent(t *testing.T) {
+	ctx := t.Context()
+	identities := defaultTableIdentities()
+	identities["public.items"] = source.CDCChunkTableIdentity{
+		DestTable:            "raw.items",
+		PhysicalIdentity:     "dest-items-v2",
+		PreEvolutionIdentity: "dest-items-v1",
+	}
+	store := &chunkIdentityTestStore{
+		chunkTestStore: newChunkTestStore(),
+		identities:     identities,
+	}
+	store.identity = "new-identity"
+	store.values[source.CDCChunkEvolutionIntentKey] = []byte(`{"version":1,"tables":{"public.items":{"dest_table":"raw.items","pre_identity":"dest-items-v1","post_identity":"dest-items-v2"}}}`)
+
+	tables := []source.SourceTableInfo{
+		makeChunkTestTable("public.anchor", "1001", "fp-anchor-v1"),
+		makeChunkTestTable("public.items", "1002", "fp-items-v2"),
+	}
+	state := completedMultiTableChunkState("new-identity")
+	state.Tables["public.items"].DestIdentity = "dest-items-v2"
+	state.Tables["public.items"].SchemaFingerprint = "fp-items-v2"
+
+	results := make(chan source.RecordBatchResult, 4)
+	schemas := map[string]*schema.TableSchema{
+		"public.anchor": tables[0].Schema,
+		"public.items":  tables[1].Schema,
+	}
+	reader := &chunkReader{
+		tables:          tables,
+		options:         &source.CDCChunkedSnapshotOptions{Store: store, WALStaging: "inmemory", Execution: "serial", ChunkSize: 100, WALBufferBytes: 1 << 20},
+		state:           state,
+		accum:           newBatchAccumulator(100, schemas),
+		results:         results,
+		multi:           true,
+		targetIdentity:  store.identity,
+		tableIdentities: identities,
+	}
+	reader.accum.durable = func() pglogrepl.LSN { return reader.state.Applied }
+	defer func() { _ = reader.accum.toast.close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		for res := range results {
+			if res.CDCFlush {
+				tok := res.CommitToken.(source.CDCStateCommitToken)
+				commit := tok.SourceCommitToken.(*chunkedCommit)
+				if err := commit.persist(ctx); err != nil {
+					done <- err
+					return
+				}
+				commit.ack.Do(func() { close(commit.done) })
+			}
+		}
+		done <- nil
+	}()
+
+	require.NoError(t, reader.checkpoint(ctx, 120, nil))
+	close(results)
+	require.NoError(t, <-done)
+
+	raw, err := store.Load(ctx, source.CDCChunkEvolutionIntentKey)
+	require.NoError(t, err)
+	require.Nil(t, raw, "ordinary checkpoint must clear orphaned evolution intent when no resnapshot is pending")
+	require.True(t, reader.evolutionIntentCleared)
 }
