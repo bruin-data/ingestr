@@ -224,7 +224,7 @@ func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
 	require.Empty(t, itemsResume)
 	require.NoError(t, run2.BeginRun(ctx, false))
 
-	require.NoError(t, run2.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, true, func() error {
+	require.NoError(t, run2.ApplyStartupEvolution(ctx, "public.items", "raw.items", func() error {
 		dest.incarnations["raw.items"] = "incarnation:raw.items:v2"
 		return nil
 	}))
@@ -268,7 +268,7 @@ func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
 
 	// An in-place follow-up startup evolution (v2 -> v2) must NOT overwrite
 	// or shadow the durable v1 -> v2 evolution intent.
-	require.NoError(t, run2Restart.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, true, func() error {
+	require.NoError(t, run2Restart.ApplyStartupEvolution(ctx, "public.items", "raw.items", func() error {
 		return nil
 	}))
 	afterInPlaceIdentities, err := run2Restart.ChunkStore().(source.CDCChunkTableIdentityProvider).TableIdentities(ctx)
@@ -289,7 +289,7 @@ func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
 	// original pre-evolution identity (v1), and an external replacement AFTER
 	// that in-memory evolution must NOT be masked by preEvolutionDestinations.
 	dest.incarnations["raw.items"] = "incarnation:raw.items:v2"
-	require.NoError(t, run2Restart.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, true, func() error {
+	require.NoError(t, run2Restart.ApplyStartupEvolution(ctx, "public.items", "raw.items", func() error {
 		dest.incarnations["raw.items"] = "incarnation:raw.items:v3"
 		return nil
 	}))
@@ -314,7 +314,7 @@ func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
 	require.NoError(t, run3.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v4"))
 	require.NoError(t, run3.BeginRun(ctx, false))
 	applied := false
-	err = run3.ApplyStartupEvolution(ctx, "public.items", "raw.items", true, true, func() error {
+	err = run3.ApplyStartupEvolution(ctx, "public.items", "raw.items", func() error {
 		applied = true
 		dest.incarnations["raw.items"] = "incarnation:raw.items:v4"
 		return nil
@@ -330,4 +330,67 @@ func TestCDCChunkStoreTableIdentitiesAndStartupEvolution(t *testing.T) {
 	require.NoError(t, run3.ChunkStore().Save(ctx, source.CDCChunkEvolutionIntentKey, []byte(`{"version":99,"tables":{}}`)))
 	err = run3.recordEvolutionIntent(ctx, "public.items", "raw.items", "v1", "v2")
 	require.ErrorContains(t, err, "unsupported CDC evolution intent version")
+}
+
+func TestCDCStatePersistDoesNotRegressCertifiedTablePosition(t *testing.T) {
+	ctx := t.Context()
+	dest := &softReplaceDestination{
+		orderedCDCStateDestination: &orderedCDCStateDestination{cdcStateDestination: newCDCStateDestination()},
+		soft:                       true,
+	}
+	dest.incarnations["raw.anchor"] = "incarnation:raw.anchor:v1"
+	dest.incarnations["raw.items"] = "incarnation:raw.items:v1"
+
+	// Certify public.anchor at 0/64 (100) and public.items resnapshotted at 0/8C (140).
+	run1, err := NewCDCStateManager(dest, "chunk-no-regress", "raw.anchor", "")
+	require.NoError(t, err)
+	require.NoError(t, run1.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
+	require.NoError(t, run1.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v1"))
+	require.NoError(t, run1.BeginRun(ctx, false))
+	require.NoError(t, run1.InvalidateSnapshot(ctx, "public.anchor", "raw.anchor", "1001"))
+	require.NoError(t, run1.BindDestinationIncarnation(ctx, "public.anchor", "raw.anchor"))
+	require.NoError(t, run1.InvalidateSnapshot(ctx, "public.items", "raw.items", "1002"))
+	require.NoError(t, run1.BindDestinationIncarnation(ctx, "public.items", "raw.items"))
+	require.NoError(t, run1.Persist(ctx, source.CDCStateCommitToken{
+		Position: "0/64",
+		SnapshotPositions: map[string]string{
+			"public.anchor": "0/64",
+			"public.items":  "0/8C",
+		},
+		SnapshotIncarnations: map[string]string{
+			"public.anchor": "1001",
+			"public.items":  "1002",
+		},
+		SnapshotSchemas: map[string]string{
+			"public.anchor": "fp-anchor-v1",
+			"public.items":  "fp-items-v1",
+		},
+	}))
+
+	// Crash recovery before WAL catches up to 0/8C: intermediate checkpoint at 0/78 (120)
+	// must advance public.anchor to 0/78 while keeping public.items at 0/8C.
+	run2, err := NewCDCStateManager(dest, "chunk-no-regress", "raw.anchor", "")
+	require.NoError(t, err)
+	require.NoError(t, run2.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
+	require.NoError(t, run2.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v1"))
+	anchorPos, err := run2.ResumePosition(ctx, "public.anchor")
+	require.NoError(t, err)
+	itemsPos, err := run2.ResumePosition(ctx, "public.items")
+	require.NoError(t, err)
+	require.Equal(t, "0/64", anchorPos)
+	require.Equal(t, "0/8C", itemsPos)
+	require.NoError(t, run2.BeginRun(ctx, false))
+
+	require.NoError(t, run2.Persist(ctx, source.CDCStateCommitToken{Position: "0/78"}))
+
+	run3, err := NewCDCStateManager(dest, "chunk-no-regress", "raw.anchor", "")
+	require.NoError(t, err)
+	require.NoError(t, run3.RegisterTableState(ctx, "public.anchor", "raw.anchor", "1001", "fp-anchor-v1"))
+	require.NoError(t, run3.RegisterTableState(ctx, "public.items", "raw.items", "1002", "fp-items-v1"))
+	anchorAfter, err := run3.ResumePosition(ctx, "public.anchor")
+	require.NoError(t, err)
+	itemsAfter, err := run3.ResumePosition(ctx, "public.items")
+	require.NoError(t, err)
+	require.Equal(t, "0/78", anchorAfter)
+	require.Equal(t, "0/8C", itemsAfter, "certified snapshot position must not regress below its snapshot LSN")
 }

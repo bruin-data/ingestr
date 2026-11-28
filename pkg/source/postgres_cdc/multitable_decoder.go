@@ -337,12 +337,6 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 		beforeLSN := d.staleBeforeLSN[tableName]
 		isPreSnapshot := beforeLSN > 0 && d.relationLSN() < beforeLSN
 		if expected := d.expectedRelIDs[tableName]; expected != 0 && rel.RelationID != expected {
-			if _, historical := d.historicalIDs[tableName][rel.RelationID]; historical {
-				rel.Stale = true
-				d.targetRelIDs[rel.RelationID] = tableName
-				d.relations[rel.RelationID] = rel
-				return nil
-			}
 			reincErr := &TableReincarnatedError{
 				Table:    tableName,
 				Previous: strconv.FormatUint(uint64(expected), 10),
@@ -357,6 +351,14 @@ func (d *MultiTableDecoder) handleRelation(data []byte) error {
 					d.recordStaleStream(tableName, beforeLSN, reincErr)
 				}
 				return nil
+			}
+			if beforeLSN == 0 {
+				if _, historical := d.historicalIDs[tableName][rel.RelationID]; historical {
+					rel.Stale = true
+					d.targetRelIDs[rel.RelationID] = tableName
+					d.relations[rel.RelationID] = rel
+					return nil
+				}
 			}
 			return reincErr
 		}

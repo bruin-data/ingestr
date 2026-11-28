@@ -617,7 +617,11 @@ func (r *chunkReader) exportAndCopyResnapshotTables(ctx context.Context, slot st
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = conn.Close(ctx) }()
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
 
 	tempSlot := backfillSlotName(slot)
 	created, err := r.source.createLogicalSlot(ctx, conn, tempSlot, true)
@@ -669,7 +673,6 @@ func (r *chunkReader) exportAndCopyResnapshotTables(ctx context.Context, slot st
 				return nil, err
 			}
 		}
-		r.source.recordSnapshotState(table.Name, snapshotLSN, table.Incarnation, table.SchemaFingerprint)
 		lsns[table.Name] = snapshotLSN
 	}
 	return lsns, nil
@@ -715,14 +718,12 @@ func (r *chunkReader) clearEvolutionIntent(ctx context.Context) {
 	if r.evolutionIntentCleared || r.options == nil || r.options.Store == nil {
 		return
 	}
-	hasIntent := false
-	for _, ti := range r.tableIdentities {
-		if ti.PreEvolutionIdentity != "" && ti.PhysicalIdentity != "" && ti.PreEvolutionIdentity != ti.PhysicalIdentity {
-			hasIntent = true
-			break
-		}
+	raw, err := r.options.Store.Load(ctx, source.CDCChunkEvolutionIntentKey)
+	if err != nil {
+		config.Debug("[CDC] Failed to check chunk evolution intent: %v", err)
+		return
 	}
-	if !hasIntent {
+	if raw == nil {
 		r.evolutionIntentCleared = true
 		return
 	}
@@ -740,6 +741,10 @@ func (r *chunkReader) checkpoint(ctx context.Context, position pglogrepl.LSN, sn
 	previous := r.state.Consumed
 	r.state.Applied = max(r.state.Applied, position)
 	r.state.pruneReachedReplayFilters()
+	if r.repl != nil && r.repl.decoder != nil {
+		r.repl.decoder.AllowHistoricalRelationIDs(r.state.historicalRelationIDs())
+		r.repl.decoder.AllowStaleRelationsBefore(r.state.staleRelationsBefore())
+	}
 	if r.journal != nil {
 		r.state.Consumed = r.journal.manifest.Tail
 	}

@@ -196,11 +196,7 @@ func reconcileChunkState(
 		ti, hasTI := tableIdentities[table.Name]
 
 		currentPKs := tablePrimaryKeys(table)
-		savedPKs := saved.PrimaryKeys
-		if len(savedPKs) == 0 && hasTI {
-			savedPKs = ti.DestPrimaryKeys
-		}
-		if len(savedPKs) > 0 && !slices.Equal(savedPKs, currentPKs) {
+		if len(saved.PrimaryKeys) > 0 && !slices.Equal(saved.PrimaryKeys, currentPKs) {
 			return chunkReconcileResult{}, fmt.Errorf("primary keys for %s changed since the chunked snapshot checkpoint; use --full-refresh to establish a new baseline", table.Name)
 		}
 
@@ -221,14 +217,13 @@ func reconcileChunkState(
 
 		// When the aggregate identity changed, every retained table that has
 		// already copied rows (Done or Initialized) must have verifiable source
-		// OID, schema, primary-key, and physical destination identity proof so
-		// neither an unfinished legacy table nor a partially proven table can
-		// skip change detection or resume against an unchecked replacement.
+		// OID, schema, and physical destination identity proof so neither an
+		// unfinished legacy table nor a partially proven table can skip change
+		// detection or resume against an unchecked replacement.
 		if identityChanged && (saved.Done || saved.Initialized) {
 			if tableIdentities != nil {
 				if !hasTI || savedDestID == "" || ti.PhysicalIdentity == "" ||
-					prevIncarnation == "" || prevSchema == "" ||
-					(len(currentPKs) > 0 && len(savedPKs) == 0) {
+					prevIncarnation == "" || prevSchema == "" {
 					return chunkReconcileResult{}, fmt.Errorf("chunked snapshot checkpoint lacks per-table identity proof for %s; use --full-refresh to establish a new baseline", table.Name)
 				}
 			} else if sameSelection {

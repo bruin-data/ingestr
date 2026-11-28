@@ -24,7 +24,6 @@ type CDCChunkTableIdentity struct {
 	DestTable             string
 	PhysicalIdentity      string
 	PreEvolutionIdentity  string
-	DestPrimaryKeys       []string
 	LastCertifiedDest     string
 	LastCertifiedPhysical string
 	LastCertifiedSource   string

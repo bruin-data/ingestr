@@ -773,3 +773,39 @@ func TestMultiTableDecoderStreamedStaleRelationEnforcesCommitLSN(t *testing.T) {
 		require.Empty(t, d.staleStreamErrs)
 	})
 }
+
+func TestMultiTableDecoderHistoricalRelIDFailsAtOrAfterSnapshotBoundary(t *testing.T) {
+	tableSchema := addCDCColumns(&schema.TableSchema{
+		Name:        "items",
+		Schema:      "public",
+		PrimaryKeys: []string{"id"},
+		Columns:     []schema.Column{{Name: "id", DataType: schema.TypeInt32}},
+	})
+	d := NewMultiTableDecoder([]source.SourceTableInfo{{
+		Name:        "public.items",
+		Schema:      tableSchema,
+		Incarnation: "20",
+	}})
+	d.AllowHistoricalRelationIDs(map[string]map[uint32]struct{}{"public.items": {10: {}}})
+	d.AllowStaleRelationsBefore(map[string]pglogrepl.LSN{"public.items": 140})
+
+	// Historical OID strictly before snapshot boundary is skipped cleanly.
+	groups := decodeAll(t, d, [][]byte{
+		pgoBeginMsg(120),
+		pgoRelationMsg(10, "public", "items"),
+		pgoInsertMsg(10, "1"),
+		pgoCommitMsg(120),
+	}, 110)
+	require.Empty(t, groups)
+
+	// Reusing that cached historical OID at or after snapshot boundary must fail closed.
+	_, err := d.Decode(pgoBeginMsg(160), 150)
+	require.NoError(t, err)
+	_, err = d.Decode(pgoInsertMsg(10, "2"), 155)
+	var reincErr *TableReincarnatedError
+	require.ErrorAs(t, err, &reincErr)
+
+	// A fresh RelationMessage for that historical OID at or after snapshot boundary must also fail closed.
+	_, err = d.Decode(pgoRelationMsg(10, "public", "items"), 160)
+	require.ErrorAs(t, err, &reincErr)
+}

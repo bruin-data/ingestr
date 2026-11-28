@@ -603,16 +603,11 @@ func (m *CDCStateManager) destinationIncarnationForTable(ctx context.Context, de
 	return "", "", true, nil
 }
 
-// ApplyStartupEvolution runs startup schema evolution for a registered CDC
-// table while validating the pre-evolution physical destination identity and
-// recording any evolution-induced table recreation. When persistIntent is true
-// and evolution changes the physical destination identity, a durable evolution
-// intent is stored in the chunk store so a crash before checkpointResnapshot
-// still recovers on restart without a full refresh.
-func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable, destTable string, hasChanges, persistIntent bool, apply func() error) error {
-	if !hasChanges {
-		return apply()
-	}
+// ApplyStartupEvolution runs startup schema evolution for a chunked CDC table
+// while validating its pre-evolution physical destination identity and
+// recording any evolution-induced table recreation in the chunk store so a
+// crash before checkpointResnapshot still recovers on restart.
+func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable, destTable string, apply func() error) error {
 	m.mu.Lock()
 	_, preDigest, preExists, err := m.destinationIncarnationForTable(ctx, destTable)
 	if err != nil {
@@ -623,7 +618,7 @@ func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable
 	if preExists && preDigest != "" {
 		if prev, ok := m.preEvolutionDestinations[sourceTable]; ok && prev.DestTable == destTable && prev.PostIdentity == preDigest && prev.PreIdentity != "" {
 			effectivePre = prev.PreIdentity
-		} else if persistIntent {
+		} else {
 			store := &cdcChunkStore{manager: m, table: m.chunkTableName()}
 			intent, err := store.loadEvolutionIntentLocked(ctx)
 			if err != nil {
@@ -686,14 +681,12 @@ func (m *CDCStateManager) ApplyStartupEvolution(ctx context.Context, sourceTable
 	}
 	delete(m.knownComplete, sourceTable)
 	delete(m.knownDestinations, sourceTable)
+	delete(m.knownIncarnations, sourceTable)
+	delete(m.knownSchemas, sourceTable)
+	delete(m.keyedResumes, sourceTable)
 	m.mu.Unlock()
 
-	if persistIntent {
-		if err := m.recordEvolutionIntent(ctx, sourceTable, destTable, effectivePre, postDigest); err != nil {
-			return err
-		}
-	}
-	return nil
+	return m.recordEvolutionIntent(ctx, sourceTable, destTable, effectivePre, postDigest)
 }
 
 // lastCompletedTableState returns the newest certified snapshot and destination
@@ -1391,7 +1384,7 @@ func (m *CDCStateManager) Persist(ctx context.Context, token source.CDCStateComm
 		if _, snapshotted := positions[table]; snapshotted {
 			continue
 		}
-		if token.Position != "" {
+		if token.Position != "" && compareCDCPositions(token.Position, position) > 0 {
 			position = token.Position
 		}
 		positions[table] = position

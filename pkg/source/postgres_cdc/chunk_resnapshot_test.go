@@ -283,7 +283,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.anchor",
 				PhysicalIdentity:      "dest-anchor-v1",
 				PreEvolutionIdentity:  "dest-anchor-v1",
-				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.anchor",
 				LastCertifiedPhysical: "dest-anchor-v1",
 				LastCertifiedSource:   "1001",
@@ -293,7 +292,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.items",
 				PhysicalIdentity:      "dest-items-v1",
 				PreEvolutionIdentity:  "dest-items-v1",
-				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.items",
 				LastCertifiedPhysical: "dest-items-v1",
 				LastCertifiedSource:   "1002",
@@ -320,7 +318,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.anchor",
 				PhysicalIdentity:      "dest-anchor-v1",
 				PreEvolutionIdentity:  "dest-anchor-v1",
-				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.anchor",
 				LastCertifiedPhysical: "dest-anchor-v1",
 				LastCertifiedSource:   "1001",
@@ -330,7 +327,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.items",
 				PhysicalIdentity:      "dest-items-replaced",
 				PreEvolutionIdentity:  "dest-items-replaced",
-				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.items",
 				LastCertifiedPhysical: "dest-items-v1",
 				LastCertifiedSource:   "1002",
@@ -361,7 +357,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				DestTable:             "raw.anchor",
 				PhysicalIdentity:      "dest-anchor-v1",
 				PreEvolutionIdentity:  "dest-anchor-v1",
-				DestPrimaryKeys:       []string{"id"},
 				LastCertifiedDest:     "raw.anchor",
 				LastCertifiedPhysical: "dest-anchor-v1",
 				LastCertifiedSource:   "1001",
@@ -383,7 +378,7 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 		require.ErrorContains(t, err, "--full-refresh")
 	})
 
-	t.Run("fails closed when legacy proof omits source OID, schema, or primary keys", func(t *testing.T) {
+	t.Run("fails closed when legacy proof omits source OID or schema", func(t *testing.T) {
 		cases := []struct {
 			name    string
 			mutate  func(ti *source.CDCChunkTableIdentity)
@@ -399,16 +394,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 				mutate:  func(ti *source.CDCChunkTableIdentity) { ti.LastCertifiedSchema = "" },
 				wantErr: "lacks per-table identity proof for public.anchor",
 			},
-			{
-				name:    "missing DestPrimaryKeys",
-				mutate:  func(ti *source.CDCChunkTableIdentity) { ti.DestPrimaryKeys = nil },
-				wantErr: "lacks per-table identity proof for public.anchor",
-			},
-			{
-				name:    "mismatched DestPrimaryKeys",
-				mutate:  func(ti *source.CDCChunkTableIdentity) { ti.DestPrimaryKeys = []string{"other_id"} },
-				wantErr: "primary keys for public.anchor changed",
-			},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -417,7 +402,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 					DestTable:             "raw.anchor",
 					PhysicalIdentity:      "dest-anchor-v1",
 					PreEvolutionIdentity:  "dest-anchor-v1",
-					DestPrimaryKeys:       []string{"id"},
 					LastCertifiedDest:     "raw.anchor",
 					LastCertifiedPhysical: "dest-anchor-v1",
 					LastCertifiedSource:   "1001",
@@ -430,7 +414,6 @@ func TestReconcileChunkStateLegacyCheckpointResnapshotAndFailClosed(t *testing.T
 						DestTable:             "raw.items",
 						PhysicalIdentity:      "dest-items-v1",
 						PreEvolutionIdentity:  "dest-items-v1",
-						DestPrimaryKeys:       []string{"id"},
 						LastCertifiedDest:     "raw.items",
 						LastCertifiedPhysical: "dest-items-v1",
 						LastCertifiedSource:   "1002",
@@ -755,5 +738,16 @@ func TestChunkCheckpointClearsOrphanedEvolutionIntent(t *testing.T) {
 	raw, err := store.Load(ctx, source.CDCChunkEvolutionIntentKey)
 	require.NoError(t, err)
 	require.Nil(t, raw, "ordinary checkpoint must clear orphaned evolution intent when no resnapshot is pending")
+	require.True(t, reader.evolutionIntentCleared)
+
+	// Also verify clearing orphaned evolution intent when tableIdentities no
+	// longer lists any evolving table (e.g., after table removal or --full-refresh).
+	store.values[source.CDCChunkEvolutionIntentKey] = []byte(`{"version":1,"tables":{"public.removed":{"dest_table":"raw.removed","pre_identity":"v1","post_identity":"v2"}}}`)
+	reader.tableIdentities = defaultTableIdentities()
+	reader.evolutionIntentCleared = false
+	reader.clearEvolutionIntent(ctx)
+	raw, err = store.Load(ctx, source.CDCChunkEvolutionIntentKey)
+	require.NoError(t, err)
+	require.Nil(t, raw, "clearEvolutionIntent must delete orphaned intent even when evolved table is absent from tableIdentities")
 	require.True(t, reader.evolutionIntentCleared)
 }

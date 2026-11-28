@@ -81,8 +81,8 @@ func (e *StreamingExecutor) Execute(ctx context.Context, job *IngestionJob) erro
 			return err
 		}
 	}
-	if chunked != nil && e.opts.StateManager != nil && job.EvolutionPlan != nil && job.EvolutionPlan.HasChanges() {
-		if err := e.opts.StateManager.ApplyStartupEvolution(ctx, job.Config.SourceTable, job.Config.DestTable, true, true, func() error {
+	if chunked != nil && !job.Config.FullRefresh && e.opts.StateManager != nil && job.EvolutionPlan != nil && job.EvolutionPlan.HasChanges() {
+		if err := e.opts.StateManager.ApplyStartupEvolution(ctx, job.Config.SourceTable, job.Config.DestTable, func() error {
 			return job.ApplyEvolution(ctx)
 		}); err != nil {
 			return fmt.Errorf("failed to apply schema evolution: %w", err)
@@ -203,8 +203,8 @@ func (e *StreamingExecutor) ExecuteMultiTable(ctx context.Context, job *MultiTab
 		}
 
 		plan := job.EvolutionPlans[ti.Name]
-		if chunked != nil && e.opts.StateManager != nil && plan != nil && plan.HasChanges() {
-			if err := e.opts.StateManager.ApplyStartupEvolution(ctx, ti.Name, st.destTable, true, true, func() error {
+		if chunked != nil && !job.Config.FullRefresh && e.opts.StateManager != nil && plan != nil && plan.HasChanges() {
+			if err := e.opts.StateManager.ApplyStartupEvolution(ctx, ti.Name, st.destTable, func() error {
 				return job.ApplyEvolutionFor(ctx, ti.Name)
 			}); err != nil {
 				return fmt.Errorf("failed to evolve destination table %s: %w", ti.Name, err)

@@ -383,19 +383,6 @@ func (m *CDCStateManager) recordEvolutionIntent(ctx context.Context, sourceTable
 		if intent.Tables == nil {
 			intent.Tables = make(map[string]cdcEvolutionTableLog)
 		}
-		if prev, ok := intent.Tables[sourceTable]; ok && prev.DestTable == destTable && prev.PostIdentity == preIdentity && prev.PreIdentity != "" {
-			preIdentity = prev.PreIdentity
-			m.mu.Lock()
-			if m.preEvolutionDestinations == nil {
-				m.preEvolutionDestinations = make(map[string]cdcEvolutionTableLog)
-			}
-			m.preEvolutionDestinations[sourceTable] = cdcEvolutionTableLog{
-				DestTable:    destTable,
-				PreIdentity:  preIdentity,
-				PostIdentity: postIdentity,
-			}
-			m.mu.Unlock()
-		}
 	}
 	intent.Tables[sourceTable] = cdcEvolutionTableLog{
 		DestTable:    destTable,
@@ -441,17 +428,10 @@ func (s *cdcChunkStore) TableIdentities(ctx context.Context) (map[string]source.
 		if preEvolution == "" {
 			preEvolution = physical
 		}
-		var destPKs []string
-		if m.dest != nil {
-			if destSchema, err := m.dest.GetTableSchema(ctx, destTable); err == nil && destSchema != nil && len(destSchema.PrimaryKeys) > 0 {
-				destPKs = append([]string(nil), destSchema.PrimaryKeys...)
-			}
-		}
 		info := source.CDCChunkTableIdentity{
 			DestTable:            destTable,
 			PhysicalIdentity:     physical,
 			PreEvolutionIdentity: preEvolution,
-			DestPrimaryKeys:      destPKs,
 		}
 		if certDest, certPhysical, certSource, certSchema, ok := m.lastCompletedTableState(table); ok {
 			info.LastCertifiedDest = certDest
